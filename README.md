@@ -48,9 +48,17 @@ destination = "*.openai.com"
 ports = [443]
 ```
 
-Glob patterns: `*` matches within a single DNS label (not across dots). An empty ports list matches all ports.
+Glob patterns: `*` matches within a single DNS label (not across dots). `**` matches across dots (any depth of subdomains). `?` matches a single non-dot character. Matching is case-insensitive (RFC 4343). An empty ports list matches all ports.
 
 Evaluation order: deny rules first, then allow, then ask, then the default verdict.
+
+## Hot Reload
+
+Send SIGHUP to reload the policy file without restarting the proxy. Existing connections are not affected. New connections use the updated policy.
+
+```bash
+kill -HUP $(pgrep sluice)
+```
 
 ## Audit Log
 

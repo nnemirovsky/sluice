@@ -12,7 +12,7 @@ import (
 type Event struct {
 	Timestamp   string `json:"timestamp"`
 	Destination string `json:"destination"`
-	Port        int    `json:"port"`
+	Port        int    `json:"port,omitempty"`
 	Verdict     string `json:"verdict"`
 	Reason      string `json:"reason,omitempty"`
 	Tool        string `json:"tool,omitempty"`

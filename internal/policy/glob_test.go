@@ -29,6 +29,15 @@ func TestGlobMatch(t *testing.T) {
 		{"a|b.com", "a|b.com", true},
 		{"a|b.com", "a", false},
 		{"a^b.com", "a^b.com", true},
+		// Single-character wildcard (? matches one non-dot character)
+		{"a?.com", "ab.com", true},
+		{"a?.com", "a.com", false},
+		{"a?.com", "a..com", false},
+		{"a?.com", "abc.com", false},
+		// Case-insensitive matching (DNS names are case-insensitive per RFC 4343)
+		{"*.github.com", "API.GitHub.com", true},
+		{"api.anthropic.com", "API.Anthropic.COM", true},
+		{"API.EXAMPLE.COM", "api.example.com", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.pattern+"_"+tt.input, func(t *testing.T) {

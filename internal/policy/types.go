@@ -24,13 +24,8 @@ func (v Verdict) String() string {
 
 // Rule represents a single policy rule matching a destination pattern and optional port list.
 type Rule struct {
-	Destination  string `toml:"destination"`
-	Ports        []int  `toml:"ports"`
-	Note         string `toml:"note"`
-	InjectHeader string `toml:"inject_header"`
-	Credential   string `toml:"credential"`
-	Template     string `toml:"template"`
-	Protocol     string `toml:"protocol"`
+	Destination string `toml:"destination"`
+	Ports       []int  `toml:"ports"`
 }
 
 // PolicyConfig holds top-level policy settings.

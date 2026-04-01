@@ -59,6 +59,140 @@ func TestEvaluate(t *testing.T) {
 	}
 }
 
+func TestIsDenied(t *testing.T) {
+	eng, err := LoadFromFile("../../testdata/policy_mixed.toml")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	tests := []struct {
+		dest string
+		port int
+		want bool
+	}{
+		// Explicitly denied IP
+		{"169.254.169.254", 80, true},
+		// Explicitly denied domain pattern
+		{"pool.crypto-mining.example", 443, true},
+		// Allowed domain is NOT denied (only checks deny rules)
+		{"api.github.com", 443, false},
+		// Unknown IP is NOT denied (no explicit deny rule, no default fallback)
+		{"140.82.112.3", 443, false},
+		// Unknown domain is NOT denied
+		{"random.unknown.com", 443, false},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s:%d", tt.dest, tt.port), func(t *testing.T) {
+			got := eng.IsDenied(tt.dest, tt.port)
+			if got != tt.want {
+				t.Errorf("IsDenied(%q, %d) = %v, want %v",
+					tt.dest, tt.port, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsRestricted(t *testing.T) {
+	eng, err := LoadFromFile("../../testdata/policy_mixed.toml")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	tests := []struct {
+		dest string
+		port int
+		want bool
+	}{
+		// Explicitly denied IP
+		{"169.254.169.254", 80, true},
+		// Explicitly denied domain pattern
+		{"pool.crypto-mining.example", 443, true},
+		// Ask rule matches
+		{"api.openai.com", 443, true},
+		// Ask rule port mismatch
+		{"api.openai.com", 80, false},
+		// Allowed domain is NOT restricted
+		{"api.github.com", 443, false},
+		// Unknown IP is NOT restricted (no explicit deny or ask rule)
+		{"140.82.112.3", 443, false},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s:%d", tt.dest, tt.port), func(t *testing.T) {
+			got := eng.IsRestricted(tt.dest, tt.port)
+			if got != tt.want {
+				t.Errorf("IsRestricted(%q, %d) = %v, want %v",
+					tt.dest, tt.port, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCouldBeAllowed(t *testing.T) {
+	eng, err := LoadFromFile("../../testdata/policy_mixed.toml")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	tests := []struct {
+		dest string
+		want bool
+	}{
+		// Matches allow rule (*.github.com) -> could be allowed
+		{"api.github.com", true},
+		// Matches allow rule (api.anthropic.com) -> could be allowed
+		{"api.anthropic.com", true},
+		// Matches ask rule (*.openai.com) -> treated as deny (ask = deny, no allow override)
+		{"api.openai.com", false},
+		// Matches portless deny rule (169.254.169.254) -> definitely denied
+		{"169.254.169.254", false},
+		// Matches portless deny rule (*.crypto-mining.example) -> definitely denied
+		{"pool.crypto-mining.example", false},
+		// No rule matches, default is deny -> not allowed
+		{"random.unknown.com", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.dest, func(t *testing.T) {
+			got := eng.CouldBeAllowed(tt.dest)
+			if got != tt.want {
+				t.Errorf("CouldBeAllowed(%q) = %v, want %v",
+					tt.dest, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCouldBeAllowedDefaultAllow(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+
+[[deny]]
+destination = "evil.com"
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	tests := []struct {
+		dest string
+		want bool
+	}{
+		// Portless deny -> definitely denied
+		{"evil.com", false},
+		// No rules match, default allow -> could be allowed
+		{"anything.com", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.dest, func(t *testing.T) {
+			got := eng.CouldBeAllowed(tt.dest)
+			if got != tt.want {
+				t.Errorf("CouldBeAllowed(%q) = %v, want %v",
+					tt.dest, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadFromBytesErrors(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -66,6 +200,9 @@ func TestLoadFromBytesErrors(t *testing.T) {
 	}{
 		{"invalid TOML", "this is not valid [[[ toml"},
 		{"unknown default verdict", "[policy]\ndefault = \"invalid\""},
+		{"empty destination", "[policy]\ndefault = \"deny\"\n\n[[allow]]\ndestination = \"\""},
+		{"invalid port zero", "[policy]\ndefault = \"deny\"\n\n[[allow]]\ndestination = \"x.com\"\nports = [0]"},
+		{"invalid port too high", "[policy]\ndefault = \"deny\"\n\n[[allow]]\ndestination = \"x.com\"\nports = [99999]"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
