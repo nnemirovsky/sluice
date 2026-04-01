@@ -14,14 +14,21 @@ type Glob struct {
 
 func CompileGlob(pattern string) (*Glob, error) {
 	var re strings.Builder
-	re.WriteString("^")
+	re.WriteString("(?i)^")
 	for i := 0; i < len(pattern); i++ {
 		switch pattern[i] {
 		case '*':
 			if i+1 < len(pattern) && pattern[i+1] == '*' {
-				// ** matches across dots (any characters)
-				re.WriteString(".*")
-				i++
+				// ** matches across dots (any characters).
+				// When followed by '.', use (.*\.)? so that **.example.com
+				// matches both example.com and sub.example.com.
+				if i+2 < len(pattern) && pattern[i+2] == '.' {
+					re.WriteString(`(.*\.)?`)
+					i += 2 // skip second * and the dot
+				} else {
+					re.WriteString(".*")
+					i++
+				}
 			} else if len(pattern) == 1 {
 				// Standalone * matches everything
 				re.WriteString(".*")

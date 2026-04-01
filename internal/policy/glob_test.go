@@ -17,10 +17,15 @@ func TestGlobMatch(t *testing.T) {
 		{"169.254.169.254", "169.254.169.254", true},
 		{"*.crypto-mining.*", "pool.crypto-mining.io", true},
 		{"*", "anything.at.all", true},
-		// Double-star matches across dots
+		// Double-star matches across dots (including apex domain)
 		{"**.example.com", "deep.sub.example.com", true},
 		{"**.example.com", "one.example.com", true},
+		{"**.example.com", "example.com", true},
 		{"prefix.**", "prefix.a.b.c", true},
+		// Mid-pattern double-star
+		{"a.**.b.com", "a.b.com", true},
+		{"a.**.b.com", "a.x.b.com", true},
+		{"a.**.b.com", "a.x.y.b.com", true},
 		// Regex metacharacters in patterns are treated as literals
 		{"example.com+extra", "example.com+extra", true},
 		{"example.com+extra", "example.commmextra", false},
