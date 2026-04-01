@@ -11,6 +11,10 @@ import (
 	"github.com/nemirovsky/sluice/internal/policy"
 )
 
+// telegramMaxMessage is Telegram's maximum message length (4096 UTF-8 chars).
+// We leave a small margin for the truncation notice.
+const telegramMaxMessage = 4000
+
 type BotConfig struct {
 	Token     string
 	ChatID    int64
@@ -32,7 +36,10 @@ func FormatApprovalMessage(dest string, port int) string {
 func NewBot(cfg BotConfig, broker *ApprovalBroker) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(cfg.Token)
 	if err != nil {
-		return nil, fmt.Errorf("telegram bot init: %w", err)
+		// Do not wrap the original error: the telegram-bot-api library
+		// includes the full request URL (which contains the bot token) in
+		// HTTP errors, so propagating it would leak the token in logs.
+		return nil, fmt.Errorf("telegram bot init failed (check token and network connectivity)")
 	}
 	log.Printf("telegram bot authorized as @%s", api.Self.UserName)
 
@@ -138,6 +145,10 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	response := b.commands.Handle(cmd)
 	if response == "" {
 		return
+	}
+
+	if len(response) > telegramMaxMessage {
+		response = response[:telegramMaxMessage] + "\n\n(truncated)"
 	}
 
 	reply := tgbotapi.NewMessage(b.chatID, response)

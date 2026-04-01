@@ -166,7 +166,7 @@ func (h *CommandHandler) policyRemove(dest string) string {
 		return fmt.Sprintf("No rule found for: %s", dest)
 	}
 	if err != nil {
-		return fmt.Sprintf("Rule removed but recompile failed: %v", err)
+		return fmt.Sprintf("Failed to remove rule (compile error, rolled back): %v", err)
 	}
 	return fmt.Sprintf("Removed rule: %s", dest)
 }
