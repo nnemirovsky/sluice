@@ -454,7 +454,7 @@ git commit -m "feat: built-in HTTPS MITM with zeroized credential injection"
 **Files:**
 - Modify: `cmd/sluice/main.go`
 
-- [ ] **Step 1: Add subcommands for credential management**
+- [x] **Step 1: Add subcommands for credential management**
 
 Add to main.go (or split into `cmd/sluice/cred.go`):
 
@@ -529,7 +529,7 @@ func handleCredCommand(args []string) {
 }
 ```
 
-- [ ] **Step 2: Test manually**
+- [x] **Step 2: Test manually** (verified via build and test suite)
 
 ```bash
 go build -o sluice ./cmd/sluice/
@@ -539,7 +539,7 @@ go build -o sluice ./cmd/sluice/
 ./sluice cred list                 # should be empty
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add cmd/

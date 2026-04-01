@@ -10,4 +10,4 @@
 .gopath/
 
 # Binary
-sluice
+/sluice

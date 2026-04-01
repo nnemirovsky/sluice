@@ -15,6 +15,15 @@ import (
 )
 
 func main() {
+	// Handle subcommands before flag parsing.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "cred":
+			handleCredCommand(os.Args[2:])
+			return
+		}
+	}
+
 	listenAddr := flag.String("listen", "127.0.0.1:1080", "SOCKS5 listen address")
 	policyPath := flag.String("policy", "policy.toml", "path to policy TOML file")
 	auditPath := flag.String("audit", "audit.jsonl", "path to audit log file")
