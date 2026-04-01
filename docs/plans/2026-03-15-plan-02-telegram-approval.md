@@ -36,7 +36,7 @@ sluice/
 - Create: `internal/telegram/approval.go`
 - Create: `internal/telegram/approval_test.go`
 
-- [ ] **Step 1: Write failing test for approval flow**
+- [x] **Step 1: Write failing test for approval flow**
 
 ```go
 // internal/telegram/approval_test.go
@@ -94,12 +94,12 @@ func TestApprovalFlowDeny(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/telegram/ -v -timeout 10s`
 Expected: FAIL
 
-- [ ] **Step 3: Implement approval.go**
+- [x] **Step 3: Implement approval.go**
 
 ```go
 // internal/telegram/approval.go
@@ -198,12 +198,12 @@ func (b *ApprovalBroker) Resolve(id string, resp Response) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/telegram/ -v -timeout 10s`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/telegram/
