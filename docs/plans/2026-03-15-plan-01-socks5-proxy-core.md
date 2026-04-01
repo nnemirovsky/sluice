@@ -408,7 +408,7 @@ git commit -m "feat: glob pattern matching for policy rules"
 - Modify: `internal/policy/engine.go`
 - Modify: `internal/policy/engine_test.go`
 
-- [ ] **Step 1: Write failing tests for Evaluate**
+- [x] **Step 1: Write failing tests for Evaluate**
 
 Add to `engine_test.go`:
 
@@ -447,12 +447,12 @@ func TestEvaluate(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/policy/ -v -run TestEvaluate`
 Expected: FAIL (Compile and Evaluate methods don't exist)
 
-- [ ] **Step 3: Implement Compile and Evaluate on Engine**
+- [x] **Step 3: Implement Compile and Evaluate on Engine**
 
 Add to `engine.go`:
 
@@ -538,12 +538,12 @@ func (e *Engine) Evaluate(dest string, port int) Verdict {
 
 Also add `compiled *compiledEngine` field to the `Engine` struct.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/policy/ -v -run TestEvaluate`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/policy/
