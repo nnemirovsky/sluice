@@ -403,7 +403,7 @@ git commit -m "feat: binding resolution for credential injection"
 - Create: `internal/proxy/inject_test.go`
 - Create: `internal/proxy/ca.go`
 
-- [ ] **Step 1: CA certificate generation**
+- [x] **Step 1: CA certificate generation**
 
 ```go
 // internal/proxy/ca.go
@@ -412,7 +412,7 @@ git commit -m "feat: binding resolution for credential injection"
 // Uses crypto/x509 + crypto/ecdsa (P-256).
 ```
 
-- [ ] **Step 2: Implement in-process credential injection**
+- [x] **Step 2: Implement in-process credential injection**
 
 ```go
 // internal/proxy/inject.go
@@ -425,7 +425,7 @@ git commit -m "feat: binding resolution for credential injection"
 // No IPC, no serialization, no Python runtime.
 ```
 
-- [ ] **Step 3: Write tests**
+- [x] **Step 3: Write tests**
 
 ```go
 // internal/proxy/inject_test.go
@@ -440,7 +440,7 @@ func TestCredentialZeroedAfterInjection(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add internal/proxy/inject.go internal/proxy/inject_test.go internal/proxy/ca.go
