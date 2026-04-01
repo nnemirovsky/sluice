@@ -68,12 +68,17 @@ func (b *ApprovalBroker) Request(dest string, port int, timeout time.Duration) (
 		CreatedAt:   time.Now(),
 	}
 
+	// Single deadline for the entire request lifecycle (enqueue + wait)
+	// to prevent blocking for 2x the configured timeout.
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
 	// Use a timeout when sending to the pending channel to prevent proxy
 	// goroutines from blocking indefinitely when the channel is full
 	// (e.g., Telegram API outage).
 	select {
 	case b.pending <- req:
-	case <-time.After(timeout):
+	case <-deadline.C:
 		b.mu.Lock()
 		delete(b.waiters, id)
 		b.mu.Unlock()
@@ -83,7 +88,7 @@ func (b *ApprovalBroker) Request(dest string, port int, timeout time.Duration) (
 	select {
 	case resp := <-ch:
 		return resp, nil
-	case <-time.After(timeout):
+	case <-deadline.C:
 		b.mu.Lock()
 		delete(b.waiters, id)
 		b.mu.Unlock()

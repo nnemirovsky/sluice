@@ -209,7 +209,10 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 					allowed = true
 					reason = "user approved always"
 					log.Printf("[ASK->ALLOW+SAVE] %s:%d (user approved always)", dest, port)
-					if err := eng.AddDynamicAllow(dest, port); err != nil {
+					// Use the current engine (not the context snapshot) for mutations
+					// so the rule is added to the live engine even if SIGHUP fired
+					// during the approval wait.
+					if err := r.engine.Load().AddDynamicAllow(dest, port); err != nil {
 						log.Printf("[WARN] failed to add dynamic allow rule for %s:%d: %v", dest, port, err)
 					}
 				default:

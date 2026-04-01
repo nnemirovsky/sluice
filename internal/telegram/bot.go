@@ -127,8 +127,6 @@ func (b *Bot) handleCallback(cq *tgbotapi.CallbackQuery) {
 func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	if !IsAuthorizedChat(msg.Chat.ID, b.chatID) {
 		log.Printf("unauthorized command from chat %d (expected %d)", msg.Chat.ID, b.chatID)
-		reply := tgbotapi.NewMessage(msg.Chat.ID, "Unauthorized. This bot only accepts commands from the configured chat.")
-		b.api.Send(reply)
 		return
 	}
 

@@ -318,7 +318,7 @@ func (e *Engine) RemoveRule(dest string) (bool, error) {
 		e.AllowRules = origAllow
 		e.DenyRules = origDeny
 		e.AskRules = origAsk
-		return false, err
+		return true, err
 	}
 	return true, nil
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/nemirovsky/sluice/internal/policy"
 )
@@ -40,24 +41,25 @@ func ParseCommand(text string) *Command {
 
 // CommandHandler holds the dependencies needed by command handlers.
 type CommandHandler struct {
-	engine    *policy.Engine
+	engine    atomic.Pointer[policy.Engine]
 	broker    *ApprovalBroker
 	auditPath string
 }
 
 // NewCommandHandler creates a command handler with the given dependencies.
 func NewCommandHandler(engine *policy.Engine, broker *ApprovalBroker, auditPath string) *CommandHandler {
-	return &CommandHandler{
-		engine:    engine,
+	h := &CommandHandler{
 		broker:    broker,
 		auditPath: auditPath,
 	}
+	h.engine.Store(engine)
+	return h
 }
 
 // UpdateEngine replaces the policy engine used by command handlers.
 // Called on SIGHUP policy reload to keep the bot in sync with the proxy.
 func (h *CommandHandler) UpdateEngine(eng *policy.Engine) {
-	h.engine = eng
+	h.engine.Store(eng)
 }
 
 // Handle dispatches a command to the appropriate handler and returns the response text.
@@ -107,7 +109,7 @@ func (h *CommandHandler) handlePolicy(args []string) string {
 }
 
 func (h *CommandHandler) policyShow() string {
-	snap := h.engine.Snapshot()
+	snap := h.engine.Load().Snapshot()
 	var b strings.Builder
 	b.WriteString("Current policy (default: ")
 	b.WriteString(snap.Default.String())
@@ -145,21 +147,21 @@ func (h *CommandHandler) policyShow() string {
 }
 
 func (h *CommandHandler) policyAllow(dest string) string {
-	if err := h.engine.AddAllowRule(dest); err != nil {
+	if err := h.engine.Load().AddAllowRule(dest); err != nil {
 		return fmt.Sprintf("Failed to add allow rule: %v", err)
 	}
 	return fmt.Sprintf("Added allow rule: %s", dest)
 }
 
 func (h *CommandHandler) policyDeny(dest string) string {
-	if err := h.engine.AddDenyRule(dest); err != nil {
+	if err := h.engine.Load().AddDenyRule(dest); err != nil {
 		return fmt.Sprintf("Failed to add deny rule: %v", err)
 	}
 	return fmt.Sprintf("Added deny rule: %s", dest)
 }
 
 func (h *CommandHandler) policyRemove(dest string) string {
-	removed, err := h.engine.RemoveRule(dest)
+	removed, err := h.engine.Load().RemoveRule(dest)
 	if !removed {
 		return fmt.Sprintf("No rule found for: %s", dest)
 	}
@@ -177,7 +179,7 @@ func (h *CommandHandler) handleCred(args []string) string {
 }
 
 func (h *CommandHandler) handleStatus() string {
-	snap := h.engine.Snapshot()
+	snap := h.engine.Load().Snapshot()
 	var b strings.Builder
 	b.WriteString("Sluice Status\n\n")
 
@@ -259,7 +261,8 @@ func formatPorts(ports []int) string {
 	return strings.Join(strs, ",")
 }
 
-// readLastLines reads the last n lines from a file.
+// readLastLines reads the last n lines from a file using a ring buffer
+// so that only O(n) memory is used regardless of file size.
 func readLastLines(path string, n int) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -267,17 +270,29 @@ func readLastLines(path string, n int) ([]string, error) {
 	}
 	defer f.Close()
 
-	var lines []string
+	ring := make([]string, n)
+	idx := 0
+	count := 0
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
+		ring[idx%n] = scanner.Text()
+		idx++
+		count++
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
 
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
+	if count == 0 {
+		return nil, nil
 	}
-	return lines, nil
+	if count < n {
+		return ring[:count], nil
+	}
+	// Reorder the ring buffer so entries are in chronological order.
+	result := make([]string, n)
+	start := idx % n
+	copy(result, ring[start:])
+	copy(result[n-start:], ring[:start])
+	return result, nil
 }
