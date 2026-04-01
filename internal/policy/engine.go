@@ -236,6 +236,14 @@ func (e *Engine) CouldBeAllowed(dest string) bool {
 	return e.Default == Allow
 }
 
+// AddDynamicAllow appends a new allow rule for the given destination and port,
+// then recompiles the engine so the rule takes effect immediately.
+func (e *Engine) AddDynamicAllow(dest string, port int) {
+	rule := Rule{Destination: dest, Ports: []int{port}}
+	e.AllowRules = append(e.AllowRules, rule)
+	e.Compile()
+}
+
 // Evaluate checks a destination and port against the compiled policy rules.
 // Deny rules are checked first, then allow, then ask. Falls back to default.
 func (e *Engine) Evaluate(dest string, port int) Verdict {

@@ -5,17 +5,21 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
+	"github.com/nemirovsky/sluice/internal/telegram"
 )
 
 func main() {
 	listenAddr := flag.String("listen", "127.0.0.1:1080", "SOCKS5 listen address")
 	policyPath := flag.String("policy", "policy.toml", "path to policy TOML file")
 	auditPath := flag.String("audit", "audit.jsonl", "path to audit log file")
+	telegramToken := flag.String("telegram-token", os.Getenv("TELEGRAM_BOT_TOKEN"), "Telegram bot token")
+	telegramChatIDStr := flag.String("telegram-chat-id", os.Getenv("TELEGRAM_CHAT_ID"), "Telegram chat ID for approvals")
 	flag.Parse()
 
 	eng, err := policy.LoadFromFile(*policyPath)
@@ -31,10 +35,37 @@ func main() {
 	}
 	defer logger.Close()
 
+	broker := telegram.NewApprovalBroker()
+
+	var telegramChatID int64
+	if *telegramChatIDStr != "" {
+		telegramChatID, err = strconv.ParseInt(*telegramChatIDStr, 10, 64)
+		if err != nil {
+			log.Fatalf("invalid telegram-chat-id: %v", err)
+		}
+	}
+
+	if *telegramToken != "" && telegramChatID != 0 {
+		bot, err := telegram.NewBot(telegram.BotConfig{
+			Token:      *telegramToken,
+			ChatID:     telegramChatID,
+			TimeoutSec: eng.TimeoutSec,
+		}, broker)
+		if err != nil {
+			log.Fatalf("telegram bot: %v", err)
+		}
+		go bot.Run()
+		defer bot.Stop()
+		log.Printf("telegram approval bot started")
+	} else {
+		log.Printf("telegram not configured (ask rules will auto-deny)")
+	}
+
 	srv, err := proxy.New(proxy.Config{
 		ListenAddr: *listenAddr,
 		Policy:     eng,
 		Audit:      logger,
+		Broker:     broker,
 	})
 	if err != nil {
 		log.Fatalf("start proxy: %v", err)

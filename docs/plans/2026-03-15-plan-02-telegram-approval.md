@@ -394,7 +394,7 @@ git commit -m "feat: Telegram bot with inline keyboard approval"
 - Modify: `internal/proxy/server.go`
 - Modify: `cmd/sluice/main.go`
 
-- [ ] **Step 1: Update proxy Config to accept ApprovalBroker**
+- [x] **Step 1: Update proxy Config to accept ApprovalBroker**
 
 Add to `proxy.Config`:
 
@@ -441,7 +441,7 @@ case policy.Ask:
 	}
 ```
 
-- [ ] **Step 2: Add AddDynamicAllow to policy engine**
+- [x] **Step 2: Add AddDynamicAllow to policy engine**
 
 Add to `internal/policy/engine.go`:
 
@@ -454,7 +454,7 @@ func (e *Engine) AddDynamicAllow(dest string, port int) {
 }
 ```
 
-- [ ] **Step 3: Update main.go to start Telegram bot**
+- [x] **Step 3: Update main.go to start Telegram bot**
 
 Add Telegram config flags and bot startup:
 
@@ -491,12 +491,12 @@ srv, err := proxy.New(proxy.Config{
 })
 ```
 
-- [ ] **Step 4: Run full test suite**
+- [x] **Step 4: Run full test suite**
 
 Run: `go test ./... -v -timeout 30s`
 Expected: ALL PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/ cmd/
