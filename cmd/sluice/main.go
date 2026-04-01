@@ -45,13 +45,16 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
+	errCh := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil {
-			log.Printf("proxy stopped: %v", err)
-		}
+		errCh <- srv.ListenAndServe()
 	}()
 
-	<-sigCh
-	log.Println("shutting down...")
-	srv.Close()
+	select {
+	case <-sigCh:
+		log.Println("shutting down...")
+		srv.Close()
+	case err := <-errCh:
+		log.Fatalf("proxy failed: %v", err)
+	}
 }

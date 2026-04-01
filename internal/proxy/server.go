@@ -55,27 +55,32 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 
 	verdict := r.engine.Evaluate(dest, port)
 
+	// Determine the effective outcome (ask is treated as deny until Telegram is configured).
+	allowed := false
+	effectiveVerdict := verdict
+	switch verdict {
+	case policy.Allow:
+		allowed = true
+	case policy.Ask:
+		effectiveVerdict = policy.Deny
+		log.Printf("[ASK->DENY] %s:%d (Telegram not configured)", dest, port)
+	}
+
 	if r.audit != nil {
 		if err := r.audit.Log(audit.Event{
 			Destination: dest,
 			Port:        port,
-			Verdict:     verdict.String(),
+			Verdict:     effectiveVerdict.String(),
 		}); err != nil {
 			log.Printf("audit log write error: %v", err)
 		}
 	}
 
-	switch verdict {
-	case policy.Allow:
+	if allowed {
 		proto := DetectProtocol(port)
 		ctx = context.WithValue(ctx, ctxKeyProtocol, proto)
-		return ctx, true
-	case policy.Ask:
-		log.Printf("[ASK->DENY] %s:%d (Telegram not configured)", dest, port)
-		return ctx, false
-	default:
-		return ctx, false
 	}
+	return ctx, allowed
 }
 
 // New creates a new SOCKS5 proxy server bound to the configured listen address.
