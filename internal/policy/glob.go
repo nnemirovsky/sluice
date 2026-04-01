@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 type Glob struct {
@@ -33,7 +34,9 @@ func CompileGlob(pattern string) (*Glob, error) {
 		case '.':
 			re.WriteString(`\.`)
 		default:
-			re.WriteByte(pattern[i])
+			r, size := utf8.DecodeRuneInString(pattern[i:])
+			re.WriteString(regexp.QuoteMeta(string(r)))
+			i += size - 1
 		}
 	}
 	re.WriteString("$")

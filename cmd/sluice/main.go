@@ -22,9 +22,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("load policy: %v", err)
 	}
-	if err := eng.Compile(); err != nil {
-		log.Fatalf("compile policy: %v", err)
-	}
 	log.Printf("loaded policy: %d allow, %d deny, %d ask rules (default: %s)",
 		len(eng.AllowRules), len(eng.DenyRules), len(eng.AskRules), eng.Default)
 

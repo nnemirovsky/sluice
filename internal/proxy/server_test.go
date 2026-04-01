@@ -3,7 +3,6 @@ package proxy
 import (
 	"net"
 	"testing"
-	"time"
 
 	"golang.org/x/net/proxy"
 
@@ -39,7 +38,6 @@ destination = "127.0.0.1"
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng.Compile()
 
 	// Start sluice proxy
 	srv, err := New(Config{
@@ -51,9 +49,6 @@ destination = "127.0.0.1"
 	}
 	go srv.ListenAndServe()
 	defer srv.Close()
-
-	// Wait for proxy to start
-	time.Sleep(50 * time.Millisecond)
 
 	// Connect through SOCKS5 proxy
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
@@ -85,7 +80,6 @@ default = "deny"
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng.Compile()
 
 	srv, err := New(Config{
 		ListenAddr: "127.0.0.1:0",
@@ -97,8 +91,6 @@ default = "deny"
 	go srv.ListenAndServe()
 	defer srv.Close()
 
-	time.Sleep(50 * time.Millisecond)
-
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
 		t.Fatal(err)
@@ -107,5 +99,38 @@ default = "deny"
 	_, err = dialer.Dial("tcp", "93.184.216.34:80")
 	if err == nil {
 		t.Fatal("expected connection to be denied")
+	}
+}
+
+func TestProxyDeniesAskConnection(t *testing.T) {
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[ask]]
+destination = "127.0.0.1"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.ListenAndServe()
+	defer srv.Close()
+
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = dialer.Dial("tcp", "127.0.0.1:9999")
+	if err == nil {
+		t.Fatal("expected ask connection to be denied")
 	}
 }

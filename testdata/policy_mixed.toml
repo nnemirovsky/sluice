@@ -14,3 +14,7 @@ destination = "169.254.169.254"
 
 [[deny]]
 destination = "*.crypto-mining.example"
+
+[[ask]]
+destination = "*.openai.com"
+ports = [443]

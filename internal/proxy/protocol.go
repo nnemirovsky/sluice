@@ -14,7 +14,7 @@ const (
 
 // DetectProtocol infers the application-layer protocol from the destination port.
 // This is a port-based heuristic used before any bytes are read from the connection.
-func DetectProtocol(dest string, port int) Protocol {
+func DetectProtocol(port int) Protocol {
 	switch port {
 	case 80, 8080:
 		return ProtoHTTP

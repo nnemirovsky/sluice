@@ -10,7 +10,6 @@ import (
 type compiledRule struct {
 	glob  *Glob
 	ports map[int]bool
-	rule  Rule
 }
 
 type compiledEngine struct {
@@ -64,13 +63,17 @@ func LoadFromBytes(data []byte) (*Engine, error) {
 		timeout = 120
 	}
 
-	return &Engine{
+	eng := &Engine{
 		Default:    defaultVerdict,
 		AllowRules: pf.Allow,
 		DenyRules:  pf.Deny,
 		AskRules:   pf.Ask,
 		TimeoutSec: timeout,
-	}, nil
+	}
+	if err := eng.Compile(); err != nil {
+		return nil, fmt.Errorf("compile policy rules: %w", err)
+	}
+	return eng, nil
 }
 
 func compileRules(rules []Rule) ([]compiledRule, error) {
@@ -84,7 +87,7 @@ func compileRules(rules []Rule) ([]compiledRule, error) {
 		for _, p := range r.Ports {
 			ports[p] = true
 		}
-		out = append(out, compiledRule{glob: g, ports: ports, rule: r})
+		out = append(out, compiledRule{glob: g, ports: ports})
 	}
 	return out, nil
 }
@@ -123,9 +126,6 @@ func matchRules(rules []compiledRule, dest string, port int) bool {
 // Evaluate checks a destination and port against the compiled policy rules.
 // Deny rules are checked first, then allow, then ask. Falls back to default.
 func (e *Engine) Evaluate(dest string, port int) Verdict {
-	if e.compiled == nil {
-		return e.Default
-	}
 	if matchRules(e.compiled.denyRules, dest, port) {
 		return Deny
 	}

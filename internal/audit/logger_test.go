@@ -17,16 +17,20 @@ func TestLoggerWritesJSONLines(t *testing.T) {
 		t.Fatalf("new logger: %v", err)
 	}
 
-	logger.Log(Event{
+	if err := logger.Log(Event{
 		Destination: "api.anthropic.com",
 		Port:        443,
 		Verdict:     "allow",
-	})
-	logger.Log(Event{
+	}); err != nil {
+		t.Fatalf("log event 1: %v", err)
+	}
+	if err := logger.Log(Event{
 		Destination: "evil.com",
 		Port:        80,
 		Verdict:     "deny",
-	})
+	}); err != nil {
+		t.Fatalf("log event 2: %v", err)
+	}
 	logger.Close()
 
 	data, err := os.ReadFile(path)

@@ -23,8 +23,6 @@ type Config struct {
 type Server struct {
 	listener net.Listener
 	socks    *socks5.Server
-	policy   *policy.Engine
-	audit    *audit.FileLogger
 }
 
 type contextKey string
@@ -47,23 +45,29 @@ type policyRuleSet struct {
 func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context.Context, bool) {
 	dest := req.DestAddr.FQDN
 	if dest == "" {
-		dest = req.DestAddr.IP.String()
+		if req.DestAddr.IP != nil {
+			dest = req.DestAddr.IP.String()
+		} else {
+			return ctx, false
+		}
 	}
 	port := req.DestAddr.Port
 
 	verdict := r.engine.Evaluate(dest, port)
 
 	if r.audit != nil {
-		r.audit.Log(audit.Event{
+		if err := r.audit.Log(audit.Event{
 			Destination: dest,
 			Port:        port,
 			Verdict:     verdict.String(),
-		})
+		}); err != nil {
+			log.Printf("audit log write error: %v", err)
+		}
 	}
 
 	switch verdict {
 	case policy.Allow:
-		proto := DetectProtocol(dest, port)
+		proto := DetectProtocol(port)
 		ctx = context.WithValue(ctx, ctxKeyProtocol, proto)
 		return ctx, true
 	case policy.Ask:
@@ -95,8 +99,6 @@ func New(cfg Config) (*Server, error) {
 	return &Server{
 		listener: ln,
 		socks:    socksServer,
-		policy:   cfg.Policy,
-		audit:    cfg.Audit,
 	}, nil
 }
 

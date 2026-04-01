@@ -37,13 +37,13 @@ func NewFileLogger(path string) (*FileLogger, error) {
 }
 
 // Log writes an event to the audit log. It is safe for concurrent use.
-func (l *FileLogger) Log(evt Event) {
+func (l *FileLogger) Log(evt Event) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if evt.Timestamp == "" {
 		evt.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	}
-	l.enc.Encode(evt)
+	return l.enc.Encode(evt)
 }
 
 // Close closes the underlying file.
