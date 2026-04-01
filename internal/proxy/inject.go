@@ -27,7 +27,7 @@ func PhantomToken(credentialName string) string {
 // headers and request body.
 type Injector struct {
 	Proxy    *goproxy.ProxyHttpServer
-	store    *vault.Store
+	provider vault.Provider
 	resolver *vault.BindingResolver
 	caCert   tls.Certificate
 }
@@ -35,9 +35,9 @@ type Injector struct {
 // NewInjector creates an MITM proxy that injects credentials into matching
 // requests. The caCert is used to generate per-host TLS certificates for
 // HTTPS interception.
-func NewInjector(store *vault.Store, resolver *vault.BindingResolver, caCert tls.Certificate) *Injector {
+func NewInjector(provider vault.Provider, resolver *vault.BindingResolver, caCert tls.Certificate) *Injector {
 	inj := &Injector{
-		store:    store,
+		provider: provider,
 		resolver: resolver,
 		caCert:   caCert,
 	}
@@ -78,7 +78,7 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 		return r, nil
 	}
 
-	secret, err := inj.store.Get(binding.Credential)
+	secret, err := inj.provider.Get(binding.Credential)
 	if err != nil {
 		log.Printf("[INJECT] credential %q lookup failed: %v", binding.Credential, err)
 		return r, nil

@@ -668,7 +668,7 @@ is configured.
 - Create: `internal/vault/provider_env.go` (env var provider)
 - Create: `internal/vault/provider_hashicorp.go` (HashiCorp Vault)
 
-- [ ] **Step 1: Define provider interface**
+- [x] **Step 1: Define provider interface**
 
 ```go
 // internal/vault/provider.go
@@ -690,13 +690,13 @@ type Provider interface {
 }
 ```
 
-- [ ] **Step 2: Refactor age store to implement Provider**
+- [x] **Step 2: Refactor age store to implement Provider**
 
 Rename existing `Store` methods to satisfy the `Provider` interface.
 `Add`/`Remove` remain age-specific (external providers manage their
 own storage).
 
-- [ ] **Step 3: Implement env var provider**
+- [x] **Step 3: Implement env var provider**
 
 ```go
 // internal/vault/provider_env.go
@@ -718,7 +718,7 @@ func (p *EnvProvider) List() ([]string, error) { return nil, nil }
 func (p *EnvProvider) Name() string            { return "env" }
 ```
 
-- [ ] **Step 4: Implement HashiCorp Vault provider**
+- [x] **Step 4: Implement HashiCorp Vault provider**
 
 ```go
 // internal/vault/provider_hashicorp.go
@@ -730,7 +730,7 @@ package vault
 // Supports lease renewal for dynamic secrets.
 ```
 
-- [ ] **Step 5: Provider selection in config**
+- [x] **Step 5: Provider selection in config**
 
 ```toml
 # policy.toml
@@ -746,7 +746,7 @@ role_id_env = "VAULT_ROLE_ID"
 secret_id_env = "VAULT_SECRET_ID"
 ```
 
-- [ ] **Step 6: Multi-provider chaining (optional)**
+- [x] **Step 6: Multi-provider chaining (optional)**
 
 Allow fallback: try HashiCorp first, fall back to age files.
 
@@ -755,7 +755,7 @@ Allow fallback: try HashiCorp first, fall back to age files.
 providers = ["hashicorp", "age"]   # try in order
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add internal/vault/provider*.go
