@@ -1076,7 +1076,7 @@ needs to detect the protocol and hand off to the appropriate handler.
 - Create: `internal/proxy/protocol_test.go`
 - Modify: `internal/proxy/server.go` (add protocol detection after policy allow)
 
-- [ ] **Step 1: Define protocol types and detection**
+- [x] **Step 1: Define protocol types and detection**
 
 ```go
 // internal/proxy/protocol.go
@@ -1101,7 +1101,7 @@ const (
 func DetectProtocol(dest string, port int) Protocol
 ```
 
-- [ ] **Step 2: Write tests for protocol detection**
+- [x] **Step 2: Write tests for protocol detection**
 
 ```go
 func TestDetectProtocol(t *testing.T) {
@@ -1116,17 +1116,17 @@ func TestDetectProtocol(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Integrate protocol detection into server.go Allow handler**
+- [x] **Step 3: Integrate protocol detection into server.go Allow handler**
 
 After policy verdict is Allow, detect protocol and store in context for
 credential injection (Plan 3) to use.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `go test ./internal/proxy/ -v -timeout 10s`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/proxy/protocol.go internal/proxy/protocol_test.go internal/proxy/server.go

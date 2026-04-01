@@ -27,6 +27,18 @@ type Server struct {
 	audit    *audit.FileLogger
 }
 
+type contextKey string
+
+const ctxKeyProtocol contextKey = "protocol"
+
+// ProtocolFromContext retrieves the detected protocol from the request context.
+func ProtocolFromContext(ctx context.Context) Protocol {
+	if v, ok := ctx.Value(ctxKeyProtocol).(Protocol); ok {
+		return v
+	}
+	return ProtoGeneric
+}
+
 type policyRuleSet struct {
 	engine *policy.Engine
 	audit  *audit.FileLogger
@@ -51,6 +63,8 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 
 	switch verdict {
 	case policy.Allow:
+		proto := DetectProtocol(dest, port)
+		ctx = context.WithValue(ctx, ctxKeyProtocol, proto)
 		return ctx, true
 	case policy.Ask:
 		log.Printf("[ASK->DENY] %s:%d (Telegram not configured)", dest, port)
