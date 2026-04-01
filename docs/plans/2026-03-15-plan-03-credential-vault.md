@@ -267,7 +267,7 @@ git commit -m "feat: age-encrypted credential vault"
 - Create: `internal/vault/binding.go`
 - Create: `internal/vault/binding_test.go`
 
-- [ ] **Step 1: Write failing test**
+- [x] **Step 1: Write failing test**
 
 ```go
 // internal/vault/binding_test.go
@@ -307,12 +307,12 @@ func TestResolveBinding(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/vault/ -v -run TestResolveBinding`
 Expected: FAIL
 
-- [ ] **Step 3: Implement binding.go**
+- [x] **Step 3: Implement binding.go**
 
 ```go
 // internal/vault/binding.go
@@ -380,12 +380,12 @@ func (b Binding) FormatValue(secret string) string {
 }
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `go test ./internal/vault/ -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/vault/binding.go internal/vault/binding_test.go
