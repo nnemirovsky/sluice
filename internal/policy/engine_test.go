@@ -141,8 +141,8 @@ func TestCouldBeAllowed(t *testing.T) {
 		{"api.github.com", true},
 		// Matches allow rule (api.anthropic.com) -> could be allowed
 		{"api.anthropic.com", true},
-		// Matches ask rule (*.openai.com) -> treated as deny (ask = deny, no allow override)
-		{"api.openai.com", false},
+		// Matches ask rule (*.openai.com) -> needs DNS resolution for approval flow
+		{"api.openai.com", true},
 		// Matches portless deny rule (169.254.169.254) -> definitely denied
 		{"169.254.169.254", false},
 		// Matches portless deny rule (*.crypto-mining.example) -> definitely denied
@@ -152,12 +152,22 @@ func TestCouldBeAllowed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.dest, func(t *testing.T) {
-			got := eng.CouldBeAllowed(tt.dest)
+			got := eng.CouldBeAllowed(tt.dest, true)
 			if got != tt.want {
-				t.Errorf("CouldBeAllowed(%q) = %v, want %v",
+				t.Errorf("CouldBeAllowed(%q, true) = %v, want %v",
 					tt.dest, got, tt.want)
 			}
 		})
+	}
+
+	// With includeAsk=false, ask rules should NOT count as allowed.
+	// api.openai.com matches only an ask rule, so it should be false.
+	if eng.CouldBeAllowed("api.openai.com", false) {
+		t.Error("CouldBeAllowed(api.openai.com, false) = true, want false (ask rule without broker)")
+	}
+	// Allow rules should still work.
+	if !eng.CouldBeAllowed("api.github.com", false) {
+		t.Error("CouldBeAllowed(api.github.com, false) = false, want true (allow rule)")
 	}
 }
 
@@ -184,12 +194,31 @@ destination = "evil.com"
 	}
 	for _, tt := range tests {
 		t.Run(tt.dest, func(t *testing.T) {
-			got := eng.CouldBeAllowed(tt.dest)
+			got := eng.CouldBeAllowed(tt.dest, true)
 			if got != tt.want {
-				t.Errorf("CouldBeAllowed(%q) = %v, want %v",
+				t.Errorf("CouldBeAllowed(%q, true) = %v, want %v",
 					tt.dest, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCouldBeAllowedDefaultAskNoBroker(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "ask"
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// With includeAsk=true, default=ask means unmatched destinations could be allowed
+	if !eng.CouldBeAllowed("anything.com", true) {
+		t.Error("CouldBeAllowed(anything.com, true) with default=ask should be true")
+	}
+	// With includeAsk=false, default=ask should NOT count as allowed (prevents DNS leak)
+	if eng.CouldBeAllowed("anything.com", false) {
+		t.Error("CouldBeAllowed(anything.com, false) with default=ask should be false")
 	}
 }
 
@@ -387,7 +416,7 @@ destination = "evil.com"
 	}
 
 	// Trailing dot should be stripped before matching
-	if eng.CouldBeAllowed("evil.com.") {
+	if eng.CouldBeAllowed("evil.com.", true) {
 		t.Error("CouldBeAllowed with trailing dot should match deny rule for 'evil.com'")
 	}
 }
@@ -410,5 +439,43 @@ destination = "test[0].example.com"
 	}
 	if eng.Evaluate("test0.example.com", 443) != Deny {
 		t.Error("expected non-literal match to deny")
+	}
+}
+
+func TestLoadPolicyWithTelegram(t *testing.T) {
+	eng, err := LoadFromFile("../../testdata/policy_with_telegram.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eng.Telegram.BotTokenEnv != "TELEGRAM_BOT_TOKEN" {
+		t.Errorf("expected bot_token_env %q, got %q", "TELEGRAM_BOT_TOKEN", eng.Telegram.BotTokenEnv)
+	}
+	if eng.Telegram.ChatIDEnv != "TELEGRAM_CHAT_ID" {
+		t.Errorf("expected chat_id_env %q, got %q", "TELEGRAM_CHAT_ID", eng.Telegram.ChatIDEnv)
+	}
+	if eng.Default != Ask {
+		t.Errorf("expected default Ask, got %v", eng.Default)
+	}
+	if eng.TimeoutSec != 60 {
+		t.Errorf("expected timeout 60, got %d", eng.TimeoutSec)
+	}
+	if len(eng.AllowRules) != 1 {
+		t.Errorf("expected 1 allow rule, got %d", len(eng.AllowRules))
+	}
+	if len(eng.AskRules) != 1 {
+		t.Errorf("expected 1 ask rule, got %d", len(eng.AskRules))
+	}
+}
+
+func TestLoadPolicyWithoutTelegram(t *testing.T) {
+	eng, err := LoadFromFile("../../testdata/policy_mixed.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eng.Telegram.BotTokenEnv != "" {
+		t.Errorf("expected empty bot_token_env, got %q", eng.Telegram.BotTokenEnv)
+	}
+	if eng.Telegram.ChatIDEnv != "" {
+		t.Errorf("expected empty chat_id_env, got %q", eng.Telegram.ChatIDEnv)
 	}
 }

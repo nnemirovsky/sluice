@@ -34,9 +34,16 @@ type PolicyConfig struct {
 	Timeout int    `toml:"timeout_sec"`
 }
 
+// TelegramConfig holds the Telegram bot settings from the policy file.
+type TelegramConfig struct {
+	BotTokenEnv string `toml:"bot_token_env"`
+	ChatIDEnv   string `toml:"chat_id_env"`
+}
+
 type policyFile struct {
-	Policy PolicyConfig `toml:"policy"`
-	Allow  []Rule       `toml:"allow"`
-	Deny   []Rule       `toml:"deny"`
-	Ask    []Rule       `toml:"ask"`
+	Policy   PolicyConfig   `toml:"policy"`
+	Telegram TelegramConfig `toml:"telegram"`
+	Allow    []Rule         `toml:"allow"`
+	Deny     []Rule         `toml:"deny"`
+	Ask      []Rule         `toml:"ask"`
 }

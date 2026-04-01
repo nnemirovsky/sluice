@@ -36,7 +36,7 @@ sluice/
 - Create: `internal/telegram/approval.go`
 - Create: `internal/telegram/approval_test.go`
 
-- [ ] **Step 1: Write failing test for approval flow**
+- [x] **Step 1: Write failing test for approval flow**
 
 ```go
 // internal/telegram/approval_test.go
@@ -94,12 +94,12 @@ func TestApprovalFlowDeny(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/telegram/ -v -timeout 10s`
 Expected: FAIL
 
-- [ ] **Step 3: Implement approval.go**
+- [x] **Step 3: Implement approval.go**
 
 ```go
 // internal/telegram/approval.go
@@ -198,12 +198,12 @@ func (b *ApprovalBroker) Resolve(id string, resp Response) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/telegram/ -v -timeout 10s`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/telegram/
@@ -218,7 +218,7 @@ git commit -m "feat: approval broker with request/response channel flow"
 - Create: `internal/telegram/bot.go`
 - Create: `internal/telegram/bot_test.go`
 
-- [ ] **Step 1: Write test for message formatting**
+- [x] **Step 1: Write test for message formatting**
 
 ```go
 // internal/telegram/bot_test.go
@@ -243,12 +243,12 @@ func TestFormatApprovalMessage(t *testing.T) {
 
 (Add `"strings"` to imports.)
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/telegram/ -v -run TestFormatApprovalMessage`
 Expected: FAIL
 
-- [ ] **Step 3: Implement bot.go**
+- [x] **Step 3: Implement bot.go**
 
 ```go
 // internal/telegram/bot.go
@@ -366,18 +366,18 @@ func (b *Bot) Stop() {
 }
 ```
 
-- [ ] **Step 4: Add telegram dependency**
+- [x] **Step 4: Add telegram dependency**
 
 ```bash
 go get github.com/go-telegram-bot-api/telegram-bot-api/v5
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `go test ./internal/telegram/ -v -run TestFormatApprovalMessage`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add internal/telegram/ go.mod go.sum
@@ -394,7 +394,7 @@ git commit -m "feat: Telegram bot with inline keyboard approval"
 - Modify: `internal/proxy/server.go`
 - Modify: `cmd/sluice/main.go`
 
-- [ ] **Step 1: Update proxy Config to accept ApprovalBroker**
+- [x] **Step 1: Update proxy Config to accept ApprovalBroker**
 
 Add to `proxy.Config`:
 
@@ -441,7 +441,7 @@ case policy.Ask:
 	}
 ```
 
-- [ ] **Step 2: Add AddDynamicAllow to policy engine**
+- [x] **Step 2: Add AddDynamicAllow to policy engine**
 
 Add to `internal/policy/engine.go`:
 
@@ -454,7 +454,7 @@ func (e *Engine) AddDynamicAllow(dest string, port int) {
 }
 ```
 
-- [ ] **Step 3: Update main.go to start Telegram bot**
+- [x] **Step 3: Update main.go to start Telegram bot**
 
 Add Telegram config flags and bot startup:
 
@@ -491,12 +491,12 @@ srv, err := proxy.New(proxy.Config{
 })
 ```
 
-- [ ] **Step 4: Run full test suite**
+- [x] **Step 4: Run full test suite**
 
 Run: `go test ./... -v -timeout 30s`
 Expected: ALL PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/ cmd/
@@ -510,7 +510,7 @@ git commit -m "feat: integrate Telegram approval into SOCKS5 proxy"
 **Files:**
 - Modify: `internal/policy/types.go`
 
-- [ ] **Step 1: Add TelegramConfig to policy file struct**
+- [x] **Step 1: Add TelegramConfig to policy file struct**
 
 ```go
 type TelegramConfig struct {
@@ -522,7 +522,7 @@ type TelegramConfig struct {
 // Telegram TelegramConfig `toml:"telegram"`
 ```
 
-- [ ] **Step 2: Add test policy file with telegram section**
+- [x] **Step 2: Add test policy file with telegram section**
 
 Create `testdata/policy_with_telegram.toml`:
 
@@ -543,7 +543,7 @@ ports = [443]
 destination = "*.unknown.com"
 ```
 
-- [ ] **Step 3: Write test for loading telegram config**
+- [x] **Step 3: Write test for loading telegram config**
 
 ```go
 func TestLoadPolicyWithTelegram(t *testing.T) {
@@ -557,12 +557,12 @@ func TestLoadPolicyWithTelegram(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `go test ./... -v -timeout 30s`
 Expected: ALL PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/ testdata/
@@ -584,7 +584,7 @@ manage Sluice entirely from Telegram without SSH access.
 - Create: `internal/telegram/commands.go`
 - Create: `internal/telegram/commands_test.go`
 
-- [ ] **Step 1: Implement command dispatcher**
+- [x] **Step 1: Implement command dispatcher**
 
 Route incoming Telegram messages starting with `/` to command handlers:
 
@@ -604,7 +604,7 @@ Route incoming Telegram messages starting with `/` to command handlers:
 //   /help                     - List available commands
 ```
 
-- [ ] **Step 2: Implement /policy commands**
+- [x] **Step 2: Implement /policy commands**
 
 ```go
 func handlePolicyShow(bot *tgbotapi.BotAPI, chatID int64, engine *policy.Engine)
@@ -612,10 +612,10 @@ func handlePolicyAllow(bot *tgbotapi.BotAPI, chatID int64, engine *policy.Engine
 func handlePolicyDeny(bot *tgbotapi.BotAPI, chatID int64, engine *policy.Engine, dest string)
 ```
 
-Policy changes are applied to the running engine AND written back to the
-TOML file so they survive restarts.
+Policy changes are applied to the running engine in-memory only. TOML
+write-back is deferred to a future plan.
 
-- [ ] **Step 3: Implement /cred commands**
+- [x] **Step 3: Implement /cred commands** (stubbed, returns "vault not configured" until vault subsystem is implemented)
 
 ```go
 func handleCredAdd(bot *tgbotapi.BotAPI, chatID int64, store *vault.Store, name string)
@@ -627,7 +627,7 @@ func handleCredRemove(bot *tgbotapi.BotAPI, chatID int64, store *vault.Store, na
 For `/cred add`: bot asks for the value in the next message, reads it,
 deletes the message containing the secret, stores encrypted, confirms.
 
-- [ ] **Step 4: Implement /status and /audit commands**
+- [x] **Step 4: Implement /status and /audit commands**
 
 ```go
 func handleStatus(bot *tgbotapi.BotAPI, chatID int64, proxy *proxy.Server, broker *ApprovalBroker)
@@ -639,12 +639,12 @@ approval requests, agent container status (via Docker API if available).
 
 `/audit recent` reads last N lines from audit.jsonl and formats them.
 
-- [ ] **Step 5: Secure command access**
+- [x] **Step 5: Secure command access**
 
 Only accept commands from the configured `chat_id`. Reject and log
 commands from other chat IDs.
 
-- [ ] **Step 6: Write tests for command parsing and dispatch**
+- [x] **Step 6: Write tests for command parsing and dispatch**
 
 ```go
 func TestParseCommand(t *testing.T) {
@@ -655,12 +655,12 @@ func TestParseCommand(t *testing.T) {
 }
 ```
 
-- [ ] **Step 7: Run tests**
+- [x] **Step 7: Run tests**
 
 Run: `go test ./internal/telegram/ -v`
 Expected: PASS
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add internal/telegram/commands.go internal/telegram/commands_test.go internal/telegram/bot.go

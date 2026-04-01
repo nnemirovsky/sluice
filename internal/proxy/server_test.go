@@ -4,10 +4,12 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 
 	"golang.org/x/net/proxy"
 
 	"github.com/nemirovsky/sluice/internal/policy"
+	"github.com/nemirovsky/sluice/internal/telegram"
 )
 
 // resolveLocalhost looks up "localhost" and returns the first IP address
@@ -409,5 +411,232 @@ destination = "127.0.0.1"
 	_, err = dialer.Dial("tcp", "127.0.0.1:9999")
 	if err == nil {
 		t.Fatal("expected ask connection to be denied")
+	}
+}
+
+func TestProxyAskWithBrokerAllowOnce(t *testing.T) {
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Close()
+	go func() {
+		for {
+			conn, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			conn.Write([]byte("hello"))
+			conn.Close()
+		}
+	}()
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[ask]]
+destination = "127.0.0.1"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	broker := telegram.NewApprovalBroker()
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Broker:     broker,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.ListenAndServe()
+	defer srv.Close()
+
+	// Simulate user approving the request
+	go func() {
+		req := <-broker.Pending()
+		broker.Resolve(req.ID, telegram.ResponseAllowOnce)
+	}()
+
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := dialer.Dial("tcp", echo.Addr().String())
+	if err != nil {
+		t.Fatalf("expected ask+approve to allow connection: %v", err)
+	}
+	defer conn.Close()
+
+	buf := make([]byte, 5)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(buf[:n]) != "hello" {
+		t.Errorf("expected 'hello', got %q", string(buf[:n]))
+	}
+}
+
+func TestProxyAskWithBrokerDeny(t *testing.T) {
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[ask]]
+destination = "127.0.0.1"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	broker := telegram.NewApprovalBroker()
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Broker:     broker,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.ListenAndServe()
+	defer srv.Close()
+
+	// Simulate user denying the request
+	go func() {
+		req := <-broker.Pending()
+		broker.Resolve(req.ID, telegram.ResponseDeny)
+	}()
+
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = dialer.Dial("tcp", "127.0.0.1:9999")
+	if err == nil {
+		t.Fatal("expected ask+deny to block connection")
+	}
+}
+
+func TestProxyAskWithBrokerAlwaysAllow(t *testing.T) {
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Close()
+	go func() {
+		for {
+			conn, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			conn.Write([]byte("hello"))
+			conn.Close()
+		}
+	}()
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[ask]]
+destination = "127.0.0.1"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	broker := telegram.NewApprovalBroker()
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Broker:     broker,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.ListenAndServe()
+	defer srv.Close()
+
+	// Simulate user approving "always allow"
+	go func() {
+		req := <-broker.Pending()
+		broker.Resolve(req.ID, telegram.ResponseAlwaysAllow)
+	}()
+
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First connection: goes through broker, gets "always allow"
+	conn, err := dialer.Dial("tcp", echo.Addr().String())
+	if err != nil {
+		t.Fatalf("expected always-allow to permit connection: %v", err)
+	}
+	conn.Close()
+
+	// Wait briefly for dynamic rule to take effect
+	time.Sleep(10 * time.Millisecond)
+
+	// Second connection: should be allowed by dynamic rule without broker
+	conn2, err := dialer.Dial("tcp", echo.Addr().String())
+	if err != nil {
+		t.Fatalf("expected dynamic allow rule to permit second connection: %v", err)
+	}
+	defer conn2.Close()
+
+	buf := make([]byte, 5)
+	n, err := conn2.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(buf[:n]) != "hello" {
+		t.Errorf("expected 'hello', got %q", string(buf[:n]))
+	}
+}
+
+func TestProxyAskWithBrokerTimeout(t *testing.T) {
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+timeout_sec = 1
+
+[[ask]]
+destination = "127.0.0.1"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	broker := telegram.NewApprovalBroker()
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Broker:     broker,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.ListenAndServe()
+	defer srv.Close()
+
+	// No one responds to the approval request, so it should timeout
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = dialer.Dial("tcp", "127.0.0.1:9999")
+	if err == nil {
+		t.Fatal("expected timeout to deny connection")
 	}
 }

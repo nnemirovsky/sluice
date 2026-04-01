@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/policy"
+	"github.com/nemirovsky/sluice/internal/telegram"
 )
 
 // dnsTimeout bounds how long a single DNS lookup can block. The go-socks5
@@ -32,6 +34,7 @@ type Config struct {
 	ListenAddr string
 	Policy     *policy.Engine
 	Audit      *audit.FileLogger
+	Broker     *telegram.ApprovalBroker
 }
 
 // Server wraps a SOCKS5 server with policy enforcement and audit logging.
@@ -71,6 +74,7 @@ func isPrivateIP(ip net.IP) bool {
 type policyResolver struct {
 	engine *atomic.Pointer[policy.Engine]
 	audit  *audit.FileLogger
+	broker *telegram.ApprovalBroker
 }
 
 func (r *policyResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
@@ -81,7 +85,11 @@ func (r *policyResolver) Resolve(ctx context.Context, name string) (context.Cont
 	// same policy version, preventing a SIGHUP reload from splitting a
 	// single request across two different policy snapshots.
 	ctx = context.WithValue(ctx, ctxKeyEngine, eng)
-	if !eng.CouldBeAllowed(dest) {
+	// Only treat Ask rules as potentially-allowed when an approval broker
+	// is configured. Without a broker, Ask verdicts become Deny, so
+	// resolving DNS would leak queries for destinations that will be denied.
+	includeAsk := r.broker != nil
+	if !eng.CouldBeAllowed(dest, includeAsk) {
 		// Definitely denied on all ports: skip DNS to prevent leaks.
 		// Allow() will deny the connection with ruleFailure.
 		return ctx, nil, nil
@@ -140,8 +148,10 @@ func (r *policyResolver) Resolve(ctx context.Context, name string) (context.Cont
 }
 
 type policyRuleSet struct {
-	engine *atomic.Pointer[policy.Engine]
-	audit  *audit.FileLogger
+	engine   *atomic.Pointer[policy.Engine]
+	reloadMu *sync.Mutex // serializes engine swaps and dynamic rule mutations
+	audit    *audit.FileLogger
+	broker   *telegram.ApprovalBroker
 }
 
 func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context.Context, bool) {
@@ -176,7 +186,7 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 	}
 	verdict := eng.Evaluate(dest, port)
 
-	// Determine the effective outcome (ask is treated as deny until Telegram is configured).
+	// Determine the effective outcome.
 	allowed := false
 	effectiveVerdict := verdict
 	var reason string
@@ -184,9 +194,45 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 	case policy.Allow:
 		allowed = true
 	case policy.Ask:
-		effectiveVerdict = policy.Deny
-		reason = "ask treated as deny (Telegram not configured)"
-		log.Printf("[ASK->DENY] %s:%d (Telegram not configured)", dest, port)
+		if r.broker == nil {
+			effectiveVerdict = policy.Deny
+			reason = "ask treated as deny (no approval broker)"
+			log.Printf("[ASK->DENY] %s:%d (no approval broker)", dest, port)
+		} else {
+			log.Printf("[ASK] %s:%d (waiting for Telegram approval)", dest, port)
+			timeout := time.Duration(eng.TimeoutSec) * time.Second
+			resp, err := r.broker.Request(dest, port, timeout)
+			if err != nil {
+				effectiveVerdict = policy.Deny
+				reason = fmt.Sprintf("approval timeout: %v", err)
+				log.Printf("[ASK->DENY] %s:%d (timeout: %v)", dest, port, err)
+			} else {
+				switch resp {
+				case telegram.ResponseAllowOnce:
+					allowed = true
+					effectiveVerdict = policy.Allow
+					reason = "user approved once"
+					log.Printf("[ASK->ALLOW] %s:%d (user approved once)", dest, port)
+				case telegram.ResponseAlwaysAllow:
+					allowed = true
+					effectiveVerdict = policy.Allow
+					reason = "user approved always"
+					log.Printf("[ASK->ALLOW+SAVE] %s:%d (user approved always)", dest, port)
+					// Hold reloadMu to prevent a concurrent SIGHUP from swapping
+					// the engine between Load() and AddDynamicAllow(), which would
+					// write the rule to the retired engine.
+					r.reloadMu.Lock()
+					if err := r.engine.Load().AddDynamicAllow(dest, port); err != nil {
+						log.Printf("[WARN] failed to add dynamic allow rule for %s:%d: %v", dest, port, err)
+					}
+					r.reloadMu.Unlock()
+				default:
+					effectiveVerdict = policy.Deny
+					reason = "user denied"
+					log.Printf("[ASK->DENY] %s:%d (user denied)", dest, port)
+				}
+			}
+		}
 	}
 
 	// DNS rebinding check for FQDN connections. The policyResolver
@@ -256,9 +302,10 @@ func New(cfg Config) (*Server, error) {
 
 	enginePtr := new(atomic.Pointer[policy.Engine])
 	enginePtr.Store(cfg.Policy)
+	reloadMu := new(sync.Mutex)
 
-	rules := &policyRuleSet{engine: enginePtr, audit: cfg.Audit}
-	resolver := &policyResolver{engine: enginePtr, audit: cfg.Audit}
+	rules := &policyRuleSet{engine: enginePtr, reloadMu: reloadMu, audit: cfg.Audit, broker: cfg.Broker}
+	resolver := &policyResolver{engine: enginePtr, audit: cfg.Audit, broker: cfg.Broker}
 
 	socksCfg := &socks5.Config{
 		Rules:    rules,
@@ -301,8 +348,25 @@ func New(cfg Config) (*Server, error) {
 }
 
 // ReloadPolicy atomically swaps the policy engine used for future connections.
+// Holds reloadMu to prevent racing with in-flight "Always Allow" mutations.
 func (s *Server) ReloadPolicy(eng *policy.Engine) {
+	s.rules.reloadMu.Lock()
+	defer s.rules.reloadMu.Unlock()
 	s.rules.engine.Store(eng)
+}
+
+// EnginePtr returns the shared atomic engine pointer. The Telegram command
+// handler uses this to read and mutate the same engine as the proxy, avoiding
+// split-brain windows during SIGHUP reloads.
+func (s *Server) EnginePtr() *atomic.Pointer[policy.Engine] {
+	return s.rules.engine
+}
+
+// ReloadMu returns the shared reload mutex. The Telegram command handler
+// holds this mutex when mutating the engine, ensuring mutations are
+// serialized with SIGHUP-triggered engine swaps.
+func (s *Server) ReloadMu() *sync.Mutex {
+	return s.rules.reloadMu
 }
 
 // Addr returns the address the server is listening on.
