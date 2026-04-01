@@ -69,6 +69,8 @@ func loadOrCreateIdentity(path string) (*age.X25519Identity, error) {
 	}
 	defer f.Close()
 	if _, err := f.WriteString(id.String() + "\n"); err != nil {
+		f.Close()
+		os.Remove(path)
 		return nil, fmt.Errorf("write identity: %w", err)
 	}
 	return id, nil

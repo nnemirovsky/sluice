@@ -163,7 +163,10 @@ func extractAuthPlainBase64(upper, original string) (b64, prefix string, found b
 	// SMTP: "AUTH PLAIN <base64>"
 	const smtpAuthPlain = "AUTH PLAIN "
 	if strings.HasPrefix(upper, smtpAuthPlain) {
-		return original[len(smtpAuthPlain):], original[:len(smtpAuthPlain)], true
+		b64 = original[len(smtpAuthPlain):]
+		if b64 != "" {
+			return b64, original[:len(smtpAuthPlain)], true
+		}
 	}
 	// IMAP: "tag AUTHENTICATE PLAIN <base64>"
 	const imapAuthPlain = " AUTHENTICATE PLAIN "
