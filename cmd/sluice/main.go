@@ -35,7 +35,7 @@ func main() {
 	}
 	defer logger.Close()
 
-	broker := telegram.NewApprovalBroker()
+	var broker *telegram.ApprovalBroker
 
 	var telegramChatID int64
 	if *telegramChatIDStr != "" {
@@ -46,12 +46,12 @@ func main() {
 	}
 
 	if *telegramToken != "" && telegramChatID != 0 {
+		broker = telegram.NewApprovalBroker()
 		bot, err := telegram.NewBot(telegram.BotConfig{
-			Token:      *telegramToken,
-			ChatID:     telegramChatID,
-			TimeoutSec: eng.TimeoutSec,
-			Engine:     eng,
-			AuditPath:  *auditPath,
+			Token:     *telegramToken,
+			ChatID:    telegramChatID,
+			Engine:    eng,
+			AuditPath: *auditPath,
 		}, broker)
 		if err != nil {
 			log.Fatalf("telegram bot: %v", err)

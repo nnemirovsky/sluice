@@ -101,14 +101,26 @@ func (h *CommandHandler) handlePolicy(args []string) string {
 }
 
 func (h *CommandHandler) policyShow() string {
+	snap := h.engine.Snapshot()
 	var b strings.Builder
 	b.WriteString("Current policy (default: ")
-	b.WriteString(h.engine.Default.String())
+	b.WriteString(snap.Default.String())
 	b.WriteString(")\n\n")
 
-	if len(h.engine.AllowRules) > 0 {
-		b.WriteString("ALLOW:\n")
-		for _, r := range h.engine.AllowRules {
+	for _, section := range []struct {
+		label string
+		rules []policy.Rule
+	}{
+		{"ALLOW", snap.AllowRules},
+		{"DENY", snap.DenyRules},
+		{"ASK", snap.AskRules},
+	} {
+		if len(section.rules) == 0 {
+			continue
+		}
+		b.WriteString(section.label)
+		b.WriteString(":\n")
+		for _, r := range section.rules {
 			b.WriteString("  ")
 			b.WriteString(r.Destination)
 			if len(r.Ports) > 0 {
@@ -119,33 +131,7 @@ func (h *CommandHandler) policyShow() string {
 		}
 	}
 
-	if len(h.engine.DenyRules) > 0 {
-		b.WriteString("DENY:\n")
-		for _, r := range h.engine.DenyRules {
-			b.WriteString("  ")
-			b.WriteString(r.Destination)
-			if len(r.Ports) > 0 {
-				b.WriteString(" ports=")
-				b.WriteString(formatPorts(r.Ports))
-			}
-			b.WriteString("\n")
-		}
-	}
-
-	if len(h.engine.AskRules) > 0 {
-		b.WriteString("ASK:\n")
-		for _, r := range h.engine.AskRules {
-			b.WriteString("  ")
-			b.WriteString(r.Destination)
-			if len(r.Ports) > 0 {
-				b.WriteString(" ports=")
-				b.WriteString(formatPorts(r.Ports))
-			}
-			b.WriteString("\n")
-		}
-	}
-
-	if len(h.engine.AllowRules) == 0 && len(h.engine.DenyRules) == 0 && len(h.engine.AskRules) == 0 {
+	if len(snap.AllowRules) == 0 && len(snap.DenyRules) == 0 && len(snap.AskRules) == 0 {
 		b.WriteString("No rules configured.")
 	}
 
@@ -153,54 +139,28 @@ func (h *CommandHandler) policyShow() string {
 }
 
 func (h *CommandHandler) policyAllow(dest string) string {
-	rule := policy.Rule{Destination: dest}
-	h.engine.AllowRules = append(h.engine.AllowRules, rule)
-	if err := h.engine.Compile(); err != nil {
-		// Roll back
-		h.engine.AllowRules = h.engine.AllowRules[:len(h.engine.AllowRules)-1]
+	if err := h.engine.AddAllowRule(dest); err != nil {
 		return fmt.Sprintf("Failed to add allow rule: %v", err)
 	}
 	return fmt.Sprintf("Added allow rule: %s", dest)
 }
 
 func (h *CommandHandler) policyDeny(dest string) string {
-	rule := policy.Rule{Destination: dest}
-	h.engine.DenyRules = append(h.engine.DenyRules, rule)
-	if err := h.engine.Compile(); err != nil {
-		h.engine.DenyRules = h.engine.DenyRules[:len(h.engine.DenyRules)-1]
+	if err := h.engine.AddDenyRule(dest); err != nil {
 		return fmt.Sprintf("Failed to add deny rule: %v", err)
 	}
 	return fmt.Sprintf("Added deny rule: %s", dest)
 }
 
 func (h *CommandHandler) policyRemove(dest string) string {
-	removed := false
-	h.engine.AllowRules, removed = removeRule(h.engine.AllowRules, dest)
-	if r := false; !removed {
-		h.engine.DenyRules, r = removeRule(h.engine.DenyRules, dest)
-		removed = r
-	}
-	if r := false; !removed {
-		h.engine.AskRules, r = removeRule(h.engine.AskRules, dest)
-		removed = r
-	}
-
+	removed, err := h.engine.RemoveRule(dest)
 	if !removed {
 		return fmt.Sprintf("No rule found for: %s", dest)
 	}
-	if err := h.engine.Compile(); err != nil {
+	if err != nil {
 		return fmt.Sprintf("Rule removed but recompile failed: %v", err)
 	}
 	return fmt.Sprintf("Removed rule: %s", dest)
-}
-
-func removeRule(rules []policy.Rule, dest string) ([]policy.Rule, bool) {
-	for i, r := range rules {
-		if r.Destination == dest {
-			return append(rules[:i], rules[i+1:]...), true
-		}
-	}
-	return rules, false
 }
 
 func (h *CommandHandler) handleCred(args []string) string {
@@ -211,19 +171,17 @@ func (h *CommandHandler) handleCred(args []string) string {
 }
 
 func (h *CommandHandler) handleStatus() string {
+	snap := h.engine.Snapshot()
 	var b strings.Builder
 	b.WriteString("Sluice Status\n\n")
 
 	b.WriteString("Policy: ")
 	b.WriteString(fmt.Sprintf("%d allow, %d deny, %d ask rules",
-		len(h.engine.AllowRules), len(h.engine.DenyRules), len(h.engine.AskRules)))
-	b.WriteString(fmt.Sprintf(" (default: %s)\n", h.engine.Default))
+		len(snap.AllowRules), len(snap.DenyRules), len(snap.AskRules)))
+	b.WriteString(fmt.Sprintf(" (default: %s)\n", snap.Default))
 
 	if h.broker != nil {
-		h.broker.mu.Lock()
-		pending := len(h.broker.waiters)
-		h.broker.mu.Unlock()
-		b.WriteString(fmt.Sprintf("Pending approvals: %d\n", pending))
+		b.WriteString(fmt.Sprintf("Pending approvals: %d\n", h.broker.PendingCount()))
 	}
 
 	return b.String()

@@ -12,11 +12,10 @@ import (
 )
 
 type BotConfig struct {
-	Token      string
-	ChatID     int64
-	TimeoutSec int
-	Engine     *policy.Engine
-	AuditPath  string
+	Token     string
+	ChatID    int64
+	Engine    *policy.Engine
+	AuditPath string
 }
 
 type Bot struct {
@@ -83,6 +82,11 @@ func (b *Bot) sendApprovalRequests() {
 }
 
 func (b *Bot) handleCallback(cq *tgbotapi.CallbackQuery) {
+	if cq.Message == nil || cq.Message.Chat.ID != b.chatID {
+		log.Printf("unauthorized callback from chat %d (expected %d)", cq.Message.Chat.ID, b.chatID)
+		return
+	}
+
 	parts := strings.SplitN(cq.Data, "|", 2)
 	if len(parts) != 2 {
 		return

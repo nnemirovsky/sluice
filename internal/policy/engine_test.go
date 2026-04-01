@@ -141,8 +141,8 @@ func TestCouldBeAllowed(t *testing.T) {
 		{"api.github.com", true},
 		// Matches allow rule (api.anthropic.com) -> could be allowed
 		{"api.anthropic.com", true},
-		// Matches ask rule (*.openai.com) -> treated as deny (ask = deny, no allow override)
-		{"api.openai.com", false},
+		// Matches ask rule (*.openai.com) -> needs DNS resolution for approval flow
+		{"api.openai.com", true},
 		// Matches portless deny rule (169.254.169.254) -> definitely denied
 		{"169.254.169.254", false},
 		// Matches portless deny rule (*.crypto-mining.example) -> definitely denied

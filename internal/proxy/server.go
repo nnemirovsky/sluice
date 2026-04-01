@@ -209,7 +209,9 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 					allowed = true
 					reason = "user approved always"
 					log.Printf("[ASK->ALLOW+SAVE] %s:%d (user approved always)", dest, port)
-					eng.AddDynamicAllow(dest, port)
+					if err := eng.AddDynamicAllow(dest, port); err != nil {
+						log.Printf("[WARN] failed to add dynamic allow rule for %s:%d: %v", dest, port, err)
+					}
 				default:
 					effectiveVerdict = policy.Deny
 					reason = "user denied"

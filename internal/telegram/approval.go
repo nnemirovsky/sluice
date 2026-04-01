@@ -79,6 +79,13 @@ func (b *ApprovalBroker) Request(dest string, port int, timeout time.Duration) (
 	}
 }
 
+// PendingCount returns the number of approval requests awaiting a response.
+func (b *ApprovalBroker) PendingCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.waiters)
+}
+
 func (b *ApprovalBroker) Resolve(id string, resp Response) {
 	b.mu.Lock()
 	ch, ok := b.waiters[id]
