@@ -955,7 +955,7 @@ git commit -m "feat: SOCKS5 proxy server with policy enforcement"
 **Files:**
 - Modify: `cmd/sluice/main.go`
 
-- [ ] **Step 1: Implement CLI with flag parsing**
+- [x] **Step 1: Implement CLI with flag parsing**
 
 ```go
 // cmd/sluice/main.go
@@ -1022,7 +1022,7 @@ func main() {
 }
 ```
 
-- [ ] **Step 2: Build and test manually**
+- [x] **Step 2: Build and test manually**
 
 ```bash
 cd /Users/nemirovsky/Developer/sluice
@@ -1034,7 +1034,7 @@ go build -o sluice ./cmd/sluice/
 kill %1
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add cmd/sluice/main.go
