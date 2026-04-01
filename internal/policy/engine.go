@@ -298,10 +298,12 @@ func (e *Engine) RemoveRule(dest string) (bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// Save originals for rollback.
-	origAllow := e.AllowRules
-	origDeny := e.DenyRules
-	origAsk := e.AskRules
+	// Deep-copy originals for rollback. removeRuleFromSlice uses append
+	// which mutates the backing array in-place, so a simple slice header
+	// copy would share the corrupted array on rollback.
+	origAllow := append([]Rule(nil), e.AllowRules...)
+	origDeny := append([]Rule(nil), e.DenyRules...)
+	origAsk := append([]Rule(nil), e.AskRules...)
 
 	var removed bool
 	e.AllowRules, removed = removeRuleFromSlice(e.AllowRules, dest)
