@@ -54,6 +54,18 @@ Glob patterns: `*` matches within a single DNS label (not across dots). `**` mat
 
 Evaluation order: deny rules first, then allow, then ask, then the default verdict.
 
+### Telegram Config in Policy File
+
+The policy file can optionally specify custom environment variable names for the Telegram bot token and chat ID:
+
+```toml
+[telegram]
+bot_token_env = "MY_BOT_TOKEN"   # env var name (default: TELEGRAM_BOT_TOKEN)
+chat_id_env = "MY_CHAT_ID"       # env var name (default: TELEGRAM_CHAT_ID)
+```
+
+When present, these override the default environment variable names unless the corresponding CLI flag (`-telegram-token`, `-telegram-chat-id`) was explicitly provided. This is useful when running multiple Sluice instances with different bot tokens.
+
 ## Telegram Approval Bot
 
 When configured, connections matching `ask` policy rules trigger an approval request via Telegram. The bot sends an inline keyboard message to the configured chat with three options: Allow Once, Always Allow, and Deny.
@@ -78,9 +90,13 @@ Commands are only accepted from the configured chat ID.
 | `/audit recent [N]` | Show last N audit entries (default 10) |
 | `/help` | Show available commands |
 
+Policy changes made via `/policy allow`, `/policy deny`, and `/policy remove` are applied to the running engine only. They are not persisted to the policy file and will be lost on SIGHUP reload or process restart.
+
 ## Hot Reload
 
-Send SIGHUP to reload the policy file without restarting the proxy. Existing connections are not affected. New connections use the updated policy.
+Send SIGHUP to reload the policy file without restarting the proxy. Existing connections are not affected. New connections use the updated policy. SIGHUP also updates the policy engine used by Telegram command handlers.
+
+The Telegram runtime (bot token, chat ID, approval broker) is wired once at startup and cannot be hot-reloaded. If the `[telegram]` section of the policy file changes, a full restart is required. A warning is logged when config drift is detected.
 
 ```bash
 kill -HUP $(pgrep sluice)

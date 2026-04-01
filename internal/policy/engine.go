@@ -341,8 +341,9 @@ func (e *Engine) RemoveRule(dest string) (bool, error) {
 }
 
 func removeRuleFromSlice(rules []Rule, dest string) ([]Rule, bool) {
+	dest = strings.ToLower(normalizeDestination(dest))
 	for i, r := range rules {
-		if r.Destination == dest {
+		if strings.ToLower(normalizeDestination(r.Destination)) == dest {
 			return append(rules[:i], rules[i+1:]...), true
 		}
 	}

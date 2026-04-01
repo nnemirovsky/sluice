@@ -31,6 +31,9 @@ func TestApprovalFlowTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected timeout error, got response %v", resp)
 	}
+	if resp != ResponseDeny {
+		t.Errorf("expected ResponseDeny on timeout, got %v", resp)
+	}
 }
 
 func TestApprovalFlowDeny(t *testing.T) {

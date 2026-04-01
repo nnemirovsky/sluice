@@ -217,6 +217,12 @@ default = "deny"
 	if strings.Contains(result, "a.com") {
 		t.Errorf("should not show first entry when requesting 2, got: %s", result)
 	}
+	// Verify chronological ordering (b.com should appear before c.com)
+	bIdx := strings.Index(result, "b.com")
+	cIdx := strings.Index(result, "c.com")
+	if bIdx >= cIdx {
+		t.Errorf("entries should be in chronological order (b.com before c.com), got: %s", result)
+	}
 }
 
 func TestHandleAuditEmpty(t *testing.T) {

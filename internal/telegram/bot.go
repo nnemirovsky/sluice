@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -40,10 +41,11 @@ type Bot struct {
 	chatID   int64
 	broker   *ApprovalBroker
 	commands *CommandHandler
+	done     chan struct{}
 }
 
 func FormatApprovalMessage(dest string, port int) string {
-	return fmt.Sprintf("Agent wants to connect to:\n\n`%s:%d`\n\nAllow this connection?", dest, port)
+	return fmt.Sprintf("Agent wants to connect to:\n\n%s:%d\n\nAllow this connection?", dest, port)
 }
 
 func NewBot(cfg BotConfig, broker *ApprovalBroker) (*Bot, error) {
@@ -58,7 +60,7 @@ func NewBot(cfg BotConfig, broker *ApprovalBroker) (*Bot, error) {
 
 	cmdHandler := NewCommandHandler(cfg.Engine, broker, cfg.AuditPath)
 
-	return &Bot{api: api, chatID: cfg.ChatID, broker: broker, commands: cmdHandler}, nil
+	return &Bot{api: api, chatID: cfg.ChatID, broker: broker, commands: cmdHandler, done: make(chan struct{})}, nil
 }
 
 func (b *Bot) Run() {
@@ -83,44 +85,55 @@ func (b *Bot) Run() {
 }
 
 func (b *Bot) sendApprovalRequests() {
-	for req := range b.broker.Pending() {
-		// Skip requests whose waiter has already been cleaned up (timed out
-		// or resolved while queued). This prevents sending stale approval
-		// prompts to Telegram after backlog or recovery.
-		if !b.broker.HasWaiter(req.ID) {
-			b.broker.ClearTimedOut(req.ID) // clean up timedOut entry if present
-			continue
-		}
-		msg := tgbotapi.NewMessage(b.chatID, FormatApprovalMessage(req.Destination, req.Port))
-		msg.ParseMode = "Markdown"
-		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
-			tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData("Allow Once", req.ID+"|allow_once"),
-				tgbotapi.NewInlineKeyboardButtonData("Always Allow", req.ID+"|always_allow"),
-				tgbotapi.NewInlineKeyboardButtonData("Deny", req.ID+"|deny"),
-			),
-		)
-		sent, err := b.api.Send(msg)
-		if err != nil {
-			log.Printf("telegram send error: %s", sanitizeError(err))
-			// On send failure, auto-deny
-			b.broker.Resolve(req.ID, ResponseDeny)
-			b.broker.ClearTimedOut(req.ID) // clean up timedOut entry if request expired during send
-			continue
-		}
-		// If the request timed out while the Telegram API call was in
-		// flight, update the message immediately so the user does not
-		// see a stale prompt and only discover it expired after tapping.
-		// Use WasTimedOut (not HasWaiter) to distinguish a genuine timeout
-		// from a callback that resolved the request during the send.
-		// Only clear the flag if the edit succeeds so that handleCallback
-		// can still show "timed out" if the operator taps a stale button.
-		if b.broker.WasTimedOut(req.ID) {
-			edit := tgbotapi.NewEditMessageText(b.chatID, sent.MessageID,
-				FormatApprovalMessage(req.Destination, req.Port)+"\n\n(request timed out)")
-			if _, editErr := b.api.Send(edit); editErr == nil {
-				b.broker.ClearTimedOut(req.ID)
+	for {
+		select {
+		case req, ok := <-b.broker.Pending():
+			if !ok {
+				return
 			}
+			b.handlePendingRequest(req)
+		case <-b.done:
+			return
+		}
+	}
+}
+
+func (b *Bot) handlePendingRequest(req ApprovalRequest) {
+	// Skip requests whose waiter has already been cleaned up (timed out
+	// or resolved while queued). This prevents sending stale approval
+	// prompts to Telegram after backlog or recovery.
+	if !b.broker.HasWaiter(req.ID) {
+		b.broker.ClearTimedOut(req.ID) // clean up timedOut entry if present
+		return
+	}
+	msg := tgbotapi.NewMessage(b.chatID, FormatApprovalMessage(req.Destination, req.Port))
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Allow Once", req.ID+"|allow_once"),
+			tgbotapi.NewInlineKeyboardButtonData("Always Allow", req.ID+"|always_allow"),
+			tgbotapi.NewInlineKeyboardButtonData("Deny", req.ID+"|deny"),
+		),
+	)
+	sent, err := b.api.Send(msg)
+	if err != nil {
+		log.Printf("telegram send error: %s", sanitizeError(err))
+		// On send failure, auto-deny
+		b.broker.Resolve(req.ID, ResponseDeny)
+		b.broker.ClearTimedOut(req.ID) // clean up timedOut entry if request expired during send
+		return
+	}
+	// If the request timed out while the Telegram API call was in
+	// flight, update the message immediately so the user does not
+	// see a stale prompt and only discover it expired after tapping.
+	// Use WasTimedOut (not HasWaiter) to distinguish a genuine timeout
+	// from a callback that resolved the request during the send.
+	// Only clear the flag if the edit succeeds so that handleCallback
+	// can still show "timed out" if the operator taps a stale button.
+	if b.broker.WasTimedOut(req.ID) {
+		edit := tgbotapi.NewEditMessageText(b.chatID, sent.MessageID,
+			FormatApprovalMessage(req.Destination, req.Port)+"\n\n(request timed out)")
+		if _, editErr := b.api.Send(edit); editErr == nil {
+			b.broker.ClearTimedOut(req.ID)
 		}
 	}
 }
@@ -203,7 +216,13 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	}
 
 	if len(response) > telegramMaxMessage {
-		response = response[:telegramMaxMessage] + "\n\n(truncated)"
+		// Truncate at a valid UTF-8 rune boundary to avoid splitting
+		// multi-byte characters, which Telegram would reject.
+		cut := telegramMaxMessage
+		for cut > 0 && !utf8.RuneStart(response[cut]) {
+			cut--
+		}
+		response = response[:cut] + "\n\n(truncated)"
 	}
 
 	reply := tgbotapi.NewMessage(b.chatID, response)
@@ -219,5 +238,6 @@ func (b *Bot) UpdateEngine(eng *policy.Engine) {
 }
 
 func (b *Bot) Stop() {
+	close(b.done)
 	b.api.StopReceivingUpdates()
 }

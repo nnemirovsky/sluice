@@ -612,10 +612,10 @@ func handlePolicyAllow(bot *tgbotapi.BotAPI, chatID int64, engine *policy.Engine
 func handlePolicyDeny(bot *tgbotapi.BotAPI, chatID int64, engine *policy.Engine, dest string)
 ```
 
-Policy changes are applied to the running engine AND written back to the
-TOML file so they survive restarts.
+Policy changes are applied to the running engine in-memory only. TOML
+write-back is deferred to a future plan.
 
-- [x] **Step 3: Implement /cred commands**
+- [x] **Step 3: Implement /cred commands** (stubbed, returns "vault not configured" until vault subsystem is implemented)
 
 ```go
 func handleCredAdd(bot *tgbotapi.BotAPI, chatID int64, store *vault.Store, name string)
