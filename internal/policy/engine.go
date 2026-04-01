@@ -27,6 +27,7 @@ type Engine struct {
 	DenyRules  []Rule
 	AskRules   []Rule
 	TimeoutSec int
+	Telegram   TelegramConfig
 	compiled   *compiledEngine
 }
 
@@ -71,6 +72,7 @@ func LoadFromBytes(data []byte) (*Engine, error) {
 		DenyRules:  pf.Deny,
 		AskRules:   pf.Ask,
 		TimeoutSec: timeout,
+		Telegram:   pf.Telegram,
 	}
 	if err := eng.Compile(); err != nil {
 		return nil, fmt.Errorf("compile policy rules: %w", err)

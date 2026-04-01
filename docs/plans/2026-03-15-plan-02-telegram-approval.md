@@ -510,7 +510,7 @@ git commit -m "feat: integrate Telegram approval into SOCKS5 proxy"
 **Files:**
 - Modify: `internal/policy/types.go`
 
-- [ ] **Step 1: Add TelegramConfig to policy file struct**
+- [x] **Step 1: Add TelegramConfig to policy file struct**
 
 ```go
 type TelegramConfig struct {
@@ -522,7 +522,7 @@ type TelegramConfig struct {
 // Telegram TelegramConfig `toml:"telegram"`
 ```
 
-- [ ] **Step 2: Add test policy file with telegram section**
+- [x] **Step 2: Add test policy file with telegram section**
 
 Create `testdata/policy_with_telegram.toml`:
 
@@ -543,7 +543,7 @@ ports = [443]
 destination = "*.unknown.com"
 ```
 
-- [ ] **Step 3: Write test for loading telegram config**
+- [x] **Step 3: Write test for loading telegram config**
 
 ```go
 func TestLoadPolicyWithTelegram(t *testing.T) {
@@ -557,12 +557,12 @@ func TestLoadPolicyWithTelegram(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `go test ./... -v -timeout 30s`
 Expected: ALL PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/ testdata/

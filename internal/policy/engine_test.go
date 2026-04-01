@@ -412,3 +412,41 @@ destination = "test[0].example.com"
 		t.Error("expected non-literal match to deny")
 	}
 }
+
+func TestLoadPolicyWithTelegram(t *testing.T) {
+	eng, err := LoadFromFile("../../testdata/policy_with_telegram.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eng.Telegram.BotTokenEnv != "TELEGRAM_BOT_TOKEN" {
+		t.Errorf("expected bot_token_env %q, got %q", "TELEGRAM_BOT_TOKEN", eng.Telegram.BotTokenEnv)
+	}
+	if eng.Telegram.ChatIDEnv != "TELEGRAM_CHAT_ID" {
+		t.Errorf("expected chat_id_env %q, got %q", "TELEGRAM_CHAT_ID", eng.Telegram.ChatIDEnv)
+	}
+	if eng.Default != Ask {
+		t.Errorf("expected default Ask, got %v", eng.Default)
+	}
+	if eng.TimeoutSec != 60 {
+		t.Errorf("expected timeout 60, got %d", eng.TimeoutSec)
+	}
+	if len(eng.AllowRules) != 1 {
+		t.Errorf("expected 1 allow rule, got %d", len(eng.AllowRules))
+	}
+	if len(eng.AskRules) != 1 {
+		t.Errorf("expected 1 ask rule, got %d", len(eng.AskRules))
+	}
+}
+
+func TestLoadPolicyWithoutTelegram(t *testing.T) {
+	eng, err := LoadFromFile("../../testdata/policy_mixed.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eng.Telegram.BotTokenEnv != "" {
+		t.Errorf("expected empty bot_token_env, got %q", eng.Telegram.BotTokenEnv)
+	}
+	if eng.Telegram.ChatIDEnv != "" {
+		t.Errorf("expected empty chat_id_env, got %q", eng.Telegram.ChatIDEnv)
+	}
+}

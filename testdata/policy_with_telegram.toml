@@ -1,0 +1,14 @@
+[policy]
+default = "ask"
+timeout_sec = 60
+
+[telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+chat_id_env = "TELEGRAM_CHAT_ID"
+
+[[allow]]
+destination = "api.anthropic.com"
+ports = [443]
+
+[[ask]]
+destination = "*.unknown.com"
