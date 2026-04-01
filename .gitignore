@@ -5,3 +5,8 @@
 
 # Go build cache
 .go/
+.gocache/
+.gomodcache/
+
+# Binary
+sluice
