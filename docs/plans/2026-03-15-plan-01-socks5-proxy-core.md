@@ -91,7 +91,7 @@ git commit -m "init: scaffold Go module and entrypoint"
 - Create: `internal/policy/engine_test.go`
 - Create: `testdata/policy_mixed.toml`
 
-- [ ] **Step 1: Create test policy file**
+- [x] **Step 1: Create test policy file**
 
 ```toml
 # testdata/policy_mixed.toml
@@ -113,7 +113,7 @@ destination = "169.254.169.254"
 destination = "*.crypto-mining.example"
 ```
 
-- [ ] **Step 2: Write failing test for policy loading**
+- [x] **Step 2: Write failing test for policy loading**
 
 ```go
 // internal/policy/engine_test.go
@@ -140,12 +140,12 @@ func TestLoadPolicy(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `go test ./internal/policy/ -v -run TestLoadPolicy`
 Expected: FAIL (package doesn't exist yet)
 
-- [ ] **Step 4: Implement types.go**
+- [x] **Step 4: Implement types.go**
 
 ```go
 // internal/policy/types.go
@@ -196,7 +196,7 @@ type policyFile struct {
 }
 ```
 
-- [ ] **Step 5: Implement engine.go (loading only)**
+- [x] **Step 5: Implement engine.go (loading only)**
 
 ```go
 // internal/policy/engine.go
@@ -260,7 +260,7 @@ func LoadFromBytes(data []byte) (*Engine, error) {
 }
 ```
 
-- [ ] **Step 6: Add toml dependency and run test**
+- [x] **Step 6: Add toml dependency and run test**
 
 ```bash
 cd /Users/nemirovsky/Developer/sluice
@@ -270,7 +270,7 @@ go test ./internal/policy/ -v -run TestLoadPolicy
 
 Expected: PASS
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add internal/policy/ testdata/ go.mod go.sum
