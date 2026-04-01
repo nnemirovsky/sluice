@@ -119,16 +119,24 @@ func (b *Bot) handleCallback(cq *tgbotapi.CallbackQuery) {
 		return
 	}
 
-	b.broker.Resolve(reqID, resp)
+	resolved := b.broker.Resolve(reqID, resp)
 
-	// Update the message to show the decision
-	callback := tgbotapi.NewCallback(cq.ID, label)
-	b.api.Request(callback)
+	if resolved {
+		callback := tgbotapi.NewCallback(cq.ID, label)
+		b.api.Request(callback)
 
-	edit := tgbotapi.NewEditMessageText(b.chatID, cq.Message.MessageID,
-		cq.Message.Text+fmt.Sprintf("\n\n*%s* at %s", label, time.Now().UTC().Format("15:04:05")))
-	edit.ParseMode = "Markdown"
-	b.api.Send(edit)
+		edit := tgbotapi.NewEditMessageText(b.chatID, cq.Message.MessageID,
+			cq.Message.Text+fmt.Sprintf("\n\n*%s* at %s", label, time.Now().UTC().Format("15:04:05")))
+		edit.ParseMode = "Markdown"
+		b.api.Send(edit)
+	} else {
+		callback := tgbotapi.NewCallback(cq.ID, "Request already expired")
+		b.api.Request(callback)
+
+		edit := tgbotapi.NewEditMessageText(b.chatID, cq.Message.MessageID,
+			cq.Message.Text+"\n\n(request timed out)")
+		b.api.Send(edit)
+	}
 }
 
 func (b *Bot) handleMessage(msg *tgbotapi.Message) {

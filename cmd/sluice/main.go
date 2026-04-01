@@ -90,12 +90,12 @@ func main() {
 				log.Printf("reload policy failed: %v", err)
 				continue
 			}
+			log.Printf("reloaded policy: %d allow, %d deny, %d ask rules (default: %s)",
+				len(newEng.AllowRules), len(newEng.DenyRules), len(newEng.AskRules), newEng.Default)
 			srv.ReloadPolicy(newEng)
 			if bot != nil {
 				bot.UpdateEngine(newEng)
 			}
-			log.Printf("reloaded policy: %d allow, %d deny, %d ask rules (default: %s)",
-				len(newEng.AllowRules), len(newEng.DenyRules), len(newEng.AskRules), newEng.Default)
 		}
 	}()
 

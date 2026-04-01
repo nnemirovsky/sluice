@@ -103,7 +103,10 @@ func (b *ApprovalBroker) PendingCount() int {
 	return len(b.waiters)
 }
 
-func (b *ApprovalBroker) Resolve(id string, resp Response) {
+// Resolve delivers a response to a pending approval request.
+// Returns true if the request was still pending, false if it had already
+// timed out or been resolved (so the caller can show an appropriate message).
+func (b *ApprovalBroker) Resolve(id string, resp Response) bool {
 	b.mu.Lock()
 	ch, ok := b.waiters[id]
 	if ok {
@@ -114,4 +117,5 @@ func (b *ApprovalBroker) Resolve(id string, resp Response) {
 	if ok {
 		ch <- resp
 	}
+	return ok
 }
