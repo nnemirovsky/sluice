@@ -285,7 +285,7 @@ git commit -m "feat: policy types and TOML loading"
 - Create: `internal/policy/glob.go`
 - Create: `internal/policy/glob_test.go`
 
-- [ ] **Step 1: Write failing tests for glob matching**
+- [x] **Step 1: Write failing tests for glob matching**
 
 ```go
 // internal/policy/glob_test.go
@@ -325,12 +325,12 @@ func TestGlobMatch(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/policy/ -v -run TestGlobMatch`
 Expected: FAIL
 
-- [ ] **Step 3: Implement glob.go**
+- [x] **Step 3: Implement glob.go**
 
 ```go
 // internal/policy/glob.go
@@ -388,12 +388,12 @@ func (g *Glob) String() string {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/policy/ -v -run TestGlobMatch`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/policy/glob.go internal/policy/glob_test.go
