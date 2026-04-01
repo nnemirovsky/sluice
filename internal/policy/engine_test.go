@@ -214,6 +214,184 @@ func TestLoadFromBytesErrors(t *testing.T) {
 	}
 }
 
+func TestCanonicalizeDestination(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		// Trailing dots are stripped
+		{"example.com.", "example.com"},
+		{"example.com...", "example.com"},
+		// Already canonical
+		{"example.com", "example.com"},
+		// IPv6 compressed
+		{"0:0:0:0:0:0:0:1", "::1"},
+		{"0000:0000:0000:0000:0000:0000:0000:0001", "::1"},
+		// IPv6 already canonical
+		{"::1", "::1"},
+		// IPv4 unchanged
+		{"127.0.0.1", "127.0.0.1"},
+		// Glob patterns left alone (not valid IPs)
+		{"*.example.com", "*.example.com"},
+		{"**.example.com", "**.example.com"},
+		// Trailing dot + glob
+		{"*.example.com.", "*.example.com"},
+		// Bare wildcard + trailing dot: kept as-is to avoid match-all
+		{"*.", "*."},
+		{"**.", "**."},
+		{"*...", "*..."},
+		// Bare wildcard without trailing dot: unchanged (no stripping needed)
+		{"*", "*"},
+		{"**", "**"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := canonicalizeDestination(tt.input)
+			if got != tt.want {
+				t.Errorf("canonicalizeDestination(%q) = %q, want %q",
+					tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDenyRuleWithTrailingDot(t *testing.T) {
+	// A deny rule with trailing dot should still match the runtime
+	// canonical form (no trailing dot).
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+
+[[deny]]
+destination = "evil.com."
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if eng.Evaluate("evil.com", 443) != Deny {
+		t.Error("deny rule with trailing dot should match canonical 'evil.com'")
+	}
+}
+
+func TestDenyRuleWithExpandedIPv6(t *testing.T) {
+	// A deny rule with expanded IPv6 should match the runtime
+	// canonical (compressed) form.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+
+[[deny]]
+destination = "0:0:0:0:0:0:0:1"
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if eng.Evaluate("::1", 443) != Deny {
+		t.Error("deny rule with expanded IPv6 should match canonical '::1'")
+	}
+}
+
+func TestIsExplicitlyAllowed(t *testing.T) {
+	eng, err := LoadFromFile("../../testdata/policy_mixed.toml")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	tests := []struct {
+		dest string
+		port int
+		want bool
+	}{
+		// Matches allow rule
+		{"api.anthropic.com", 443, true},
+		{"api.github.com", 443, true},
+		// Port mismatch on allow rule
+		{"api.github.com", 22, false},
+		// Denied but not explicitly allowed
+		{"169.254.169.254", 80, false},
+		// Unknown destination
+		{"random.unknown.com", 443, false},
+		// Ask rule does not count as allowed
+		{"api.openai.com", 443, false},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s:%d", tt.dest, tt.port), func(t *testing.T) {
+			got := eng.IsExplicitlyAllowed(tt.dest, tt.port)
+			if got != tt.want {
+				t.Errorf("IsExplicitlyAllowed(%q, %d) = %v, want %v",
+					tt.dest, tt.port, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTrailingDotWildcardNotMatchAll(t *testing.T) {
+	// A deny rule with destination "*." must NOT become a match-all rule.
+	// Without the guard in canonicalizeDestination, trailing-dot removal
+	// reduces "*." to "*" which CompileGlob treats as match-everything.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+
+[[deny]]
+destination = "*."
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	// Multi-label domains must NOT be denied (they don't match "*.")
+	if eng.Evaluate("example.com", 443) != Allow {
+		t.Error("'*.' deny rule should not match multi-label 'example.com'")
+	}
+	if eng.Evaluate("api.github.com", 443) != Allow {
+		t.Error("'*.' deny rule should not match multi-label 'api.github.com'")
+	}
+}
+
+func TestEvaluateNormalizesInput(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+
+[[deny]]
+destination = "evil.com"
+
+[[deny]]
+destination = "::1"
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// Trailing dot in input should still match canonical rule
+	if eng.Evaluate("evil.com.", 443) != Deny {
+		t.Error("Evaluate with trailing dot should match deny rule for 'evil.com'")
+	}
+
+	// Expanded IPv6 in input should match compressed rule
+	if eng.Evaluate("0:0:0:0:0:0:0:1", 443) != Deny {
+		t.Error("Evaluate with expanded IPv6 should match deny rule for '::1'")
+	}
+}
+
+func TestCouldBeAllowedNormalizesInput(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+
+[[deny]]
+destination = "evil.com"
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// Trailing dot should be stripped before matching
+	if eng.CouldBeAllowed("evil.com.") {
+		t.Error("CouldBeAllowed with trailing dot should match deny rule for 'evil.com'")
+	}
+}
+
 func TestLoadFromBytesGlobWithMetachars(t *testing.T) {
 	// After regex injection fix, patterns with metacharacters compile fine as literals
 	input := `

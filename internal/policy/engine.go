@@ -2,7 +2,9 @@ package policy
 
 import (
 	"fmt"
+	"net"
 	"os"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -76,13 +78,43 @@ func LoadFromBytes(data []byte) (*Engine, error) {
 	return eng, nil
 }
 
+// normalizeDestination normalizes a runtime destination to the canonical form
+// used by compiled rules: trailing dots are stripped and IPv6 addresses are
+// compressed. This ensures callers of the public Engine API get consistent
+// results regardless of whether the destination has a trailing dot or uses
+// an expanded IPv6 form.
+func normalizeDestination(dest string) string {
+	dest = strings.TrimRight(dest, ".")
+	if ip := net.ParseIP(dest); ip != nil {
+		return ip.String()
+	}
+	return dest
+}
+
+// canonicalizeDestination normalizes a rule destination so it matches the
+// canonical form used at runtime: trailing dots are stripped (DNS FQDN
+// normalization) and IPv6 addresses are compressed (net.IP.String() form).
+func canonicalizeDestination(dest string) string {
+	normalized := normalizeDestination(dest)
+	// Guard: do not let trailing-dot removal reduce a glob pattern to a
+	// bare wildcard. "*." means single-label-then-dot in glob syntax;
+	// reducing it to "*" makes CompileGlob treat it as match-all, silently
+	// widening the rule scope. Keep the original so the rule compiles
+	// harmlessly (won't match dot-free runtime destinations).
+	if normalized != dest && (normalized == "*" || normalized == "**") {
+		return dest
+	}
+	return normalized
+}
+
 func compileRules(rules []Rule) ([]compiledRule, error) {
 	out := make([]compiledRule, 0, len(rules))
 	for _, r := range rules {
 		if r.Destination == "" {
 			return nil, fmt.Errorf("rule has empty destination")
 		}
-		g, err := CompileGlob(r.Destination)
+		dest := canonicalizeDestination(r.Destination)
+		g, err := CompileGlob(dest)
 		if err != nil {
 			return nil, fmt.Errorf("compile rule %q: %w", r.Destination, err)
 		}
@@ -132,6 +164,7 @@ func matchRules(rules []compiledRule, dest string, port int) bool {
 // IsDenied checks whether a destination and port match any explicit deny rule.
 // Unlike Evaluate, this does not fall back to the default verdict.
 func (e *Engine) IsDenied(dest string, port int) bool {
+	dest = normalizeDestination(dest)
 	if e.compiled == nil {
 		return false
 	}
@@ -143,11 +176,24 @@ func (e *Engine) IsDenied(dest string, port int) bool {
 // Used for DNS rebinding checks where the original FQDN was already allowed
 // and we need to verify the resolved IP is not explicitly restricted.
 func (e *Engine) IsRestricted(dest string, port int) bool {
+	dest = normalizeDestination(dest)
 	if e.compiled == nil {
 		return false
 	}
 	return matchRules(e.compiled.denyRules, dest, port) ||
 		matchRules(e.compiled.askRules, dest, port)
+}
+
+// IsExplicitlyAllowed checks whether a destination and port match any explicit
+// allow rule. Unlike Evaluate, this does not fall back to the default verdict.
+// Used for DNS rebinding checks where we need to know if a resolved private IP
+// is independently allowed by policy.
+func (e *Engine) IsExplicitlyAllowed(dest string, port int) bool {
+	dest = normalizeDestination(dest)
+	if e.compiled == nil {
+		return false
+	}
+	return matchRules(e.compiled.allowRules, dest, port)
 }
 
 // CouldBeAllowed reports whether a destination could be allowed on any port.
@@ -156,6 +202,7 @@ func (e *Engine) IsRestricted(dest string, port int) bool {
 // DNS leaks for definitely-denied hosts. Ask rules are treated as deny
 // (Telegram not yet configured) and do not make a destination resolvable.
 func (e *Engine) CouldBeAllowed(dest string) bool {
+	dest = normalizeDestination(dest)
 	if e.compiled == nil {
 		return e.Default == Allow
 	}
@@ -192,6 +239,7 @@ func (e *Engine) CouldBeAllowed(dest string) bool {
 // Evaluate checks a destination and port against the compiled policy rules.
 // Deny rules are checked first, then allow, then ask. Falls back to default.
 func (e *Engine) Evaluate(dest string, port int) Verdict {
+	dest = normalizeDestination(dest)
 	if e.compiled == nil {
 		return e.Default
 	}

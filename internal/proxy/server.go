@@ -7,12 +7,25 @@ import (
 	"net"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/armon/go-socks5"
 
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/policy"
 )
+
+// dnsTimeout bounds how long a single DNS lookup can block. The go-socks5
+// library passes context.Background() into the resolver, so we cannot rely
+// on external cancellation. This timeout prevents a stuck system resolver
+// from holding a request goroutine indefinitely.
+const dnsTimeout = 10 * time.Second
+
+// connectTimeout bounds how long a single outbound TCP connect can block.
+// Without this, a client can point the proxy at a black-holed IP and hold
+// a goroutine/socket until the kernel TCP timeout expires (typically 2+
+// minutes on Linux). This limits the resource impact of such requests.
+const connectTimeout = 30 * time.Second
 
 // Config holds configuration for creating a new SOCKS5 proxy server.
 type Config struct {
@@ -30,8 +43,9 @@ type Server struct {
 
 type contextKey string
 
-const ctxKeyProtocol contextKey = "protocol"
-const ctxKeyEngine  contextKey = "engine"
+const ctxKeyProtocol       contextKey = "protocol"
+const ctxKeyEngine         contextKey = "engine"
+const ctxKeyFallbackAddrs  contextKey = "fallbackAddrs"
 
 // ProtocolFromContext retrieves the detected protocol from the request context.
 func ProtocolFromContext(ctx context.Context) Protocol {
@@ -39,6 +53,14 @@ func ProtocolFromContext(ctx context.Context) Protocol {
 		return v
 	}
 	return ProtoGeneric
+}
+
+// isPrivateIP checks whether an IP is in a private, loopback, link-local,
+// or unspecified range. These addresses should not be reachable via DNS
+// rebinding of allow-listed hostnames unless explicitly allowed by policy.
+func isPrivateIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified()
 }
 
 // policyResolver performs DNS resolution only for destinations that could be
@@ -65,9 +87,14 @@ func (r *policyResolver) Resolve(ctx context.Context, name string) (context.Cont
 		return ctx, nil, nil
 	}
 
-	// Destination might be allowed: resolve DNS. Failures return an error
-	// so go-socks5 sends hostUnreachable (more accurate than ruleFailure).
-	ips, err := net.LookupIP(dest)
+	// Destination might be allowed: resolve DNS. The context from
+	// go-socks5 is context.Background() and is never cancelled, so we
+	// add our own timeout to bound stalled system resolver lookups.
+	// Failures return an error so go-socks5 sends hostUnreachable
+	// (more accurate than ruleFailure).
+	dnsCtx, dnsCancel := context.WithTimeout(ctx, dnsTimeout)
+	defer dnsCancel()
+	addrs, err := net.DefaultResolver.LookupIPAddr(dnsCtx, dest)
 	if err != nil {
 		log.Printf("[DENY] DNS resolution failed for %s: %v", dest, err)
 		if r.audit != nil {
@@ -81,7 +108,7 @@ func (r *policyResolver) Resolve(ctx context.Context, name string) (context.Cont
 		}
 		return ctx, nil, fmt.Errorf("resolve %s: %w", dest, err)
 	}
-	if len(ips) == 0 {
+	if len(addrs) == 0 {
 		log.Printf("[DENY] DNS resolution returned no addresses for %s", dest)
 		if r.audit != nil {
 			if logErr := r.audit.Log(audit.Event{
@@ -95,7 +122,21 @@ func (r *policyResolver) Resolve(ctx context.Context, name string) (context.Cont
 		return ctx, nil, fmt.Errorf("resolve %s: no addresses found", dest)
 	}
 
-	return ctx, ips[0], nil
+	// The go-socks5 NameResolver interface returns a single IP, so we
+	// pass the first address and store any remaining addresses in the
+	// context as fallbacks. The custom Dial function tries them in order
+	// if the primary address is unreachable, providing resilience on
+	// dual-stack hosts where the preferred address family may be unusable.
+	// The system resolver already applies RFC 6724 destination address
+	// selection, so addrs[0] is the best first choice.
+	if len(addrs) > 1 {
+		fallback := make([]net.IP, len(addrs)-1)
+		for i, a := range addrs[1:] {
+			fallback[i] = a.IP
+		}
+		ctx = context.WithValue(ctx, ctxKeyFallbackAddrs, fallback)
+	}
+	return ctx, addrs[0].IP, nil
 }
 
 type policyRuleSet struct {
@@ -157,6 +198,30 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 			effectiveVerdict = policy.Deny
 			reason = fmt.Sprintf("resolved IP %s is restricted", resolvedIP)
 			log.Printf("[DENY] %s resolved to restricted IP %s", req.DestAddr.FQDN, resolvedIP)
+		} else if isPrivateIP(req.DestAddr.IP) && eng.Evaluate(resolvedIP, port) != policy.Allow {
+			allowed = false
+			effectiveVerdict = policy.Deny
+			reason = fmt.Sprintf("resolved IP %s is private and not allowed by policy", resolvedIP)
+			log.Printf("[DENY] %s resolved to private IP %s (DNS rebinding protection)", req.DestAddr.FQDN, resolvedIP)
+		}
+	}
+
+	// Filter fallback addresses through the same rebinding/policy checks
+	// so the Dial function only tries addresses that would be allowed.
+	if allowed && req.DestAddr.FQDN != "" {
+		if fallbacks, ok := ctx.Value(ctxKeyFallbackAddrs).([]net.IP); ok {
+			approved := make([]net.IP, 0, len(fallbacks))
+			for _, ip := range fallbacks {
+				ipStr := ip.String()
+				if eng.IsRestricted(ipStr, port) {
+					continue
+				}
+				if isPrivateIP(ip) && eng.Evaluate(ipStr, port) != policy.Allow {
+					continue
+				}
+				approved = append(approved, ip)
+			}
+			ctx = context.WithValue(ctx, ctxKeyFallbackAddrs, approved)
 		}
 	}
 
@@ -198,6 +263,29 @@ func New(cfg Config) (*Server, error) {
 	socksCfg := &socks5.Config{
 		Rules:    rules,
 		Resolver: resolver,
+		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			d := &net.Dialer{Timeout: connectTimeout}
+			conn, err := d.DialContext(ctx, network, addr)
+			if err == nil {
+				return conn, nil
+			}
+			// Try policy-approved fallback addresses from DNS resolution.
+			fallbacks, _ := ctx.Value(ctxKeyFallbackAddrs).([]net.IP)
+			if len(fallbacks) == 0 {
+				return nil, err
+			}
+			_, portStr, splitErr := net.SplitHostPort(addr)
+			if splitErr != nil {
+				return nil, err
+			}
+			for _, ip := range fallbacks {
+				fbAddr := net.JoinHostPort(ip.String(), portStr)
+				if fbConn, fbErr := d.DialContext(ctx, network, fbAddr); fbErr == nil {
+					return fbConn, nil
+				}
+			}
+			return nil, err
+		},
 	}
 	socksServer, err := socks5.New(socksCfg)
 	if err != nil {
