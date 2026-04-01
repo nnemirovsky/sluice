@@ -79,12 +79,18 @@ func LoadFromBytes(data []byte) (*Engine, error) {
 func compileRules(rules []Rule) ([]compiledRule, error) {
 	out := make([]compiledRule, 0, len(rules))
 	for _, r := range rules {
+		if r.Destination == "" {
+			return nil, fmt.Errorf("rule has empty destination")
+		}
 		g, err := CompileGlob(r.Destination)
 		if err != nil {
 			return nil, fmt.Errorf("compile rule %q: %w", r.Destination, err)
 		}
 		ports := make(map[int]bool, len(r.Ports))
 		for _, p := range r.Ports {
+			if p < 1 || p > 65535 {
+				return nil, fmt.Errorf("rule %q: invalid port %d (must be 1-65535)", r.Destination, p)
+			}
 			ports[p] = true
 		}
 		out = append(out, compiledRule{glob: g, ports: ports})
@@ -126,6 +132,9 @@ func matchRules(rules []compiledRule, dest string, port int) bool {
 // Evaluate checks a destination and port against the compiled policy rules.
 // Deny rules are checked first, then allow, then ask. Falls back to default.
 func (e *Engine) Evaluate(dest string, port int) Verdict {
+	if e.compiled == nil {
+		return e.Default
+	}
 	if matchRules(e.compiled.denyRules, dest, port) {
 		return Deny
 	}

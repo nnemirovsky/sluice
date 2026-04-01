@@ -80,6 +80,9 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 
 // New creates a new SOCKS5 proxy server bound to the configured listen address.
 func New(cfg Config) (*Server, error) {
+	if cfg.Policy == nil {
+		return nil, fmt.Errorf("policy engine is required")
+	}
 	ln, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("listen: %w", err)
