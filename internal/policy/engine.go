@@ -293,10 +293,16 @@ func (e *Engine) AddDenyRule(dest string) error {
 }
 
 // RemoveRule removes the first rule matching dest from any rule list and recompiles.
-// Returns true if a rule was found and removed.
+// On compile failure the removal is rolled back. Returns true if a rule was found and removed.
 func (e *Engine) RemoveRule(dest string) (bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	// Save originals for rollback.
+	origAllow := e.AllowRules
+	origDeny := e.DenyRules
+	origAsk := e.AskRules
+
 	var removed bool
 	e.AllowRules, removed = removeRuleFromSlice(e.AllowRules, dest)
 	if !removed {
@@ -309,7 +315,10 @@ func (e *Engine) RemoveRule(dest string) (bool, error) {
 		return false, nil
 	}
 	if err := e.Compile(); err != nil {
-		return true, err
+		e.AllowRules = origAllow
+		e.DenyRules = origDeny
+		e.AskRules = origAsk
+		return false, err
 	}
 	return true, nil
 }

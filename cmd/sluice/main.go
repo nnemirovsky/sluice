@@ -36,6 +36,7 @@ func main() {
 	defer logger.Close()
 
 	var broker *telegram.ApprovalBroker
+	var bot *telegram.Bot
 
 	var telegramChatID int64
 	if *telegramChatIDStr != "" {
@@ -47,14 +48,15 @@ func main() {
 
 	if *telegramToken != "" && telegramChatID != 0 {
 		broker = telegram.NewApprovalBroker()
-		bot, err := telegram.NewBot(telegram.BotConfig{
+		var botErr error
+		bot, botErr = telegram.NewBot(telegram.BotConfig{
 			Token:     *telegramToken,
 			ChatID:    telegramChatID,
 			Engine:    eng,
 			AuditPath: *auditPath,
 		}, broker)
-		if err != nil {
-			log.Fatalf("telegram bot: %v", err)
+		if botErr != nil {
+			log.Fatalf("telegram bot: %v", botErr)
 		}
 		go bot.Run()
 		defer bot.Stop()
@@ -89,6 +91,9 @@ func main() {
 				continue
 			}
 			srv.ReloadPolicy(newEng)
+			if bot != nil {
+				bot.UpdateEngine(newEng)
+			}
 			log.Printf("reloaded policy: %d allow, %d deny, %d ask rules (default: %s)",
 				len(newEng.AllowRules), len(newEng.DenyRules), len(newEng.AskRules), newEng.Default)
 		}

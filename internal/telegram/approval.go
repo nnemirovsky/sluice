@@ -61,11 +61,23 @@ func (b *ApprovalBroker) Request(dest string, port int, timeout time.Duration) (
 	b.waiters[id] = ch
 	b.mu.Unlock()
 
-	b.pending <- ApprovalRequest{
+	req := ApprovalRequest{
 		ID:          id,
 		Destination: dest,
 		Port:        port,
 		CreatedAt:   time.Now(),
+	}
+
+	// Use a timeout when sending to the pending channel to prevent proxy
+	// goroutines from blocking indefinitely when the channel is full
+	// (e.g., Telegram API outage).
+	select {
+	case b.pending <- req:
+	case <-time.After(timeout):
+		b.mu.Lock()
+		delete(b.waiters, id)
+		b.mu.Unlock()
+		return ResponseDeny, fmt.Errorf("approval queue full (timeout after %v)", timeout)
 	}
 
 	select {

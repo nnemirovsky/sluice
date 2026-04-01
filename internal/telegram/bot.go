@@ -82,7 +82,10 @@ func (b *Bot) sendApprovalRequests() {
 }
 
 func (b *Bot) handleCallback(cq *tgbotapi.CallbackQuery) {
-	if cq.Message == nil || cq.Message.Chat.ID != b.chatID {
+	if cq.Message == nil {
+		return
+	}
+	if cq.Message.Chat.ID != b.chatID {
 		log.Printf("unauthorized callback from chat %d (expected %d)", cq.Message.Chat.ID, b.chatID)
 		return
 	}
@@ -143,6 +146,12 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	if _, err := b.api.Send(reply); err != nil {
 		log.Printf("telegram send error: %v", err)
 	}
+}
+
+// UpdateEngine replaces the policy engine used by command handlers.
+// Called on SIGHUP policy reload to keep the bot in sync with the proxy.
+func (b *Bot) UpdateEngine(eng *policy.Engine) {
+	b.commands.UpdateEngine(eng)
 }
 
 func (b *Bot) Stop() {

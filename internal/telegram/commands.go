@@ -54,6 +54,12 @@ func NewCommandHandler(engine *policy.Engine, broker *ApprovalBroker, auditPath 
 	}
 }
 
+// UpdateEngine replaces the policy engine used by command handlers.
+// Called on SIGHUP policy reload to keep the bot in sync with the proxy.
+func (h *CommandHandler) UpdateEngine(eng *policy.Engine) {
+	h.engine = eng
+}
+
 // Handle dispatches a command to the appropriate handler and returns the response text.
 // Returns empty string if the command is not recognized.
 func (h *CommandHandler) Handle(cmd *Command) string {
@@ -188,10 +194,14 @@ func (h *CommandHandler) handleStatus() string {
 }
 
 func (h *CommandHandler) handleAudit(args []string) string {
+	const maxAuditLines = 50
 	count := 10
 	if len(args) >= 2 && args[0] == "recent" {
 		if n, err := strconv.Atoi(args[1]); err == nil && n > 0 {
 			count = n
+			if count > maxAuditLines {
+				count = maxAuditLines
+			}
 		}
 	} else if len(args) >= 1 && args[0] == "recent" {
 		// default count
