@@ -56,6 +56,8 @@ func GenerateSSHHostKey() (ssh.Signer, error) {
 //  4. Accept the agent's SSH connection with no authentication
 //  5. Relay SSH channels between agent and upstream
 func (h *SSHJumpHost) HandleConnection(agentConn net.Conn, upstreamAddr string, binding vault.Binding) error {
+	defer agentConn.Close()
+
 	// Decrypt SSH private key from vault.
 	secret, err := h.provider.Get(binding.Credential)
 	if err != nil {

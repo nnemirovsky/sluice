@@ -55,18 +55,22 @@ func LoadOrCreateCA(dir string) (tls.Certificate, *x509.Certificate, error) {
 		return tls.Certificate{}, nil, genErr
 	}
 
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsCert.Certificate[0]})
-	if writeErr := os.WriteFile(certPath, certPEM, 0644); writeErr != nil {
-		return tls.Certificate{}, nil, fmt.Errorf("write CA cert: %w", writeErr)
-	}
-
 	keyDER, marshalErr := x509.MarshalECPrivateKey(tlsCert.PrivateKey.(*ecdsa.PrivateKey))
 	if marshalErr != nil {
 		return tls.Certificate{}, nil, fmt.Errorf("marshal CA key: %w", marshalErr)
 	}
+	// Write key first. If the cert write fails afterward, the orphaned key
+	// is less problematic than an orphaned cert (the missing cert causes
+	// LoadX509KeyPair to fail, and the stat check detects only one file).
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	if writeErr := os.WriteFile(keyPath, keyPEM, 0600); writeErr != nil {
 		return tls.Certificate{}, nil, fmt.Errorf("write CA key: %w", writeErr)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsCert.Certificate[0]})
+	if writeErr := os.WriteFile(certPath, certPEM, 0644); writeErr != nil {
+		os.Remove(keyPath)
+		return tls.Certificate{}, nil, fmt.Errorf("write CA cert: %w", writeErr)
 	}
 
 	return tlsCert, x509Cert, nil

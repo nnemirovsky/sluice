@@ -115,17 +115,17 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 		}
 	}
 
-	// Replace phantom tokens in the request body.
+	// Replace phantom tokens in the request body. Always reconstruct the
+	// body from whatever was read, even on partial read error, to avoid
+	// forwarding a request with a consumed/closed body.
 	if r.Body != nil && r.Body != http.NoBody {
 		body, readErr := io.ReadAll(r.Body)
 		r.Body.Close()
-		if readErr == nil {
-			if bytes.Contains(body, []byte(phantom)) {
-				body = bytes.ReplaceAll(body, []byte(phantom), []byte(value))
-			}
-			r.Body = io.NopCloser(bytes.NewReader(body))
-			r.ContentLength = int64(len(body))
+		if readErr == nil && bytes.Contains(body, []byte(phantom)) {
+			body = bytes.ReplaceAll(body, []byte(phantom), []byte(value))
 		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
 	}
 
 	log.Printf("[INJECT] injected credential %q for %s:%d", binding.Credential, host, port)

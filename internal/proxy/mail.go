@@ -46,6 +46,8 @@ type mailSession struct {
 // handshake). The upstreamAddr is the target host:port. TLS wrapping
 // for implicit TLS ports (993, 465) is handled at a lower layer.
 func (m *MailProxy) HandleConnection(agentConn net.Conn, upstreamAddr string, binding vault.Binding, proto Protocol) error {
+	defer agentConn.Close()
+
 	upstreamConn, err := net.DialTimeout("tcp", upstreamAddr, connectTimeout)
 	if err != nil {
 		return fmt.Errorf("dial upstream %s: %w", upstreamAddr, err)
@@ -79,7 +81,6 @@ func (m *MailProxy) HandleConnection(agentConn net.Conn, upstreamAddr string, bi
 		}
 	}
 
-	agentConn.Close()
 	upstreamConn.Close()
 	<-done
 	return nil
@@ -139,9 +140,14 @@ func authContinuationCount(upper string) int {
 	if upper == "AUTH PLAIN" {
 		return 1
 	}
-	// SMTP: "AUTH LOGIN" expects two continuation lines (username + password).
-	if upper == "AUTH LOGIN" || strings.HasPrefix(upper, "AUTH LOGIN ") {
+	// SMTP: "AUTH LOGIN" (no inline data) expects two continuation lines
+	// (username + password). "AUTH LOGIN <initial-response>" already has
+	// the username inline, so only 1 continuation (password) follows.
+	if upper == "AUTH LOGIN" {
 		return 2
+	}
+	if strings.HasPrefix(upper, "AUTH LOGIN ") {
+		return 1
 	}
 	// IMAP: "tag AUTHENTICATE PLAIN\r\n" (no inline data)
 	if strings.HasSuffix(upper, " AUTHENTICATE PLAIN") {
