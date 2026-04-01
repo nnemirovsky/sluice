@@ -83,8 +83,9 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 		log.Printf("[INJECT] credential %q lookup failed: %v", binding.Credential, err)
 		return r, nil
 	}
+	defer secret.Release()
 
-	value := binding.FormatValue(secret)
+	value := binding.FormatValue(secret.String())
 	phantom := PhantomToken(binding.Credential)
 
 	// Set the configured header if specified.

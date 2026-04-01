@@ -80,20 +80,23 @@ func (s *Store) Add(name, value string) error {
 }
 
 // Get decrypts and returns the credential with the given name.
-func (s *Store) Get(name string) (string, error) {
+// The caller must call Release() on the returned SecureBytes when done.
+func (s *Store) Get(name string) (SecureBytes, error) {
 	data, err := os.ReadFile(s.credPath(name))
 	if err != nil {
-		return "", fmt.Errorf("read credential %q: %w", name, err)
+		return SecureBytes{}, fmt.Errorf("read credential %q: %w", name, err)
 	}
 	r, err := age.Decrypt(bytes.NewReader(data), s.identity)
 	if err != nil {
-		return "", fmt.Errorf("decrypt %q: %w", name, err)
+		return SecureBytes{}, fmt.Errorf("decrypt %q: %w", name, err)
 	}
 	val, err := io.ReadAll(r)
 	if err != nil {
-		return "", fmt.Errorf("read decrypted %q: %w", name, err)
+		return SecureBytes{}, fmt.Errorf("read decrypted %q: %w", name, err)
 	}
-	return string(val), nil
+	// Wrap in SecureBytes so caller can zero memory after use.
+	sb := SecureBytes{data: val}
+	return sb, nil
 }
 
 // List returns the names of all stored credentials.

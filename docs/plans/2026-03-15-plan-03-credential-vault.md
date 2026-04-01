@@ -563,7 +563,7 @@ zeroing after use.
 - Modify: `internal/vault/store.go` (return `SecureBytes` instead of `string`)
 - Modify: `mitmproxy-addons/inject_creds.py` (clear value after injection)
 
-- [ ] **Step 1: Implement SecureBytes type**
+- [x] **Step 1: Implement SecureBytes type**
 
 ```go
 // internal/vault/secure.go
@@ -601,19 +601,19 @@ func (s *SecureBytes) Release() {
 }
 ```
 
-- [ ] **Step 2: Update Store.Get to return SecureBytes**
+- [x] **Step 2: Update Store.Get to return SecureBytes**
 
 Change `Store.Get` signature from `(string, error)` to `(SecureBytes, error)`.
 Callers must call `Release()` after using the credential.
 
-- [ ] **Step 3: Update inject.go to use SecureBytes**
+- [x] **Step 3: Update inject.go to use SecureBytes**
 
 Modify `internal/proxy/inject.go` to use `SecureBytes` for decrypted
 credentials. Call `Release()` immediately after injection completes.
 The credential should never remain in memory longer than the single
 request handling duration.
 
-- [ ] **Step 4: Tests**
+- [x] **Step 4: Tests**
 
 ```go
 func TestSecureBytesRelease(t *testing.T) {
@@ -632,7 +632,7 @@ func TestSecureBytesRelease(t *testing.T) {
 
 Run: `go test ./internal/vault/ -v -run TestSecureBytes`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/vault/secure.go internal/vault/secure_test.go

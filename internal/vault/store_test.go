@@ -22,8 +22,9 @@ func TestAddAndGetCredential(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if val != "ghp_abc123secrettoken456" {
-		t.Errorf("expected token, got %q", val)
+	defer val.Release()
+	if val.String() != "ghp_abc123secrettoken456" {
+		t.Errorf("expected token, got %q", val.String())
 	}
 
 	// Verify the file on disk is encrypted (not plaintext)
