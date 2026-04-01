@@ -5,6 +5,8 @@ import (
 	"log"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -32,7 +34,8 @@ const telegramMaxMessage = 4000
 type BotConfig struct {
 	Token     string
 	ChatID    int64
-	Engine    *policy.Engine
+	EnginePtr *atomic.Pointer[policy.Engine]
+	ReloadMu  *sync.Mutex
 	AuditPath string
 }
 
@@ -58,7 +61,7 @@ func NewBot(cfg BotConfig, broker *ApprovalBroker) (*Bot, error) {
 	}
 	log.Printf("telegram bot authorized as @%s", api.Self.UserName)
 
-	cmdHandler := NewCommandHandler(cfg.Engine, broker, cfg.AuditPath)
+	cmdHandler := NewCommandHandler(cfg.EnginePtr, cfg.ReloadMu, broker, cfg.AuditPath)
 
 	return &Bot{api: api, chatID: cfg.ChatID, broker: broker, commands: cmdHandler, done: make(chan struct{})}, nil
 }
@@ -229,12 +232,6 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	if _, err := b.api.Send(reply); err != nil {
 		log.Printf("telegram send error: %s", sanitizeError(err))
 	}
-}
-
-// UpdateEngine replaces the policy engine used by command handlers.
-// Called on SIGHUP policy reload to keep the bot in sync with the proxy.
-func (b *Bot) UpdateEngine(eng *policy.Engine) {
-	b.commands.UpdateEngine(eng)
 }
 
 func (b *Bot) Stop() {

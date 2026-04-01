@@ -57,14 +57,14 @@ func main() {
 	}
 	defer logger.Close()
 
+	// Parse Telegram chat ID early so we can pass the broker to the proxy.
 	var broker *telegram.ApprovalBroker
-	var bot *telegram.Bot
+	var telegramChatID int64
+	telegramEnabled := false
 
-	// Only parse the chat ID when a bot token is also present. This prevents
-	// a stray TELEGRAM_CHAT_ID env var (e.g. "foo") from aborting startup
-	// when Telegram is effectively disabled (no token).
 	if *telegramToken != "" && *telegramChatIDStr != "" {
-		telegramChatID, parseErr := strconv.ParseInt(*telegramChatIDStr, 10, 64)
+		var parseErr error
+		telegramChatID, parseErr = strconv.ParseInt(*telegramChatIDStr, 10, 64)
 		if parseErr != nil {
 			log.Fatalf("invalid telegram-chat-id: %v", parseErr)
 		}
@@ -72,24 +72,16 @@ func main() {
 			log.Printf("telegram chat ID is zero, telegram disabled (ask rules will auto-deny)")
 		} else {
 			broker = telegram.NewApprovalBroker()
-			var botErr error
-			bot, botErr = telegram.NewBot(telegram.BotConfig{
-				Token:     *telegramToken,
-				ChatID:    telegramChatID,
-				Engine:    eng,
-				AuditPath: *auditPath,
-			}, broker)
-			if botErr != nil {
-				log.Fatalf("telegram bot: %v", botErr)
-			}
-			go bot.Run()
-			defer bot.Stop()
-			log.Printf("telegram approval bot started")
+			telegramEnabled = true
 		}
 	} else {
 		log.Printf("telegram not configured (ask rules will auto-deny)")
 	}
 
+	// Create the proxy first so the bot can share its engine pointer and
+	// reload mutex. This eliminates split-brain windows during SIGHUP
+	// reloads: both components see engine swaps and policy mutations
+	// through the same atomic pointer, serialized by the same mutex.
 	srv, err := proxy.New(proxy.Config{
 		ListenAddr: *listenAddr,
 		Policy:     eng,
@@ -98,6 +90,24 @@ func main() {
 	})
 	if err != nil {
 		log.Fatalf("start proxy: %v", err)
+	}
+
+	var bot *telegram.Bot
+	if telegramEnabled {
+		var botErr error
+		bot, botErr = telegram.NewBot(telegram.BotConfig{
+			Token:     *telegramToken,
+			ChatID:    telegramChatID,
+			EnginePtr: srv.EnginePtr(),
+			ReloadMu:  srv.ReloadMu(),
+			AuditPath: *auditPath,
+		}, broker)
+		if botErr != nil {
+			log.Fatalf("telegram bot: %v", botErr)
+		}
+		go bot.Run()
+		defer bot.Stop()
+		log.Printf("telegram approval bot started")
 	}
 
 	log.Printf("sluice SOCKS5 proxy listening on %s", srv.Addr())
@@ -121,10 +131,10 @@ func main() {
 			}
 			log.Printf("reloaded policy: %d allow, %d deny, %d ask rules (default: %s)",
 				len(newEng.AllowRules), len(newEng.DenyRules), len(newEng.AskRules), newEng.Default)
+			// ReloadPolicy swaps the shared engine pointer under the shared
+			// mutex. The bot's command handler reads the same pointer, so
+			// it sees the new engine immediately with no separate update step.
 			srv.ReloadPolicy(newEng)
-			if bot != nil {
-				bot.UpdateEngine(newEng)
-			}
 
 			// Warn if the reloaded policy's Telegram config changed.
 			// The Telegram runtime (broker, bot, chat ID) is wired once

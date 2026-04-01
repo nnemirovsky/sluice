@@ -1,11 +1,11 @@
 package telegram
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/nemirovsky/sluice/internal/policy"
@@ -41,25 +41,23 @@ func ParseCommand(text string) *Command {
 
 // CommandHandler holds the dependencies needed by command handlers.
 type CommandHandler struct {
-	engine    atomic.Pointer[policy.Engine]
+	engine    *atomic.Pointer[policy.Engine]
+	reloadMu *sync.Mutex // shared with proxy; serializes engine swaps and policy mutations
 	broker    *ApprovalBroker
 	auditPath string
 }
 
-// NewCommandHandler creates a command handler with the given dependencies.
-func NewCommandHandler(engine *policy.Engine, broker *ApprovalBroker, auditPath string) *CommandHandler {
-	h := &CommandHandler{
+// NewCommandHandler creates a command handler that shares the proxy's engine
+// pointer and reload mutex. Sharing these prevents split-brain windows during
+// SIGHUP reloads: a single mutex serializes engine swaps and policy mutations
+// across both the proxy and the bot.
+func NewCommandHandler(enginePtr *atomic.Pointer[policy.Engine], reloadMu *sync.Mutex, broker *ApprovalBroker, auditPath string) *CommandHandler {
+	return &CommandHandler{
+		engine:    enginePtr,
+		reloadMu:  reloadMu,
 		broker:    broker,
 		auditPath: auditPath,
 	}
-	h.engine.Store(engine)
-	return h
-}
-
-// UpdateEngine replaces the policy engine used by command handlers.
-// Called on SIGHUP policy reload to keep the bot in sync with the proxy.
-func (h *CommandHandler) UpdateEngine(eng *policy.Engine) {
-	h.engine.Store(eng)
 }
 
 // Handle dispatches a command to the appropriate handler and returns the response text.
@@ -151,6 +149,8 @@ func (h *CommandHandler) policyShow() string {
 const inMemoryWarning = "\n(in-memory only, will be lost on reload/restart)"
 
 func (h *CommandHandler) policyAllow(dest string) string {
+	h.reloadMu.Lock()
+	defer h.reloadMu.Unlock()
 	if err := h.engine.Load().AddAllowRule(dest); err != nil {
 		return fmt.Sprintf("Failed to add allow rule: %v", err)
 	}
@@ -158,6 +158,8 @@ func (h *CommandHandler) policyAllow(dest string) string {
 }
 
 func (h *CommandHandler) policyDeny(dest string) string {
+	h.reloadMu.Lock()
+	defer h.reloadMu.Unlock()
 	if err := h.engine.Load().AddDenyRule(dest); err != nil {
 		return fmt.Sprintf("Failed to add deny rule: %v", err)
 	}
@@ -165,6 +167,8 @@ func (h *CommandHandler) policyDeny(dest string) string {
 }
 
 func (h *CommandHandler) policyRemove(dest string) string {
+	h.reloadMu.Lock()
+	defer h.reloadMu.Unlock()
 	removed, err := h.engine.Load().RemoveRule(dest)
 	if !removed {
 		return fmt.Sprintf("No rule found for: %s", dest)
@@ -269,8 +273,9 @@ func formatPorts(ports []int) string {
 	return strings.Join(strs, ",")
 }
 
-// readLastLines reads the last n lines from a file using a ring buffer
-// so that only O(n) memory is used regardless of file size.
+// readLastLines reads the last n lines from a file by reading backwards from
+// the end, so that I/O cost is proportional to the returned lines rather than
+// the total file size. This prevents large audit logs from blocking the caller.
 func readLastLines(path string, n int) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -278,29 +283,70 @@ func readLastLines(path string, n int) ([]string, error) {
 	}
 	defer f.Close()
 
-	ring := make([]string, n)
-	idx := 0
-	count := 0
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		ring[idx%n] = scanner.Text()
-		idx++
-		count++
-	}
-	if err := scanner.Err(); err != nil {
+	stat, err := f.Stat()
+	if err != nil {
 		return nil, err
 	}
-
-	if count == 0 {
+	size := stat.Size()
+	if size == 0 {
 		return nil, nil
 	}
-	if count < n {
-		return ring[:count], nil
+
+	// Read backwards from end of file in chunks until we have enough
+	// newlines to extract n complete lines.
+	const chunkSize = 4096
+	offset := size
+	newlineCount := 0
+	var chunks [][]byte
+
+	for offset > 0 {
+		readLen := int64(chunkSize)
+		if readLen > offset {
+			readLen = offset
+		}
+		offset -= readLen
+
+		chunk := make([]byte, readLen)
+		if _, err := f.ReadAt(chunk, offset); err != nil {
+			return nil, err
+		}
+		chunks = append(chunks, chunk)
+
+		for _, b := range chunk {
+			if b == '\n' {
+				newlineCount++
+			}
+		}
+		// n+1 newlines guarantees n complete lines even when file ends with \n.
+		if newlineCount > n {
+			break
+		}
 	}
-	// Reorder the ring buffer so entries are in chronological order.
-	result := make([]string, n)
-	start := idx % n
-	copy(result, ring[start:])
-	copy(result[n-start:], ring[:start])
-	return result, nil
+
+	// Reverse chunks (they were accumulated back-to-front) and concatenate.
+	for i, j := 0, len(chunks)-1; i < j; i, j = i+1, j-1 {
+		chunks[i], chunks[j] = chunks[j], chunks[i]
+	}
+	total := 0
+	for _, c := range chunks {
+		total += len(c)
+	}
+	buf := make([]byte, 0, total)
+	for _, c := range chunks {
+		buf = append(buf, c...)
+	}
+
+	lines := strings.Split(string(buf), "\n")
+	// Trim empty trailing entry from file ending with \n.
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 {
+		return nil, nil
+	}
+	// Take last n lines.
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return lines, nil
 }

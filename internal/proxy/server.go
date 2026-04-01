@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -147,9 +148,10 @@ func (r *policyResolver) Resolve(ctx context.Context, name string) (context.Cont
 }
 
 type policyRuleSet struct {
-	engine *atomic.Pointer[policy.Engine]
-	audit  *audit.FileLogger
-	broker *telegram.ApprovalBroker
+	engine   *atomic.Pointer[policy.Engine]
+	reloadMu *sync.Mutex // serializes engine swaps and dynamic rule mutations
+	audit    *audit.FileLogger
+	broker   *telegram.ApprovalBroker
 }
 
 func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context.Context, bool) {
@@ -216,12 +218,14 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 					effectiveVerdict = policy.Allow
 					reason = "user approved always"
 					log.Printf("[ASK->ALLOW+SAVE] %s:%d (user approved always)", dest, port)
-					// Use the current engine (not the context snapshot) for mutations
-					// so the rule is added to the live engine even if SIGHUP fired
-					// during the approval wait.
+					// Hold reloadMu to prevent a concurrent SIGHUP from swapping
+					// the engine between Load() and AddDynamicAllow(), which would
+					// write the rule to the retired engine.
+					r.reloadMu.Lock()
 					if err := r.engine.Load().AddDynamicAllow(dest, port); err != nil {
 						log.Printf("[WARN] failed to add dynamic allow rule for %s:%d: %v", dest, port, err)
 					}
+					r.reloadMu.Unlock()
 				default:
 					effectiveVerdict = policy.Deny
 					reason = "user denied"
@@ -298,8 +302,9 @@ func New(cfg Config) (*Server, error) {
 
 	enginePtr := new(atomic.Pointer[policy.Engine])
 	enginePtr.Store(cfg.Policy)
+	reloadMu := new(sync.Mutex)
 
-	rules := &policyRuleSet{engine: enginePtr, audit: cfg.Audit, broker: cfg.Broker}
+	rules := &policyRuleSet{engine: enginePtr, reloadMu: reloadMu, audit: cfg.Audit, broker: cfg.Broker}
 	resolver := &policyResolver{engine: enginePtr, audit: cfg.Audit, broker: cfg.Broker}
 
 	socksCfg := &socks5.Config{
@@ -343,8 +348,25 @@ func New(cfg Config) (*Server, error) {
 }
 
 // ReloadPolicy atomically swaps the policy engine used for future connections.
+// Holds reloadMu to prevent racing with in-flight "Always Allow" mutations.
 func (s *Server) ReloadPolicy(eng *policy.Engine) {
+	s.rules.reloadMu.Lock()
+	defer s.rules.reloadMu.Unlock()
 	s.rules.engine.Store(eng)
+}
+
+// EnginePtr returns the shared atomic engine pointer. The Telegram command
+// handler uses this to read and mutate the same engine as the proxy, avoiding
+// split-brain windows during SIGHUP reloads.
+func (s *Server) EnginePtr() *atomic.Pointer[policy.Engine] {
+	return s.rules.engine
+}
+
+// ReloadMu returns the shared reload mutex. The Telegram command handler
+// holds this mutex when mutating the engine, ensuring mutations are
+// serialized with SIGHUP-triggered engine swaps.
+func (s *Server) ReloadMu() *sync.Mutex {
+	return s.rules.reloadMu
 }
 
 // Addr returns the address the server is listening on.

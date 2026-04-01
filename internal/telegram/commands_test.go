@@ -4,10 +4,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/nemirovsky/sluice/internal/policy"
 )
+
+// newTestHandler creates a CommandHandler backed by the given engine for tests.
+func newTestHandler(eng *policy.Engine, broker *ApprovalBroker, auditPath string) *CommandHandler {
+	ptr := new(atomic.Pointer[policy.Engine])
+	ptr.Store(eng)
+	return NewCommandHandler(ptr, new(sync.Mutex), broker, auditPath)
+}
 
 func TestParseCommand(t *testing.T) {
 	tests := []struct {
@@ -63,7 +72,7 @@ func TestHandlePolicyShow(t *testing.T) {
 		},
 	}
 
-	handler := NewCommandHandler(eng, nil, "")
+	handler := newTestHandler(eng, nil, "")
 	result := handler.Handle(&Command{Name: "policy", Args: []string{"show"}})
 
 	if !strings.Contains(result, "api.anthropic.com") {
@@ -86,7 +95,7 @@ default = "deny"
 		t.Fatal(err)
 	}
 
-	handler := NewCommandHandler(eng, nil, "")
+	handler := newTestHandler(eng, nil, "")
 	result := handler.Handle(&Command{Name: "policy", Args: []string{"allow", "example.com"}})
 
 	if !strings.Contains(result, "Added allow rule") {
@@ -109,7 +118,7 @@ default = "allow"
 		t.Fatal(err)
 	}
 
-	handler := NewCommandHandler(eng, nil, "")
+	handler := newTestHandler(eng, nil, "")
 	result := handler.Handle(&Command{Name: "policy", Args: []string{"deny", "bad.com"}})
 
 	if !strings.Contains(result, "Added deny rule") {
@@ -135,7 +144,7 @@ destination = "removeme.com"
 		t.Fatal(err)
 	}
 
-	handler := NewCommandHandler(eng, nil, "")
+	handler := newTestHandler(eng, nil, "")
 	result := handler.Handle(&Command{Name: "policy", Args: []string{"remove", "removeme.com"}})
 
 	if !strings.Contains(result, "Removed rule") {
@@ -158,7 +167,7 @@ default = "deny"
 		t.Fatal(err)
 	}
 
-	handler := NewCommandHandler(eng, nil, "")
+	handler := newTestHandler(eng, nil, "")
 	result := handler.Handle(&Command{Name: "policy", Args: []string{"remove", "nonexistent.com"}})
 
 	if !strings.Contains(result, "No rule found") {
@@ -179,7 +188,7 @@ destination = "example.com"
 	}
 
 	broker := NewApprovalBroker()
-	handler := NewCommandHandler(eng, broker, "")
+	handler := newTestHandler(eng, broker, "")
 	result := handler.Handle(&Command{Name: "status"})
 
 	if !strings.Contains(result, "1 allow") {
@@ -205,7 +214,7 @@ func TestHandleAuditRecent(t *testing.T) {
 	eng, _ := policy.LoadFromBytes([]byte(`[policy]
 default = "deny"
 `))
-	handler := NewCommandHandler(eng, nil, auditFile)
+	handler := newTestHandler(eng, nil, auditFile)
 
 	result := handler.Handle(&Command{Name: "audit", Args: []string{"recent", "2"}})
 	if !strings.Contains(result, "b.com") {
@@ -236,7 +245,7 @@ func TestHandleAuditEmpty(t *testing.T) {
 	eng, _ := policy.LoadFromBytes([]byte(`[policy]
 default = "deny"
 `))
-	handler := NewCommandHandler(eng, nil, auditFile)
+	handler := newTestHandler(eng, nil, auditFile)
 
 	result := handler.Handle(&Command{Name: "audit", Args: []string{"recent"}})
 	if !strings.Contains(result, "empty") {
@@ -248,7 +257,7 @@ func TestHandleHelp(t *testing.T) {
 	eng, _ := policy.LoadFromBytes([]byte(`[policy]
 default = "deny"
 `))
-	handler := NewCommandHandler(eng, nil, "")
+	handler := newTestHandler(eng, nil, "")
 	result := handler.Handle(&Command{Name: "help"})
 
 	if !strings.Contains(result, "/policy") {
@@ -266,7 +275,7 @@ func TestHandleCred(t *testing.T) {
 	eng, _ := policy.LoadFromBytes([]byte(`[policy]
 default = "deny"
 `))
-	handler := NewCommandHandler(eng, nil, "")
+	handler := newTestHandler(eng, nil, "")
 	result := handler.Handle(&Command{Name: "cred", Args: []string{"list"}})
 
 	if !strings.Contains(result, "not available") {
@@ -278,7 +287,7 @@ func TestHandleUnknownCommand(t *testing.T) {
 	eng, _ := policy.LoadFromBytes([]byte(`[policy]
 default = "deny"
 `))
-	handler := NewCommandHandler(eng, nil, "")
+	handler := newTestHandler(eng, nil, "")
 	result := handler.Handle(&Command{Name: "foobar"})
 
 	if !strings.Contains(result, "Unknown command") {
