@@ -48,14 +48,14 @@ sluice/
 - Create: `go.mod`
 - Create: `cmd/sluice/main.go`
 
-- [ ] **Step 1: Initialize Go module**
+- [x] **Step 1: Initialize Go module**
 
 ```bash
 cd /Users/nemirovsky/Developer/sluice
 go mod init github.com/nemirovsky/sluice
 ```
 
-- [ ] **Step 2: Create minimal main.go**
+- [x] **Step 2: Create minimal main.go**
 
 ```go
 // cmd/sluice/main.go
@@ -68,12 +68,12 @@ func main() {
 }
 ```
 
-- [ ] **Step 3: Verify it compiles and runs**
+- [x] **Step 3: Verify it compiles and runs**
 
 Run: `go run ./cmd/sluice/`
 Expected: prints "sluice: not implemented"
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git init
@@ -91,7 +91,7 @@ git commit -m "init: scaffold Go module and entrypoint"
 - Create: `internal/policy/engine_test.go`
 - Create: `testdata/policy_mixed.toml`
 
-- [ ] **Step 1: Create test policy file**
+- [x] **Step 1: Create test policy file**
 
 ```toml
 # testdata/policy_mixed.toml
@@ -113,7 +113,7 @@ destination = "169.254.169.254"
 destination = "*.crypto-mining.example"
 ```
 
-- [ ] **Step 2: Write failing test for policy loading**
+- [x] **Step 2: Write failing test for policy loading**
 
 ```go
 // internal/policy/engine_test.go
@@ -140,12 +140,12 @@ func TestLoadPolicy(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `go test ./internal/policy/ -v -run TestLoadPolicy`
 Expected: FAIL (package doesn't exist yet)
 
-- [ ] **Step 4: Implement types.go**
+- [x] **Step 4: Implement types.go**
 
 ```go
 // internal/policy/types.go
@@ -196,7 +196,7 @@ type policyFile struct {
 }
 ```
 
-- [ ] **Step 5: Implement engine.go (loading only)**
+- [x] **Step 5: Implement engine.go (loading only)**
 
 ```go
 // internal/policy/engine.go
@@ -260,7 +260,7 @@ func LoadFromBytes(data []byte) (*Engine, error) {
 }
 ```
 
-- [ ] **Step 6: Add toml dependency and run test**
+- [x] **Step 6: Add toml dependency and run test**
 
 ```bash
 cd /Users/nemirovsky/Developer/sluice
@@ -270,7 +270,7 @@ go test ./internal/policy/ -v -run TestLoadPolicy
 
 Expected: PASS
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add internal/policy/ testdata/ go.mod go.sum
@@ -285,7 +285,7 @@ git commit -m "feat: policy types and TOML loading"
 - Create: `internal/policy/glob.go`
 - Create: `internal/policy/glob_test.go`
 
-- [ ] **Step 1: Write failing tests for glob matching**
+- [x] **Step 1: Write failing tests for glob matching**
 
 ```go
 // internal/policy/glob_test.go
@@ -325,12 +325,12 @@ func TestGlobMatch(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/policy/ -v -run TestGlobMatch`
 Expected: FAIL
 
-- [ ] **Step 3: Implement glob.go**
+- [x] **Step 3: Implement glob.go**
 
 ```go
 // internal/policy/glob.go
@@ -388,12 +388,12 @@ func (g *Glob) String() string {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/policy/ -v -run TestGlobMatch`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/policy/glob.go internal/policy/glob_test.go
@@ -408,7 +408,7 @@ git commit -m "feat: glob pattern matching for policy rules"
 - Modify: `internal/policy/engine.go`
 - Modify: `internal/policy/engine_test.go`
 
-- [ ] **Step 1: Write failing tests for Evaluate**
+- [x] **Step 1: Write failing tests for Evaluate**
 
 Add to `engine_test.go`:
 
@@ -447,12 +447,12 @@ func TestEvaluate(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/policy/ -v -run TestEvaluate`
 Expected: FAIL (Compile and Evaluate methods don't exist)
 
-- [ ] **Step 3: Implement Compile and Evaluate on Engine**
+- [x] **Step 3: Implement Compile and Evaluate on Engine**
 
 Add to `engine.go`:
 
@@ -538,12 +538,12 @@ func (e *Engine) Evaluate(dest string, port int) Verdict {
 
 Also add `compiled *compiledEngine` field to the `Engine` struct.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/policy/ -v -run TestEvaluate`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/policy/
@@ -560,7 +560,7 @@ git commit -m "feat: policy evaluation with glob matching"
 - Create: `internal/audit/logger.go`
 - Create: `internal/audit/logger_test.go`
 
-- [ ] **Step 1: Write failing test**
+- [x] **Step 1: Write failing test**
 
 ```go
 // internal/audit/logger_test.go
@@ -626,12 +626,12 @@ func splitNonEmpty(s string) []string {
 
 (Add `"strings"` to imports.)
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/audit/ -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implement logger.go**
+- [x] **Step 3: Implement logger.go**
 
 ```go
 // internal/audit/logger.go
@@ -686,12 +686,12 @@ func (l *FileLogger) Close() error {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/audit/ -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/audit/
@@ -706,7 +706,7 @@ git commit -m "feat: JSON lines audit logger"
 - Create: `internal/proxy/server.go`
 - Create: `internal/proxy/server_test.go`
 
-- [ ] **Step 1: Write failing test**
+- [x] **Step 1: Write failing test**
 
 ```go
 // internal/proxy/server_test.go
@@ -823,12 +823,12 @@ default = "deny"
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go get golang.org/x/net/proxy && go test ./internal/proxy/ -v -timeout 10s`
 Expected: FAIL
 
-- [ ] **Step 3: Implement server.go**
+- [x] **Step 3: Implement server.go**
 
 ```go
 // internal/proxy/server.go
@@ -931,7 +931,7 @@ func (s *Server) Close() error {
 }
 ```
 
-- [ ] **Step 4: Add go-socks5 dependency and run tests**
+- [x] **Step 4: Add go-socks5 dependency and run tests**
 
 ```bash
 cd /Users/nemirovsky/Developer/sluice
@@ -941,7 +941,7 @@ go test ./internal/proxy/ -v -timeout 10s
 
 Expected: PASS (both tests)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/proxy/ go.mod go.sum
@@ -955,7 +955,7 @@ git commit -m "feat: SOCKS5 proxy server with policy enforcement"
 **Files:**
 - Modify: `cmd/sluice/main.go`
 
-- [ ] **Step 1: Implement CLI with flag parsing**
+- [x] **Step 1: Implement CLI with flag parsing**
 
 ```go
 // cmd/sluice/main.go
@@ -1022,7 +1022,7 @@ func main() {
 }
 ```
 
-- [ ] **Step 2: Build and test manually**
+- [x] **Step 2: Build and test manually**
 
 ```bash
 cd /Users/nemirovsky/Developer/sluice
@@ -1034,7 +1034,7 @@ go build -o sluice ./cmd/sluice/
 kill %1
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add cmd/sluice/main.go
@@ -1045,17 +1045,17 @@ git commit -m "feat: wire CLI entrypoint with proxy, policy, and audit"
 
 ### Task 8: Run all tests and verify
 
-- [ ] **Step 1: Run full test suite**
+- [x] **Step 1: Run full test suite**
 
 Run: `go test ./... -v -timeout 30s`
 Expected: ALL PASS
 
-- [ ] **Step 2: Verify binary builds cleanly**
+- [x] **Step 2: Verify binary builds cleanly**
 
 Run: `go build -o sluice ./cmd/sluice/ && echo "OK"`
 Expected: OK
 
-- [ ] **Step 3: Tag milestone**
+- [x] **Step 3: Tag milestone**
 
 ```bash
 git tag v0.0.1-alpha
@@ -1076,7 +1076,7 @@ needs to detect the protocol and hand off to the appropriate handler.
 - Create: `internal/proxy/protocol_test.go`
 - Modify: `internal/proxy/server.go` (add protocol detection after policy allow)
 
-- [ ] **Step 1: Define protocol types and detection**
+- [x] **Step 1: Define protocol types and detection**
 
 ```go
 // internal/proxy/protocol.go
@@ -1101,7 +1101,7 @@ const (
 func DetectProtocol(dest string, port int) Protocol
 ```
 
-- [ ] **Step 2: Write tests for protocol detection**
+- [x] **Step 2: Write tests for protocol detection**
 
 ```go
 func TestDetectProtocol(t *testing.T) {
@@ -1116,17 +1116,17 @@ func TestDetectProtocol(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Integrate protocol detection into server.go Allow handler**
+- [x] **Step 3: Integrate protocol detection into server.go Allow handler**
 
 After policy verdict is Allow, detect protocol and store in context for
 credential injection (Plan 3) to use.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `go test ./internal/proxy/ -v -timeout 10s`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/proxy/protocol.go internal/proxy/protocol_test.go internal/proxy/server.go

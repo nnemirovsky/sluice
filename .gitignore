@@ -1,1 +1,7 @@
 .memsearch/
+
+# ralphex progress logs
+.ralphex/progress/
+
+# Go build cache
+.go/
