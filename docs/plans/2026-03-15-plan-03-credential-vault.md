@@ -45,7 +45,7 @@ sluice/
 - Create: `internal/vault/store.go`
 - Create: `internal/vault/store_test.go`
 
-- [ ] **Step 1: Write failing test for add/get credential**
+- [x] **Step 1: Write failing test for add/get credential**
 
 ```go
 // internal/vault/store_test.go
@@ -126,12 +126,12 @@ func TestRemoveCredential(t *testing.T) {
 
 (Add `"os"` to imports.)
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go get filippo.io/age && go test ./internal/vault/ -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implement store.go**
+- [x] **Step 3: Implement store.go**
 
 ```go
 // internal/vault/store.go
@@ -247,12 +247,12 @@ func (s *Store) Remove(name string) error {
 }
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `go test ./internal/vault/ -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/vault/ go.mod go.sum
