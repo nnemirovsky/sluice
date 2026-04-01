@@ -706,7 +706,7 @@ git commit -m "feat: JSON lines audit logger"
 - Create: `internal/proxy/server.go`
 - Create: `internal/proxy/server_test.go`
 
-- [ ] **Step 1: Write failing test**
+- [x] **Step 1: Write failing test**
 
 ```go
 // internal/proxy/server_test.go
@@ -823,12 +823,12 @@ default = "deny"
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go get golang.org/x/net/proxy && go test ./internal/proxy/ -v -timeout 10s`
 Expected: FAIL
 
-- [ ] **Step 3: Implement server.go**
+- [x] **Step 3: Implement server.go**
 
 ```go
 // internal/proxy/server.go
@@ -931,7 +931,7 @@ func (s *Server) Close() error {
 }
 ```
 
-- [ ] **Step 4: Add go-socks5 dependency and run tests**
+- [x] **Step 4: Add go-socks5 dependency and run tests**
 
 ```bash
 cd /Users/nemirovsky/Developer/sluice
@@ -941,7 +941,7 @@ go test ./internal/proxy/ -v -timeout 10s
 
 Expected: PASS (both tests)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/proxy/ go.mod go.sum
