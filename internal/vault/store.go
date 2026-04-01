@@ -48,6 +48,9 @@ func loadOrCreateIdentity(path string) (*age.X25519Identity, error) {
 		}
 		return id, nil
 	}
+	if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read identity file: %w", err)
+	}
 
 	id, err := age.GenerateX25519Identity()
 	if err != nil {

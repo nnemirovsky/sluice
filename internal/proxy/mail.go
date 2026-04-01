@@ -79,6 +79,7 @@ func (m *MailProxy) HandleConnection(agentConn net.Conn, upstreamAddr string, bi
 		}
 	}
 
+	agentConn.Close()
 	upstreamConn.Close()
 	<-done
 	return nil

@@ -182,9 +182,15 @@ func sshHandleChannel(newChan ssh.NewChannel, dst ssh.Conn) {
 	}()
 
 	// Relay stdout/stdin bidirectionally.
-	go io.Copy(dstChan, srcChan)
+	// CloseWrite signals EOF to the remote side so processes reading
+	// stdin until EOF (cat, sort, piped input) terminate properly.
+	go func() {
+		io.Copy(dstChan, srcChan)
+		dstChan.CloseWrite()
+	}()
 	go func() {
 		io.Copy(srcChan, dstChan)
+		srcChan.CloseWrite()
 		upstreamDone <- struct{}{}
 	}()
 
