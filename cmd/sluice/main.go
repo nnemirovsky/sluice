@@ -45,6 +45,22 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
+	sighupCh := make(chan os.Signal, 1)
+	signal.Notify(sighupCh, syscall.SIGHUP)
+
+	go func() {
+		for range sighupCh {
+			newEng, err := policy.LoadFromFile(*policyPath)
+			if err != nil {
+				log.Printf("reload policy failed: %v", err)
+				continue
+			}
+			srv.ReloadPolicy(newEng)
+			log.Printf("reloaded policy: %d allow, %d deny, %d ask rules (default: %s)",
+				len(newEng.AllowRules), len(newEng.DenyRules), len(newEng.AskRules), newEng.Default)
+		}
+	}()
+
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- srv.ListenAndServe()

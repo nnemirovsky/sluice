@@ -129,6 +129,66 @@ func matchRules(rules []compiledRule, dest string, port int) bool {
 	return false
 }
 
+// IsDenied checks whether a destination and port match any explicit deny rule.
+// Unlike Evaluate, this does not fall back to the default verdict.
+func (e *Engine) IsDenied(dest string, port int) bool {
+	if e.compiled == nil {
+		return false
+	}
+	return matchRules(e.compiled.denyRules, dest, port)
+}
+
+// IsRestricted checks whether a destination and port match any explicit deny
+// or ask rule. Unlike Evaluate, this does not fall back to the default verdict.
+// Used for DNS rebinding checks where the original FQDN was already allowed
+// and we need to verify the resolved IP is not explicitly restricted.
+func (e *Engine) IsRestricted(dest string, port int) bool {
+	if e.compiled == nil {
+		return false
+	}
+	return matchRules(e.compiled.denyRules, dest, port) ||
+		matchRules(e.compiled.askRules, dest, port)
+}
+
+// CouldBeAllowed reports whether a destination could be allowed on any port.
+// Used by the resolver to decide whether to perform DNS resolution. Returns
+// false only when certain the destination is denied on all ports, preventing
+// DNS leaks for definitely-denied hosts. Ask rules are treated as deny
+// (Telegram not yet configured) and do not make a destination resolvable.
+func (e *Engine) CouldBeAllowed(dest string) bool {
+	if e.compiled == nil {
+		return e.Default == Allow
+	}
+
+	// A portless deny rule denies all ports and takes precedence over
+	// allow/ask rules in Evaluate, so the destination cannot be allowed.
+	for _, r := range e.compiled.denyRules {
+		if len(r.ports) == 0 && r.glob.Match(dest) {
+			return false
+		}
+	}
+
+	// If any allow rule matches (ignoring ports), the destination
+	// might be allowed on some port.
+	for _, r := range e.compiled.allowRules {
+		if r.glob.Match(dest) {
+			return true
+		}
+	}
+
+	// Ask rules are treated as deny (Telegram not yet configured). A
+	// portless ask rule with no matching allow rule means the destination
+	// is definitely denied on all ports.
+	for _, r := range e.compiled.askRules {
+		if len(r.ports) == 0 && r.glob.Match(dest) {
+			return false
+		}
+	}
+
+	// No explicit allow match: only default=allow permits the destination.
+	return e.Default == Allow
+}
+
 // Evaluate checks a destination and port against the compiled policy rules.
 // Deny rules are checked first, then allow, then ask. Falls back to default.
 func (e *Engine) Evaluate(dest string, port int) Verdict {
