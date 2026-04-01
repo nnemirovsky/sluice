@@ -53,7 +53,19 @@ func loadOrCreateIdentity(path string) (*age.X25519Identity, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate identity: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(id.String()+"\n"), 0600); err != nil {
+
+	// Use O_CREATE|O_EXCL for atomic creation to prevent TOCTOU races
+	// where concurrent processes could overwrite each other's key.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		if os.IsExist(err) {
+			// Another process created the file first. Read their key.
+			return loadOrCreateIdentity(path)
+		}
+		return nil, fmt.Errorf("create identity file: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(id.String() + "\n"); err != nil {
 		return nil, fmt.Errorf("write identity: %w", err)
 	}
 	return id, nil

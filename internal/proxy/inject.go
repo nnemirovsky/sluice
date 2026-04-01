@@ -53,11 +53,16 @@ func NewInjector(provider vault.Provider, resolver *vault.BindingResolver, caCer
 	}
 	proxy.OnRequest().HandleConnect(goproxy.FuncHttpsHandler(
 		func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-			h, _, err := net.SplitHostPort(host)
+			h, portStr, err := net.SplitHostPort(host)
 			if err != nil {
 				h = host
+				portStr = "443"
 			}
-			if _, ok := inj.resolver.Resolve(h, 443); ok {
+			port, _ := strconv.Atoi(portStr)
+			if port == 0 {
+				port = 443
+			}
+			if _, ok := inj.resolver.Resolve(h, port); ok {
 				return mitmAction, host
 			}
 			return goproxy.OkConnect, host

@@ -5,7 +5,8 @@ import "unsafe"
 // SecureBytes holds a credential value and zeroes it on Release.
 // Use Release() as soon as the value is no longer needed.
 type SecureBytes struct {
-	data []byte
+	data     []byte
+	released bool
 }
 
 // NewSecureBytes creates a SecureBytes from a string value.
@@ -30,18 +31,14 @@ func (s SecureBytes) Len() int {
 	return len(s.data)
 }
 
-// IsReleased returns true if the memory has been zeroed.
+// IsReleased returns true if Release has been called.
 func (s SecureBytes) IsReleased() bool {
-	for _, b := range s.data {
-		if b != 0 {
-			return false
-		}
-	}
-	return true
+	return s.released
 }
 
 // Release zeroes the underlying memory. Safe to call multiple times.
 func (s *SecureBytes) Release() {
+	s.released = true
 	if len(s.data) == 0 {
 		return
 	}

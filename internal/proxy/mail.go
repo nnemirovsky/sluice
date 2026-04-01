@@ -32,6 +32,12 @@ func NewMailProxy(provider vault.Provider) *MailProxy {
 	return &MailProxy{provider: provider}
 }
 
+// mailSession holds per-connection state for auth command tracking.
+type mailSession struct {
+	proxy          *MailProxy
+	expectBase64   bool // true when next line should be base64 auth continuation
+}
+
 // HandleConnection proxies a mail protocol connection, intercepting
 // authentication commands and replacing phantom tokens with real
 // credentials from the vault.
@@ -56,12 +62,14 @@ func (m *MailProxy) HandleConnection(agentConn net.Conn, upstreamAddr string, bi
 		close(done)
 	}()
 
+	sess := &mailSession{proxy: m}
+
 	// Agent -> upstream: read lines and replace phantom tokens in auth commands.
 	reader := bufio.NewReader(agentConn)
 	for {
 		line, readErr := reader.ReadString('\n')
 		if len(line) > 0 {
-			modified := m.processLine(line, phantom, binding)
+			modified := sess.processLine(line, phantom, binding)
 			if _, writeErr := io.WriteString(upstreamConn, modified); writeErr != nil {
 				break
 			}
@@ -81,33 +89,62 @@ func (m *MailProxy) HandleConnection(agentConn net.Conn, upstreamAddr string, bi
 //
 //  1. Direct phantom token in the line (IMAP LOGIN command).
 //  2. Inline base64 after AUTH PLAIN / AUTHENTICATE PLAIN.
-//  3. Standalone base64 continuation line (AUTH PLAIN continuation,
-//     AUTHENTICATE PLAIN continuation, or AUTH LOGIN password).
-func (m *MailProxy) processLine(line, phantom string, binding vault.Binding) string {
+//  3. Standalone base64 continuation line only when the previous command
+//     indicated continuation data is expected (AUTH PLAIN without inline
+//     data, AUTHENTICATE PLAIN without inline data, AUTH LOGIN).
+func (sess *mailSession) processLine(line, phantom string, binding vault.Binding) string {
 	trimmed := strings.TrimRight(line, "\r\n")
 
 	// Direct phantom token in the line (e.g., IMAP LOGIN command).
 	if strings.Contains(trimmed, phantom) {
-		return m.replacePhantom(trimmed, phantom, binding) + "\r\n"
+		sess.expectBase64 = false
+		return sess.proxy.replacePhantom(trimmed, phantom, binding) + "\r\n"
 	}
 
 	upper := strings.ToUpper(trimmed)
 
 	// AUTH PLAIN / AUTHENTICATE PLAIN with inline base64 data.
 	if b64, prefix, ok := extractAuthPlainBase64(upper, trimmed); ok {
-		if replaced, didReplace := m.tryReplaceBase64(b64, phantom, binding); didReplace {
+		sess.expectBase64 = false
+		if replaced, didReplace := sess.proxy.tryReplaceBase64(b64, phantom, binding); didReplace {
 			return prefix + replaced + "\r\n"
 		}
 		return line
 	}
 
-	// Standalone base64 line (continuation data for AUTH PLAIN,
-	// AUTHENTICATE PLAIN, or AUTH LOGIN password response).
-	if replaced, didReplace := m.tryReplaceBase64(trimmed, phantom, binding); didReplace {
-		return replaced + "\r\n"
+	// Check for auth commands that expect base64 continuation on the next line.
+	if isAuthContinuationTrigger(upper) {
+		sess.expectBase64 = true
+		return line
+	}
+
+	// Standalone base64 continuation line, only when expected after an auth command.
+	if sess.expectBase64 {
+		sess.expectBase64 = false
+		if replaced, didReplace := sess.proxy.tryReplaceBase64(trimmed, phantom, binding); didReplace {
+			return replaced + "\r\n"
+		}
 	}
 
 	return line
+}
+
+// isAuthContinuationTrigger returns true if the line is an auth command
+// that expects base64 data on the following line(s).
+func isAuthContinuationTrigger(upper string) bool {
+	// SMTP: "AUTH PLAIN\r\n" (no inline data, continuation follows)
+	if upper == "AUTH PLAIN" {
+		return true
+	}
+	// SMTP: "AUTH LOGIN" or "AUTH LOGIN\r\n"
+	if upper == "AUTH LOGIN" || strings.HasPrefix(upper, "AUTH LOGIN ") {
+		return true
+	}
+	// IMAP: "tag AUTHENTICATE PLAIN\r\n" (no inline data)
+	if strings.HasSuffix(upper, " AUTHENTICATE PLAIN") {
+		return true
+	}
+	return false
 }
 
 // extractAuthPlainBase64 finds inline base64 data in AUTH PLAIN or
