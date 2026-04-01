@@ -48,14 +48,14 @@ sluice/
 - Create: `go.mod`
 - Create: `cmd/sluice/main.go`
 
-- [ ] **Step 1: Initialize Go module**
+- [x] **Step 1: Initialize Go module**
 
 ```bash
 cd /Users/nemirovsky/Developer/sluice
 go mod init github.com/nemirovsky/sluice
 ```
 
-- [ ] **Step 2: Create minimal main.go**
+- [x] **Step 2: Create minimal main.go**
 
 ```go
 // cmd/sluice/main.go
@@ -68,12 +68,12 @@ func main() {
 }
 ```
 
-- [ ] **Step 3: Verify it compiles and runs**
+- [x] **Step 3: Verify it compiles and runs**
 
 Run: `go run ./cmd/sluice/`
 Expected: prints "sluice: not implemented"
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git init
