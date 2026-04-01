@@ -162,9 +162,12 @@ func (b *Bot) handleCallback(cq *tgbotapi.CallbackQuery) {
 		callback := tgbotapi.NewCallback(cq.ID, label)
 		b.api.Request(callback)
 
+		// Do not use Markdown parse mode here: cq.Message.Text is Telegram's
+		// plain-text extraction of the original Markdown message. Re-parsing
+		// it as Markdown breaks when the destination contains underscores or
+		// other Markdown-special characters (common in DNS names).
 		edit := tgbotapi.NewEditMessageText(b.chatID, cq.Message.MessageID,
-			cq.Message.Text+fmt.Sprintf("\n\n*%s* at %s", label, time.Now().UTC().Format("15:04:05")))
-		edit.ParseMode = "Markdown"
+			fmt.Sprintf("%s\n\n%s at %s", cq.Message.Text, label, time.Now().UTC().Format("15:04:05")))
 		b.api.Send(edit)
 	} else if b.broker.WasTimedOut(reqID) {
 		b.broker.ClearTimedOut(reqID)

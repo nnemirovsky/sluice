@@ -76,7 +76,7 @@ func LoadFromBytes(data []byte) (*Engine, error) {
 		TimeoutSec: timeout,
 		Telegram:   pf.Telegram,
 	}
-	if err := eng.Compile(); err != nil {
+	if err := eng.compile(); err != nil {
 		return nil, fmt.Errorf("compile policy rules: %w", err)
 	}
 	return eng, nil
@@ -134,9 +134,12 @@ func compileRules(rules []Rule) ([]compiledRule, error) {
 	return out, nil
 }
 
-// Compile compiles all glob patterns in the policy rules for fast matching.
+// compile compiles all glob patterns in the policy rules for fast matching.
 // On failure the existing compiled state is preserved.
-func (e *Engine) Compile() error {
+//
+// Callers must hold e.mu (write lock) when the engine is shared. The only
+// exception is LoadFromBytes which calls compile before the engine is returned.
+func (e *Engine) compile() error {
 	ce := &compiledEngine{}
 	var err error
 	ce.allowRules, err = compileRules(e.AllowRules)
@@ -269,7 +272,7 @@ func (e *Engine) AddDynamicAllow(dest string, port int) error {
 	defer e.mu.Unlock()
 	rule := Rule{Destination: dest, Ports: []int{port}}
 	e.AllowRules = append(e.AllowRules, rule)
-	if err := e.Compile(); err != nil {
+	if err := e.compile(); err != nil {
 		e.AllowRules = e.AllowRules[:len(e.AllowRules)-1]
 		return err
 	}
@@ -283,7 +286,7 @@ func (e *Engine) AddAllowRule(dest string) error {
 	defer e.mu.Unlock()
 	rule := Rule{Destination: dest}
 	e.AllowRules = append(e.AllowRules, rule)
-	if err := e.Compile(); err != nil {
+	if err := e.compile(); err != nil {
 		e.AllowRules = e.AllowRules[:len(e.AllowRules)-1]
 		return err
 	}
@@ -297,7 +300,7 @@ func (e *Engine) AddDenyRule(dest string) error {
 	defer e.mu.Unlock()
 	rule := Rule{Destination: dest}
 	e.DenyRules = append(e.DenyRules, rule)
-	if err := e.Compile(); err != nil {
+	if err := e.compile(); err != nil {
 		e.DenyRules = e.DenyRules[:len(e.DenyRules)-1]
 		return err
 	}
@@ -328,7 +331,7 @@ func (e *Engine) RemoveRule(dest string) (bool, error) {
 	if !removed {
 		return false, nil
 	}
-	if err := e.Compile(); err != nil {
+	if err := e.compile(); err != nil {
 		e.AllowRules = origAllow
 		e.DenyRules = origDeny
 		e.AskRules = origAsk

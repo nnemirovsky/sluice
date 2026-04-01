@@ -203,11 +203,16 @@ func (h *CommandHandler) handleAudit(args []string) string {
 	const maxAuditLines = 50
 	count := 10
 	if len(args) >= 2 && args[0] == "recent" {
-		if n, err := strconv.Atoi(args[1]); err == nil && n > 0 {
-			count = n
-			if count > maxAuditLines {
-				count = maxAuditLines
-			}
+		n, err := strconv.Atoi(args[1])
+		if err != nil {
+			return fmt.Sprintf("Invalid count %q: must be a positive integer.", args[1])
+		}
+		if n < 1 {
+			return "Count must be a positive integer."
+		}
+		count = n
+		if count > maxAuditLines {
+			count = maxAuditLines
 		}
 	} else if len(args) >= 1 && args[0] == "recent" {
 		// default count
