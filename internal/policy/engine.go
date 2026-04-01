@@ -211,14 +211,21 @@ func (e *Engine) IsExplicitlyAllowed(dest string, port int) bool {
 // CouldBeAllowed reports whether a destination could be allowed on any port.
 // Used by the resolver to decide whether to perform DNS resolution. Returns
 // false only when certain the destination is denied on all ports, preventing
-// DNS leaks for definitely-denied hosts. Ask rules require DNS resolution so
-// the approval flow can proceed.
-func (e *Engine) CouldBeAllowed(dest string) bool {
+// DNS leaks for definitely-denied hosts.
+//
+// When includeAsk is true, Ask rules are treated as potentially-allowed
+// (DNS resolution is needed so the approval flow can proceed). When false,
+// Ask rules are ignored and default=Ask is treated as Deny. Pass false when
+// no approval broker is configured to prevent DNS leaks for Ask-only matches.
+func (e *Engine) CouldBeAllowed(dest string, includeAsk bool) bool {
 	dest = normalizeDestination(dest)
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.compiled == nil {
-		return e.Default == Allow || e.Default == Ask
+		if includeAsk {
+			return e.Default == Allow || e.Default == Ask
+		}
+		return e.Default == Allow
 	}
 
 	// A portless deny rule denies all ports and takes precedence over
@@ -237,16 +244,21 @@ func (e *Engine) CouldBeAllowed(dest string) bool {
 		}
 	}
 
-	// Ask rules need DNS resolution so the approval flow can work.
-	for _, r := range e.compiled.askRules {
-		if r.glob.Match(dest) {
-			return true
+	// Ask rules need DNS resolution so the approval flow can work,
+	// but only when an approval broker is available.
+	if includeAsk {
+		for _, r := range e.compiled.askRules {
+			if r.glob.Match(dest) {
+				return true
+			}
 		}
 	}
 
-	// No explicit allow or ask match: only default=allow or default=ask
-	// permits the destination.
-	return e.Default == Allow || e.Default == Ask
+	// No explicit allow (or ask) match: check the default verdict.
+	if includeAsk {
+		return e.Default == Allow || e.Default == Ask
+	}
+	return e.Default == Allow
 }
 
 // AddDynamicAllow appends a new allow rule for the given destination and port,

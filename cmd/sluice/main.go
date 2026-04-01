@@ -22,12 +22,34 @@ func main() {
 	telegramChatIDStr := flag.String("telegram-chat-id", os.Getenv("TELEGRAM_CHAT_ID"), "Telegram chat ID for approvals")
 	flag.Parse()
 
+	// Track which flags were explicitly set on the command line so we can
+	// distinguish "user passed --telegram-token X" from "flag has the
+	// default value read from TELEGRAM_BOT_TOKEN env".
+	explicitFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) {
+		explicitFlags[f.Name] = true
+	})
+	// Whether explicit flags were provided for Telegram settings.
+	// Captured once so the SIGHUP handler can detect config drift.
+	telegramTokenExplicit := explicitFlags["telegram-token"]
+	telegramChatIDExplicit := explicitFlags["telegram-chat-id"]
+
 	eng, err := policy.LoadFromFile(*policyPath)
 	if err != nil {
 		log.Fatalf("load policy: %v", err)
 	}
 	log.Printf("loaded policy: %d allow, %d deny, %d ask rules (default: %s)",
 		len(eng.AllowRules), len(eng.DenyRules), len(eng.AskRules), eng.Default)
+
+	// If the policy file specifies custom env var names for the Telegram bot,
+	// use those instead of the hardcoded defaults (but only when the flag was
+	// not explicitly provided on the command line).
+	if eng.Telegram.BotTokenEnv != "" && !explicitFlags["telegram-token"] {
+		*telegramToken = os.Getenv(eng.Telegram.BotTokenEnv)
+	}
+	if eng.Telegram.ChatIDEnv != "" && !explicitFlags["telegram-chat-id"] {
+		*telegramChatIDStr = os.Getenv(eng.Telegram.ChatIDEnv)
+	}
 
 	logger, err := audit.NewFileLogger(*auditPath)
 	if err != nil {
@@ -38,29 +60,32 @@ func main() {
 	var broker *telegram.ApprovalBroker
 	var bot *telegram.Bot
 
-	var telegramChatID int64
-	if *telegramChatIDStr != "" {
-		telegramChatID, err = strconv.ParseInt(*telegramChatIDStr, 10, 64)
-		if err != nil {
-			log.Fatalf("invalid telegram-chat-id: %v", err)
+	// Only parse the chat ID when a bot token is also present. This prevents
+	// a stray TELEGRAM_CHAT_ID env var (e.g. "foo") from aborting startup
+	// when Telegram is effectively disabled (no token).
+	if *telegramToken != "" && *telegramChatIDStr != "" {
+		telegramChatID, parseErr := strconv.ParseInt(*telegramChatIDStr, 10, 64)
+		if parseErr != nil {
+			log.Fatalf("invalid telegram-chat-id: %v", parseErr)
 		}
-	}
-
-	if *telegramToken != "" && telegramChatID != 0 {
-		broker = telegram.NewApprovalBroker()
-		var botErr error
-		bot, botErr = telegram.NewBot(telegram.BotConfig{
-			Token:     *telegramToken,
-			ChatID:    telegramChatID,
-			Engine:    eng,
-			AuditPath: *auditPath,
-		}, broker)
-		if botErr != nil {
-			log.Fatalf("telegram bot: %v", botErr)
+		if telegramChatID == 0 {
+			log.Printf("telegram chat ID is zero, telegram disabled (ask rules will auto-deny)")
+		} else {
+			broker = telegram.NewApprovalBroker()
+			var botErr error
+			bot, botErr = telegram.NewBot(telegram.BotConfig{
+				Token:     *telegramToken,
+				ChatID:    telegramChatID,
+				Engine:    eng,
+				AuditPath: *auditPath,
+			}, broker)
+			if botErr != nil {
+				log.Fatalf("telegram bot: %v", botErr)
+			}
+			go bot.Run()
+			defer bot.Stop()
+			log.Printf("telegram approval bot started")
 		}
-		go bot.Run()
-		defer bot.Stop()
-		log.Printf("telegram approval bot started")
 	} else {
 		log.Printf("telegram not configured (ask rules will auto-deny)")
 	}
@@ -83,6 +108,10 @@ func main() {
 	sighupCh := make(chan os.Signal, 1)
 	signal.Notify(sighupCh, syscall.SIGHUP)
 
+	// Save the startup Telegram config so the SIGHUP handler can detect
+	// config drift (the Telegram runtime is not hot-reloadable).
+	startupTelegram := eng.Telegram
+
 	go func() {
 		for range sighupCh {
 			newEng, err := policy.LoadFromFile(*policyPath)
@@ -95,6 +124,32 @@ func main() {
 			srv.ReloadPolicy(newEng)
 			if bot != nil {
 				bot.UpdateEngine(newEng)
+			}
+
+			// Warn if the reloaded policy's Telegram config changed.
+			// The Telegram runtime (broker, bot, chat ID) is wired once
+			// at startup and cannot be hot-reloaded. Env var names or
+			// enable/disable changes require a full restart.
+			if newEng.Telegram != startupTelegram {
+				log.Printf("WARNING: [telegram] config changed in policy file but Telegram runtime is not hot-reloadable; restart required")
+			}
+
+			// Warn if the reloaded policy has ask rules but no approval
+			// broker is running. This can happen when Telegram was not
+			// configured at startup and ask rules were added later.
+			if broker == nil && (len(newEng.AskRules) > 0 || newEng.Default == policy.Ask) {
+				log.Printf("WARNING: policy has ask rules but no Telegram approval broker is running; ask verdicts will auto-deny")
+			}
+
+			// Warn if env var names changed and CLI flags were not used.
+			// The operator may expect the new env var names to take effect.
+			if newEng.Telegram.BotTokenEnv != startupTelegram.BotTokenEnv && !telegramTokenExplicit {
+				log.Printf("WARNING: bot_token_env changed from %q to %q but env vars are only read at startup; restart required",
+					startupTelegram.BotTokenEnv, newEng.Telegram.BotTokenEnv)
+			}
+			if newEng.Telegram.ChatIDEnv != startupTelegram.ChatIDEnv && !telegramChatIDExplicit {
+				log.Printf("WARNING: chat_id_env changed from %q to %q but env vars are only read at startup; restart required",
+					startupTelegram.ChatIDEnv, newEng.Telegram.ChatIDEnv)
 			}
 		}
 	}()

@@ -92,6 +92,9 @@ default = "deny"
 	if !strings.Contains(result, "Added allow rule") {
 		t.Errorf("expected confirmation, got: %s", result)
 	}
+	if !strings.Contains(result, "in-memory only") {
+		t.Errorf("expected in-memory warning, got: %s", result)
+	}
 	if len(eng.AllowRules) != 1 || eng.AllowRules[0].Destination != "example.com" {
 		t.Errorf("allow rule not added to engine")
 	}
@@ -111,6 +114,9 @@ default = "allow"
 
 	if !strings.Contains(result, "Added deny rule") {
 		t.Errorf("expected confirmation, got: %s", result)
+	}
+	if !strings.Contains(result, "in-memory only") {
+		t.Errorf("expected in-memory warning, got: %s", result)
 	}
 	if len(eng.DenyRules) != 1 {
 		t.Errorf("deny rule not added")
@@ -134,6 +140,9 @@ destination = "removeme.com"
 
 	if !strings.Contains(result, "Removed rule") {
 		t.Errorf("expected removal confirmation, got: %s", result)
+	}
+	if !strings.Contains(result, "in-memory only") {
+		t.Errorf("expected in-memory warning, got: %s", result)
 	}
 	if len(eng.AllowRules) != 0 {
 		t.Errorf("rule not removed: %v", eng.AllowRules)

@@ -73,6 +73,7 @@ func isPrivateIP(ip net.IP) bool {
 type policyResolver struct {
 	engine *atomic.Pointer[policy.Engine]
 	audit  *audit.FileLogger
+	broker *telegram.ApprovalBroker
 }
 
 func (r *policyResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
@@ -83,7 +84,11 @@ func (r *policyResolver) Resolve(ctx context.Context, name string) (context.Cont
 	// same policy version, preventing a SIGHUP reload from splitting a
 	// single request across two different policy snapshots.
 	ctx = context.WithValue(ctx, ctxKeyEngine, eng)
-	if !eng.CouldBeAllowed(dest) {
+	// Only treat Ask rules as potentially-allowed when an approval broker
+	// is configured. Without a broker, Ask verdicts become Deny, so
+	// resolving DNS would leak queries for destinations that will be denied.
+	includeAsk := r.broker != nil
+	if !eng.CouldBeAllowed(dest, includeAsk) {
 		// Definitely denied on all ports: skip DNS to prevent leaks.
 		// Allow() will deny the connection with ruleFailure.
 		return ctx, nil, nil
@@ -203,10 +208,12 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 				switch resp {
 				case telegram.ResponseAllowOnce:
 					allowed = true
+					effectiveVerdict = policy.Allow
 					reason = "user approved once"
 					log.Printf("[ASK->ALLOW] %s:%d (user approved once)", dest, port)
 				case telegram.ResponseAlwaysAllow:
 					allowed = true
+					effectiveVerdict = policy.Allow
 					reason = "user approved always"
 					log.Printf("[ASK->ALLOW+SAVE] %s:%d (user approved always)", dest, port)
 					// Use the current engine (not the context snapshot) for mutations
@@ -293,7 +300,7 @@ func New(cfg Config) (*Server, error) {
 	enginePtr.Store(cfg.Policy)
 
 	rules := &policyRuleSet{engine: enginePtr, audit: cfg.Audit, broker: cfg.Broker}
-	resolver := &policyResolver{engine: enginePtr, audit: cfg.Audit}
+	resolver := &policyResolver{engine: enginePtr, audit: cfg.Audit, broker: cfg.Broker}
 
 	socksCfg := &socks5.Config{
 		Rules:    rules,

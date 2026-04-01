@@ -3,6 +3,7 @@ package telegram
 import (
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -10,6 +11,18 @@ import (
 
 	"github.com/nemirovsky/sluice/internal/policy"
 )
+
+// tokenPattern matches Telegram bot tokens embedded in URLs or error messages.
+// Tokens follow the format <numeric-id>:<alphanumeric-string> and typically
+// appear right after "bot" in API URLs (e.g. /bot123456:AAH.../sendMessage).
+var tokenPattern = regexp.MustCompile(`[0-9]+:[A-Za-z0-9_-]{20,}`)
+
+// sanitizeError removes bot tokens from error messages to prevent leaking
+// secrets in logs. The telegram-bot-api library includes the full request URL
+// (containing the bot token) in HTTP/network error strings.
+func sanitizeError(err error) string {
+	return tokenPattern.ReplaceAllString(err.Error(), "<REDACTED>")
+}
 
 // telegramMaxMessage is Telegram's maximum message length (4096 UTF-8 chars).
 // We leave a small margin for the truncation notice.
@@ -71,6 +84,13 @@ func (b *Bot) Run() {
 
 func (b *Bot) sendApprovalRequests() {
 	for req := range b.broker.Pending() {
+		// Skip requests whose waiter has already been cleaned up (timed out
+		// or resolved while queued). This prevents sending stale approval
+		// prompts to Telegram after backlog or recovery.
+		if !b.broker.HasWaiter(req.ID) {
+			b.broker.ClearTimedOut(req.ID) // clean up timedOut entry if present
+			continue
+		}
 		msg := tgbotapi.NewMessage(b.chatID, FormatApprovalMessage(req.Destination, req.Port))
 		msg.ParseMode = "Markdown"
 		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
@@ -80,10 +100,27 @@ func (b *Bot) sendApprovalRequests() {
 				tgbotapi.NewInlineKeyboardButtonData("Deny", req.ID+"|deny"),
 			),
 		)
-		if _, err := b.api.Send(msg); err != nil {
-			log.Printf("telegram send error: %v", err)
+		sent, err := b.api.Send(msg)
+		if err != nil {
+			log.Printf("telegram send error: %s", sanitizeError(err))
 			// On send failure, auto-deny
 			b.broker.Resolve(req.ID, ResponseDeny)
+			b.broker.ClearTimedOut(req.ID) // clean up timedOut entry if request expired during send
+			continue
+		}
+		// If the request timed out while the Telegram API call was in
+		// flight, update the message immediately so the user does not
+		// see a stale prompt and only discover it expired after tapping.
+		// Use WasTimedOut (not HasWaiter) to distinguish a genuine timeout
+		// from a callback that resolved the request during the send.
+		// Only clear the flag if the edit succeeds so that handleCallback
+		// can still show "timed out" if the operator taps a stale button.
+		if b.broker.WasTimedOut(req.ID) {
+			edit := tgbotapi.NewEditMessageText(b.chatID, sent.MessageID,
+				FormatApprovalMessage(req.Destination, req.Port)+"\n\n(request timed out)")
+			if _, editErr := b.api.Send(edit); editErr == nil {
+				b.broker.ClearTimedOut(req.ID)
+			}
 		}
 	}
 }
@@ -129,13 +166,20 @@ func (b *Bot) handleCallback(cq *tgbotapi.CallbackQuery) {
 			cq.Message.Text+fmt.Sprintf("\n\n*%s* at %s", label, time.Now().UTC().Format("15:04:05")))
 		edit.ParseMode = "Markdown"
 		b.api.Send(edit)
-	} else {
-		callback := tgbotapi.NewCallback(cq.ID, "Request already expired")
+	} else if b.broker.WasTimedOut(reqID) {
+		b.broker.ClearTimedOut(reqID)
+		callback := tgbotapi.NewCallback(cq.ID, "Request timed out")
 		b.api.Request(callback)
 
 		edit := tgbotapi.NewEditMessageText(b.chatID, cq.Message.MessageID,
 			cq.Message.Text+"\n\n(request timed out)")
 		b.api.Send(edit)
+	} else {
+		// Request was already resolved by a previous callback (e.g. double-tap
+		// or another user in a group chat). Don't overwrite the message since
+		// it already shows the correct resolution.
+		callback := tgbotapi.NewCallback(cq.ID, "Already resolved")
+		b.api.Request(callback)
 	}
 }
 
@@ -161,7 +205,7 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 
 	reply := tgbotapi.NewMessage(b.chatID, response)
 	if _, err := b.api.Send(reply); err != nil {
-		log.Printf("telegram send error: %v", err)
+		log.Printf("telegram send error: %s", sanitizeError(err))
 	}
 }
 

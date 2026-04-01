@@ -35,17 +35,25 @@ type ApprovalRequest struct {
 	CreatedAt   time.Time
 }
 
+// timedOutTTL is how long timed-out request IDs are retained for bot-side
+// cleanup. After this duration, unclaimed entries are garbage collected
+// during the next timeout to prevent unbounded map growth when operators
+// never tap expired buttons.
+const timedOutTTL = 10 * time.Minute
+
 type ApprovalBroker struct {
-	mu      sync.Mutex
-	pending chan ApprovalRequest
-	waiters map[string]chan Response
-	nextID  atomic.Int64
+	mu       sync.Mutex
+	pending  chan ApprovalRequest
+	waiters  map[string]chan Response
+	timedOut map[string]time.Time
+	nextID   atomic.Int64
 }
 
 func NewApprovalBroker() *ApprovalBroker {
 	return &ApprovalBroker{
-		pending: make(chan ApprovalRequest, 100),
-		waiters: make(map[string]chan Response),
+		pending:  make(chan ApprovalRequest, 100),
+		waiters:  make(map[string]chan Response),
+		timedOut: make(map[string]time.Time),
 	}
 }
 
@@ -90,8 +98,25 @@ func (b *ApprovalBroker) Request(dest string, port int, timeout time.Duration) (
 		return resp, nil
 	case <-deadline.C:
 		b.mu.Lock()
-		delete(b.waiters, id)
+		_, stillPending := b.waiters[id]
+		if stillPending {
+			delete(b.waiters, id)
+			b.timedOut[id] = time.Now()
+			// Garbage-collect stale timedOut entries that were never
+			// consumed by the bot (operator never tapped the button).
+			for k, t := range b.timedOut {
+				if time.Since(t) > timedOutTTL {
+					delete(b.timedOut, k)
+				}
+			}
+		}
 		b.mu.Unlock()
+		if !stillPending {
+			// Resolve already consumed the waiter and sent a response
+			// on the buffered channel. Honor it so the proxy decision
+			// matches what the Telegram message shows to the operator.
+			return <-ch, nil
+		}
 		return ResponseDeny, fmt.Errorf("approval timeout after %v", timeout)
 	}
 }
@@ -101,6 +126,34 @@ func (b *ApprovalBroker) PendingCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return len(b.waiters)
+}
+
+// HasWaiter reports whether a request ID still has an active waiter.
+// Returns false if the request has already timed out or been resolved.
+func (b *ApprovalBroker) HasWaiter(id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, ok := b.waiters[id]
+	return ok
+}
+
+// WasTimedOut reports whether a request timed out (as opposed to being
+// resolved by a callback). This is a non-destructive read. Call
+// ClearTimedOut to remove the entry after handling it.
+func (b *ApprovalBroker) WasTimedOut(id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, ok := b.timedOut[id]
+	return ok
+}
+
+// ClearTimedOut removes the timed-out flag for a request ID.
+// Call this after successfully handling the timeout (e.g. editing the
+// Telegram message) so other code paths do not attempt to handle it again.
+func (b *ApprovalBroker) ClearTimedOut(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.timedOut, id)
 }
 
 // Resolve delivers a response to a pending approval request.

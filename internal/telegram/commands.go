@@ -146,18 +146,22 @@ func (h *CommandHandler) policyShow() string {
 	return b.String()
 }
 
+// inMemoryWarning is appended to policy mutation responses to remind operators
+// that changes are not persisted to disk and will be lost on SIGHUP or restart.
+const inMemoryWarning = "\n(in-memory only, will be lost on reload/restart)"
+
 func (h *CommandHandler) policyAllow(dest string) string {
 	if err := h.engine.Load().AddAllowRule(dest); err != nil {
 		return fmt.Sprintf("Failed to add allow rule: %v", err)
 	}
-	return fmt.Sprintf("Added allow rule: %s", dest)
+	return fmt.Sprintf("Added allow rule: %s%s", dest, inMemoryWarning)
 }
 
 func (h *CommandHandler) policyDeny(dest string) string {
 	if err := h.engine.Load().AddDenyRule(dest); err != nil {
 		return fmt.Sprintf("Failed to add deny rule: %v", err)
 	}
-	return fmt.Sprintf("Added deny rule: %s", dest)
+	return fmt.Sprintf("Added deny rule: %s%s", dest, inMemoryWarning)
 }
 
 func (h *CommandHandler) policyRemove(dest string) string {
@@ -168,7 +172,7 @@ func (h *CommandHandler) policyRemove(dest string) string {
 	if err != nil {
 		return fmt.Sprintf("Failed to remove rule (compile error, rolled back): %v", err)
 	}
-	return fmt.Sprintf("Removed rule: %s", dest)
+	return fmt.Sprintf("Removed rule: %s%s", dest, inMemoryWarning)
 }
 
 func (h *CommandHandler) handleCred(args []string) string {
@@ -239,13 +243,12 @@ func (h *CommandHandler) handleHelp() string {
 /policy allow <dest> - Add allow rule
 /policy deny <dest> - Add deny rule
 /policy remove <dest> - Remove rule
-/cred add <name> - Add credential
-/cred list - List credential names
-/cred rotate <name> - Rotate credential
-/cred remove <name> - Remove credential
 /status - Show proxy status
 /audit recent [N] - Show last N audit entries
-/help - Show this message`
+/help - Show this message
+
+Planned (not yet available):
+/cred add|list|rotate|remove - Credential management`
 }
 
 // IsAuthorizedChat checks if a message sender's chat ID matches the configured one.

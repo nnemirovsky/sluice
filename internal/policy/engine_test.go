@@ -152,12 +152,22 @@ func TestCouldBeAllowed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.dest, func(t *testing.T) {
-			got := eng.CouldBeAllowed(tt.dest)
+			got := eng.CouldBeAllowed(tt.dest, true)
 			if got != tt.want {
-				t.Errorf("CouldBeAllowed(%q) = %v, want %v",
+				t.Errorf("CouldBeAllowed(%q, true) = %v, want %v",
 					tt.dest, got, tt.want)
 			}
 		})
+	}
+
+	// With includeAsk=false, ask rules should NOT count as allowed.
+	// api.openai.com matches only an ask rule, so it should be false.
+	if eng.CouldBeAllowed("api.openai.com", false) {
+		t.Error("CouldBeAllowed(api.openai.com, false) = true, want false (ask rule without broker)")
+	}
+	// Allow rules should still work.
+	if !eng.CouldBeAllowed("api.github.com", false) {
+		t.Error("CouldBeAllowed(api.github.com, false) = false, want true (allow rule)")
 	}
 }
 
@@ -184,12 +194,31 @@ destination = "evil.com"
 	}
 	for _, tt := range tests {
 		t.Run(tt.dest, func(t *testing.T) {
-			got := eng.CouldBeAllowed(tt.dest)
+			got := eng.CouldBeAllowed(tt.dest, true)
 			if got != tt.want {
-				t.Errorf("CouldBeAllowed(%q) = %v, want %v",
+				t.Errorf("CouldBeAllowed(%q, true) = %v, want %v",
 					tt.dest, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCouldBeAllowedDefaultAskNoBroker(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "ask"
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// With includeAsk=true, default=ask means unmatched destinations could be allowed
+	if !eng.CouldBeAllowed("anything.com", true) {
+		t.Error("CouldBeAllowed(anything.com, true) with default=ask should be true")
+	}
+	// With includeAsk=false, default=ask should NOT count as allowed (prevents DNS leak)
+	if eng.CouldBeAllowed("anything.com", false) {
+		t.Error("CouldBeAllowed(anything.com, false) with default=ask should be false")
 	}
 }
 
@@ -387,7 +416,7 @@ destination = "evil.com"
 	}
 
 	// Trailing dot should be stripped before matching
-	if eng.CouldBeAllowed("evil.com.") {
+	if eng.CouldBeAllowed("evil.com.", true) {
 		t.Error("CouldBeAllowed with trailing dot should match deny rule for 'evil.com'")
 	}
 }
