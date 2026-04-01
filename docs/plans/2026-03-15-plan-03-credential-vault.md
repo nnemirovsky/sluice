@@ -777,7 +777,7 @@ from the vault, and relays the connection.
 - Create: `internal/proxy/ssh.go`
 - Create: `internal/proxy/ssh_test.go`
 
-- [ ] **Step 1: Implement SSH jump host handler**
+- [x] **Step 1: Implement SSH jump host handler**
 
 ```go
 // internal/proxy/ssh.go
@@ -792,7 +792,7 @@ from the vault, and relays the connection.
 // having the real private key.
 ```
 
-- [ ] **Step 2: Write tests using in-process SSH server**
+- [x] **Step 2: Write tests using in-process SSH server**
 
 ```go
 func TestSSHJumpHostInjectsKey(t *testing.T) {
@@ -803,12 +803,12 @@ func TestSSHJumpHostInjectsKey(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `go test ./internal/proxy/ -v -run TestSSH`
 Expected: PASS
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add internal/proxy/ssh.go internal/proxy/ssh_test.go
