@@ -218,7 +218,7 @@ git commit -m "feat: approval broker with request/response channel flow"
 - Create: `internal/telegram/bot.go`
 - Create: `internal/telegram/bot_test.go`
 
-- [ ] **Step 1: Write test for message formatting**
+- [x] **Step 1: Write test for message formatting**
 
 ```go
 // internal/telegram/bot_test.go
@@ -243,12 +243,12 @@ func TestFormatApprovalMessage(t *testing.T) {
 
 (Add `"strings"` to imports.)
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/telegram/ -v -run TestFormatApprovalMessage`
 Expected: FAIL
 
-- [ ] **Step 3: Implement bot.go**
+- [x] **Step 3: Implement bot.go**
 
 ```go
 // internal/telegram/bot.go
@@ -366,18 +366,18 @@ func (b *Bot) Stop() {
 }
 ```
 
-- [ ] **Step 4: Add telegram dependency**
+- [x] **Step 4: Add telegram dependency**
 
 ```bash
 go get github.com/go-telegram-bot-api/telegram-bot-api/v5
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [x] **Step 5: Run test to verify it passes**
 
 Run: `go test ./internal/telegram/ -v -run TestFormatApprovalMessage`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add internal/telegram/ go.mod go.sum
