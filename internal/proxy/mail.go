@@ -34,8 +34,8 @@ func NewMailProxy(provider vault.Provider) *MailProxy {
 
 // mailSession holds per-connection state for auth command tracking.
 type mailSession struct {
-	proxy          *MailProxy
-	expectBase64   bool // true when next line should be base64 auth continuation
+	proxy              *MailProxy
+	base64Continuations int // number of remaining base64 continuation lines expected
 }
 
 // HandleConnection proxies a mail protocol connection, intercepting
@@ -98,7 +98,7 @@ func (sess *mailSession) processLine(line, phantom string, binding vault.Binding
 
 	// Direct phantom token in the line (e.g., IMAP LOGIN command).
 	if strings.Contains(trimmed, phantom) {
-		sess.expectBase64 = false
+		sess.base64Continuations = 0
 		return sess.proxy.replacePhantom(trimmed, phantom, binding) + "\r\n"
 	}
 
@@ -106,22 +106,22 @@ func (sess *mailSession) processLine(line, phantom string, binding vault.Binding
 
 	// AUTH PLAIN / AUTHENTICATE PLAIN with inline base64 data.
 	if b64, prefix, ok := extractAuthPlainBase64(upper, trimmed); ok {
-		sess.expectBase64 = false
+		sess.base64Continuations = 0
 		if replaced, didReplace := sess.proxy.tryReplaceBase64(b64, phantom, binding); didReplace {
 			return prefix + replaced + "\r\n"
 		}
 		return line
 	}
 
-	// Check for auth commands that expect base64 continuation on the next line.
-	if isAuthContinuationTrigger(upper) {
-		sess.expectBase64 = true
+	// Check for auth commands that expect base64 continuation on following lines.
+	if n := authContinuationCount(upper); n > 0 {
+		sess.base64Continuations = n
 		return line
 	}
 
 	// Standalone base64 continuation line, only when expected after an auth command.
-	if sess.expectBase64 {
-		sess.expectBase64 = false
+	if sess.base64Continuations > 0 {
+		sess.base64Continuations--
 		if replaced, didReplace := sess.proxy.tryReplaceBase64(trimmed, phantom, binding); didReplace {
 			return replaced + "\r\n"
 		}
@@ -130,22 +130,24 @@ func (sess *mailSession) processLine(line, phantom string, binding vault.Binding
 	return line
 }
 
-// isAuthContinuationTrigger returns true if the line is an auth command
-// that expects base64 data on the following line(s).
-func isAuthContinuationTrigger(upper string) bool {
+// authContinuationCount returns the number of base64 continuation lines
+// expected after the given auth command, or 0 if this is not such a command.
+// AUTH LOGIN expects 2 continuations (username, then password).
+// AUTH PLAIN and AUTHENTICATE PLAIN expect 1 continuation.
+func authContinuationCount(upper string) int {
 	// SMTP: "AUTH PLAIN\r\n" (no inline data, continuation follows)
 	if upper == "AUTH PLAIN" {
-		return true
+		return 1
 	}
-	// SMTP: "AUTH LOGIN" or "AUTH LOGIN\r\n"
+	// SMTP: "AUTH LOGIN" expects two continuation lines (username + password).
 	if upper == "AUTH LOGIN" || strings.HasPrefix(upper, "AUTH LOGIN ") {
-		return true
+		return 2
 	}
 	// IMAP: "tag AUTHENTICATE PLAIN\r\n" (no inline data)
 	if strings.HasSuffix(upper, " AUTHENTICATE PLAIN") {
-		return true
+		return 1
 	}
-	return false
+	return 0
 }
 
 // extractAuthPlainBase64 finds inline base64 data in AUTH PLAIN or

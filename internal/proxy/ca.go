@@ -32,6 +32,20 @@ func LoadOrCreateCA(dir string) (tls.Certificate, *x509.Certificate, error) {
 		return cert, x509Cert, nil
 	}
 
+	// Only generate a new CA if the files don't exist. If they exist but
+	// are corrupted or unreadable, return the error instead of silently
+	// overwriting.
+	if !os.IsNotExist(err) {
+		// tls.LoadX509KeyPair may wrap the underlying error. Check both
+		// cert and key individually to distinguish missing from corrupt.
+		_, certStatErr := os.Stat(certPath)
+		_, keyStatErr := os.Stat(keyPath)
+		if certStatErr == nil || keyStatErr == nil {
+			// At least one file exists but the pair failed to load.
+			return tls.Certificate{}, nil, fmt.Errorf("load existing CA: %w", err)
+		}
+	}
+
 	if mkErr := os.MkdirAll(dir, 0700); mkErr != nil {
 		return tls.Certificate{}, nil, fmt.Errorf("create CA dir: %w", mkErr)
 	}
