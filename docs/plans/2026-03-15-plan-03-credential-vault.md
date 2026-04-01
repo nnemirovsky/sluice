@@ -826,7 +826,7 @@ AUTH command and swaps the phantom password for the real one.
 - Create: `internal/proxy/mail.go`
 - Create: `internal/proxy/mail_test.go`
 
-- [ ] **Step 1: Implement IMAP/SMTP AUTH proxy**
+- [x] **Step 1: Implement IMAP/SMTP AUTH proxy**
 
 ```go
 // internal/proxy/mail.go
@@ -844,7 +844,7 @@ AUTH command and swaps the phantom password for the real one.
 //   - Zero credential memory
 ```
 
-- [ ] **Step 2: Write tests**
+- [x] **Step 2: Write tests**
 
 ```go
 func TestIMAPAuthSwap(t *testing.T) {
@@ -855,12 +855,12 @@ func TestSMTPAuthPlainSwap(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `go test ./internal/proxy/ -v -run TestIMAP && go test ./internal/proxy/ -v -run TestSMTP`
 Expected: PASS
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add internal/proxy/mail.go internal/proxy/mail_test.go
