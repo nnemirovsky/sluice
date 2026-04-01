@@ -50,6 +50,8 @@ func main() {
 			Token:      *telegramToken,
 			ChatID:     telegramChatID,
 			TimeoutSec: eng.TimeoutSec,
+			Engine:     eng,
+			AuditPath:  *auditPath,
 		}, broker)
 		if err != nil {
 			log.Fatalf("telegram bot: %v", err)

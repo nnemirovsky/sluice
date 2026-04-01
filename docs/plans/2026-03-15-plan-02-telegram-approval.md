@@ -584,7 +584,7 @@ manage Sluice entirely from Telegram without SSH access.
 - Create: `internal/telegram/commands.go`
 - Create: `internal/telegram/commands_test.go`
 
-- [ ] **Step 1: Implement command dispatcher**
+- [x] **Step 1: Implement command dispatcher**
 
 Route incoming Telegram messages starting with `/` to command handlers:
 
@@ -604,7 +604,7 @@ Route incoming Telegram messages starting with `/` to command handlers:
 //   /help                     - List available commands
 ```
 
-- [ ] **Step 2: Implement /policy commands**
+- [x] **Step 2: Implement /policy commands**
 
 ```go
 func handlePolicyShow(bot *tgbotapi.BotAPI, chatID int64, engine *policy.Engine)
@@ -615,7 +615,7 @@ func handlePolicyDeny(bot *tgbotapi.BotAPI, chatID int64, engine *policy.Engine,
 Policy changes are applied to the running engine AND written back to the
 TOML file so they survive restarts.
 
-- [ ] **Step 3: Implement /cred commands**
+- [x] **Step 3: Implement /cred commands**
 
 ```go
 func handleCredAdd(bot *tgbotapi.BotAPI, chatID int64, store *vault.Store, name string)
@@ -627,7 +627,7 @@ func handleCredRemove(bot *tgbotapi.BotAPI, chatID int64, store *vault.Store, na
 For `/cred add`: bot asks for the value in the next message, reads it,
 deletes the message containing the secret, stores encrypted, confirms.
 
-- [ ] **Step 4: Implement /status and /audit commands**
+- [x] **Step 4: Implement /status and /audit commands**
 
 ```go
 func handleStatus(bot *tgbotapi.BotAPI, chatID int64, proxy *proxy.Server, broker *ApprovalBroker)
@@ -639,12 +639,12 @@ approval requests, agent container status (via Docker API if available).
 
 `/audit recent` reads last N lines from audit.jsonl and formats them.
 
-- [ ] **Step 5: Secure command access**
+- [x] **Step 5: Secure command access**
 
 Only accept commands from the configured `chat_id`. Reject and log
 commands from other chat IDs.
 
-- [ ] **Step 6: Write tests for command parsing and dispatch**
+- [x] **Step 6: Write tests for command parsing and dispatch**
 
 ```go
 func TestParseCommand(t *testing.T) {
@@ -655,12 +655,12 @@ func TestParseCommand(t *testing.T) {
 }
 ```
 
-- [ ] **Step 7: Run tests**
+- [x] **Step 7: Run tests**
 
 Run: `go test ./internal/telegram/ -v`
 Expected: PASS
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add internal/telegram/commands.go internal/telegram/commands_test.go internal/telegram/bot.go

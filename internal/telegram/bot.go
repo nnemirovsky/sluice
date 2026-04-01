@@ -7,18 +7,23 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
+	"github.com/nemirovsky/sluice/internal/policy"
 )
 
 type BotConfig struct {
 	Token      string
 	ChatID     int64
 	TimeoutSec int
+	Engine     *policy.Engine
+	AuditPath  string
 }
 
 type Bot struct {
-	api    *tgbotapi.BotAPI
-	chatID int64
-	broker *ApprovalBroker
+	api      *tgbotapi.BotAPI
+	chatID   int64
+	broker   *ApprovalBroker
+	commands *CommandHandler
 }
 
 func FormatApprovalMessage(dest string, port int) string {
@@ -32,7 +37,9 @@ func NewBot(cfg BotConfig, broker *ApprovalBroker) (*Bot, error) {
 	}
 	log.Printf("telegram bot authorized as @%s", api.Self.UserName)
 
-	return &Bot{api: api, chatID: cfg.ChatID, broker: broker}, nil
+	cmdHandler := NewCommandHandler(cfg.Engine, broker, cfg.AuditPath)
+
+	return &Bot{api: api, chatID: cfg.ChatID, broker: broker, commands: cmdHandler}, nil
 }
 
 func (b *Bot) Run() {
@@ -44,12 +51,15 @@ func (b *Bot) Run() {
 	// Process pending approval requests (send to Telegram)
 	go b.sendApprovalRequests()
 
-	// Process callback queries (user tapped a button)
+	// Process updates (commands and callback queries)
 	for update := range updates {
-		if update.CallbackQuery == nil {
+		if update.CallbackQuery != nil {
+			b.handleCallback(update.CallbackQuery)
 			continue
 		}
-		b.handleCallback(update.CallbackQuery)
+		if update.Message != nil && update.Message.Text != "" {
+			b.handleMessage(update.Message)
+		}
 	}
 }
 
@@ -105,6 +115,30 @@ func (b *Bot) handleCallback(cq *tgbotapi.CallbackQuery) {
 		cq.Message.Text+fmt.Sprintf("\n\n*%s* at %s", label, time.Now().UTC().Format("15:04:05")))
 	edit.ParseMode = "Markdown"
 	b.api.Send(edit)
+}
+
+func (b *Bot) handleMessage(msg *tgbotapi.Message) {
+	if !IsAuthorizedChat(msg.Chat.ID, b.chatID) {
+		log.Printf("unauthorized command from chat %d (expected %d)", msg.Chat.ID, b.chatID)
+		reply := tgbotapi.NewMessage(msg.Chat.ID, "Unauthorized. This bot only accepts commands from the configured chat.")
+		b.api.Send(reply)
+		return
+	}
+
+	cmd := ParseCommand(msg.Text)
+	if cmd == nil {
+		return
+	}
+
+	response := b.commands.Handle(cmd)
+	if response == "" {
+		return
+	}
+
+	reply := tgbotapi.NewMessage(b.chatID, response)
+	if _, err := b.api.Send(reply); err != nil {
+		log.Printf("telegram send error: %v", err)
+	}
 }
 
 func (b *Bot) Stop() {
