@@ -1045,17 +1045,17 @@ git commit -m "feat: wire CLI entrypoint with proxy, policy, and audit"
 
 ### Task 8: Run all tests and verify
 
-- [ ] **Step 1: Run full test suite**
+- [x] **Step 1: Run full test suite**
 
 Run: `go test ./... -v -timeout 30s`
 Expected: ALL PASS
 
-- [ ] **Step 2: Verify binary builds cleanly**
+- [x] **Step 2: Verify binary builds cleanly**
 
 Run: `go build -o sluice ./cmd/sluice/ && echo "OK"`
 Expected: OK
 
-- [ ] **Step 3: Tag milestone**
+- [x] **Step 3: Tag milestone**
 
 ```bash
 git tag v0.0.1-alpha
