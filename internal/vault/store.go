@@ -59,12 +59,22 @@ func loadOrCreateIdentity(path string) (*age.X25519Identity, error) {
 	return id, nil
 }
 
-func (s *Store) credPath(name string) string {
-	return filepath.Join(s.dir, "credentials", name+".age")
+func (s *Store) credPath(name string) (string, error) {
+	if strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") || name == "." {
+		return "", fmt.Errorf("invalid credential name %q: must not contain path separators or '..'", name)
+	}
+	if name == "" {
+		return "", fmt.Errorf("credential name must not be empty")
+	}
+	return filepath.Join(s.dir, "credentials", name+".age"), nil
 }
 
 // Add encrypts and stores a credential with the given name.
 func (s *Store) Add(name, value string) error {
+	path, err := s.credPath(name)
+	if err != nil {
+		return err
+	}
 	var buf bytes.Buffer
 	w, err := age.Encrypt(&buf, s.recipient)
 	if err != nil {
@@ -76,13 +86,17 @@ func (s *Store) Add(name, value string) error {
 	if err := w.Close(); err != nil {
 		return fmt.Errorf("close: %w", err)
 	}
-	return os.WriteFile(s.credPath(name), buf.Bytes(), 0600)
+	return os.WriteFile(path, buf.Bytes(), 0600)
 }
 
 // Get decrypts and returns the credential with the given name.
 // The caller must call Release() on the returned SecureBytes when done.
 func (s *Store) Get(name string) (SecureBytes, error) {
-	data, err := os.ReadFile(s.credPath(name))
+	path, err := s.credPath(name)
+	if err != nil {
+		return SecureBytes{}, err
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return SecureBytes{}, fmt.Errorf("read credential %q: %w", name, err)
 	}
@@ -116,5 +130,9 @@ func (s *Store) List() ([]string, error) {
 
 // Remove deletes a stored credential by name.
 func (s *Store) Remove(name string) error {
-	return os.Remove(s.credPath(name))
+	path, err := s.credPath(name)
+	if err != nil {
+		return err
+	}
+	return os.Remove(path)
 }

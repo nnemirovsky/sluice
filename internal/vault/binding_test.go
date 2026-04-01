@@ -9,7 +9,10 @@ func TestResolveBinding(t *testing.T) {
 		{Destination: "*.openai.com", Ports: []int{443}, Credential: "openai_key", InjectHeader: "Authorization", Template: "Bearer {value}"},
 	}
 
-	resolver := NewBindingResolver(bindings)
+	resolver, err := NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	b, ok := resolver.Resolve("api.anthropic.com", 443)
 	if !ok {
@@ -38,7 +41,10 @@ func TestResolveBindingPortMismatch(t *testing.T) {
 		{Destination: "api.anthropic.com", Ports: []int{443}, Credential: "anthropic_key", InjectHeader: "x-api-key"},
 	}
 
-	resolver := NewBindingResolver(bindings)
+	resolver, err := NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	_, ok := resolver.Resolve("api.anthropic.com", 80)
 	if ok {

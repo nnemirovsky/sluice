@@ -150,8 +150,12 @@ func TestChainProviderList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.Add("key_a", "a")
-	store.Add("key_b", "b")
+	if err := store.Add("key_a", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add("key_b", "b"); err != nil {
+		t.Fatal(err)
+	}
 
 	chain := NewChainProvider(&EnvProvider{}, store)
 	names, err := chain.List()

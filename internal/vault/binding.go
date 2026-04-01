@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/nemirovsky/sluice/internal/policy"
@@ -28,13 +29,13 @@ type BindingResolver struct {
 }
 
 // NewBindingResolver compiles glob patterns and creates a resolver.
-// Bindings with invalid glob patterns are silently skipped.
-func NewBindingResolver(bindings []Binding) *BindingResolver {
+// Returns an error if any binding has an invalid glob pattern.
+func NewBindingResolver(bindings []Binding) (*BindingResolver, error) {
 	compiled := make([]compiledBinding, 0, len(bindings))
 	for _, b := range bindings {
 		g, err := policy.CompileGlob(b.Destination)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("invalid glob pattern %q: %w", b.Destination, err)
 		}
 		ports := make(map[int]bool, len(b.Ports))
 		for _, p := range b.Ports {
@@ -42,7 +43,7 @@ func NewBindingResolver(bindings []Binding) *BindingResolver {
 		}
 		compiled = append(compiled, compiledBinding{glob: g, ports: ports, binding: b})
 	}
-	return &BindingResolver{bindings: compiled}
+	return &BindingResolver{bindings: compiled}, nil
 }
 
 // Resolve finds the first binding that matches the given destination and port.

@@ -177,8 +177,7 @@ func TestSSHJumpHostInjectsKey(t *testing.T) {
 		Protocol:   "ssh",
 	}
 
-	resolver := vault.NewBindingResolver([]vault.Binding{binding})
-	jumpHost := NewSSHJumpHost(store, resolver, proxyHostKey)
+	jumpHost := NewSSHJumpHost(store, proxyHostKey)
 
 	// Use a TCP connection pair (buffered, unlike net.Pipe).
 	agentConn, proxyConn := tcpConnPair(t)
@@ -229,8 +228,7 @@ func TestSSHJumpHostMissingCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resolver := vault.NewBindingResolver(nil)
-	jumpHost := NewSSHJumpHost(store, resolver, proxyHostKey)
+	jumpHost := NewSSHJumpHost(store, proxyHostKey)
 
 	agentConn, proxyConn := tcpConnPair(t)
 	defer agentConn.Close()
@@ -275,8 +273,7 @@ func TestSSHJumpHostBadKey(t *testing.T) {
 		Template:   "testuser",
 	}
 
-	resolver := vault.NewBindingResolver([]vault.Binding{binding})
-	jumpHost := NewSSHJumpHost(store, resolver, proxyHostKey)
+	jumpHost := NewSSHJumpHost(store, proxyHostKey)
 
 	agentConn, proxyConn := tcpConnPair(t)
 	defer agentConn.Close()
@@ -288,7 +285,7 @@ func TestSSHJumpHostBadKey(t *testing.T) {
 	}
 }
 
-func TestSSHCredentialZeroedAfterHandshake(t *testing.T) {
+func TestSSHVaultIntegrityAfterHandshake(t *testing.T) {
 	_, pubKey, privPEM := generateTestSSHKey(t)
 
 	dir := t.TempDir()
@@ -313,8 +310,7 @@ func TestSSHCredentialZeroedAfterHandshake(t *testing.T) {
 		Template:   "testuser",
 	}
 
-	resolver := vault.NewBindingResolver([]vault.Binding{binding})
-	jumpHost := NewSSHJumpHost(store, resolver, proxyHostKey)
+	jumpHost := NewSSHJumpHost(store, proxyHostKey)
 
 	agentConn, proxyConn := tcpConnPair(t)
 

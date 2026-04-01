@@ -21,7 +21,10 @@ func setupTestInjector(t *testing.T, bindings []vault.Binding) (*Injector, *vaul
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver := vault.NewBindingResolver(bindings)
+	resolver, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
 	caCert, _, err := GenerateCA()
 	if err != nil {
 		t.Fatal(err)
@@ -140,10 +143,7 @@ func TestPhantomSwapInBody(t *testing.T) {
 	}
 }
 
-func TestCredentialZeroedAfterInjection(t *testing.T) {
-	// Verifies that credential injection works end-to-end via header
-	// injection (InjectHeader mode). Full secure memory zeroing will be
-	// tested in Task 5 when SecureBytes is implemented.
+func TestHeaderInjectionViaInjectHeader(t *testing.T) {
 	var mu sync.Mutex
 	var received http.Header
 

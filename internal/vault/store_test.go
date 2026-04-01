@@ -36,9 +36,12 @@ func TestAddAndGetCredential(t *testing.T) {
 
 func TestGetNonexistentCredential(t *testing.T) {
 	dir := t.TempDir()
-	store, _ := NewStore(dir)
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	_, err := store.Get("nonexistent")
+	_, err = store.Get("nonexistent")
 	if err == nil {
 		t.Error("expected error for nonexistent credential")
 	}
@@ -46,9 +49,16 @@ func TestGetNonexistentCredential(t *testing.T) {
 
 func TestListCredentials(t *testing.T) {
 	dir := t.TempDir()
-	store, _ := NewStore(dir)
-	store.Add("key_a", "val_a")
-	store.Add("key_b", "val_b")
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add("key_a", "val_a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add("key_b", "val_b"); err != nil {
+		t.Fatal(err)
+	}
 
 	names, err := store.List()
 	if err != nil {
@@ -61,15 +71,48 @@ func TestListCredentials(t *testing.T) {
 
 func TestRemoveCredential(t *testing.T) {
 	dir := t.TempDir()
-	store, _ := NewStore(dir)
-	store.Add("key_a", "val_a")
-
-	err := store.Remove("key_a")
+	store, err := NewStore(dir)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add("key_a", "val_a"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Remove("key_a"); err != nil {
 		t.Fatal(err)
 	}
 	_, err = store.Get("key_a")
 	if err == nil {
 		t.Error("expected error after remove")
+	}
+}
+
+func TestPathTraversalPrevented(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []string{
+		"../escape",
+		"../../etc/passwd",
+		"sub/dir",
+		"back\\slash",
+		"..",
+		".",
+		"",
+	}
+	for _, name := range cases {
+		if err := store.Add(name, "val"); err == nil {
+			t.Errorf("expected error for name %q, got nil", name)
+		}
+		if _, err := store.Get(name); err == nil {
+			t.Errorf("expected error for Get(%q), got nil", name)
+		}
+		if err := store.Remove(name); err == nil {
+			t.Errorf("expected error for Remove(%q), got nil", name)
+		}
 	}
 }

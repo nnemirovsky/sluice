@@ -299,7 +299,7 @@ func TestSMTPAuthPlainSwap(t *testing.T) {
 	}
 }
 
-func TestIMAPCredentialZeroedAfterAuth(t *testing.T) {
+func TestIMAPVaultIntegrityAfterAuth(t *testing.T) {
 	dir := t.TempDir()
 	store, err := vault.NewStore(dir)
 	if err != nil {

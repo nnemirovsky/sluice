@@ -20,17 +20,15 @@ import (
 // from the vault, and relays SSH session channels between the two.
 type SSHJumpHost struct {
 	provider vault.Provider
-	resolver *vault.BindingResolver
 	hostKey  ssh.Signer
 }
 
 // NewSSHJumpHost creates an SSH jump host handler. The hostKey is presented
-// to agents connecting through the proxy. The provider and resolver are used
-// to look up SSH private keys for upstream authentication.
-func NewSSHJumpHost(provider vault.Provider, resolver *vault.BindingResolver, hostKey ssh.Signer) *SSHJumpHost {
+// to agents connecting through the proxy. The provider is used to look up
+// SSH private keys for upstream authentication.
+func NewSSHJumpHost(provider vault.Provider, hostKey ssh.Signer) *SSHJumpHost {
 	return &SSHJumpHost{
 		provider: provider,
-		resolver: resolver,
 		hostKey:  hostKey,
 	}
 }
@@ -166,6 +164,7 @@ func sshHandleChannel(newChan ssh.NewChannel, dst ssh.Conn) {
 
 	srcChan, srcReqs, err := newChan.Accept()
 	if err != nil {
+		go ssh.DiscardRequests(dstReqs)
 		dstChan.Close()
 		return
 	}

@@ -42,8 +42,12 @@ func handleCredCommand(args []string) {
 		if err != nil {
 			log.Fatalf("read secret: %v", err)
 		}
-		if err := store.Add(args[1], string(secret)); err != nil {
-			log.Fatalf("add credential: %v", err)
+		addErr := store.Add(args[1], string(secret))
+		for i := range secret {
+			secret[i] = 0
+		}
+		if addErr != nil {
+			log.Fatalf("add credential: %v", addErr)
 		}
 		fmt.Printf("credential %q added\n", args[1])
 

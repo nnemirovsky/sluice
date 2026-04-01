@@ -45,14 +45,22 @@ func NewInjector(provider vault.Provider, resolver *vault.BindingResolver, caCer
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Verbose = false
 
-	// Configure per-host cert generation using the provided CA.
-	connectAction := &goproxy.ConnectAction{
+	// Only MITM connections to hosts that have a credential binding.
+	// Unbound hosts are passed through without TLS interception.
+	mitmAction := &goproxy.ConnectAction{
 		Action:    goproxy.ConnectMitm,
 		TLSConfig: goproxy.TLSConfigFromCA(&inj.caCert),
 	}
 	proxy.OnRequest().HandleConnect(goproxy.FuncHttpsHandler(
 		func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-			return connectAction, host
+			h, _, err := net.SplitHostPort(host)
+			if err != nil {
+				h = host
+			}
+			if _, ok := inj.resolver.Resolve(h, 443); ok {
+				return mitmAction, host
+			}
+			return goproxy.OkConnect, host
 		},
 	))
 

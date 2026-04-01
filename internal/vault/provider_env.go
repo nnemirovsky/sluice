@@ -10,8 +10,8 @@ import (
 type EnvProvider struct{}
 
 func (p *EnvProvider) Get(name string) (SecureBytes, error) {
-	val := os.Getenv(name)
-	if val == "" {
+	val, ok := os.LookupEnv(name)
+	if !ok {
 		return SecureBytes{}, fmt.Errorf("env var %q not set", name)
 	}
 	return NewSecureBytes(val), nil
