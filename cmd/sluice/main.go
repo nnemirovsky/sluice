@@ -7,11 +7,13 @@ import (
 	"os/signal"
 	"reflect"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/BurntSushi/toml"
 
 	"github.com/nemirovsky/sluice/internal/audit"
+	"github.com/nemirovsky/sluice/internal/docker"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
 	"github.com/nemirovsky/sluice/internal/telegram"
@@ -33,6 +35,9 @@ func main() {
 		case "cred":
 			handleCredCommand(os.Args[2:])
 			return
+		case "cert":
+			handleCertCommand(os.Args[2:])
+			return
 		case "mcp":
 			if err := handleMCPCommand(os.Args[2:]); err != nil {
 				os.Exit(1)
@@ -46,6 +51,8 @@ func main() {
 	auditPath := flag.String("audit", "audit.jsonl", "path to audit log file")
 	telegramToken := flag.String("telegram-token", os.Getenv("TELEGRAM_BOT_TOKEN"), "Telegram bot token")
 	telegramChatIDStr := flag.String("telegram-chat-id", os.Getenv("TELEGRAM_CHAT_ID"), "Telegram chat ID for approvals")
+	dockerSocket := flag.String("docker-socket", "", "Docker socket path (auto-detects from DOCKER_HOST or /var/run/docker.sock)")
+	dockerContainer := flag.String("docker-container", envDefault("SLUICE_AGENT_CONTAINER", "openclaw"), "Docker container name for auto-restart on credential changes")
 	flag.Parse()
 
 	// Track which flags were explicitly set on the command line so we can
@@ -147,6 +154,28 @@ func main() {
 		log.Fatalf("start proxy: %v", err)
 	}
 
+	// Extract the vault.Store from the provider (if age backend) so
+	// Telegram /cred commands can add/remove/rotate credentials.
+	var vaultStore *vault.Store
+	if provider != nil {
+		vaultStore, _ = provider.(*vault.Store)
+	}
+
+	// Docker container manager for auto-restart on credential changes.
+	var dockerMgr *docker.Manager
+	if vaultStore != nil {
+		sock := resolveDockerSocket(*dockerSocket)
+		if sock != "" {
+			if fi, statErr := os.Stat(sock); statErr == nil && fi.Mode().Type() == os.ModeSocket {
+				client := docker.NewSocketClient(sock)
+				dockerMgr = docker.NewManager(client, *dockerContainer)
+				log.Printf("docker manager enabled: socket=%s, container=%s", sock, *dockerContainer)
+			} else if *dockerSocket != "" {
+				log.Printf("WARNING: --docker-socket %q not found or not a socket; container auto-restart disabled", *dockerSocket)
+			}
+		}
+	}
+
 	var bot *telegram.Bot
 	if telegramEnabled {
 		var botErr error
@@ -156,6 +185,8 @@ func main() {
 			EnginePtr: srv.EnginePtr(),
 			ReloadMu:  srv.ReloadMu(),
 			AuditPath: *auditPath,
+			Vault:     vaultStore,
+			DockerMgr: dockerMgr,
 		}, broker)
 		if botErr != nil {
 			log.Fatalf("telegram bot: %v", botErr)
@@ -244,4 +275,25 @@ func main() {
 	case err := <-errCh:
 		log.Fatalf("proxy failed: %v", err)
 	}
+}
+
+// envDefault returns the environment variable value if set, otherwise the fallback.
+func envDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// resolveDockerSocket returns the Docker socket path to use. If explicit is
+// non-empty it is returned as-is. Otherwise it checks DOCKER_HOST env and
+// falls back to the default /var/run/docker.sock.
+func resolveDockerSocket(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if envHost := os.Getenv("DOCKER_HOST"); envHost != "" {
+		return strings.TrimPrefix(envHost, "unix://")
+	}
+	return "/var/run/docker.sock"
 }

@@ -41,8 +41,8 @@ func startTestIMAPServer(t *testing.T) (*testIMAPServer, net.Listener) {
 }
 
 func (s *testIMAPServer) handle(conn net.Conn) {
-	defer conn.Close()
-	fmt.Fprintf(conn, "* OK IMAP4rev1 Server Ready\r\n")
+	defer func() { _ = conn.Close() }()
+	_, _ = fmt.Fprintf(conn, "* OK IMAP4rev1 Server Ready\r\n")
 
 	reader := bufio.NewReader(conn)
 	for {
@@ -62,9 +62,9 @@ func (s *testIMAPServer) handle(conn net.Conn) {
 			s.mu.Lock()
 			s.loginCmd = trimmed
 			s.mu.Unlock()
-			fmt.Fprintf(conn, "%s OK LOGIN completed\r\n", tag)
+			_, _ = fmt.Fprintf(conn, "%s OK LOGIN completed\r\n", tag)
 		} else if strings.Contains(upper, " LOGOUT") {
-			fmt.Fprintf(conn, "%s OK LOGOUT completed\r\n", tag)
+			_, _ = fmt.Fprintf(conn, "%s OK LOGOUT completed\r\n", tag)
 			return
 		} else {
 			fmt.Fprintf(conn, "%s BAD Unknown command\r\n", tag)
@@ -104,7 +104,7 @@ func startTestSMTPServer(t *testing.T) (*testSMTPServer, net.Listener) {
 }
 
 func (s *testSMTPServer) handle(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	fmt.Fprintf(conn, "220 smtp.test.local ESMTP\r\n")
 
 	reader := bufio.NewReader(conn)
@@ -157,7 +157,7 @@ func TestIMAPAuthSwap(t *testing.T) {
 	}
 
 	imapSrv, ln := startTestIMAPServer(t)
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	binding := vault.Binding{
 		Credential: "imap_pass",
@@ -199,8 +199,8 @@ func TestIMAPAuthSwap(t *testing.T) {
 
 	// Disconnect.
 	fmt.Fprintf(agentConn, "A002 LOGOUT\r\n")
-	reader.ReadString('\n') // read LOGOUT response
-	agentConn.Close()
+	_, _ = reader.ReadString('\n') // read LOGOUT response
+	_ = agentConn.Close()
 	<-errCh
 
 	// Verify server received the real password, not the phantom.
@@ -224,7 +224,7 @@ func TestSMTPAuthPlainSwap(t *testing.T) {
 	}
 
 	smtpSrv, ln := startTestSMTPServer(t)
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	binding := vault.Binding{
 		Credential: "smtp_pass",
@@ -282,8 +282,8 @@ func TestSMTPAuthPlainSwap(t *testing.T) {
 
 	// Disconnect.
 	fmt.Fprintf(agentConn, "QUIT\r\n")
-	reader.ReadString('\n') // read QUIT response
-	agentConn.Close()
+	_, _ = reader.ReadString('\n') // read QUIT response
+	_ = agentConn.Close()
 	<-errCh
 
 	// Verify server received the real password, not the phantom.
@@ -329,7 +329,7 @@ func startTestSMTPLoginServer(t *testing.T) (*testSMTPLoginServer, net.Listener)
 }
 
 func (s *testSMTPLoginServer) handle(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	fmt.Fprintf(conn, "220 smtp.test.local ESMTP\r\n")
 
 	reader := bufio.NewReader(conn)
@@ -393,7 +393,7 @@ func TestSMTPAuthLoginSwap(t *testing.T) {
 	}
 
 	smtpSrv, ln := startTestSMTPLoginServer(t)
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	binding := vault.Binding{
 		Credential: "smtp_login_pass",
@@ -470,8 +470,8 @@ func TestSMTPAuthLoginSwap(t *testing.T) {
 
 	// Disconnect.
 	fmt.Fprintf(agentConn, "QUIT\r\n")
-	reader.ReadString('\n')
-	agentConn.Close()
+	_, _ = reader.ReadString('\n')
+	_ = agentConn.Close()
 	<-errCh
 
 	// Verify server received real credentials.

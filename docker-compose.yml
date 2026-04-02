@@ -1,0 +1,58 @@
+services:
+  sluice:
+    build: .
+    command:
+      - "-policy"
+      - "/etc/sluice/policy.toml"
+      - "-audit"
+      - "/var/log/sluice/audit.jsonl"
+      - "-listen"
+      - "0.0.0.0:1080"
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - SLUICE_VAULT_DIR=/home/sluice/.sluice
+      - SLUICE_AGENT_CONTAINER=openclaw
+    group_add:
+      - "${DOCKER_GID:-0}"
+    volumes:
+      - ./examples/policy.toml:/etc/sluice/policy.toml:ro
+      - sluice-vault:/home/sluice/.sluice
+      - sluice-audit:/var/log/sluice
+      - sluice-ca:/home/sluice/ca
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [internal, external]
+
+  tun2proxy:
+    image: ghcr.io/tun2proxy/tun2proxy-ubuntu:latest
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    command: ["--proxy", "socks5://sluice:1080"]
+    networks: [internal]
+    depends_on: [sluice]
+
+  openclaw:
+    image: openclaw/openclaw:latest
+    container_name: openclaw
+    network_mode: "service:tun2proxy"
+    env_file: .env.phantom
+    environment:
+      - SSL_CERT_FILE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
+      - REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
+      - NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
+    volumes:
+      - openclaw-data:/root/.openclaw
+      - sluice-ca:/usr/local/share/ca-certificates/sluice:ro
+    depends_on: [tun2proxy]
+
+networks:
+  internal:
+    internal: true
+  external: {}
+
+volumes:
+  sluice-vault:
+  sluice-audit:
+  sluice-ca:
+  openclaw-data:

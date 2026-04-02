@@ -31,7 +31,7 @@ func TestLoggerWritesJSONLines(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("log event 2: %v", err)
 	}
-	logger.Close()
+	_ = logger.Close()
 
 	data, err := os.ReadFile(path)
 	if err != nil {

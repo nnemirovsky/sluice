@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/nemirovsky/sluice/internal/vault"
 	"golang.org/x/term"
@@ -36,11 +38,21 @@ func handleCredCommand(args []string) {
 			fmt.Println("usage: sluice cred add <name>")
 			os.Exit(1)
 		}
-		fmt.Print("Enter secret: ")
-		secret, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Println()
-		if err != nil {
-			log.Fatalf("read secret: %v", err)
+		var secret []byte
+		if term.IsTerminal(int(os.Stdin.Fd())) {
+			fmt.Print("Enter secret: ")
+			s, err := term.ReadPassword(int(os.Stdin.Fd()))
+			fmt.Println()
+			if err != nil {
+				log.Fatalf("read secret: %v", err)
+			}
+			secret = s
+		} else {
+			scanner := bufio.NewScanner(os.Stdin)
+			if !scanner.Scan() {
+				log.Fatalf("read secret from stdin: no input")
+			}
+			secret = []byte(strings.TrimRight(scanner.Text(), "\r\n"))
 		}
 		addErr := store.Add(args[1], string(secret))
 		for i := range secret {

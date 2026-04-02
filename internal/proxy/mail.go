@@ -74,7 +74,7 @@ type mailSession struct {
 // is ready to relay traffic. A non-nil error means setup failed and the
 // SOCKS5 layer should report a connection failure to the client.
 func (m *MailProxy) HandleConnection(agentConn net.Conn, dialAddrs []string, hostAddr string, binding vault.Binding, proto Protocol, ready chan<- error) error {
-	defer agentConn.Close()
+	defer func() { _ = agentConn.Close() }()
 
 	// signalErr sends an error on ready (if non-nil) to report setup
 	// failure to the SOCKS5 layer before returning.
@@ -90,7 +90,7 @@ func (m *MailProxy) HandleConnection(agentConn net.Conn, dialAddrs []string, hos
 	if err != nil {
 		return signalErr(err)
 	}
-	defer upstreamConn.Close()
+	defer func() { _ = upstreamConn.Close() }()
 
 	// For implicit TLS ports (993 IMAPS, 465 SMTPS), the agent's mail
 	// client starts TLS immediately. The proxy must terminate that TLS
@@ -221,12 +221,12 @@ func (m *MailProxy) HandleConnection(agentConn net.Conn, dialAddrs []string, hos
 					log.Printf("[MAIL] STARTTLS on %s without CA cert; raw relay (no credential injection)", hostAddr)
 					done := make(chan struct{})
 					go func() {
-						io.Copy(agentRW, serverReader)
-						agentConn.Close()
+						_, _ = io.Copy(agentRW, serverReader)
+						_ = agentConn.Close()
 						close(done)
 					}()
-					io.Copy(upstreamRW, agentReader)
-					upstreamConn.Close()
+					_, _ = io.Copy(upstreamRW, agentReader)
+					_ = upstreamConn.Close()
 					<-done
 					return nil
 				}

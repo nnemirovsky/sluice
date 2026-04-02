@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -50,6 +51,31 @@ func LoadOrCreateCA(dir string) (tls.Certificate, *x509.Certificate, error) {
 		return tls.Certificate{}, nil, fmt.Errorf("create CA dir: %w", mkErr)
 	}
 
+	// Acquire exclusive lock to prevent concurrent CA generation from
+	// producing mismatched key/cert pairs on disk.
+	lockPath := filepath.Join(dir, "ca.lock")
+	lockFile, lockErr := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if lockErr != nil {
+		return tls.Certificate{}, nil, fmt.Errorf("create CA lock file: %w", lockErr)
+	}
+	defer func() { _ = lockFile.Close() }()
+	if lockErr = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); lockErr != nil {
+		return tls.Certificate{}, nil, fmt.Errorf("acquire CA lock: %w", lockErr)
+	}
+	defer func() { _ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) }()
+
+	// Re-check after acquiring lock: another process may have created
+	// the CA while we waited.
+	cert, err = tls.LoadX509KeyPair(certPath, keyPath)
+	if err == nil {
+		x509Cert, parseErr := x509.ParseCertificate(cert.Certificate[0])
+		if parseErr != nil {
+			return tls.Certificate{}, nil, fmt.Errorf("parse existing CA cert: %w", parseErr)
+		}
+		cert.Leaf = x509Cert
+		return cert, x509Cert, nil
+	}
+
 	tlsCert, x509Cert, genErr := GenerateCA()
 	if genErr != nil {
 		return tls.Certificate{}, nil, genErr
@@ -59,21 +85,49 @@ func LoadOrCreateCA(dir string) (tls.Certificate, *x509.Certificate, error) {
 	if marshalErr != nil {
 		return tls.Certificate{}, nil, fmt.Errorf("marshal CA key: %w", marshalErr)
 	}
-	// Write key first. If the cert write fails afterward, the orphaned key
-	// is less problematic than an orphaned cert (the missing cert causes
+	// Write key first using temp-file + rename for atomic writes.
+	// If the cert write fails afterward, the orphaned key is less
+	// problematic than an orphaned cert (the missing cert causes
 	// LoadX509KeyPair to fail, and the stat check detects only one file).
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	if writeErr := os.WriteFile(keyPath, keyPEM, 0600); writeErr != nil {
+	if writeErr := atomicWriteFile(keyPath, keyPEM, 0600); writeErr != nil {
 		return tls.Certificate{}, nil, fmt.Errorf("write CA key: %w", writeErr)
 	}
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsCert.Certificate[0]})
-	if writeErr := os.WriteFile(certPath, certPEM, 0644); writeErr != nil {
+	if writeErr := atomicWriteFile(certPath, certPEM, 0644); writeErr != nil {
 		os.Remove(keyPath)
 		return tls.Certificate{}, nil, fmt.Errorf("write CA cert: %w", writeErr)
 	}
 
 	return tlsCert, x509Cert, nil
+}
+
+// atomicWriteFile writes data to a temp file in the same directory, then
+// renames it to the target path. This prevents partial writes from leaving
+// a corrupted file at the target path.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // GenerateCA creates a new self-signed CA certificate and key in memory.

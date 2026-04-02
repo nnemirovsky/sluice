@@ -12,7 +12,9 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/nemirovsky/sluice/internal/docker"
 	"github.com/nemirovsky/sluice/internal/policy"
+	"github.com/nemirovsky/sluice/internal/vault"
 )
 
 // tokenPattern matches Telegram bot tokens embedded in URLs or error messages.
@@ -37,6 +39,8 @@ type BotConfig struct {
 	EnginePtr *atomic.Pointer[policy.Engine]
 	ReloadMu  *sync.Mutex
 	AuditPath string
+	Vault     *vault.Store
+	DockerMgr *docker.Manager
 }
 
 type Bot struct {
@@ -62,6 +66,12 @@ func NewBot(cfg BotConfig, broker *ApprovalBroker) (*Bot, error) {
 	log.Printf("telegram bot authorized as @%s", api.Self.UserName)
 
 	cmdHandler := NewCommandHandler(cfg.EnginePtr, cfg.ReloadMu, broker, cfg.AuditPath)
+	if cfg.Vault != nil {
+		cmdHandler.SetVault(cfg.Vault)
+	}
+	if cfg.DockerMgr != nil {
+		cmdHandler.SetDockerManager(cfg.DockerMgr)
+	}
 
 	return &Bot{api: api, chatID: cfg.ChatID, broker: broker, commands: cmdHandler, done: make(chan struct{})}, nil
 }
@@ -176,7 +186,7 @@ func (b *Bot) handleCallback(cq *tgbotapi.CallbackQuery) {
 
 	if resolved {
 		callback := tgbotapi.NewCallback(cq.ID, label)
-		b.api.Request(callback)
+		_, _ = b.api.Request(callback)
 
 		// Do not use Markdown parse mode here: cq.Message.Text is Telegram's
 		// plain-text extraction of the original Markdown message. Re-parsing
@@ -184,21 +194,21 @@ func (b *Bot) handleCallback(cq *tgbotapi.CallbackQuery) {
 		// other Markdown-special characters (common in DNS names).
 		edit := tgbotapi.NewEditMessageText(b.chatID, cq.Message.MessageID,
 			fmt.Sprintf("%s\n\n%s at %s", cq.Message.Text, label, time.Now().UTC().Format("15:04:05")))
-		b.api.Send(edit)
+		_, _ = b.api.Send(edit)
 	} else if b.broker.WasTimedOut(reqID) {
 		b.broker.ClearTimedOut(reqID)
 		callback := tgbotapi.NewCallback(cq.ID, "Request timed out")
-		b.api.Request(callback)
+		_, _ = b.api.Request(callback)
 
 		edit := tgbotapi.NewEditMessageText(b.chatID, cq.Message.MessageID,
 			cq.Message.Text+"\n\n(request timed out)")
-		b.api.Send(edit)
+		_, _ = b.api.Send(edit)
 	} else {
 		// Request was already resolved by a previous callback (e.g. double-tap
 		// or another user in a group chat). Don't overwrite the message since
 		// it already shows the correct resolution.
 		callback := tgbotapi.NewCallback(cq.ID, "Already resolved")
-		b.api.Request(callback)
+		_, _ = b.api.Request(callback)
 	}
 }
 

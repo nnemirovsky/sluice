@@ -68,16 +68,16 @@ func loadOrCreateIdentity(path string) (*age.X25519Identity, error) {
 	}
 	tmpPath := tmpFile.Name()
 	if _, writeErr := tmpFile.WriteString(id.String() + "\n"); writeErr != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("write identity temp: %w", writeErr)
 	}
 	if writeErr := tmpFile.Close(); writeErr != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("close identity temp: %w", writeErr)
 	}
 	if chmodErr := os.Chmod(tmpPath, 0600); chmodErr != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("chmod identity temp: %w", chmodErr)
 	}
 
@@ -132,8 +132,8 @@ func (s *Store) Add(name, value string) error {
 	}
 	tmpPath := tmpFile.Name()
 	if _, err := tmpFile.Write(buf.Bytes()); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("write temp: %w", err)
 	}
 	if err := tmpFile.Close(); err != nil {
