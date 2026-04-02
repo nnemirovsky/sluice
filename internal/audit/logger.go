@@ -1,16 +1,21 @@
 package audit
 
 import (
+	"bufio"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"sync"
 	"time"
+
+	"lukechampine.com/blake3"
 )
 
 // Event represents a single audit log entry for a connection attempt.
 type Event struct {
 	Timestamp   string `json:"timestamp"`
+	PrevHash    string `json:"prev_hash"`
 	Destination string `json:"destination"`
 	Port        int    `json:"port,omitempty"`
 	Verdict     string `json:"verdict"`
@@ -21,29 +26,54 @@ type Event struct {
 }
 
 // FileLogger writes audit events as JSON lines to a file.
+// Each entry includes a blake3 hash of the previous entry for tamper evidence.
 type FileLogger struct {
-	mu   sync.Mutex
-	file *os.File
-	enc  *json.Encoder
+	mu       sync.Mutex
+	file     *os.File
+	lastHash string
 }
 
 // NewFileLogger creates a new append-only JSON lines audit logger.
+// If the file already contains entries, the last line is read to recover
+// the hash chain for restart continuity.
 func NewFileLogger(path string) (*FileLogger, error) {
+	lastHash, err := recoverLastHash(path)
+	if err != nil {
+		return nil, fmt.Errorf("recover hash chain: %w", err)
+	}
+
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("open audit log: %w", err)
 	}
-	return &FileLogger{file: f, enc: json.NewEncoder(f)}, nil
+	return &FileLogger{file: f, lastHash: lastHash}, nil
 }
 
 // Log writes an event to the audit log. It is safe for concurrent use.
+// The event's PrevHash is set to the blake3 hash of the previous line
+// (or blake3 of empty string for the first entry).
 func (l *FileLogger) Log(evt Event) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	if evt.Timestamp == "" {
 		evt.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	}
-	return l.enc.Encode(evt)
+	evt.PrevHash = l.lastHash
+
+	line, err := json.Marshal(evt)
+	if err != nil {
+		return fmt.Errorf("marshal audit event: %w", err)
+	}
+
+	line = append(line, '\n')
+	if _, err := l.file.Write(line); err != nil {
+		return fmt.Errorf("write audit event: %w", err)
+	}
+
+	// Update lastHash to the hash of what was just written (without trailing newline).
+	l.lastHash = hashLine(line[:len(line)-1])
+	return nil
 }
 
 // Close closes the underlying file.
@@ -51,4 +81,43 @@ func (l *FileLogger) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.file.Close()
+}
+
+// hashLine computes the blake3-256 hash of data and returns the hex-encoded string.
+func hashLine(data []byte) string {
+	h := blake3.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
+
+// recoverLastHash reads the last non-empty line from an existing log file
+// and returns its blake3 hash. If the file does not exist or is empty,
+// it returns the genesis hash (blake3 of empty string).
+func recoverLastHash(path string) (string, error) {
+	genesisHash := hashLine([]byte(""))
+
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return genesisHash, nil
+		}
+		return "", err
+	}
+	defer f.Close()
+
+	var lastLine string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line != "" {
+			lastLine = line
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("scan audit log: %w", err)
+	}
+
+	if lastLine == "" {
+		return genesisHash, nil
+	}
+	return hashLine([]byte(lastLine)), nil
 }
