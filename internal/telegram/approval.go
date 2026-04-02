@@ -307,6 +307,10 @@ func (b *ApprovalBroker) Resolve(id string, resp Response) bool {
 // unblock goroutines waiting to enqueue on the pending channel.
 func (b *ApprovalBroker) CancelAll() {
 	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
 	b.closed = true
 	waiters := make(map[string]chan Response, len(b.waiters))
 	for id, ch := range b.waiters {
