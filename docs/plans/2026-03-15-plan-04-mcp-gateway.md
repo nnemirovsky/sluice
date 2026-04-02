@@ -345,7 +345,7 @@ git commit -m "feat: MCP upstream server management"
 - Create: `internal/mcp/policy.go`
 - Create: `internal/mcp/policy_test.go`
 
-- [ ] **Step 1: Write failing test**
+- [x] **Step 1: Write failing test**
 
 ```go
 // internal/mcp/policy_test.go
@@ -387,12 +387,12 @@ func TestToolPolicyEvaluate(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/mcp/ -v -run TestToolPolicyEvaluate`
 Expected: FAIL
 
-- [ ] **Step 3: Implement policy.go**
+- [x] **Step 3: Implement policy.go**
 
 ```go
 // internal/mcp/policy.go
@@ -464,12 +464,12 @@ func (tp *ToolPolicy) Evaluate(toolName string) policy.Verdict {
 }
 ```
 
-- [ ] **Step 4: Run test**
+- [x] **Step 4: Run test**
 
 Run: `go test ./internal/mcp/ -v -run TestToolPolicyEvaluate`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/mcp/policy.go internal/mcp/policy_test.go
