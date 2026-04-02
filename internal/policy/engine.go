@@ -39,6 +39,10 @@ type Engine struct {
 }
 
 // LoadFromFile reads and parses a policy TOML file.
+//
+// Deprecated: Use LoadFromStore for runtime policy loading. This function is
+// retained for backward compatibility during the migration to SQLite-backed
+// policy storage and will be removed in a future release.
 func LoadFromFile(path string) (*Engine, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -47,7 +51,8 @@ func LoadFromFile(path string) (*Engine, error) {
 	return LoadFromBytes(data)
 }
 
-// LoadFromBytes parses policy from raw TOML bytes.
+// LoadFromBytes parses policy from raw TOML bytes. Primarily used by
+// store/import.go for TOML seeding and by tests that construct policy inline.
 func LoadFromBytes(data []byte) (*Engine, error) {
 	var pf policyFile
 	if err := toml.Unmarshal(data, &pf); err != nil {
@@ -294,6 +299,9 @@ func (e *Engine) CouldBeAllowed(dest string, includeAsk bool) bool {
 // AddDynamicAllow appends a new allow rule for the given destination and port,
 // then recompiles the engine so the rule takes effect immediately. On compile
 // failure the rule is rolled back and the engine state is unchanged.
+//
+// Deprecated: Mutations should go through the SQLite store, then recompile
+// via LoadFromStore. Retained for backward compatibility during migration.
 func (e *Engine) AddDynamicAllow(dest string, port int) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -308,6 +316,9 @@ func (e *Engine) AddDynamicAllow(dest string, port int) error {
 
 // AddAllowRule appends a portless allow rule and recompiles.
 // On failure the rule is rolled back.
+//
+// Deprecated: Mutations should go through the SQLite store. Retained for
+// backward compatibility during migration.
 func (e *Engine) AddAllowRule(dest string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -322,6 +333,9 @@ func (e *Engine) AddAllowRule(dest string) error {
 
 // AddDenyRule appends a portless deny rule and recompiles.
 // On failure the rule is rolled back.
+//
+// Deprecated: Mutations should go through the SQLite store. Retained for
+// backward compatibility during migration.
 func (e *Engine) AddDenyRule(dest string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -336,6 +350,9 @@ func (e *Engine) AddDenyRule(dest string) error {
 
 // RemoveRule removes the first rule matching dest from any rule list and recompiles.
 // On compile failure the removal is rolled back. Returns true if a rule was found and removed.
+//
+// Deprecated: Mutations should go through the SQLite store. Retained for
+// backward compatibility during migration.
 func (e *Engine) RemoveRule(dest string) (bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()

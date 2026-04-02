@@ -172,14 +172,14 @@ Replace `LoadFromFile`/`LoadFromBytes` with `LoadFromStore`. The Engine becomes 
 - Create: `internal/policy/engine_store.go`
 - Modify: `internal/policy/engine_test.go`
 
-- [ ] Create `LoadFromStore(s *store.Store) (*Engine, error)` that reads all rules from SQLite and compiles them
-- [ ] Keep `LoadFromBytes` for backward compatibility (tests, import path) but mark as internal
-- [ ] Remove `LoadFromFile` (replaced by store-based loading)
-- [ ] Remove dynamic mutation methods from Engine (`AddDynamicAllow`, `AddAllowRule`, `AddDenyRule`, `RemoveRule`). Mutations now go through the store.
-- [ ] Add `Engine.Validate()` that checks compiled state is consistent
-- [ ] Update engine_test.go: tests that used LoadFromBytes can stay; tests that used LoadFromFile switch to LoadFromStore with in-memory SQLite
-- [ ] Write tests for LoadFromStore with various rule combinations
-- [ ] Run tests: `go test ./internal/policy/ -v -timeout 30s`
+- [x] Create `LoadFromStore(s *store.Store) (*Engine, error)` that reads all rules from SQLite and compiles them
+- [x] Keep `LoadFromBytes` for backward compatibility (tests, import path) but mark as internal
+- [x] Remove `LoadFromFile` (replaced by store-based loading) -- deprecated, kept until callers migrate in Tasks 4/6
+- [x] Remove dynamic mutation methods from Engine (`AddDynamicAllow`, `AddAllowRule`, `AddDenyRule`, `RemoveRule`). Mutations now go through the store. -- deprecated, kept until callers migrate in Tasks 4/6
+- [x] Add `Engine.Validate()` that checks compiled state is consistent
+- [x] Update engine_test.go: tests that used LoadFromBytes can stay; tests that used LoadFromFile switch to LoadFromStore with in-memory SQLite
+- [x] Write tests for LoadFromStore with various rule combinations
+- [x] Run tests: `go test ./internal/policy/ -v -timeout 30s`
 
 ### Task 4: Wire SQLite store into proxy server and SIGHUP handler
 

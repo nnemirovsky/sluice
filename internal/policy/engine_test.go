@@ -2,14 +2,37 @@ package policy
 
 import (
 	"fmt"
+	"os"
 	"testing"
+
+	"github.com/nemirovsky/sluice/internal/store"
 )
 
-func TestLoadPolicy(t *testing.T) {
-	eng, err := LoadFromFile("../../testdata/policy_mixed.toml")
+// loadFromTOMLFile is a test helper that creates an in-memory store, imports
+// the given TOML file, and builds an Engine via LoadFromStore.
+func loadFromTOMLFile(t *testing.T, path string) *Engine {
+	t.Helper()
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("failed to load policy: %v", err)
+		t.Fatalf("read TOML file: %v", err)
 	}
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	if _, err := s.ImportTOML(data); err != nil {
+		t.Fatalf("import TOML: %v", err)
+	}
+	eng, err := LoadFromStore(s)
+	if err != nil {
+		t.Fatalf("load from store: %v", err)
+	}
+	return eng
+}
+
+func TestLoadPolicy(t *testing.T) {
+	eng := loadFromTOMLFile(t, "../../testdata/policy_mixed.toml")
 	if eng.Default != Deny {
 		t.Errorf("expected default Deny, got %v", eng.Default)
 	}
@@ -28,10 +51,7 @@ func TestLoadPolicy(t *testing.T) {
 }
 
 func TestEvaluate(t *testing.T) {
-	eng, err := LoadFromFile("../../testdata/policy_mixed.toml")
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
+	eng := loadFromTOMLFile(t, "../../testdata/policy_mixed.toml")
 
 	tests := []struct {
 		dest string
@@ -60,10 +80,7 @@ func TestEvaluate(t *testing.T) {
 }
 
 func TestIsDenied(t *testing.T) {
-	eng, err := LoadFromFile("../../testdata/policy_mixed.toml")
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
+	eng := loadFromTOMLFile(t, "../../testdata/policy_mixed.toml")
 
 	tests := []struct {
 		dest string
@@ -93,10 +110,7 @@ func TestIsDenied(t *testing.T) {
 }
 
 func TestIsRestricted(t *testing.T) {
-	eng, err := LoadFromFile("../../testdata/policy_mixed.toml")
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
+	eng := loadFromTOMLFile(t, "../../testdata/policy_mixed.toml")
 
 	tests := []struct {
 		dest string
@@ -128,10 +142,7 @@ func TestIsRestricted(t *testing.T) {
 }
 
 func TestCouldBeAllowed(t *testing.T) {
-	eng, err := LoadFromFile("../../testdata/policy_mixed.toml")
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
+	eng := loadFromTOMLFile(t, "../../testdata/policy_mixed.toml")
 
 	tests := []struct {
 		dest string
@@ -223,10 +234,7 @@ default = "ask"
 }
 
 func TestLoadPolicyWithTools(t *testing.T) {
-	eng, err := LoadFromFile("../../testdata/policy_with_tools.toml")
-	if err != nil {
-		t.Fatal(err)
-	}
+	eng := loadFromTOMLFile(t, "../../testdata/policy_with_tools.toml")
 	if len(eng.ToolAllowRules) != 1 {
 		t.Errorf("expected 1 tool_allow, got %d", len(eng.ToolAllowRules))
 	}
@@ -357,10 +365,7 @@ destination = "0:0:0:0:0:0:0:1"
 }
 
 func TestIsExplicitlyAllowed(t *testing.T) {
-	eng, err := LoadFromFile("../../testdata/policy_mixed.toml")
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
+	eng := loadFromTOMLFile(t, "../../testdata/policy_mixed.toml")
 
 	tests := []struct {
 		dest string
@@ -479,10 +484,7 @@ destination = "test[0].example.com"
 }
 
 func TestLoadPolicyWithTelegram(t *testing.T) {
-	eng, err := LoadFromFile("../../testdata/policy_with_telegram.toml")
-	if err != nil {
-		t.Fatal(err)
-	}
+	eng := loadFromTOMLFile(t, "../../testdata/policy_with_telegram.toml")
 	if eng.Telegram.BotTokenEnv != "TELEGRAM_BOT_TOKEN" {
 		t.Errorf("expected bot_token_env %q, got %q", "TELEGRAM_BOT_TOKEN", eng.Telegram.BotTokenEnv)
 	}
@@ -504,10 +506,7 @@ func TestLoadPolicyWithTelegram(t *testing.T) {
 }
 
 func TestLoadPolicyWithoutTelegram(t *testing.T) {
-	eng, err := LoadFromFile("../../testdata/policy_mixed.toml")
-	if err != nil {
-		t.Fatal(err)
-	}
+	eng := loadFromTOMLFile(t, "../../testdata/policy_mixed.toml")
 	if eng.Telegram.BotTokenEnv != "" {
 		t.Errorf("expected empty bot_token_env, got %q", eng.Telegram.BotTokenEnv)
 	}
@@ -517,10 +516,7 @@ func TestLoadPolicyWithoutTelegram(t *testing.T) {
 }
 
 func TestLoadPolicyWithInspect(t *testing.T) {
-	eng, err := LoadFromFile("../../testdata/policy_with_inspect.toml")
-	if err != nil {
-		t.Fatal(err)
-	}
+	eng := loadFromTOMLFile(t, "../../testdata/policy_with_inspect.toml")
 	if len(eng.InspectBlockRules) != 2 {
 		t.Errorf("expected 2 inspect_block rules, got %d", len(eng.InspectBlockRules))
 	}
@@ -532,5 +528,254 @@ func TestLoadPolicyWithInspect(t *testing.T) {
 	}
 	if eng.InspectRedactRules[0].Replacement != "[REDACTED_API_KEY]" {
 		t.Errorf("expected redact replacement %q, got %q", "[REDACTED_API_KEY]", eng.InspectRedactRules[0].Replacement)
+	}
+}
+
+// --- LoadFromStore-specific tests ---
+
+func TestLoadFromStoreEmpty(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer s.Close()
+
+	eng, err := LoadFromStore(s)
+	if err != nil {
+		t.Fatalf("load from store: %v", err)
+	}
+	if eng.Default != Deny {
+		t.Errorf("expected default Deny for empty store, got %v", eng.Default)
+	}
+	if eng.TimeoutSec != 120 {
+		t.Errorf("expected default timeout 120, got %d", eng.TimeoutSec)
+	}
+	if len(eng.AllowRules) != 0 {
+		t.Errorf("expected 0 allow rules, got %d", len(eng.AllowRules))
+	}
+	if err := eng.Validate(); err != nil {
+		t.Errorf("validate failed: %v", err)
+	}
+}
+
+func TestLoadFromStoreWithRules(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer s.Close()
+
+	s.SetConfig("default_verdict", "ask")
+	s.SetConfig("timeout_sec", "60")
+	s.AddRule("allow", "api.example.com", []int{443}, store.RuleOpts{})
+	s.AddRule("deny", "evil.com", nil, store.RuleOpts{Note: "bad site"})
+	s.AddRule("ask", "*.unknown.com", []int{80, 443}, store.RuleOpts{})
+
+	eng, err := LoadFromStore(s)
+	if err != nil {
+		t.Fatalf("load from store: %v", err)
+	}
+	if eng.Default != Ask {
+		t.Errorf("expected Ask, got %v", eng.Default)
+	}
+	if eng.TimeoutSec != 60 {
+		t.Errorf("expected 60, got %d", eng.TimeoutSec)
+	}
+	if len(eng.AllowRules) != 1 {
+		t.Errorf("expected 1 allow rule, got %d", len(eng.AllowRules))
+	}
+	if len(eng.DenyRules) != 1 {
+		t.Errorf("expected 1 deny rule, got %d", len(eng.DenyRules))
+	}
+	if len(eng.AskRules) != 1 {
+		t.Errorf("expected 1 ask rule, got %d", len(eng.AskRules))
+	}
+
+	// Verify evaluation works
+	if eng.Evaluate("api.example.com", 443) != Allow {
+		t.Error("expected Allow for api.example.com:443")
+	}
+	if eng.Evaluate("evil.com", 80) != Deny {
+		t.Error("expected Deny for evil.com:80")
+	}
+	if eng.Evaluate("foo.unknown.com", 443) != Ask {
+		t.Error("expected Ask for foo.unknown.com:443")
+	}
+	if eng.Evaluate("random.com", 443) != Ask {
+		t.Error("expected Ask (default) for random.com:443")
+	}
+}
+
+func TestLoadFromStoreWithToolRules(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer s.Close()
+
+	s.AddToolRule("allow", "github__list_*", "read-only", "manual")
+	s.AddToolRule("deny", "exec__*", "block exec", "manual")
+	s.AddToolRule("ask", "filesystem__write_*", "", "manual")
+
+	eng, err := LoadFromStore(s)
+	if err != nil {
+		t.Fatalf("load from store: %v", err)
+	}
+	if len(eng.ToolAllowRules) != 1 {
+		t.Errorf("expected 1 tool allow, got %d", len(eng.ToolAllowRules))
+	}
+	if len(eng.ToolDenyRules) != 1 {
+		t.Errorf("expected 1 tool deny, got %d", len(eng.ToolDenyRules))
+	}
+	if len(eng.ToolAskRules) != 1 {
+		t.Errorf("expected 1 tool ask, got %d", len(eng.ToolAskRules))
+	}
+	if eng.ToolAllowRules[0].Tool != "github__list_*" {
+		t.Errorf("expected tool %q, got %q", "github__list_*", eng.ToolAllowRules[0].Tool)
+	}
+	if eng.ToolAllowRules[0].Verdict != "allow" {
+		t.Errorf("expected verdict %q, got %q", "allow", eng.ToolAllowRules[0].Verdict)
+	}
+}
+
+func TestLoadFromStoreWithInspectRules(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer s.Close()
+
+	s.AddInspectRule("block", `(?i)(sk-[a-zA-Z0-9]{20,})`, store.InspectRuleOpts{
+		Description: "api_key_leak",
+	})
+	s.AddInspectRule("redact", `(?i)(sk-[a-zA-Z0-9]{20,})`, store.InspectRuleOpts{
+		Description: "api_key_in_response",
+		Replacement: "[REDACTED]",
+	})
+
+	eng, err := LoadFromStore(s)
+	if err != nil {
+		t.Fatalf("load from store: %v", err)
+	}
+	if len(eng.InspectBlockRules) != 1 {
+		t.Errorf("expected 1 block rule, got %d", len(eng.InspectBlockRules))
+	}
+	if len(eng.InspectRedactRules) != 1 {
+		t.Errorf("expected 1 redact rule, got %d", len(eng.InspectRedactRules))
+	}
+	if eng.InspectBlockRules[0].Pattern != `(?i)(sk-[a-zA-Z0-9]{20,})` {
+		t.Errorf("unexpected block pattern: %q", eng.InspectBlockRules[0].Pattern)
+	}
+	if eng.InspectRedactRules[0].Replacement != "[REDACTED]" {
+		t.Errorf("unexpected redact replacement: %q", eng.InspectRedactRules[0].Replacement)
+	}
+}
+
+func TestLoadFromStoreWithTelegram(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer s.Close()
+
+	s.SetConfig("telegram_bot_token_env", "MY_BOT_TOKEN")
+	s.SetConfig("telegram_chat_id_env", "MY_CHAT_ID")
+
+	eng, err := LoadFromStore(s)
+	if err != nil {
+		t.Fatalf("load from store: %v", err)
+	}
+	if eng.Telegram.BotTokenEnv != "MY_BOT_TOKEN" {
+		t.Errorf("expected %q, got %q", "MY_BOT_TOKEN", eng.Telegram.BotTokenEnv)
+	}
+	if eng.Telegram.ChatIDEnv != "MY_CHAT_ID" {
+		t.Errorf("expected %q, got %q", "MY_CHAT_ID", eng.Telegram.ChatIDEnv)
+	}
+}
+
+func TestLoadFromStoreInvalidDefaultVerdict(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer s.Close()
+
+	s.SetConfig("default_verdict", "invalid")
+	_, err = LoadFromStore(s)
+	if err == nil {
+		t.Error("expected error for invalid default verdict")
+	}
+}
+
+func TestLoadFromStoreInvalidTimeout(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer s.Close()
+
+	s.SetConfig("timeout_sec", "not_a_number")
+	_, err = LoadFromStore(s)
+	if err == nil {
+		t.Error("expected error for invalid timeout_sec")
+	}
+}
+
+func TestLoadFromStoreRecompile(t *testing.T) {
+	// Verify that mutating the store and reloading produces an updated Engine.
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer s.Close()
+
+	s.SetConfig("default_verdict", "deny")
+	s.AddRule("allow", "api.example.com", []int{443}, store.RuleOpts{})
+
+	eng1, err := LoadFromStore(s)
+	if err != nil {
+		t.Fatalf("first load: %v", err)
+	}
+	if eng1.Evaluate("api.example.com", 443) != Allow {
+		t.Error("expected Allow before mutation")
+	}
+	if eng1.Evaluate("new.example.com", 443) != Deny {
+		t.Error("expected Deny for unknown before mutation")
+	}
+
+	// Add a new rule and recompile
+	s.AddRule("allow", "new.example.com", []int{443}, store.RuleOpts{Source: "telegram"})
+	eng2, err := LoadFromStore(s)
+	if err != nil {
+		t.Fatalf("second load: %v", err)
+	}
+	if eng2.Evaluate("new.example.com", 443) != Allow {
+		t.Error("expected Allow after mutation")
+	}
+	// Original engine should be unchanged (immutable snapshot)
+	if eng1.Evaluate("new.example.com", 443) != Deny {
+		t.Error("original engine should be unchanged after store mutation")
+	}
+}
+
+func TestLoadFromStoreValidate(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer s.Close()
+
+	eng, err := LoadFromStore(s)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if err := eng.Validate(); err != nil {
+		t.Errorf("validate failed on valid engine: %v", err)
+	}
+
+	// Nil engine should fail validation
+	var nilEng *Engine
+	if err := nilEng.Validate(); err == nil {
+		t.Error("expected error for nil engine")
 	}
 }
