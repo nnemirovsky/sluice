@@ -190,11 +190,11 @@ CLI subcommands (cred, audit, mcp) have no tests. `cert_test.go` exists but cove
 - Create: `cmd/sluice/audit_test.go`
 - Create: `cmd/sluice/mcp_test.go`
 
-- [ ] Write tests for `handleCredCommand` (add, list, remove subcommands with mock vault)
-- [ ] Write tests for `handleAuditCommand` (verify subcommand with temp audit file)
-- [ ] Write tests for `handleMCPCommand` (config parsing, upstream validation)
-- [ ] Write tests for error cases (missing args, invalid paths, permission denied)
-- [ ] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
+- [x] Write tests for `handleCredCommand` (add, list, remove subcommands with mock vault)
+- [x] Write tests for `handleAuditCommand` (verify subcommand with temp audit file)
+- [x] Write tests for `handleMCPCommand` (config parsing, upstream validation)
+- [x] Write tests for error cases (missing args, invalid paths, permission denied)
+- [x] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
 
 ### Task 8: Add health check endpoint and Docker hardening
 
