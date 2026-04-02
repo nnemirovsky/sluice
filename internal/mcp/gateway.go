@@ -52,6 +52,9 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 	if gw.timeoutSec == 0 {
 		gw.timeoutSec = 120
 	}
+	if gw.policy == nil {
+		gw.policy = NewToolPolicy(nil, policy.Allow)
+	}
 
 	for _, ucfg := range cfg.Upstreams {
 		if _, exists := gw.upstreams[ucfg.Name]; exists {
@@ -215,11 +218,13 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 
 func (gw *Gateway) logAudit(tool, action string, verdict policy.Verdict) {
 	if gw.audit != nil {
-		gw.audit.Log(audit.Event{
+		if err := gw.audit.Log(audit.Event{
 			Tool:    tool,
 			Action:  action,
 			Verdict: verdict.String(),
-		})
+		}); err != nil {
+			log.Printf("[MCP AUDIT ERROR] %v", err)
+		}
 	}
 }
 

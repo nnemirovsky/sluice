@@ -197,6 +197,45 @@ func TestNewContentInspectorInvalidRedactPattern(t *testing.T) {
 	}
 }
 
+func TestInspectBlocksUnicodeEscapedAPIKey(t *testing.T) {
+	ci, err := NewContentInspector(
+		[]policy.InspectBlockRule{
+			{Pattern: `(?i)(sk-[a-zA-Z0-9]{20,})`, Name: "api_key_leak"},
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Unicode escapes in JSON decode to the same string, so the pattern
+	// must still match after JSON parsing.
+	args := json.RawMessage(`{"key": "\u0073\u006b-abcdefghijklmnopqrstuvwxyz1234"}`)
+	result := ci.InspectArguments(args)
+	if !result.Blocked {
+		t.Error("expected unicode-escaped API key to be blocked")
+	}
+}
+
+func TestInspectBlocksInvalidJSON(t *testing.T) {
+	ci, err := NewContentInspector(
+		[]policy.InspectBlockRule{
+			{Pattern: `(?i)(sk-[a-zA-Z0-9]{20,})`, Name: "api_key_leak"},
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Invalid JSON should be blocked (fail-closed) to prevent bypass.
+	args := json.RawMessage(`{invalid json`)
+	result := ci.InspectArguments(args)
+	if !result.Blocked {
+		t.Error("expected invalid JSON arguments to be blocked")
+	}
+}
+
 func TestNilArgsInspection(t *testing.T) {
 	ci, err := NewContentInspector(
 		[]policy.InspectBlockRule{

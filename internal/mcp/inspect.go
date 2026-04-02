@@ -63,16 +63,19 @@ func NewContentInspector(blockRules []policy.InspectBlockRule, redactRules []pol
 // extractStrings parses JSON and collects all string values (including map
 // keys) so that inspection patterns match decoded content rather than raw
 // JSON syntax. This prevents bypass via JSON unicode escapes.
-func extractStrings(data json.RawMessage) []string {
+func extractStrings(data json.RawMessage) ([]string, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
 	var val interface{}
 	if err := json.Unmarshal(data, &val); err != nil {
-		return []string{string(data)}
+		return nil, fmt.Errorf("invalid JSON arguments: %w", err)
 	}
 	var strs []string
 	walkJSON(val, func(s string) {
 		strs = append(strs, s)
 	})
-	return strs
+	return strs, nil
 }
 
 func walkJSON(v interface{}, fn func(string)) {
@@ -96,7 +99,14 @@ func walkJSON(v interface{}, fn func(string)) {
 // Arguments are parsed as JSON so that unicode escapes are decoded
 // before pattern matching, preventing bypass via escaped characters.
 func (ci *ContentInspector) InspectArguments(args json.RawMessage) InspectionResult {
-	values := extractStrings(args)
+	values, err := extractStrings(args)
+	if err != nil {
+		return InspectionResult{
+			Blocked:  true,
+			Reason:   fmt.Sprintf("argument inspection failed: %v", err),
+			Findings: []Finding{{RuleName: "json_parse", Match: "", Location: "args"}},
+		}
+	}
 	var findings []Finding
 	for _, r := range ci.blockRules {
 		for _, v := range values {

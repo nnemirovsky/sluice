@@ -32,6 +32,7 @@ type Upstream struct {
 	scanErr atomic.Value   // stores the scanner error, if any
 	waitCh  chan error      // receives cmd.Wait() result exactly once
 	done    chan struct{}   // closed by Stop to unblock the scanner goroutine
+	stopOnce sync.Once
 	mu      sync.Mutex
 	tools   []Tool
 	nextID  atomic.Int64
@@ -267,13 +268,17 @@ func (u *Upstream) CallTool(toolName string, arguments json.RawMessage) (*JSONRP
 // scanner goroutine calls cmd.Wait() exactly once and sends the result
 // to waitCh.
 func (u *Upstream) Stop() error {
-	u.stdin.Close()
-	close(u.done) // unblock the scanner goroutine if the channel is full
-	select {
-	case err := <-u.waitCh:
-		return err
-	case <-time.After(5 * time.Second):
-		u.cmd.Process.Kill()
-		return <-u.waitCh
-	}
+	var result error
+	u.stopOnce.Do(func() {
+		u.stdin.Close()
+		close(u.done) // unblock the scanner goroutine if the channel is full
+		select {
+		case err := <-u.waitCh:
+			result = err
+		case <-time.After(5 * time.Second):
+			u.cmd.Process.Kill()
+			result = <-u.waitCh
+		}
+	})
+	return result
 }
