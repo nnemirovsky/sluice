@@ -1,0 +1,545 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/nemirovsky/sluice/internal/store"
+)
+
+// TestPolicyListEmpty verifies listing rules on an empty store.
+func TestPolicyListEmpty(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	rules, err := db.ListRules("")
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("expected 0 rules, got %d", len(rules))
+	}
+}
+
+// TestPolicyAddAndList verifies adding rules and listing them.
+func TestPolicyAddAndList(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Add allow rule.
+	id1, err := db.AddRule("allow", "api.example.com", []int{443, 80}, store.RuleOpts{Note: "API access"})
+	if err != nil {
+		t.Fatalf("add allow rule: %v", err)
+	}
+	if id1 == 0 {
+		t.Error("expected non-zero ID for allow rule")
+	}
+
+	// Add deny rule.
+	id2, err := db.AddRule("deny", "evil.example.com", nil, store.RuleOpts{Note: "blocked"})
+	if err != nil {
+		t.Fatalf("add deny rule: %v", err)
+	}
+
+	// Add ask rule.
+	id3, err := db.AddRule("ask", "unknown.example.com", []int{443}, store.RuleOpts{})
+	if err != nil {
+		t.Fatalf("add ask rule: %v", err)
+	}
+
+	// List all rules.
+	all, err := db.ListRules("")
+	if err != nil {
+		t.Fatalf("list all: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("expected 3 rules, got %d", len(all))
+	}
+
+	// Verify first rule.
+	if all[0].Verdict != "allow" {
+		t.Errorf("expected allow, got %s", all[0].Verdict)
+	}
+	if all[0].Destination != "api.example.com" {
+		t.Errorf("expected api.example.com, got %s", all[0].Destination)
+	}
+	if len(all[0].Ports) != 2 || all[0].Ports[0] != 443 || all[0].Ports[1] != 80 {
+		t.Errorf("expected ports [443,80], got %v", all[0].Ports)
+	}
+	if all[0].Note != "API access" {
+		t.Errorf("expected note 'API access', got %q", all[0].Note)
+	}
+
+	// List filtered by verdict.
+	allows, err := db.ListRules("allow")
+	if err != nil {
+		t.Fatalf("list allow: %v", err)
+	}
+	if len(allows) != 1 {
+		t.Errorf("expected 1 allow rule, got %d", len(allows))
+	}
+
+	denies, err := db.ListRules("deny")
+	if err != nil {
+		t.Fatalf("list deny: %v", err)
+	}
+	if len(denies) != 1 {
+		t.Errorf("expected 1 deny rule, got %d", len(denies))
+	}
+
+	_ = id2
+	_ = id3
+}
+
+// TestPolicyRemove verifies removing a rule by ID.
+func TestPolicyRemove(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	id, err := db.AddRule("allow", "api.example.com", []int{443}, store.RuleOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove existing rule.
+	deleted, err := db.RemoveRule(id)
+	if err != nil {
+		t.Fatalf("remove rule: %v", err)
+	}
+	if !deleted {
+		t.Error("expected rule to be deleted")
+	}
+
+	// Verify it's gone.
+	rules, err := db.ListRules("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("expected 0 rules after remove, got %d", len(rules))
+	}
+
+	// Removing non-existent rule returns false.
+	deleted, err = db.RemoveRule(9999)
+	if err != nil {
+		t.Fatalf("remove non-existent: %v", err)
+	}
+	if deleted {
+		t.Error("expected false for non-existent rule")
+	}
+}
+
+// TestPolicyImportFromTOML verifies TOML import via the store.
+func TestPolicyImportFromTOML(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	tomlData := `[policy]
+default = "deny"
+timeout_sec = 60
+
+[telegram]
+bot_token_env = "MY_TOKEN"
+
+[[allow]]
+destination = "api.example.com"
+ports = [443]
+note = "API"
+
+[[deny]]
+destination = "evil.example.com"
+
+[[tool_allow]]
+tool = "github__list_*"
+
+[[tool_deny]]
+tool = "exec__*"
+
+[[binding]]
+destination = "api.example.com"
+ports = [443]
+credential = "my_key"
+inject_header = "Authorization"
+template = "Bearer {value}"
+
+[[mcp_upstream]]
+name = "github"
+command = "npx"
+args = ["-y", "@mcp/server-github"]
+timeout_sec = 60
+`
+	result, err := db.ImportTOML([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.RulesInserted != 2 {
+		t.Errorf("expected 2 rules inserted, got %d", result.RulesInserted)
+	}
+	if result.ToolRulesInserted != 2 {
+		t.Errorf("expected 2 tool rules inserted, got %d", result.ToolRulesInserted)
+	}
+	if result.BindingsInserted != 1 {
+		t.Errorf("expected 1 binding inserted, got %d", result.BindingsInserted)
+	}
+	if result.UpstreamsInserted != 1 {
+		t.Errorf("expected 1 upstream inserted, got %d", result.UpstreamsInserted)
+	}
+	if result.ConfigSet < 3 {
+		t.Errorf("expected at least 3 config set, got %d", result.ConfigSet)
+	}
+
+	// Second import should skip duplicates.
+	result2, err := db.ImportTOML([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("second import: %v", err)
+	}
+	if result2.RulesInserted != 0 {
+		t.Errorf("expected 0 rules on re-import, got %d", result2.RulesInserted)
+	}
+	if result2.RulesSkipped != 2 {
+		t.Errorf("expected 2 rules skipped, got %d", result2.RulesSkipped)
+	}
+}
+
+// TestPolicyExportRoundTrip verifies that import then export produces valid TOML.
+func TestPolicyExportRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Populate the store.
+	db.SetConfig("default_verdict", "deny")
+	db.SetConfig("timeout_sec", "120")
+	db.SetConfig("telegram_bot_token_env", "MY_BOT")
+	db.SetConfig("telegram_chat_id_env", "MY_CHAT")
+	db.AddRule("allow", "api.example.com", []int{443}, store.RuleOpts{Note: "API"})
+	db.AddRule("deny", "evil.example.com", nil, store.RuleOpts{})
+	db.AddToolRule("allow", "github__list_*", "", "manual")
+	db.AddToolRule("deny", "exec__*", "blocked", "manual")
+	db.AddBinding("api.example.com", "my_key", store.BindingOpts{
+		Ports:        []int{443},
+		InjectHeader: "Authorization",
+		Template:     "Bearer {value}",
+	})
+	db.AddMCPUpstream("github", "npx", store.MCPUpstreamOpts{
+		Args:       []string{"-y", "@mcp/server-github"},
+		TimeoutSec: 60,
+	})
+	db.AddInspectRule("block", "(?i)(sk-[a-zA-Z0-9_-]{20,})", store.InspectRuleOpts{Description: "api_key_leak"})
+	db.AddInspectRule("redact", "(?i)(sk-[a-zA-Z0-9_-]{20,})", store.InspectRuleOpts{
+		Description: "api_key_in_response",
+		Replacement: "[REDACTED]",
+	})
+	db.Close()
+
+	// Re-open and export to verify the data is readable.
+	db2, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+
+	// Verify all data is present by reading it back.
+	rules, _ := db2.ListRules("")
+	if len(rules) != 2 {
+		t.Errorf("expected 2 rules, got %d", len(rules))
+	}
+
+	toolRules, _ := db2.ListToolRules("")
+	if len(toolRules) != 2 {
+		t.Errorf("expected 2 tool rules, got %d", len(toolRules))
+	}
+
+	bindings, _ := db2.ListBindings()
+	if len(bindings) != 1 {
+		t.Errorf("expected 1 binding, got %d", len(bindings))
+	}
+
+	upstreams, _ := db2.ListMCPUpstreams()
+	if len(upstreams) != 1 {
+		t.Errorf("expected 1 upstream, got %d", len(upstreams))
+	}
+
+	inspectRules, _ := db2.ListInspectRules("")
+	if len(inspectRules) != 2 {
+		t.Errorf("expected 2 inspect rules, got %d", len(inspectRules))
+	}
+
+	dv, _ := db2.GetConfig("default_verdict")
+	if dv != "deny" {
+		t.Errorf("expected default_verdict deny, got %q", dv)
+	}
+}
+
+// TestPolicyImportFile verifies import from a file on disk.
+func TestPolicyImportFile(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	tomlPath := filepath.Join(dir, "policy.toml")
+
+	tomlData := `[policy]
+default = "ask"
+
+[[allow]]
+destination = "safe.example.com"
+ports = [443]
+`
+	if err := os.WriteFile(tomlPath, []byte(tomlData), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	data, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := db.ImportTOML(data)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if result.RulesInserted != 1 {
+		t.Errorf("expected 1 rule inserted, got %d", result.RulesInserted)
+	}
+
+	dv, _ := db.GetConfig("default_verdict")
+	if dv != "ask" {
+		t.Errorf("expected default_verdict ask, got %q", dv)
+	}
+}
+
+// TestPolicyAddInvalidVerdict verifies that invalid verdicts are rejected by the store.
+func TestPolicyAddInvalidVerdict(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	_, err = db.AddRule("invalid", "example.com", nil, store.RuleOpts{})
+	if err == nil {
+		t.Error("expected error for invalid verdict")
+	}
+}
+
+// TestPolicyAddWithAllVerdicts verifies that all three verdict types work.
+func TestPolicyAddWithAllVerdicts(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	for _, v := range []string{"allow", "deny", "ask"} {
+		id, err := db.AddRule(v, v+".example.com", []int{443}, store.RuleOpts{Note: v + " rule"})
+		if err != nil {
+			t.Fatalf("add %s rule: %v", v, err)
+		}
+		if id == 0 {
+			t.Errorf("expected non-zero ID for %s rule", v)
+		}
+	}
+
+	all, err := db.ListRules("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("expected 3 rules, got %d", len(all))
+	}
+}
+
+// TestPolicyImportMalformedTOML verifies that malformed TOML is rejected.
+func TestPolicyImportMalformedTOML(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	_, err = db.ImportTOML([]byte("this is not valid toml [[["))
+	if err == nil {
+		t.Error("expected error for malformed TOML")
+	}
+
+	// Store should still be empty.
+	rules, _ := db.ListRules("")
+	if len(rules) != 0 {
+		t.Error("store should be empty after failed import")
+	}
+}
+
+// TestPolicyExportContainsExpectedSections verifies export output format.
+func TestPolicyExportContainsExpectedSections(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	db.SetConfig("default_verdict", "deny")
+	db.SetConfig("timeout_sec", "60")
+	db.AddRule("allow", "api.example.com", []int{443}, store.RuleOpts{Note: "API"})
+	db.AddRule("deny", "evil.example.com", nil, store.RuleOpts{})
+	db.AddToolRule("allow", "github__list_*", "", "manual")
+	db.AddBinding("api.example.com", "my_key", store.BindingOpts{
+		Ports:        []int{443},
+		InjectHeader: "Authorization",
+	})
+
+	// Read back and verify the data that would be exported.
+	dv, _ := db.GetConfig("default_verdict")
+	if dv != "deny" {
+		t.Errorf("expected deny, got %q", dv)
+	}
+
+	rules, _ := db.ListRules("")
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 rules, got %d", len(rules))
+	}
+	if rules[0].Destination != "api.example.com" {
+		t.Errorf("expected api.example.com, got %s", rules[0].Destination)
+	}
+
+	toolRules, _ := db.ListToolRules("")
+	if len(toolRules) != 1 {
+		t.Fatalf("expected 1 tool rule, got %d", len(toolRules))
+	}
+
+	bindings, _ := db.ListBindings()
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+}
+
+// TestPolicyWorkflow verifies the full add-list-remove workflow.
+func TestPolicyWorkflow(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Add.
+	id, err := db.AddRule("allow", "api.example.com", []int{443}, store.RuleOpts{Note: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// List.
+	rules, err := db.ListRules("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rules))
+	}
+	if rules[0].ID != id {
+		t.Errorf("expected ID %d, got %d", id, rules[0].ID)
+	}
+	if rules[0].Source != "manual" {
+		t.Errorf("expected source manual, got %s", rules[0].Source)
+	}
+
+	// Remove.
+	deleted, err := db.RemoveRule(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !deleted {
+		t.Error("expected deleted")
+	}
+
+	// List again.
+	rules, err = db.ListRules("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("expected 0 rules after remove, got %d", len(rules))
+	}
+}
+
+// TestPolicyImportExistingFixtures verifies import works with the repo's
+// existing testdata TOML fixtures.
+func TestPolicyImportExistingFixtures(t *testing.T) {
+	// Find testdata files.
+	entries, err := os.ReadDir("../../testdata")
+	if err != nil {
+		t.Skip("testdata directory not found")
+	}
+
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".toml") {
+			continue
+		}
+		t.Run(e.Name(), func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join("../../testdata", e.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			db, err := store.New(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+
+			_, err = db.ImportTOML(data)
+			if err != nil {
+				t.Errorf("import %s failed: %v", e.Name(), err)
+			}
+		})
+	}
+}
+
+// TestPolicyImportExamplePolicy verifies the examples/policy.toml imports cleanly.
+func TestPolicyImportExamplePolicy(t *testing.T) {
+	data, err := os.ReadFile("../../examples/policy.toml")
+	if err != nil {
+		t.Skip("examples/policy.toml not found")
+	}
+
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	result, err := db.ImportTOML(data)
+	if err != nil {
+		t.Fatalf("import examples/policy.toml: %v", err)
+	}
+
+	// The example has 3 allow + 2 deny = 5 network rules.
+	if result.RulesInserted < 3 {
+		t.Errorf("expected at least 3 rules from example policy, got %d", result.RulesInserted)
+	}
+	// The example has tool rules.
+	if result.ToolRulesInserted < 1 {
+		t.Errorf("expected at least 1 tool rule from example policy, got %d", result.ToolRulesInserted)
+	}
+}

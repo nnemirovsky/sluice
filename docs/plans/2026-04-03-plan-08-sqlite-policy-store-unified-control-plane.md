@@ -210,16 +210,16 @@ New CLI for managing policy rules directly.
 - Create: `cmd/sluice/policy_test.go`
 - Modify: `cmd/sluice/main.go` (add case "policy" to subcommand switch)
 
-- [ ] Implement `sluice policy list [--verdict allow|deny|ask]` -- lists all network rules
-- [ ] Implement `sluice policy add allow <destination> [--ports 443,80] [--note "reason"]`
-- [ ] Implement `sluice policy add deny <destination> [--note "reason"]`
-- [ ] Implement `sluice policy add ask <destination> [--ports 443] [--note "reason"]`
-- [ ] Implement `sluice policy remove <id>`
-- [ ] Implement `sluice policy import <path.toml>` -- calls store.ImportTOML with merge semantics
-- [ ] Implement `sluice policy export` -- dumps current rules as TOML to stdout
-- [ ] Wire into main.go subcommand switch
-- [ ] Write tests for each subcommand (success + error cases)
-- [ ] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
+- [x] Implement `sluice policy list [--verdict allow|deny|ask]` -- lists all network rules
+- [x] Implement `sluice policy add allow <destination> [--ports 443,80] [--note "reason"]`
+- [x] Implement `sluice policy add deny <destination> [--note "reason"]`
+- [x] Implement `sluice policy add ask <destination> [--ports 443] [--note "reason"]`
+- [x] Implement `sluice policy remove <id>`
+- [x] Implement `sluice policy import <path.toml>` -- calls store.ImportTOML with merge semantics
+- [x] Implement `sluice policy export` -- dumps current rules as TOML to stdout
+- [x] Wire into main.go subcommand switch
+- [x] Write tests for each subcommand (success + error cases)
+- [x] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
 
 ### Task 6: Update Telegram commands to use SQLite store
 

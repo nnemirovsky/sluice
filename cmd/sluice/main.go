@@ -39,6 +39,9 @@ func main() {
 				log.Fatalf("mcp: %v", err)
 			}
 			return
+		case "policy":
+			handlePolicyCommand(os.Args[2:])
+			return
 		case "audit":
 			handleAuditCommand(os.Args[2:])
 			return
