@@ -674,7 +674,7 @@ git commit -m "feat: MCP gateway core with tool policy and approval"
 **Files:**
 - Create: `internal/mcp/transport.go`
 
-- [ ] **Step 1: Implement stdio server**
+- [x] **Step 1: Implement stdio server**
 
 ```go
 // internal/mcp/transport.go
@@ -752,7 +752,7 @@ func (gw *Gateway) handleRequest(req JSONRPCRequest) *JSONRPCResponse {
 }
 ```
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add internal/mcp/transport.go
