@@ -8,6 +8,17 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 )
 
+// validateCredentialName rejects names that could cause path traversal.
+func validateCredentialName(name string) error {
+	if name == "" {
+		return fmt.Errorf("credential name must not be empty")
+	}
+	if strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") || name == "." {
+		return fmt.Errorf("invalid credential name %q: must not contain path separators or '..'", name)
+	}
+	return nil
+}
+
 // HashiCorpConfig holds configuration for the HashiCorp Vault provider.
 type HashiCorpConfig struct {
 	// Addr is the Vault server address (e.g. "https://vault.example.com:8200").
@@ -143,6 +154,9 @@ func NewHashiCorpProvider(cfg HashiCorpConfig) (*HashiCorpProvider, error) {
 // The secret must contain a "value" key. The returned SecureBytes must be
 // Released after use.
 func (p *HashiCorpProvider) Get(name string) (SecureBytes, error) {
+	if err := validateCredentialName(name); err != nil {
+		return SecureBytes{}, err
+	}
 	path := p.prefix + name
 	secret, err := p.client.Logical().Read(p.mount + "/data/" + path)
 	if err != nil {

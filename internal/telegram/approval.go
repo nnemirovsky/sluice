@@ -155,6 +155,18 @@ func (b *ApprovalBroker) Request(dest string, port int, timeout time.Duration) (
 			return ResponseDeny, ErrDestinationRateLimited
 		}
 		b.destTimestamps[dest] = append(timestamps, now)
+		// Lazy cleanup: prune stale destination entries to prevent
+		// unbounded map growth from destinations that stop sending requests.
+		if len(b.destTimestamps) > 100 {
+			for k, ts := range b.destTimestamps {
+				if k == dest {
+					continue
+				}
+				if len(ts) == 0 || ts[len(ts)-1].Before(cutoff) {
+					delete(b.destTimestamps, k)
+				}
+			}
+		}
 	}
 	b.waiters[id] = ch
 	b.mu.Unlock()
@@ -191,11 +203,12 @@ func (b *ApprovalBroker) Request(dest string, port int, timeout time.Duration) (
 		_, stillPending := b.waiters[id]
 		if stillPending {
 			delete(b.waiters, id)
-			b.timedOut[id] = time.Now()
+			b.timedOut[id] = b.now()
 			// Garbage-collect stale timedOut entries that were never
 			// consumed by the bot (operator never tapped the button).
+			now := b.now()
 			for k, t := range b.timedOut {
-				if time.Since(t) > timedOutTTL {
+				if now.Sub(t) > timedOutTTL {
 					delete(b.timedOut, k)
 				}
 			}

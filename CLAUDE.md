@@ -40,7 +40,7 @@ go test ./... -v -timeout 30s
 - `internal/vault/provider.go` - Pluggable credential provider interface, VaultConfig, ChainProvider
 - `internal/vault/provider_age.go` - Age file backend (Store satisfies Provider)
 - `internal/vault/provider_env.go` - Environment variable credential provider
-- `internal/vault/provider_hashicorp.go` - HashiCorp Vault provider stub (not yet implemented)
+- `internal/vault/provider_hashicorp.go` - HashiCorp Vault provider with KV v2 support and AppRole auth
 - `internal/mcp/gateway.go` - MCP gateway core with tool policy enforcement and upstream forwarding
 - `internal/mcp/inspect.go` - Content inspection: argument blocking and response redaction using regex rules
 - `internal/mcp/policy.go` - Tool-level policy evaluation using glob patterns (deny/allow/ask priority)
@@ -278,7 +278,7 @@ Telegram commands: `CommandHandler` holds an `atomic.Pointer[policy.Engine]` for
 
 Audit logger is optional. Pass nil in `Config.Audit` and the proxy handles it gracefully. Each JSON line includes a `prev_hash` field containing the blake3 hash of the previous line's raw JSON bytes. The first entry uses blake3("") as the genesis hash. On startup, `NewFileLogger` reads the last line from the existing file (seeking backwards from EOF) to recover the hash chain across restarts. `VerifyChain` walks the log and reports any broken links. The `sluice audit verify` CLI command wraps this for tamper detection.
 
-Credential vault: `Store` manages age-encrypted files in `~/.sluice/credentials/` with an auto-generated X25519 identity. `SecureBytes` wraps decrypted values and zeroes memory on `Release()` (best-effort in Go due to GC and string copies). `Provider` interface abstracts credential sources (age files, env vars, HashiCorp Vault). `NewProviderFromConfig` reads `[vault]` from TOML config. `HashiCorpProvider` connects to HashiCorp Vault's KV v2 secrets engine, supporting both token and AppRole authentication. Config fields (`addr`, `token`, `mount`, `path_prefix`, `role_id`, `secret_id`) can be set directly or via env var names (`addr_env`, `token_env`, `role_id_env`, `secret_id_env`).
+Credential vault: `Store` manages age-encrypted files in `~/.sluice/credentials/` with an auto-generated X25519 identity. `SecureBytes` wraps decrypted values and zeroes memory on `Release()` (best-effort in Go due to GC and string copies). `Provider` interface abstracts credential sources (age files, env vars, HashiCorp Vault). `NewProviderFromConfig` reads `[vault]` from TOML config. `HashiCorpProvider` connects to HashiCorp Vault's KV v2 secrets engine, supporting both token and AppRole authentication. Config fields (`addr`, `token`, `mount`, `prefix`, `role_id`, `secret_id`) can be set directly. `role_id` and `secret_id` support env var indirection via `role_id_env` and `secret_id_env`. For `addr` and `token`, the Vault SDK reads `VAULT_ADDR` and `VAULT_TOKEN` automatically when not set.
 
 Binding resolution: `BindingResolver` compiles destination glob patterns (reusing `policy.CompileGlob`) and resolves `(host, port)` to a `Binding`. Bindings specify the credential name, injection header, template (`Bearer {value}`), and protocol override.
 
@@ -507,52 +507,12 @@ zeroized memory.
 
 ## Docker Compose
 
-```yaml
-services:
-  sluice:
-    build: ./sluice
-    environment:
-      - SLUICE_TELEGRAM_BOT_TOKEN=${SLUICE_TELEGRAM_BOT_TOKEN}
-      - SLUICE_TELEGRAM_CHAT_ID=${SLUICE_TELEGRAM_CHAT_ID}
-      - OPENCLAW_CONTAINER_NAME=openclaw
-    volumes:
-      - ./policy.toml:/etc/sluice/policy.toml
-      - sluice-vault:/home/sluice/.sluice
-      - sluice-audit:/var/log/sluice
-      - /var/run/docker.sock:/var/run/docker.sock  # manage OpenClaw container
-    networks: [internal, external]
-    # Exposes:
-    #   - :1080  SOCKS5 proxy (internal only)
-    #   - :3000  MCP gateway HTTP (internal only)
-
-  tun2proxy:
-    image: ghcr.io/tun2proxy/tun2proxy-ubuntu:latest
-    cap_add: [NET_ADMIN]
-    volumes: ["/dev/net/tun:/dev/net/tun"]
-    command: --proxy socks5://sluice:1080
-    networks: [internal]
-    depends_on: [sluice]
-
-  openclaw:
-    container_name: openclaw  # fixed name so Sluice can manage it
-    image: openclaw/openclaw:latest
-    network_mode: "service:tun2proxy"
-    environment:
-      # Phantom tokens injected dynamically by Sluice via Docker socket.
-      # On first run these are empty. Use Sluice Telegram bot to add creds:
-      #   /cred add anthropic_api_key
-      # Sluice will restart this container with phantom env vars.
-      - OPENCLAW_TELEGRAM_BOT_TOKEN=${OPENCLAW_TELEGRAM_BOT_TOKEN}
-    volumes:
-      - openclaw-data:/root/.openclaw
-      - sluice-ca:/usr/local/share/ca-certificates/sluice:ro  # trust Sluice MITM CA
-    depends_on: [tun2proxy]
-
-networks:
-  internal:
-    internal: true   # No direct internet access
-  external: {}
-```
+See `docker-compose.yml` in the repo root. Key features:
+- Health checks: sluice exposes `/healthz` on `:3000`, tun2proxy checks TUN device
+- Startup ordering via `condition: service_healthy`
+- `restart: unless-stopped` on all services
+- CA cert trust: openclaw mounts sluice-ca volume and sets `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`
+- Phantom tokens via `env_file: .env.phantom` (generated by `scripts/gen-phantom-env.sh`)
 
 ## Libraries
 

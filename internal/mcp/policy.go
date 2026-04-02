@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/nemirovsky/sluice/internal/policy"
@@ -49,6 +50,7 @@ func NewToolPolicy(rules []policy.ToolRule, fallback policy.Verdict) (*ToolPolic
 func (tp *ToolPolicy) AddDynamicAllow(toolName string) {
 	g, err := policy.CompileGlob(toolName)
 	if err != nil {
+		log.Printf("[MCP POLICY] failed to add dynamic allow for %q: %v", toolName, err)
 		return
 	}
 	tp.mu.Lock()

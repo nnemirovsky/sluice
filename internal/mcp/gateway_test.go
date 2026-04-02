@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -774,24 +775,58 @@ func TestGatewayAuditLogging(t *testing.T) {
 	})
 
 	// Make a denied call to generate an audit event.
-	_, _ = gw.HandleToolCall(CallToolParams{
+	denyResult, denyErr := gw.HandleToolCall(CallToolParams{
 		Name:      "test__greet",
 		Arguments: json.RawMessage(`{}`),
 	})
+	if denyErr != nil {
+		t.Fatalf("denied tool call returned error: %v", denyErr)
+	}
+	if !denyResult.IsError {
+		t.Error("expected denied tool call to set IsError")
+	}
 
 	// Make an allowed call too.
-	_, _ = gw.HandleToolCall(CallToolParams{
+	allowResult, allowErr := gw.HandleToolCall(CallToolParams{
 		Name:      "test__add",
 		Arguments: json.RawMessage(`{}`),
 	})
+	if allowErr != nil {
+		t.Fatalf("allowed tool call returned error: %v", allowErr)
+	}
+	if allowResult.IsError {
+		t.Error("expected allowed tool call to succeed")
+	}
 
-	// Read the audit log and verify events were written.
+	// Read the audit log and verify events were written with correct verdicts.
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read audit log: %v", err)
 	}
 	if len(data) == 0 {
-		t.Error("expected audit log entries, got empty file")
+		t.Fatal("expected audit log entries, got empty file")
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected at least 2 audit log entries, got %d", len(lines))
+	}
+
+	// Verify the audit entries contain tool names and verdicts.
+	var foundDeny, foundAllow bool
+	for _, line := range lines {
+		if strings.Contains(line, "test__greet") && strings.Contains(line, "deny") {
+			foundDeny = true
+		}
+		if strings.Contains(line, "test__add") && strings.Contains(line, "allow") {
+			foundAllow = true
+		}
+	}
+	if !foundDeny {
+		t.Error("audit log missing deny entry for test__greet")
+	}
+	if !foundAllow {
+		t.Error("audit log missing allow entry for test__add")
 	}
 }
 

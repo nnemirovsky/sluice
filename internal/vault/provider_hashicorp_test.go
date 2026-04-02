@@ -508,3 +508,26 @@ func TestHashiCorpProviderInterfaceCompliance(t *testing.T) {
 		t.Errorf("via Provider interface: got %q, want \"val\"", sb.String())
 	}
 }
+
+func TestHashiCorpProviderPathTraversal(t *testing.T) {
+	secrets := map[string]map[string]string{
+		"test": {"value": "val"},
+	}
+	srv := newMockVaultServer(t, secrets, nil, "")
+	defer srv.Close()
+
+	p, err := NewHashiCorpProvider(HashiCorpConfig{
+		Addr:  srv.URL,
+		Token: "t",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"../../etc/passwd", "../secret", "foo/bar", "foo\\bar", "..", "."} {
+		_, err := p.Get(name)
+		if err == nil {
+			t.Errorf("Get(%q) should have returned an error for path traversal", name)
+		}
+	}
+}
