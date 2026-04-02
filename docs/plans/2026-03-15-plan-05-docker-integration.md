@@ -79,7 +79,7 @@ git commit -m "feat: multi-stage Dockerfile"
 - Create: `docker-compose.yml`
 - Create: `examples/policy.toml`
 
-- [ ] **Step 1: Create example policy**
+- [x] **Step 1: Create example policy**
 
 ```toml
 # examples/policy.toml
@@ -131,7 +131,7 @@ tool = "filesystem__write_*"
 tool = "exec__*"
 ```
 
-- [ ] **Step 2: Create docker-compose.yml**
+- [x] **Step 2: Create docker-compose.yml**
 
 ```yaml
 # docker-compose.yml
@@ -176,7 +176,7 @@ volumes:
   openclaw-data:
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docker-compose.yml examples/

@@ -12,3 +12,6 @@
 
 # Binary
 /sluice
+
+# Generated phantom token env (created by scripts/gen-phantom-env.sh)
+.env.phantom
