@@ -554,7 +554,7 @@ git commit -m "feat: policy evaluation with glob matching"
 
 ## Chunk 2: SOCKS5 Proxy Server + Audit Logger
 
-### Task 5: Audit logger (JSON lines)
+### Task 5: Audit logger (JSON lines) [upgraded by Plan 6: blake3 hash chains]
 
 **Files:**
 - Create: `internal/audit/logger.go`

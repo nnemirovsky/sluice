@@ -34,11 +34,13 @@ go test ./... -v -timeout 30s
 - `internal/mcp/transport.go` - Stdio transport for MCP gateway (JSON-RPC over stdin/stdout)
 - `internal/mcp/types.go` - JSON-RPC 2.0 and MCP protocol type definitions
 - `internal/mcp/upstream.go` - Upstream MCP server process management (spawn, handshake, tool discovery)
-- `internal/audit/logger.go` - Thread-safe append-only JSON lines audit logger
+- `internal/audit/logger.go` - Thread-safe append-only JSON lines audit logger with blake3 hash chaining
+- `internal/audit/verify.go` - Hash chain verification (walks log file, reports broken links)
 - `internal/telegram/approval.go` - Approval broker with channel-based request/response flow
 - `internal/telegram/bot.go` - Telegram bot lifecycle, inline keyboard approval messages
 - `internal/telegram/commands.go` - Telegram admin commands (/policy, /cred, /status, /audit, /help)
 - `internal/docker/manager.go` - Docker container manager for credential rotation (restart with updated phantom env)
+- `cmd/sluice/audit.go` - CLI subcommand handler for audit log verification (`audit verify`)
 - `cmd/sluice/cert.go` - CLI subcommand handler for CA certificate generation (`cert generate`)
 - `Dockerfile` - Multi-stage build for Sluice container
 - `docker-compose.yml` - Three-container setup (sluice + tun2proxy + openclaw)
@@ -58,7 +60,7 @@ Telegram approval: `ApprovalBroker` bridges the proxy and Telegram bot via chann
 
 Telegram commands: `CommandHandler` holds an `atomic.Pointer[policy.Engine]` for lock-free reads and is updated via `UpdateEngine()` on SIGHUP. Policy mutations (`/policy allow`, `/policy deny`, `/policy remove`) use `Engine.AddAllowRule()`, `AddDenyRule()`, and `RemoveRule()` which acquire write locks internally. Mutations are in-memory only and not persisted to disk.
 
-Audit logger is optional. Pass nil in `Config.Audit` and the proxy handles it gracefully.
+Audit logger is optional. Pass nil in `Config.Audit` and the proxy handles it gracefully. Each JSON line includes a `prev_hash` field containing the blake3 hash of the previous line's raw JSON bytes. The first entry uses blake3("") as the genesis hash. On startup, `NewFileLogger` reads the last line from the existing file (seeking backwards from EOF) to recover the hash chain across restarts. `VerifyChain` walks the log and reports any broken links. The `sluice audit verify` CLI command wraps this for tamper detection.
 
 Credential vault: `Store` manages age-encrypted files in `~/.sluice/credentials/` with an auto-generated X25519 identity. `SecureBytes` wraps decrypted values and zeroes memory on `Release()` (best-effort in Go due to GC and string copies). `Provider` interface abstracts credential sources (age files, env vars, HashiCorp Vault stub). `NewProviderFromConfig` reads `[vault]` from TOML config.
 

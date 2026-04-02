@@ -507,7 +507,7 @@ networks:
 | Telegram bot (approval UX) | ~250 | Inline keyboard, callback handling, shared by both layers |
 | Policy file parser (TOML) | ~150 | Network rules + tool rules |
 | Content inspection (tool args + responses) | ~200 | Regex patterns for secrets/PII |
-| Audit logger | ~150 | JSON lines, hash chains |
+| Audit logger | ~200 | JSON lines, blake3 hash chains, chain verification CLI |
 | **Total custom code** | **~2450** | Single Go binary |
 | Docker setup + tun2proxy | Config only | docker-compose.yml |
 
