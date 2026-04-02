@@ -1,3 +1,6 @@
+// Package vault manages age-encrypted credential storage with pluggable
+// provider backends. It supports age file encryption, environment variables,
+// and HashiCorp Vault as credential sources.
 package vault
 
 import (

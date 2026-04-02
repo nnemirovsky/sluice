@@ -1,3 +1,6 @@
+// Package policy provides TOML-based policy evaluation for network connections
+// and MCP tool calls. Rules are compiled from glob patterns and evaluated in
+// deny-then-allow-then-ask priority order.
 package policy
 
 // Verdict represents the policy decision for a connection request.

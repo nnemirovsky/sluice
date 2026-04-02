@@ -1,3 +1,6 @@
+// Package audit provides tamper-evident JSON Lines logging with blake3 hash
+// chaining. Each log entry includes the hash of the previous entry, enabling
+// detection of log tampering or truncation.
 package audit
 
 import (

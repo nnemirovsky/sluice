@@ -1,3 +1,6 @@
+// Package telegram provides Telegram bot integration for human approval of
+// agent actions. It supports inline keyboard approval UX, admin commands for
+// policy and credential management, and rate limiting of approval requests.
 package telegram
 
 import (
@@ -15,11 +18,15 @@ var ErrPendingLimitExceeded = fmt.Errorf("approval pending limit exceeded")
 // per-minute request allowance.
 var ErrDestinationRateLimited = fmt.Errorf("destination rate limited")
 
+// Response represents a human operator's decision on an approval request.
 type Response int
 
 const (
+	// ResponseAllowOnce permits the connection for this request only.
 	ResponseAllowOnce Response = iota
+	// ResponseAlwaysAllow permits the connection and adds a dynamic allow rule.
 	ResponseAlwaysAllow
+	// ResponseDeny rejects the connection request.
 	ResponseDeny
 )
 
@@ -36,6 +43,7 @@ func (r Response) String() string {
 	}
 }
 
+// ApprovalRequest represents a pending connection that requires human approval.
 type ApprovalRequest struct {
 	ID          string
 	Destination string

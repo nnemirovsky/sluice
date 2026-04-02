@@ -33,6 +33,7 @@ func sanitizeError(err error) string {
 // We leave a small margin for the truncation notice.
 const telegramMaxMessage = 4000
 
+// BotConfig holds configuration for creating a Telegram approval bot.
 type BotConfig struct {
 	Token     string
 	ChatID    int64
@@ -43,6 +44,8 @@ type BotConfig struct {
 	DockerMgr *docker.Manager
 }
 
+// Bot manages the Telegram bot lifecycle, sending approval requests to
+// operators and processing their inline keyboard responses.
 type Bot struct {
 	api      *tgbotapi.BotAPI
 	chatID   int64
@@ -51,6 +54,8 @@ type Bot struct {
 	done     chan struct{}
 }
 
+// FormatApprovalMessage builds the Telegram message text for a connection
+// approval request.
 func FormatApprovalMessage(dest string, port int) string {
 	return fmt.Sprintf("Agent wants to connect to:\n\n%s:%d\n\nAllow this connection?", dest, port)
 }

@@ -1,14 +1,23 @@
+// Package proxy implements a SOCKS5 proxy server with policy enforcement,
+// credential injection, and protocol-specific handlers for HTTPS, SSH,
+// IMAP, and SMTP.
 package proxy
 
 // Protocol represents the detected application-layer protocol for a connection.
 type Protocol string
 
 const (
-	ProtoHTTP    Protocol = "http"
-	ProtoHTTPS   Protocol = "https"
-	ProtoSSH     Protocol = "ssh"
-	ProtoIMAP    Protocol = "imap"
-	ProtoSMTP    Protocol = "smtp"
+	// ProtoHTTP indicates plain HTTP traffic (ports 80, 8080).
+	ProtoHTTP Protocol = "http"
+	// ProtoHTTPS indicates TLS-encrypted HTTP traffic (ports 443, 8443).
+	ProtoHTTPS Protocol = "https"
+	// ProtoSSH indicates SSH traffic (port 22).
+	ProtoSSH Protocol = "ssh"
+	// ProtoIMAP indicates IMAP mail retrieval traffic (ports 143, 993).
+	ProtoIMAP Protocol = "imap"
+	// ProtoSMTP indicates SMTP mail submission traffic (ports 25, 587, 465).
+	ProtoSMTP Protocol = "smtp"
+	// ProtoGeneric indicates unrecognized traffic on a non-standard port.
 	ProtoGeneric Protocol = "generic"
 )
 

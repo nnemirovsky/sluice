@@ -235,12 +235,12 @@ All exported types lack documentation comments. Add package-level and type-level
 **Files:**
 - Modify: all packages with exported types
 
-- [ ] Add package-level doc comments to each package (audit, docker, mcp, policy, proxy, telegram, vault)
-- [ ] Add doc comments to all exported structs (Event, FileLogger, VerifyResult, Manager, Gateway, Engine, Server, Bot, Store, etc.)
-- [ ] Add doc comments to all exported interfaces (Provider, ContainerClient)
-- [ ] Add doc comments to all exported functions not already documented
-- [ ] Run `go vet ./...` to verify no issues
-- [ ] Run tests: `go test ./... -v -timeout 30s`
+- [x] Add package-level doc comments to each package (audit, docker, mcp, policy, proxy, telegram, vault)
+- [x] Add doc comments to all exported structs (Event, FileLogger, VerifyResult, Manager, Gateway, Engine, Server, Bot, Store, etc.)
+- [x] Add doc comments to all exported interfaces (Provider, ContainerClient)
+- [x] Add doc comments to all exported functions not already documented
+- [x] Run `go vet ./...` to verify no issues
+- [x] Run tests: `go test ./... -v -timeout 30s`
 
 ### Task 11: Verify acceptance criteria
 

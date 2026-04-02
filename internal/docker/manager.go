@@ -1,3 +1,5 @@
+// Package docker manages agent containers, handling credential rotation by
+// restarting containers with updated phantom environment variables.
 package docker
 
 import (

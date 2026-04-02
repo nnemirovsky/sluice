@@ -7,6 +7,8 @@ import (
 	"unicode/utf8"
 )
 
+// Glob is a compiled glob pattern that matches destination hostnames or tool
+// names. Single * matches one label (no dots), ** matches across dots.
 type Glob struct {
 	pattern string
 	re      *regexp.Regexp
