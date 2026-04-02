@@ -41,7 +41,7 @@ sluice/
 **Files:**
 - Create: `internal/mcp/types.go`
 
-- [ ] **Step 1: Implement protocol types**
+- [x] **Step 1: Implement protocol types**
 
 ```go
 // internal/mcp/types.go
@@ -122,7 +122,7 @@ type ToolContent struct {
 }
 ```
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add internal/mcp/types.go
