@@ -1,0 +1,7 @@
+.git
+.gopath
+.gomodcache
+docs
+testdata
+*.md
+sluice
