@@ -173,13 +173,13 @@ The MCP upstream timeout is hardcoded at 120s in `upstream.go`. Users need to co
 **Files:**
 - Create: `internal/mcp/gateway_test.go`
 
-- [ ] Write test for `NewGateway` initialization
-- [ ] Write test for `StartUpstream` with mock process (verify handshake and tool discovery)
-- [ ] Write test for `tools/list` aggregation across multiple upstreams with namespace prefixing
-- [ ] Write test for `tools/call` routing to correct upstream after namespace stripping
-- [ ] Write test for tool policy enforcement (deny/allow/ask) during `tools/call`
-- [ ] Write test for content inspection (argument blocking, response redaction) during `tools/call`
-- [ ] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
+- [x] Write test for `NewGateway` initialization
+- [x] Write test for `StartUpstream` with mock process (verify handshake and tool discovery)
+- [x] Write test for `tools/list` aggregation across multiple upstreams with namespace prefixing
+- [x] Write test for `tools/call` routing to correct upstream after namespace stripping
+- [x] Write test for tool policy enforcement (deny/allow/ask) during `tools/call`
+- [x] Write test for content inspection (argument blocking, response redaction) during `tools/call`
+- [x] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
 
 ### Task 7: Add CLI subcommand tests
 
