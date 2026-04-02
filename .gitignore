@@ -29,8 +29,8 @@ dist/
 # Generated phantom token env (created by scripts/gen-phantom-env.sh)
 .env.phantom
 
-# ralphex progress logs
-.ralphex/progress/
-
 # memsearch
 .memsearch/
+
+# Claude
+.claude/settings.local.json
