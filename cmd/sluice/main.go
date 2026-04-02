@@ -44,7 +44,7 @@ func main() {
 			return
 		case "mcp":
 			if err := handleMCPCommand(os.Args[2:]); err != nil {
-				os.Exit(1)
+				log.Fatalf("mcp: %v", err)
 			}
 			return
 		case "audit":
@@ -390,7 +390,10 @@ func startHealthServer(addr string, srv *proxy.Server) (net.Listener, *http.Serv
 			w.Write([]byte("not ready"))
 		}
 	})
-	httpSrv := &http.Server{Handler: mux}
+	httpSrv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 	go httpSrv.Serve(ln) //nolint:errcheck
 	return ln, httpSrv
 }

@@ -100,11 +100,8 @@ func loadOrCreateIdentity(path string) (*age.X25519Identity, error) {
 }
 
 func (s *Store) credPath(name string) (string, error) {
-	if strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") || name == "." {
-		return "", fmt.Errorf("invalid credential name %q: must not contain path separators or '..'", name)
-	}
-	if name == "" {
-		return "", fmt.Errorf("credential name must not be empty")
+	if err := validateCredentialName(name); err != nil {
+		return "", err
 	}
 	return filepath.Join(s.dir, "credentials", name+".age"), nil
 }

@@ -633,14 +633,6 @@ func dialWithHandler(handler func(net.Conn, chan<- error)) (net.Conn, error) {
 	return socksEnd, nil
 }
 
-// ReloadPolicy atomically swaps the policy engine used for future connections.
-// Holds reloadMu to prevent racing with in-flight "Always Allow" mutations.
-func (s *Server) ReloadPolicy(eng *policy.Engine) {
-	s.rules.reloadMu.Lock()
-	defer s.rules.reloadMu.Unlock()
-	s.rules.engine.Store(eng)
-}
-
 // StoreEngine atomically stores a new policy engine without acquiring the
 // reload mutex. The caller must hold ReloadMu() when concurrent mutations
 // are possible. Use this instead of ReloadPolicy when the caller already

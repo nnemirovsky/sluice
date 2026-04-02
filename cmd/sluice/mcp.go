@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -88,7 +89,7 @@ func handleMCPCommand(args []string) error {
 	if *telegramToken != "" && *telegramChatIDStr != "" {
 		chatID, parseErr := strconv.ParseInt(*telegramChatIDStr, 10, 64)
 		if parseErr != nil {
-			log.Fatalf("invalid telegram-chat-id: %v", parseErr)
+			return fmt.Errorf("invalid telegram-chat-id: %w", parseErr)
 		}
 		if chatID != 0 {
 			broker = telegram.NewApprovalBroker()
@@ -103,7 +104,7 @@ func handleMCPCommand(args []string) error {
 				AuditPath: *auditPath,
 			}, broker)
 			if botErr != nil {
-				log.Fatalf("telegram bot: %v", botErr)
+				return fmt.Errorf("telegram bot: %w", botErr)
 			}
 			go bot.Run()
 			defer bot.Stop()
@@ -116,7 +117,7 @@ func handleMCPCommand(args []string) error {
 	if len(eng.InspectBlockRules) > 0 || len(eng.InspectRedactRules) > 0 {
 		inspector, err = mcp.NewContentInspector(eng.InspectBlockRules, eng.InspectRedactRules)
 		if err != nil {
-			log.Fatalf("create content inspector: %v", err)
+			return fmt.Errorf("create content inspector: %w", err)
 		}
 		log.Printf("content inspector: %d block rules, %d redact rules",
 			len(eng.InspectBlockRules), len(eng.InspectRedactRules))
@@ -131,7 +132,7 @@ func handleMCPCommand(args []string) error {
 		TimeoutSec: eng.TimeoutSec,
 	})
 	if err != nil {
-		log.Fatalf("start MCP gateway: %v", err)
+		return fmt.Errorf("start MCP gateway: %w", err)
 	}
 	defer gw.Stop()
 

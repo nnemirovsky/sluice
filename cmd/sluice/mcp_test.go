@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -244,7 +245,11 @@ default = "deny"
 	if os.Getenv("TEST_MCP_SUBPROCESS") == "no_upstreams" {
 		// Replace stdin with a pipe that is immediately closed on the
 		// write end so RunStdio sees EOF and returns cleanly.
-		r, w, _ := os.Pipe()
+		r, w, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			fmt.Fprintf(os.Stderr, "os.Pipe: %v\n", pipeErr)
+			os.Exit(1)
+		}
 		w.Close()
 		os.Stdin = r
 		err := handleMCPCommand([]string{"--policy", os.Getenv("TEST_POLICY_PATH")})
@@ -279,11 +284,14 @@ default = "deny"
 	}
 
 	if os.Getenv("TEST_MCP_SUBPROCESS") == "invalid_chat_id" {
-		handleMCPCommand([]string{
+		err := handleMCPCommand([]string{
 			"--policy", os.Getenv("TEST_POLICY_PATH"),
 			"--telegram-token", "fake-token",
 			"--telegram-chat-id", "not-a-number",
 		})
+		if err != nil {
+			os.Exit(1)
+		}
 		return
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=TestHandleMCPCommandInvalidChatID")

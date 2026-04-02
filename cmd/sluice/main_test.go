@@ -293,10 +293,7 @@ func TestResolveDockerSocket(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Save and restore DOCKER_HOST.
-			orig := os.Getenv("DOCKER_HOST")
-			defer os.Setenv("DOCKER_HOST", orig)
-			os.Setenv("DOCKER_HOST", tt.envHost)
+			t.Setenv("DOCKER_HOST", tt.envHost)
 
 			got, err := resolveDockerSocket(tt.explicit)
 			if tt.wantErr {
