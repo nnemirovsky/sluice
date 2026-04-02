@@ -12,6 +12,7 @@ import (
 
 	"github.com/nemirovsky/sluice/internal/docker"
 	"github.com/nemirovsky/sluice/internal/policy"
+	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
 )
 
@@ -51,6 +52,7 @@ type CommandHandler struct {
 	auditPath string
 	vault     *vault.Store
 	dockerMgr *docker.Manager
+	store     *store.Store
 }
 
 // SetVault enables credential management commands.
@@ -61,6 +63,23 @@ func (h *CommandHandler) SetVault(store *vault.Store) {
 // SetDockerManager enables automatic container restart on credential changes.
 func (h *CommandHandler) SetDockerManager(mgr *docker.Manager) {
 	h.dockerMgr = mgr
+}
+
+// SetStore enables persistent policy management via SQLite.
+func (h *CommandHandler) SetStore(s *store.Store) {
+	h.store = s
+}
+
+// recompileAndSwap rebuilds the policy Engine from the SQLite store and
+// atomically swaps it into the shared engine pointer. The caller must hold
+// reloadMu.
+func (h *CommandHandler) recompileAndSwap() error {
+	newEng, err := policy.LoadFromStore(h.store)
+	if err != nil {
+		return err
+	}
+	h.engine.Store(newEng)
+	return nil
 }
 
 // NewCommandHandler creates a command handler that shares the proxy's engine
@@ -97,7 +116,7 @@ func (h *CommandHandler) Handle(cmd *Command) string {
 
 func (h *CommandHandler) handlePolicy(args []string) string {
 	if len(args) == 0 {
-		return "Usage: /policy show | /policy allow <dest> | /policy deny <dest> | /policy remove <dest>"
+		return "Usage: /policy show | /policy allow <dest> | /policy deny <dest> | /policy remove <id>"
 	}
 	switch args[0] {
 	case "show":
@@ -114,7 +133,7 @@ func (h *CommandHandler) handlePolicy(args []string) string {
 		return h.policyDeny(args[1])
 	case "remove":
 		if len(args) < 2 {
-			return "Usage: /policy remove <destination>"
+			return "Usage: /policy remove <id>"
 		}
 		return h.policyRemove(args[1])
 	default:
@@ -123,6 +142,10 @@ func (h *CommandHandler) handlePolicy(args []string) string {
 }
 
 func (h *CommandHandler) policyShow() string {
+	if h.store != nil {
+		return h.policyShowFromStore()
+	}
+	// Fallback to engine snapshot when store is not configured.
 	snap := h.engine.Load().Snapshot()
 	var b strings.Builder
 	b.WriteString("Current policy (default: ")
@@ -160,6 +183,61 @@ func (h *CommandHandler) policyShow() string {
 	return b.String()
 }
 
+func (h *CommandHandler) policyShowFromStore() string {
+	dv, err := h.store.GetConfig("default_verdict")
+	if err != nil {
+		return fmt.Sprintf("Failed to read config: %v", err)
+	}
+	if dv == "" {
+		dv = "deny"
+	}
+
+	rules, err := h.store.ListRules("")
+	if err != nil {
+		return fmt.Sprintf("Failed to list rules: %v", err)
+	}
+
+	var b strings.Builder
+	b.WriteString("Current policy (default: ")
+	b.WriteString(dv)
+	b.WriteString(")\n\n")
+
+	for _, section := range []struct {
+		label   string
+		verdict string
+	}{
+		{"ALLOW", "allow"},
+		{"DENY", "deny"},
+		{"ASK", "ask"},
+	} {
+		var sectionRules []store.NetworkRule
+		for _, r := range rules {
+			if r.Verdict == section.verdict {
+				sectionRules = append(sectionRules, r)
+			}
+		}
+		if len(sectionRules) == 0 {
+			continue
+		}
+		b.WriteString(section.label)
+		b.WriteString(":\n")
+		for _, r := range sectionRules {
+			fmt.Fprintf(&b, "  [%d] %s", r.ID, r.Destination)
+			if len(r.Ports) > 0 {
+				b.WriteString(" ports=")
+				b.WriteString(formatPorts(r.Ports))
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	if len(rules) == 0 {
+		b.WriteString("No rules configured.")
+	}
+
+	return b.String()
+}
+
 // inMemoryWarning is appended to policy mutation responses to remind operators
 // that changes are not persisted to disk and will be lost on SIGHUP or restart.
 const inMemoryWarning = "\n(in-memory only, will be lost on reload/restart)"
@@ -167,6 +245,18 @@ const inMemoryWarning = "\n(in-memory only, will be lost on reload/restart)"
 func (h *CommandHandler) policyAllow(dest string) string {
 	h.reloadMu.Lock()
 	defer h.reloadMu.Unlock()
+
+	if h.store != nil {
+		if _, err := h.store.AddRule("allow", dest, nil, store.RuleOpts{Source: "telegram"}); err != nil {
+			return fmt.Sprintf("Failed to add allow rule: %v", err)
+		}
+		if err := h.recompileAndSwap(); err != nil {
+			return fmt.Sprintf("Added allow rule but failed to recompile: %v", err)
+		}
+		return fmt.Sprintf("Added allow rule: %s", dest)
+	}
+
+	// Fallback to in-memory mutation when store is not configured.
 	if err := h.engine.Load().AddAllowRule(dest); err != nil {
 		return fmt.Sprintf("Failed to add allow rule: %v", err)
 	}
@@ -176,23 +266,54 @@ func (h *CommandHandler) policyAllow(dest string) string {
 func (h *CommandHandler) policyDeny(dest string) string {
 	h.reloadMu.Lock()
 	defer h.reloadMu.Unlock()
+
+	if h.store != nil {
+		if _, err := h.store.AddRule("deny", dest, nil, store.RuleOpts{Source: "telegram"}); err != nil {
+			return fmt.Sprintf("Failed to add deny rule: %v", err)
+		}
+		if err := h.recompileAndSwap(); err != nil {
+			return fmt.Sprintf("Added deny rule but failed to recompile: %v", err)
+		}
+		return fmt.Sprintf("Added deny rule: %s", dest)
+	}
+
 	if err := h.engine.Load().AddDenyRule(dest); err != nil {
 		return fmt.Sprintf("Failed to add deny rule: %v", err)
 	}
 	return fmt.Sprintf("Added deny rule: %s%s", dest, inMemoryWarning)
 }
 
-func (h *CommandHandler) policyRemove(dest string) string {
+func (h *CommandHandler) policyRemove(idStr string) string {
 	h.reloadMu.Lock()
 	defer h.reloadMu.Unlock()
-	removed, err := h.engine.Load().RemoveRule(dest)
+
+	if h.store != nil {
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			return fmt.Sprintf("Invalid rule ID: %s (must be a number, use /policy show to see IDs)", idStr)
+		}
+		removed, err := h.store.RemoveRule(id)
+		if err != nil {
+			return fmt.Sprintf("Failed to remove rule: %v", err)
+		}
+		if !removed {
+			return fmt.Sprintf("No rule found with ID: %d", id)
+		}
+		if err := h.recompileAndSwap(); err != nil {
+			return fmt.Sprintf("Removed rule but failed to recompile: %v", err)
+		}
+		return fmt.Sprintf("Removed rule ID: %d", id)
+	}
+
+	// Fallback to in-memory mutation when store is not configured.
+	removed, err := h.engine.Load().RemoveRule(idStr)
 	if !removed {
-		return fmt.Sprintf("No rule found for: %s", dest)
+		return fmt.Sprintf("No rule found for: %s", idStr)
 	}
 	if err != nil {
 		return fmt.Sprintf("Failed to remove rule (compile error, rolled back): %v", err)
 	}
-	return fmt.Sprintf("Removed rule: %s%s", dest, inMemoryWarning)
+	return fmt.Sprintf("Removed rule: %s%s", idStr, inMemoryWarning)
 }
 
 func (h *CommandHandler) handleCred(args []string) string {
@@ -363,7 +484,7 @@ func (h *CommandHandler) handleHelp() string {
 /policy show - List current rules
 /policy allow <dest> - Add allow rule
 /policy deny <dest> - Add deny rule
-/policy remove <dest> - Remove rule
+/policy remove <id> - Remove rule by ID
 /status - Show proxy status
 /audit recent [N] - Show last N audit entries
 /help - Show this message`

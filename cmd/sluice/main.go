@@ -181,6 +181,7 @@ func main() {
 		Provider:   provider,
 		Resolver:   bindingResolver,
 		VaultDir:   vaultCfg.Dir,
+		Store:      db,
 	})
 	if err != nil {
 		log.Fatalf("start proxy: %v", err)
@@ -228,6 +229,7 @@ func main() {
 			AuditPath: *auditPath,
 			Vault:     vaultStore,
 			DockerMgr: dockerMgr,
+			Store:     db,
 		}, broker)
 		if botErr != nil {
 			log.Fatalf("telegram bot: %v", botErr)

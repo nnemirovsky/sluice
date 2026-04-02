@@ -10,6 +10,7 @@ import (
 
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/policy"
+	"github.com/nemirovsky/sluice/internal/store"
 	tg "github.com/nemirovsky/sluice/internal/telegram"
 )
 
@@ -21,6 +22,7 @@ type GatewayConfig struct {
 	Audit      *audit.FileLogger
 	Broker     *tg.ApprovalBroker
 	TimeoutSec int
+	Store      *store.Store
 }
 
 // Gateway intercepts tool calls between an AI agent and upstream MCP servers,
@@ -34,6 +36,7 @@ type Gateway struct {
 	audit      *audit.FileLogger
 	broker     *tg.ApprovalBroker
 	timeoutSec int
+	store      *store.Store
 }
 
 // NewGateway starts all upstream servers, performs MCP handshakes, discovers
@@ -48,6 +51,7 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 		audit:      cfg.Audit,
 		broker:     cfg.Broker,
 		timeoutSec: cfg.TimeoutSec,
+		store:      cfg.Store,
 	}
 	if gw.timeoutSec == 0 {
 		gw.timeoutSec = 120
@@ -167,6 +171,11 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 			}, nil
 		}
 		if resp == tg.ResponseAlwaysAllow {
+			if gw.store != nil {
+				if _, storeErr := gw.store.AddToolRule("allow", req.Name, "user approved always", "approval"); storeErr != nil {
+					log.Printf("[WARN] failed to persist tool allow rule for %s: %v", req.Name, storeErr)
+				}
+			}
 			gw.policy.AddDynamicAllow(req.Name)
 			log.Printf("[MCP ALWAYS ALLOW] %s", req.Name)
 		}

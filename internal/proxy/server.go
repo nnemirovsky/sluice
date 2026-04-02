@@ -22,6 +22,7 @@ import (
 
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/policy"
+	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/telegram"
 	"github.com/nemirovsky/sluice/internal/vault"
 )
@@ -47,6 +48,7 @@ type Config struct {
 	Provider   vault.Provider           // nil = no credential injection
 	Resolver   *vault.BindingResolver   // nil = no credential injection
 	VaultDir   string                   // CA cert storage dir (defaults to ~/.sluice)
+	Store      *store.Store             // nil = in-memory only (no persistence)
 }
 
 // Server wraps a SOCKS5 server with policy enforcement and audit logging.
@@ -173,6 +175,7 @@ type policyRuleSet struct {
 	reloadMu *sync.Mutex // serializes engine swaps and dynamic rule mutations
 	audit    *audit.FileLogger
 	broker   *telegram.ApprovalBroker
+	store    *store.Store
 }
 
 func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context.Context, bool) {
@@ -240,11 +243,21 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 					reason = "user approved always"
 					log.Printf("[ASK->ALLOW+SAVE] %s:%d (user approved always)", dest, port)
 					// Hold reloadMu to prevent a concurrent SIGHUP from swapping
-					// the engine between Load() and AddDynamicAllow(), which would
-					// write the rule to the retired engine.
+					// the engine between the store write and recompile.
 					r.reloadMu.Lock()
-					if err := r.engine.Load().AddDynamicAllow(dest, port); err != nil {
-						log.Printf("[WARN] failed to add dynamic allow rule for %s:%d: %v", dest, port, err)
+					if r.store != nil {
+						if _, storeErr := r.store.AddRule("allow", dest, []int{port}, store.RuleOpts{Source: "approval"}); storeErr != nil {
+							log.Printf("[WARN] failed to persist allow rule for %s:%d: %v", dest, port, storeErr)
+						}
+						if newEng, recompErr := policy.LoadFromStore(r.store); recompErr != nil {
+							log.Printf("[WARN] failed to recompile engine after always-allow: %v", recompErr)
+						} else {
+							r.engine.Store(newEng)
+						}
+					} else {
+						if err := r.engine.Load().AddDynamicAllow(dest, port); err != nil {
+							log.Printf("[WARN] failed to add dynamic allow rule for %s:%d: %v", dest, port, err)
+						}
 					}
 					r.reloadMu.Unlock()
 				default:
@@ -389,7 +402,7 @@ func New(cfg Config) (*Server, error) {
 	enginePtr.Store(cfg.Policy)
 	reloadMu := new(sync.Mutex)
 
-	rules := &policyRuleSet{engine: enginePtr, reloadMu: reloadMu, audit: cfg.Audit, broker: cfg.Broker}
+	rules := &policyRuleSet{engine: enginePtr, reloadMu: reloadMu, audit: cfg.Audit, broker: cfg.Broker, store: cfg.Store}
 	dnsResolver := &policyResolver{engine: enginePtr, audit: cfg.Audit, broker: cfg.Broker}
 	srv.rules = rules
 

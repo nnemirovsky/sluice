@@ -229,16 +229,16 @@ Replace in-memory Engine mutations with store writes. After writing, recompile E
 - Modify: `internal/telegram/commands.go`
 - Modify: `internal/telegram/commands_test.go`
 
-- [ ] Add `store *store.Store` field to `CommandHandler`
-- [ ] `/policy allow <dest>`: Write to store, then recompile and swap Engine
-- [ ] `/policy deny <dest>`: Write to store, then recompile and swap Engine
-- [ ] `/policy remove <id>`: Delete from store, then recompile and swap Engine
-- [ ] `/policy show`: Read from store instead of Engine snapshot
-- [ ] Update "Always Allow" flow in proxy: write to store with source="approval", recompile Engine
-- [ ] Update "Always Allow" flow in MCP gateway: same pattern
-- [ ] Update tests to use in-memory SQLite store
-- [ ] Write tests verifying persistence (add rule, recompile, rule still present)
-- [ ] Run tests: `go test ./internal/telegram/ -v -timeout 30s`
+- [x] Add `store *store.Store` field to `CommandHandler`
+- [x] `/policy allow <dest>`: Write to store, then recompile and swap Engine
+- [x] `/policy deny <dest>`: Write to store, then recompile and swap Engine
+- [x] `/policy remove <id>`: Delete from store, then recompile and swap Engine
+- [x] `/policy show`: Read from store instead of Engine snapshot
+- [x] Update "Always Allow" flow in proxy: write to store with source="approval", recompile Engine
+- [x] Update "Always Allow" flow in MCP gateway: same pattern
+- [x] Update tests to use in-memory SQLite store
+- [x] Write tests verifying persistence (add rule, recompile, rule still present)
+- [x] Run tests: `go test ./internal/telegram/ -v -timeout 30s`
 
 ### Task 7: Hot credential reload via shared volume
 

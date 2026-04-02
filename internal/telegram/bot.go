@@ -14,6 +14,7 @@ import (
 
 	"github.com/nemirovsky/sluice/internal/docker"
 	"github.com/nemirovsky/sluice/internal/policy"
+	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
 )
 
@@ -42,6 +43,7 @@ type BotConfig struct {
 	AuditPath string
 	Vault     *vault.Store
 	DockerMgr *docker.Manager
+	Store     *store.Store
 }
 
 // Bot manages the Telegram bot lifecycle, sending approval requests to
@@ -71,6 +73,9 @@ func NewBot(cfg BotConfig, broker *ApprovalBroker) (*Bot, error) {
 	log.Printf("telegram bot authorized as @%s", api.Self.UserName)
 
 	cmdHandler := NewCommandHandler(cfg.EnginePtr, cfg.ReloadMu, broker, cfg.AuditPath)
+	if cfg.Store != nil {
+		cmdHandler.SetStore(cfg.Store)
+	}
 	if cfg.Vault != nil {
 		cmdHandler.SetVault(cfg.Vault)
 	}
