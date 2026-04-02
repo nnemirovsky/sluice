@@ -87,6 +87,7 @@ func handleMCPCommand(args []string) {
 				ChatID:    chatID,
 				EnginePtr: &enginePtr,
 				ReloadMu:  &reloadMu,
+				AuditPath: *auditPath,
 			}, broker)
 			if botErr != nil {
 				log.Fatalf("telegram bot: %v", botErr)
@@ -137,7 +138,9 @@ func handleMCPCommand(args []string) {
 	case err := <-errCh:
 		if err != nil {
 			log.Printf("MCP gateway error: %v", err)
-			return
+			// Return to let defers run, then exit non-zero.
+			gw.Stop()
+			os.Exit(1)
 		}
 		log.Println("MCP gateway stdin closed, exiting")
 	}

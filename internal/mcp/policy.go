@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"sync"
+
 	"github.com/nemirovsky/sluice/internal/policy"
 )
 
@@ -11,6 +13,7 @@ type compiledToolRule struct {
 
 // ToolPolicy evaluates tool names against glob-based rules.
 type ToolPolicy struct {
+	mu       sync.RWMutex
 	rules    []compiledToolRule
 	fallback policy.Verdict
 }
@@ -47,22 +50,28 @@ func (tp *ToolPolicy) AddDynamicAllow(toolName string) {
 	if err != nil {
 		return
 	}
+	tp.mu.Lock()
 	tp.rules = append(tp.rules, compiledToolRule{glob: g, verdict: policy.Allow})
+	tp.mu.Unlock()
 }
 
 // Evaluate checks the tool name against rules in priority order: deny, allow, ask.
 func (tp *ToolPolicy) Evaluate(toolName string) policy.Verdict {
-	for _, r := range tp.rules {
+	tp.mu.RLock()
+	rules := tp.rules
+	tp.mu.RUnlock()
+
+	for _, r := range rules {
 		if r.verdict == policy.Deny && r.glob.Match(toolName) {
 			return policy.Deny
 		}
 	}
-	for _, r := range tp.rules {
+	for _, r := range rules {
 		if r.verdict == policy.Allow && r.glob.Match(toolName) {
 			return policy.Allow
 		}
 	}
-	for _, r := range tp.rules {
+	for _, r := range rules {
 		if r.verdict == policy.Ask && r.glob.Match(toolName) {
 			return policy.Ask
 		}

@@ -139,26 +139,19 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 		// Approved: fall through to forward
 	}
 
-	gw.logAudit(req.Name, "tool_call", finalVerdict)
-
 	// Inspect arguments before forwarding
 	if gw.inspector != nil {
 		inspection := gw.inspector.InspectArguments(req.Arguments)
 		if inspection.Blocked {
-			if gw.audit != nil {
-				gw.audit.Log(audit.Event{
-					Tool:    req.Name,
-					Action:  "inspect_block",
-					Verdict: "deny",
-					Reason:  inspection.Reason,
-				})
-			}
+			gw.logAudit(req.Name, "inspect_block", policy.Deny)
 			return &ToolResult{
 				Content: []ToolContent{{Type: "text", Text: fmt.Sprintf("Tool call blocked: %s", inspection.Reason)}},
 				IsError: true,
 			}, nil
 		}
 	}
+
+	gw.logAudit(req.Name, "tool_call", finalVerdict)
 
 	// Find upstream
 	upstreamName, ok := gw.toolMap[req.Name]
