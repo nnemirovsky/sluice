@@ -12,7 +12,7 @@ func newTestGateway() *Gateway {
 		{Name: "test__hello", Description: "Says hello"},
 		{Name: "test__greet", Description: "Greets someone"},
 	}
-	tp := NewToolPolicy(nil, policy.Allow)
+	tp, _ := NewToolPolicy(nil, policy.Allow)
 	return &Gateway{
 		upstreams:  make(map[string]*Upstream),
 		toolMap:    map[string]string{"test__hello": "test", "test__greet": "test"},

@@ -67,7 +67,10 @@ func handleMCPCommand(args []string) error {
 
 	// Build tool policy from engine's tool rules.
 	toolRules := eng.ToolRules()
-	toolPolicy := mcp.NewToolPolicy(toolRules, eng.Default)
+	toolPolicy, err := mcp.NewToolPolicy(toolRules, eng.Default)
+	if err != nil {
+		log.Fatalf("compile tool policy: %v", err)
+	}
 	log.Printf("MCP tool policy: %d rules (default: %s)", len(toolRules), eng.Default)
 
 	// Optional audit logger.

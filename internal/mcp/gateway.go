@@ -53,10 +53,15 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 		gw.timeoutSec = 120
 	}
 	if gw.policy == nil {
-		gw.policy = NewToolPolicy(nil, policy.Allow)
+		// nil rules cannot fail compilation, so error is always nil here.
+		gw.policy, _ = NewToolPolicy(nil, policy.Allow)
 	}
 
 	for _, ucfg := range cfg.Upstreams {
+		if err := ValidateUpstreamName(ucfg.Name); err != nil {
+			gw.Stop()
+			return nil, err
+		}
 		if _, exists := gw.upstreams[ucfg.Name]; exists {
 			gw.Stop()
 			return nil, fmt.Errorf("duplicate upstream name %q", ucfg.Name)

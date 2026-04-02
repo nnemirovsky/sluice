@@ -8,6 +8,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,6 +42,24 @@ type Upstream struct {
 }
 
 const defaultUpstreamTimeout = 120 * time.Second
+
+var validUpstreamName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
+
+// ValidateUpstreamName checks that the name is non-empty, contains only
+// alphanumeric characters, hyphens, and single underscores, and does not
+// contain the "__" namespace separator.
+func ValidateUpstreamName(name string) error {
+	if name == "" {
+		return fmt.Errorf("upstream name must not be empty")
+	}
+	if strings.Contains(name, "__") {
+		return fmt.Errorf("upstream name %q must not contain \"__\" (namespace separator)", name)
+	}
+	if !validUpstreamName.MatchString(name) {
+		return fmt.Errorf("upstream name %q must match [a-zA-Z0-9][a-zA-Z0-9_-]*", name)
+	}
+	return nil
+}
 
 // StartUpstream launches an upstream MCP server process and starts a
 // background goroutine that reads lines from its stdout into a channel.

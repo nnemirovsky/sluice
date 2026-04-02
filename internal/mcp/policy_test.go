@@ -7,12 +7,15 @@ import (
 )
 
 func TestToolPolicyEvaluate(t *testing.T) {
-	tp := NewToolPolicy([]policy.ToolRule{
+	tp, err := NewToolPolicy([]policy.ToolRule{
 		{Tool: "github__list_*", Verdict: "allow"},
 		{Tool: "github__delete_*", Verdict: "deny"},
 		{Tool: "filesystem__write_*", Verdict: "ask"},
 		{Tool: "exec__*", Verdict: "deny"},
 	}, policy.Ask)
+	if err != nil {
+		t.Fatalf("NewToolPolicy: %v", err)
+	}
 
 	tests := []struct {
 		tool string

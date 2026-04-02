@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/nemirovsky/sluice/internal/policy"
@@ -19,13 +20,13 @@ type ToolPolicy struct {
 }
 
 // NewToolPolicy compiles tool rules and returns a ToolPolicy.
-// Rules with invalid globs or unknown verdicts are silently skipped.
-func NewToolPolicy(rules []policy.ToolRule, fallback policy.Verdict) *ToolPolicy {
+// Returns an error if any rule has an invalid glob pattern or unknown verdict.
+func NewToolPolicy(rules []policy.ToolRule, fallback policy.Verdict) (*ToolPolicy, error) {
 	compiled := make([]compiledToolRule, 0, len(rules))
 	for _, r := range rules {
 		g, err := policy.CompileGlob(r.Tool)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("compile tool rule %q: %w", r.Tool, err)
 		}
 		var v policy.Verdict
 		switch r.Verdict {
@@ -36,11 +37,11 @@ func NewToolPolicy(rules []policy.ToolRule, fallback policy.Verdict) *ToolPolicy
 		case "ask":
 			v = policy.Ask
 		default:
-			continue
+			return nil, fmt.Errorf("tool rule %q: unknown verdict %q", r.Tool, r.Verdict)
 		}
 		compiled = append(compiled, compiledToolRule{glob: g, verdict: v})
 	}
-	return &ToolPolicy{rules: compiled, fallback: fallback}
+	return &ToolPolicy{rules: compiled, fallback: fallback}, nil
 }
 
 // AddDynamicAllow appends a runtime allow rule for the given tool name.
