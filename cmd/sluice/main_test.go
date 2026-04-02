@@ -1,10 +1,12 @@
 package main
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
@@ -188,5 +190,127 @@ destination = "example.com"
 	var nilEng *policy.Engine
 	if err := nilEng.Validate(); err == nil {
 		t.Error("expected error for nil engine")
+	}
+}
+
+// TestHealthzEndpoint verifies that /healthz returns 200 when the proxy is up
+// and 503 after the proxy is closed.
+func TestHealthzEndpoint(t *testing.T) {
+	eng, err := policy.LoadFromBytes([]byte(`[policy]
+default = "deny"
+`))
+	if err != nil {
+		t.Fatalf("load policy: %v", err)
+	}
+
+	srv, err := proxy.New(proxy.Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatalf("create server: %v", err)
+	}
+
+	healthLn, healthSrv := startHealthServer("127.0.0.1:0", srv)
+	if healthLn == nil {
+		t.Fatal("health server listener is nil")
+	}
+	defer healthSrv.Close()
+
+	healthURL := "http://" + healthLn.Addr().String() + "/healthz"
+
+	// Give the HTTP server a moment to start accepting.
+	time.Sleep(10 * time.Millisecond)
+
+	// Proxy is running, should get 200.
+	resp, err := http.Get(healthURL)
+	if err != nil {
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 while proxy is up, got %d", resp.StatusCode)
+	}
+
+	// Close the proxy.
+	srv.Close()
+
+	// Should get 503 now.
+	resp2, err := http.Get(healthURL)
+	if err != nil {
+		t.Fatalf("GET /healthz after close: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 after proxy close, got %d", resp2.StatusCode)
+	}
+}
+
+// TestResolveDockerSocket verifies the Docker socket resolution logic.
+func TestResolveDockerSocket(t *testing.T) {
+	tests := []struct {
+		name     string
+		explicit string
+		envHost  string
+		want     string
+		wantErr  bool
+	}{
+		{
+			name: "default path when nothing set",
+			want: "/var/run/docker.sock",
+		},
+		{
+			name:     "explicit path",
+			explicit: "/custom/docker.sock",
+			want:     "/custom/docker.sock",
+		},
+		{
+			name:    "unix scheme from env",
+			envHost: "unix:///var/run/docker.sock",
+			want:    "/var/run/docker.sock",
+		},
+		{
+			name:    "tcp scheme rejected",
+			envHost: "tcp://192.168.1.1:2375",
+			wantErr: true,
+		},
+		{
+			name:    "ssh scheme rejected",
+			envHost: "ssh://user@remote",
+			wantErr: true,
+		},
+		{
+			name:     "explicit tcp path rejected",
+			explicit: "tcp://192.168.1.1:2375",
+			wantErr:  true,
+		},
+		{
+			name:    "bare path from env",
+			envHost: "/tmp/docker.sock",
+			want:    "/tmp/docker.sock",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Save and restore DOCKER_HOST.
+			orig := os.Getenv("DOCKER_HOST")
+			defer os.Setenv("DOCKER_HOST", orig)
+			os.Setenv("DOCKER_HOST", tt.envHost)
+
+			got, err := resolveDockerSocket(tt.explicit)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("expected error, got path %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

@@ -2,7 +2,10 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"reflect"
@@ -54,6 +57,7 @@ func main() {
 	auditPath := flag.String("audit", "audit.jsonl", "path to audit log file")
 	telegramToken := flag.String("telegram-token", os.Getenv("TELEGRAM_BOT_TOKEN"), "Telegram bot token")
 	telegramChatIDStr := flag.String("telegram-chat-id", os.Getenv("TELEGRAM_CHAT_ID"), "Telegram chat ID for approvals")
+	healthAddr := flag.String("health-addr", ":3000", "health check HTTP listen address (serves /healthz)")
 	dockerSocket := flag.String("docker-socket", "", "Docker socket path (auto-detects from DOCKER_HOST or /var/run/docker.sock)")
 	dockerContainer := flag.String("docker-container", envDefault("SLUICE_AGENT_CONTAINER", "openclaw"), "Docker container name for auto-restart on credential changes")
 	flag.Parse()
@@ -167,8 +171,10 @@ func main() {
 	// Docker container manager for auto-restart on credential changes.
 	var dockerMgr *docker.Manager
 	if vaultStore != nil {
-		sock := resolveDockerSocket(*dockerSocket)
-		if sock != "" {
+		sock, sockErr := resolveDockerSocket(*dockerSocket)
+		if sockErr != nil {
+			log.Printf("WARNING: %v; container auto-restart disabled", sockErr)
+		} else if sock != "" {
 			if fi, statErr := os.Stat(sock); statErr == nil && fi.Mode().Type() == os.ModeSocket {
 				client := docker.NewSocketClient(sock)
 				dockerMgr = docker.NewManager(client, *dockerContainer)
@@ -177,6 +183,13 @@ func main() {
 				log.Printf("WARNING: --docker-socket %q not found or not a socket; container auto-restart disabled", *dockerSocket)
 			}
 		}
+	}
+
+	// Start health check HTTP server on :3000 (or --health-addr).
+	healthLn, healthSrv := startHealthServer(*healthAddr, srv)
+	if healthLn != nil {
+		defer healthSrv.Close()
+		log.Printf("health check server listening on %s", healthLn.Addr())
 	}
 
 	var bot *telegram.Bot
@@ -321,13 +334,53 @@ func drainSignals(ch <-chan os.Signal) {
 
 // resolveDockerSocket returns the Docker socket path to use. If explicit is
 // non-empty it is returned as-is. Otherwise it checks DOCKER_HOST env and
-// falls back to the default /var/run/docker.sock.
-func resolveDockerSocket(explicit string) string {
-	if explicit != "" {
-		return explicit
+// falls back to the default /var/run/docker.sock. Returns an error string
+// (empty on success) when a non-unix scheme is detected.
+func resolveDockerSocket(explicit string) (string, error) {
+	raw := explicit
+	if raw == "" {
+		raw = os.Getenv("DOCKER_HOST")
 	}
-	if envHost := os.Getenv("DOCKER_HOST"); envHost != "" {
-		return strings.TrimPrefix(envHost, "unix://")
+	if raw == "" {
+		return "/var/run/docker.sock", nil
 	}
-	return "/var/run/docker.sock"
+	// Reject non-unix schemes. Docker supports tcp://, ssh://, etc. but
+	// Sluice only supports local unix sockets for security. The Docker
+	// socket gives full container control so it must not traverse the
+	// network.
+	if strings.Contains(raw, "://") {
+		scheme := strings.SplitN(raw, "://", 2)[0]
+		if scheme != "unix" {
+			return "", fmt.Errorf("unsupported Docker socket scheme %q (only unix:// is supported)", scheme)
+		}
+		return strings.TrimPrefix(raw, "unix://"), nil
+	}
+	return raw, nil
+}
+
+// startHealthServer starts a minimal HTTP server serving /healthz.
+// Returns the listener and server for deferred cleanup, or nil if the
+// address is empty or the listener fails.
+func startHealthServer(addr string, srv *proxy.Server) (net.Listener, *http.Server) {
+	if addr == "" {
+		return nil, nil
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Printf("WARNING: failed to start health server on %s: %v", addr, err)
+		return nil, nil
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if srv.IsListening() {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("ok"))
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte("not ready"))
+		}
+	})
+	httpSrv := &http.Server{Handler: mux}
+	go httpSrv.Serve(ln) //nolint:errcheck
+	return ln, httpSrv
 }

@@ -205,13 +205,13 @@ No health endpoint exists. Docker containers have no HEALTHCHECK or restart poli
 - Modify: `Dockerfile` (add HEALTHCHECK)
 - Modify: `docker-compose.yml` (add restart policies and health checks)
 
-- [ ] Add a minimal HTTP server on `:3000` in main.go serving `/healthz` (returns 200 if proxy is listening)
-- [ ] Add `HEALTHCHECK --interval=10s --timeout=3s CMD wget -qO- http://localhost:3000/healthz || exit 1` to Dockerfile
-- [ ] Add `restart: unless-stopped` to all three services in docker-compose.yml
-- [ ] Add `healthcheck` blocks to sluice and tun2proxy services in docker-compose.yml
-- [ ] Validate Docker socket format in `resolveDockerSocket` (reject non-unix schemes with clear error)
-- [ ] Write test for `/healthz` endpoint (returns 200 when proxy is up)
-- [ ] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
+- [x] Add a minimal HTTP server on `:3000` in main.go serving `/healthz` (returns 200 if proxy is listening)
+- [x] Add `HEALTHCHECK --interval=10s --timeout=3s CMD wget -qO- http://localhost:3000/healthz || exit 1` to Dockerfile
+- [x] Add `restart: unless-stopped` to all three services in docker-compose.yml
+- [x] Add `healthcheck` blocks to sluice and tun2proxy services in docker-compose.yml
+- [x] Validate Docker socket format in `resolveDockerSocket` (reject non-unix schemes with clear error)
+- [x] Write test for `/healthz` endpoint (returns 200 when proxy is up)
+- [x] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
 
 ### Task 9: Add graceful shutdown with timeout
 

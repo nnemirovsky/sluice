@@ -59,6 +59,7 @@ type Server struct {
 	sshJump    *SSHJumpHost
 	mailProxy  *MailProxy
 	resolver   *vault.BindingResolver
+	closed     atomic.Bool
 }
 
 type contextKey string
@@ -672,8 +673,14 @@ func (s *Server) ListenAndServe() error {
 	return s.socks.Serve(s.listener)
 }
 
+// IsListening returns true if the server has not been closed.
+func (s *Server) IsListening() bool {
+	return !s.closed.Load()
+}
+
 // Close stops the server by closing the listener and any internal resources.
 func (s *Server) Close() error {
+	s.closed.Store(true)
 	if s.injectorLn != nil {
 		s.injectorLn.Close()
 	}

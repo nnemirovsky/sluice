@@ -1,6 +1,7 @@
 services:
   sluice:
     build: .
+    restart: unless-stopped
     command:
       - "-policy"
       - "/etc/sluice/policy.toml"
@@ -21,19 +22,35 @@ services:
       - sluice-audit:/var/log/sluice
       - sluice-ca:/home/sluice/ca
       - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
     networks: [internal, external]
 
   tun2proxy:
     image: ghcr.io/tun2proxy/tun2proxy-ubuntu:latest
+    restart: unless-stopped
     cap_add: [NET_ADMIN]
     devices:
       - /dev/net/tun:/dev/net/tun
     command: ["--proxy", "socks5://sluice:1080"]
+    healthcheck:
+      test: ["CMD-SHELL", "ip link show tun0 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
     networks: [internal]
-    depends_on: [sluice]
+    depends_on:
+      sluice:
+        condition: service_healthy
 
   openclaw:
     image: openclaw/openclaw:latest
+    restart: unless-stopped
     container_name: openclaw
     network_mode: "service:tun2proxy"
     env_file: .env.phantom
@@ -44,7 +61,9 @@ services:
     volumes:
       - openclaw-data:/root/.openclaw
       - sluice-ca:/usr/local/share/ca-certificates/sluice:ro
-    depends_on: [tun2proxy]
+    depends_on:
+      tun2proxy:
+        condition: service_healthy
 
 networks:
   internal:
