@@ -1,10 +1,18 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +23,7 @@ import (
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/telegram"
+	"github.com/nemirovsky/sluice/internal/vault"
 )
 
 // dnsTimeout bounds how long a single DNS lookup can block. The go-socks5
@@ -35,13 +44,21 @@ type Config struct {
 	Policy     *policy.Engine
 	Audit      *audit.FileLogger
 	Broker     *telegram.ApprovalBroker
+	Provider   vault.Provider           // nil = no credential injection
+	Resolver   *vault.BindingResolver   // nil = no credential injection
+	VaultDir   string                   // CA cert storage dir (defaults to ~/.sluice)
 }
 
 // Server wraps a SOCKS5 server with policy enforcement and audit logging.
 type Server struct {
-	listener net.Listener
-	socks    *socks5.Server
-	rules    *policyRuleSet
+	listener   net.Listener
+	socks      *socks5.Server
+	rules      *policyRuleSet
+	injector   *Injector
+	injectorLn net.Listener
+	sshJump    *SSHJumpHost
+	mailProxy  *MailProxy
+	resolver   *vault.BindingResolver
 }
 
 type contextKey string
@@ -49,6 +66,7 @@ type contextKey string
 const ctxKeyProtocol       contextKey = "protocol"
 const ctxKeyEngine         contextKey = "engine"
 const ctxKeyFallbackAddrs  contextKey = "fallbackAddrs"
+const ctxKeyFQDN           contextKey = "fqdn"
 
 // ProtocolFromContext retrieves the detected protocol from the request context.
 func ProtocolFromContext(ctx context.Context) Protocol {
@@ -286,6 +304,7 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 	if allowed {
 		proto := DetectProtocol(port)
 		ctx = context.WithValue(ctx, ctxKeyProtocol, proto)
+		ctx = context.WithValue(ctx, ctxKeyFQDN, dest)
 	}
 	return ctx, allowed
 }
@@ -300,51 +319,311 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("listen: %w", err)
 	}
 
+	srv := &Server{listener: ln}
+
+	// Initialize credential injection handlers when a vault provider and
+	// binding resolver are both configured.
+	if cfg.Provider != nil && cfg.Resolver != nil {
+		srv.resolver = cfg.Resolver
+
+		// HTTPS MITM injector backed by goproxy.
+		vaultDir := cfg.VaultDir
+		if vaultDir == "" {
+			home, homeErr := os.UserHomeDir()
+			if homeErr != nil {
+				ln.Close()
+				return nil, fmt.Errorf("determine home dir for CA: %w", homeErr)
+			}
+			vaultDir = filepath.Join(home, ".sluice")
+		}
+		caCert, _, caErr := LoadOrCreateCA(vaultDir)
+		if caErr != nil {
+			ln.Close()
+			return nil, fmt.Errorf("load CA: %w", caErr)
+		}
+
+		// Generate a random auth token so only our SOCKS5 dial function
+		// can use the injector listener. Without this, any local process
+		// that discovers the port could bypass policy and audit logging.
+		tokenBytes := make([]byte, 16)
+		if _, tokenErr := rand.Read(tokenBytes); tokenErr != nil {
+			ln.Close()
+			return nil, fmt.Errorf("generate injector auth token: %w", tokenErr)
+		}
+		authToken := hex.EncodeToString(tokenBytes)
+
+		srv.injector = NewInjector(cfg.Provider, cfg.Resolver, caCert, authToken)
+		injLn, injErr := net.Listen("tcp", "127.0.0.1:0")
+		if injErr != nil {
+			ln.Close()
+			return nil, fmt.Errorf("injector listener: %w", injErr)
+		}
+		srv.injectorLn = injLn
+		go http.Serve(injLn, srv.injector.Proxy) //nolint:errcheck // best-effort
+
+		// SSH jump host for credential-injected SSH connections.
+		hostKey, hkErr := GenerateSSHHostKey()
+		if hkErr != nil {
+			ln.Close()
+			injLn.Close()
+			return nil, fmt.Errorf("generate SSH host key: %w", hkErr)
+		}
+		srv.sshJump = NewSSHJumpHost(cfg.Provider, hostKey)
+
+		// Mail proxy for IMAP/SMTP credential injection. Pass the CA cert
+		// so implicit TLS ports (993, 465) can be handled via TLS MITM.
+		srv.mailProxy = NewMailProxy(cfg.Provider, &caCert)
+
+		log.Printf("credential injection enabled (%s)", cfg.Provider.Name())
+	}
+
 	enginePtr := new(atomic.Pointer[policy.Engine])
 	enginePtr.Store(cfg.Policy)
 	reloadMu := new(sync.Mutex)
 
 	rules := &policyRuleSet{engine: enginePtr, reloadMu: reloadMu, audit: cfg.Audit, broker: cfg.Broker}
-	resolver := &policyResolver{engine: enginePtr, audit: cfg.Audit, broker: cfg.Broker}
+	dnsResolver := &policyResolver{engine: enginePtr, audit: cfg.Audit, broker: cfg.Broker}
+	srv.rules = rules
 
 	socksCfg := &socks5.Config{
 		Rules:    rules,
-		Resolver: resolver,
-		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			d := &net.Dialer{Timeout: connectTimeout}
-			conn, err := d.DialContext(ctx, network, addr)
-			if err == nil {
-				return conn, nil
-			}
-			// Try policy-approved fallback addresses from DNS resolution.
-			fallbacks, _ := ctx.Value(ctxKeyFallbackAddrs).([]net.IP)
-			if len(fallbacks) == 0 {
-				return nil, err
-			}
-			_, portStr, splitErr := net.SplitHostPort(addr)
-			if splitErr != nil {
-				return nil, err
-			}
-			for _, ip := range fallbacks {
-				fbAddr := net.JoinHostPort(ip.String(), portStr)
-				if fbConn, fbErr := d.DialContext(ctx, network, fbAddr); fbErr == nil {
-					return fbConn, nil
-				}
-			}
-			return nil, err
-		},
+		Resolver: dnsResolver,
+		Dial:     srv.dial,
 	}
 	socksServer, err := socks5.New(socksCfg)
 	if err != nil {
 		ln.Close()
+		if srv.injectorLn != nil {
+			srv.injectorLn.Close()
+		}
 		return nil, fmt.Errorf("socks5: %w", err)
 	}
+	srv.socks = socksServer
 
-	return &Server{
-		listener: ln,
-		socks:    socksServer,
-		rules:    rules,
-	}, nil
+	return srv, nil
+}
+
+// dial is the custom dialer for go-socks5. When a credential binding matches
+// the destination, the connection is routed through the appropriate injection
+// handler (HTTPS MITM, SSH jump host, or mail proxy). Otherwise it falls
+// through to a direct TCP connection with DNS fallback support.
+func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	if s.resolver != nil {
+		fqdn, _ := ctx.Value(ctxKeyFQDN).(string)
+		if fqdn != "" {
+			_, portStr, _ := net.SplitHostPort(addr)
+			port, _ := strconv.Atoi(portStr)
+
+			if binding, ok := s.resolver.Resolve(fqdn, port); ok {
+				proto := ProtocolFromContext(ctx)
+				if binding.Protocol != "" {
+					proto = Protocol(binding.Protocol)
+				}
+				// hostAddr uses the FQDN for TLS SNI and SSH known_hosts
+				// verification. addr (the go-socks5 dial target) uses the
+				// policy-approved resolved IP for the actual TCP connection,
+				// preventing DNS rebinding between policy evaluation and dial.
+				hostAddr := net.JoinHostPort(fqdn, portStr)
+
+				// Build address list from primary + policy-approved fallbacks
+				// so injection handlers have the same dual-stack resilience
+				// as the non-injected direct connection path.
+				dialAddrs := []string{addr}
+				if fallbacks, ok := ctx.Value(ctxKeyFallbackAddrs).([]net.IP); ok {
+					for _, ip := range fallbacks {
+						dialAddrs = append(dialAddrs, net.JoinHostPort(ip.String(), portStr))
+					}
+				}
+
+				switch proto {
+				case ProtoHTTP, ProtoHTTPS:
+					if s.injector != nil {
+						// Pin the policy-approved IPs so goproxy's
+						// transport dials them instead of re-resolving.
+						// Each connection gets a unique pin ID to avoid
+						// races between concurrent same-host connections.
+						ips := make([]string, len(dialAddrs))
+						for i, a := range dialAddrs {
+							ip, _, _ := net.SplitHostPort(a)
+							ips[i] = ip
+						}
+						pinID := generatePinID()
+						s.injector.PinIPs(pinID, ips)
+						conn, err := dialThroughInjector(s.injectorLn.Addr().String(), fqdn, port, s.injector.authToken, pinID)
+						if err != nil {
+							s.injector.UnpinIPs(pinID)
+							return nil, err
+						}
+						return &pinnedConn{Conn: conn, injector: s.injector, pinID: pinID}, nil
+					}
+				case ProtoSSH:
+					if s.sshJump != nil {
+						return dialWithHandler(func(agentConn net.Conn, ready chan<- error) {
+							if err := s.sshJump.HandleConnection(agentConn, dialAddrs, hostAddr, binding, ready); err != nil {
+								log.Printf("[SSH] handler error: %v", err)
+							}
+						})
+					}
+				case ProtoIMAP, ProtoSMTP:
+					if s.mailProxy != nil {
+						return dialWithHandler(func(agentConn net.Conn, ready chan<- error) {
+							if err := s.mailProxy.HandleConnection(agentConn, dialAddrs, hostAddr, binding, proto, ready); err != nil {
+								log.Printf("[MAIL] handler error: %v", err)
+							}
+						})
+					}
+				}
+			}
+		}
+	}
+
+	// No credential binding or unsupported protocol: direct connection.
+	d := &net.Dialer{Timeout: connectTimeout}
+	conn, err := d.DialContext(ctx, network, addr)
+	if err == nil {
+		return conn, nil
+	}
+	// Try policy-approved fallback addresses from DNS resolution.
+	fallbacks, _ := ctx.Value(ctxKeyFallbackAddrs).([]net.IP)
+	if len(fallbacks) == 0 {
+		return nil, err
+	}
+	_, portStr, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		return nil, err
+	}
+	for _, ip := range fallbacks {
+		fbAddr := net.JoinHostPort(ip.String(), portStr)
+		if fbConn, fbErr := d.DialContext(ctx, network, fbAddr); fbErr == nil {
+			return fbConn, nil
+		}
+	}
+	return nil, err
+}
+
+// dialThroughInjector connects to the local goproxy MITM listener and
+// establishes an HTTP CONNECT tunnel for the target host. The authToken
+// is included as a header so the injector can verify the request
+// originated from the SOCKS5 proxy rather than an unauthorized local process.
+// The pinID identifies the per-connection pinned IPs for DNS rebinding protection.
+func dialThroughInjector(injectorAddr, host string, port int, authToken, pinID string) (net.Conn, error) {
+	conn, err := net.DialTimeout("tcp", injectorAddr, connectTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("connect to injector: %w", err)
+	}
+
+	target := net.JoinHostPort(host, strconv.Itoa(port))
+	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\nX-Sluice-Auth: %s\r\nX-Sluice-Pin: %s\r\n\r\n", target, target, authToken, pinID)
+	if _, wErr := io.WriteString(conn, req); wErr != nil {
+		conn.Close()
+		return nil, fmt.Errorf("send CONNECT: %w", wErr)
+	}
+
+	br := bufio.NewReader(conn)
+	resp, rErr := http.ReadResponse(br, &http.Request{Method: "CONNECT"})
+	if rErr != nil {
+		conn.Close()
+		return nil, fmt.Errorf("read CONNECT response: %w", rErr)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		conn.Close()
+		return nil, fmt.Errorf("CONNECT rejected: %s", resp.Status)
+	}
+
+	// If the buffered reader consumed bytes past the HTTP response headers,
+	// wrap the connection so those bytes are read first.
+	if br.Buffered() > 0 {
+		return &bufferedConn{Reader: br, Conn: conn}, nil
+	}
+	return conn, nil
+}
+
+// generatePinID returns a random hex string used to key per-connection
+// pinned IPs in the injector. Each SOCKS5 connection gets its own pin ID
+// so concurrent connections to the same host do not interfere.
+func generatePinID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// pinnedConn wraps a net.Conn and removes the associated pin entry from the
+// injector's sync.Map when the connection is closed. This prevents pin entries
+// from leaking when clients disconnect without making any outbound requests
+// and ensures the pins persist for the full tunnel lifetime (not just the
+// first transport dial).
+type pinnedConn struct {
+	net.Conn
+	injector *Injector
+	pinID    string
+	once     sync.Once
+}
+
+func (c *pinnedConn) Close() error {
+	c.once.Do(func() { c.injector.UnpinIPs(c.pinID) })
+	return c.Conn.Close()
+}
+
+// bufferedConn wraps a net.Conn with a buffered reader to drain bytes read
+// ahead during HTTP response parsing before reading from the raw connection.
+type bufferedConn struct {
+	io.Reader
+	net.Conn
+}
+
+func (c *bufferedConn) Read(b []byte) (int, error) {
+	return c.Reader.Read(b)
+}
+
+// dialWithHandler creates a TCP loopback pair and starts the given handler
+// in a goroutine with one end of the pair. Returns the other end for
+// go-socks5 to relay agent data through. Uses a real TCP pair rather than
+// net.Pipe() because SSH requires kernel buffering during the version
+// exchange where both sides write simultaneously.
+//
+// The handler must send nil on the ready channel once setup completes
+// successfully, or an error if setup fails. dialWithHandler blocks until
+// the ready signal arrives. If setup fails, the connection is closed and
+// the error is returned to go-socks5, which reports a proper SOCKS failure
+// to the client instead of a silent EOF after a successful CONNECT.
+func dialWithHandler(handler func(net.Conn, chan<- error)) (net.Conn, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, fmt.Errorf("handler listener: %w", err)
+	}
+
+	type acceptResult struct {
+		conn net.Conn
+		err  error
+	}
+	ch := make(chan acceptResult, 1)
+	go func() {
+		defer ln.Close()
+		c, aErr := ln.Accept()
+		ch <- acceptResult{c, aErr}
+	}()
+
+	socksEnd, dErr := net.DialTimeout("tcp", ln.Addr().String(), 5*time.Second)
+	if dErr != nil {
+		ln.Close()
+		return nil, fmt.Errorf("dial handler: %w", dErr)
+	}
+
+	result := <-ch
+	if result.err != nil {
+		socksEnd.Close()
+		return nil, fmt.Errorf("accept handler: %w", result.err)
+	}
+
+	ready := make(chan error, 1)
+	go handler(result.conn, ready)
+
+	if setupErr := <-ready; setupErr != nil {
+		socksEnd.Close()
+		return nil, fmt.Errorf("handler setup: %w", setupErr)
+	}
+	return socksEnd, nil
 }
 
 // ReloadPolicy atomically swaps the policy engine used for future connections.
@@ -379,7 +658,10 @@ func (s *Server) ListenAndServe() error {
 	return s.socks.Serve(s.listener)
 }
 
-// Close stops the server by closing the listener.
+// Close stops the server by closing the listener and any internal resources.
 func (s *Server) Close() error {
+	if s.injectorLn != nil {
+		s.injectorLn.Close()
+	}
 	return s.listener.Close()
 }

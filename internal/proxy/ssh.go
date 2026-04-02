@@ -8,8 +8,11 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 
 	"github.com/nemirovsky/sluice/internal/vault"
 )
@@ -19,8 +22,13 @@ import (
 // authentication), authenticates to the upstream server using credentials
 // from the vault, and relays SSH session channels between the two.
 type SSHJumpHost struct {
-	provider vault.Provider
-	hostKey  ssh.Signer
+	provider        vault.Provider
+	hostKey         ssh.Signer
+	// HostKeyCallback verifies the upstream SSH server's host key.
+	// If nil, the jump host attempts to use the system known_hosts file
+	// (~/.ssh/known_hosts). If that file does not exist, connections to
+	// upstream servers are rejected to prevent silent MITM attacks.
+	HostKeyCallback ssh.HostKeyCallback
 }
 
 // NewSSHJumpHost creates an SSH jump host handler. The hostKey is presented
@@ -43,31 +51,69 @@ func GenerateSSHHostKey() (ssh.Signer, error) {
 	return ssh.NewSignerFromKey(key)
 }
 
+// resolveHostKeyCallback returns the host key callback to use for upstream
+// connections. It checks in order: explicit HostKeyCallback field, system
+// known_hosts file, then returns an error (never falls back to insecure).
+func (h *SSHJumpHost) resolveHostKeyCallback() (ssh.HostKeyCallback, error) {
+	if h.HostKeyCallback != nil {
+		return h.HostKeyCallback, nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err == nil {
+		khPath := filepath.Join(home, ".ssh", "known_hosts")
+		if cb, khErr := knownhosts.New(khPath); khErr == nil {
+			return cb, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no HostKeyCallback configured and no ~/.ssh/known_hosts found; " +
+		"set SSHJumpHost.HostKeyCallback or populate known_hosts to verify upstream servers")
+}
+
 // HandleConnection manages the SSH jump host relay between an agent and
 // an upstream SSH server. The agentConn is the raw TCP stream from the
-// agent (after SOCKS5 handshake). The upstreamAddr is the target
-// host:port. The binding specifies which credential to use and the
-// SSH username (via the Template field).
+// agent (after SOCKS5 handshake). dialAddrs is a list of policy-approved
+// IP:port addresses to try in order for the upstream TCP connection.
+// hostAddr is the FQDN:port used for SSH host key verification
+// (known_hosts matching). The binding specifies which credential to use
+// and the SSH username (via the Template field).
+//
+// The ready channel signals when setup is complete. nil means the handler
+// is ready to relay traffic. A non-nil error means setup failed and the
+// SOCKS5 layer should report a connection failure to the client.
 //
 // Flow:
 //  1. Decrypt SSH private key from vault into SecureBytes
 //  2. Parse the key and zero the vault copy immediately
-//  3. Dial upstream SSH server and authenticate with the real key
-//  4. Accept the agent's SSH connection with no authentication
-//  5. Relay SSH channels between agent and upstream
-func (h *SSHJumpHost) HandleConnection(agentConn net.Conn, upstreamAddr string, binding vault.Binding) error {
+//  3. Dial upstream SSH server using policy-approved IPs and
+//     authenticate with the real key
+//  4. Signal ready (setup complete)
+//  5. Accept the agent's SSH connection with no authentication
+//  6. Relay SSH channels between agent and upstream
+func (h *SSHJumpHost) HandleConnection(agentConn net.Conn, dialAddrs []string, hostAddr string, binding vault.Binding, ready chan<- error) error {
 	defer agentConn.Close()
+
+	// signalErr sends an error on ready (if non-nil) to report setup
+	// failure to the SOCKS5 layer before returning.
+	signalErr := func(err error) error {
+		if ready != nil {
+			ready <- err
+			ready = nil
+		}
+		return err
+	}
 
 	// Decrypt SSH private key from vault.
 	secret, err := h.provider.Get(binding.Credential)
 	if err != nil {
-		return fmt.Errorf("get credential %q: %w", binding.Credential, err)
+		return signalErr(fmt.Errorf("get credential %q: %w", binding.Credential, err))
 	}
 
 	signer, parseErr := ssh.ParsePrivateKey(secret.Bytes())
 	secret.Release() // Zero vault copy immediately after parsing.
 	if parseErr != nil {
-		return fmt.Errorf("parse SSH key for %q: %w", binding.Credential, parseErr)
+		return signalErr(fmt.Errorf("parse SSH key for %q: %w", binding.Credential, parseErr))
 	}
 
 	// Template field holds the SSH username for SSH bindings.
@@ -76,24 +122,47 @@ func (h *SSHJumpHost) HandleConnection(agentConn net.Conn, upstreamAddr string, 
 		username = "root"
 	}
 
-	// Dial upstream and authenticate with the vault credential.
-	upstreamTCP, err := net.DialTimeout("tcp", upstreamAddr, connectTimeout)
-	if err != nil {
-		return fmt.Errorf("dial upstream %s: %w", upstreamAddr, err)
+	// Dial upstream using policy-approved IP addresses to prevent DNS
+	// rebinding between policy evaluation and connection. Multiple
+	// addresses provide fallback on dual-stack hosts.
+	var upstreamTCP net.Conn
+	var lastDialErr error
+	for _, addr := range dialAddrs {
+		upstreamTCP, lastDialErr = net.DialTimeout("tcp", addr, connectTimeout)
+		if lastDialErr == nil {
+			break
+		}
+	}
+	if lastDialErr != nil {
+		return signalErr(fmt.Errorf("dial upstream %v: %w", dialAddrs, lastDialErr))
 	}
 
-	upstreamSSH, upstreamChans, upstreamReqs, err := ssh.NewClientConn(upstreamTCP, upstreamAddr, &ssh.ClientConfig{
+	hostKeyCallback, hkErr := h.resolveHostKeyCallback()
+	if hkErr != nil {
+		upstreamTCP.Close()
+		return signalErr(fmt.Errorf("SSH host key verification: %w", hkErr))
+	}
+
+	// Use hostAddr (FQDN:port) for the SSH client so host key
+	// verification matches known_hosts entries by hostname.
+	upstreamSSH, upstreamChans, upstreamReqs, err := ssh.NewClientConn(upstreamTCP, hostAddr, &ssh.ClientConfig{
 		User:            username,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeyCallback,
 	})
 	if err != nil {
 		upstreamTCP.Close()
-		return fmt.Errorf("SSH handshake with %s: %w", upstreamAddr, err)
+		return signalErr(fmt.Errorf("SSH handshake with %s: %w", hostAddr, err))
 	}
 	defer upstreamSSH.Close()
 
-	log.Printf("[SSH] authenticated to %s as %q via credential %q", upstreamAddr, username, binding.Credential)
+	log.Printf("[SSH] authenticated to %s as %q via credential %q", hostAddr, username, binding.Credential)
+
+	// Setup complete. Signal the SOCKS5 layer to send CONNECT success.
+	if ready != nil {
+		ready <- nil
+		ready = nil
+	}
 
 	// Accept the agent's SSH connection with no authentication required.
 	serverConfig := &ssh.ServerConfig{NoClientAuth: true}

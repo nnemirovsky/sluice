@@ -119,3 +119,52 @@ func GenerateCA() (tls.Certificate, *x509.Certificate, error) {
 		Leaf:        x509Cert,
 	}, x509Cert, nil
 }
+
+// GenerateHostCert creates a TLS certificate for the given hostname, signed
+// by the provided CA. Used for MITM on mail protocols (IMAPS/SMTPS) where
+// the proxy terminates TLS from the agent and re-establishes it to upstream.
+func GenerateHostCert(caCert tls.Certificate, host string) (tls.Certificate, error) {
+	caX509 := caCert.Leaf
+	if caX509 == nil {
+		var parseErr error
+		caX509, parseErr = x509.ParseCertificate(caCert.Certificate[0])
+		if parseErr != nil {
+			return tls.Certificate{}, fmt.Errorf("parse CA cert: %w", parseErr)
+		}
+	}
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("generate host key: %w", err)
+	}
+
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("generate serial: %w", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			Organization: []string{"Sluice Proxy"},
+			CommonName:   host,
+		},
+		NotBefore: time.Now().Add(-time.Hour),
+		NotAfter:  time.Now().Add(24 * time.Hour),
+		KeyUsage:  x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{
+			x509.ExtKeyUsageServerAuth,
+		},
+		DNSNames: []string{host},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, caX509, &key.PublicKey, caCert.PrivateKey)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("create host cert: %w", err)
+	}
+
+	return tls.Certificate{
+		Certificate: [][]byte{certDER, caCert.Certificate[0]},
+		PrivateKey:  key,
+	}, nil
+}

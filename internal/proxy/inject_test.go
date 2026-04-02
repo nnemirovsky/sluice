@@ -29,7 +29,7 @@ func setupTestInjector(t *testing.T, bindings []vault.Binding) (*Injector, *vaul
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewInjector(store, resolver, caCert), store
+	return NewInjector(store, resolver, caCert, ""), store
 }
 
 func TestPhantomSwapInHeaders(t *testing.T) {

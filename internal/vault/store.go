@@ -57,22 +57,42 @@ func loadOrCreateIdentity(path string) (*age.X25519Identity, error) {
 		return nil, fmt.Errorf("generate identity: %w", err)
 	}
 
-	// Use O_CREATE|O_EXCL for atomic creation to prevent TOCTOU races
-	// where concurrent processes could overwrite each other's key.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		if os.IsExist(err) {
+	// Write to a temporary file then hard-link to the final path for
+	// atomic visibility. Concurrent processes see either the old state
+	// (file not found) or the complete file, never a partial write.
+	// os.CreateTemp guarantees a unique name even for concurrent
+	// goroutines within the same process.
+	tmpFile, tmpErr := os.CreateTemp(filepath.Dir(path), ".vault-key-*.tmp")
+	if tmpErr != nil {
+		return nil, fmt.Errorf("create identity temp: %w", tmpErr)
+	}
+	tmpPath := tmpFile.Name()
+	if _, writeErr := tmpFile.WriteString(id.String() + "\n"); writeErr != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return nil, fmt.Errorf("write identity temp: %w", writeErr)
+	}
+	if writeErr := tmpFile.Close(); writeErr != nil {
+		os.Remove(tmpPath)
+		return nil, fmt.Errorf("close identity temp: %w", writeErr)
+	}
+	if chmodErr := os.Chmod(tmpPath, 0600); chmodErr != nil {
+		os.Remove(tmpPath)
+		return nil, fmt.Errorf("chmod identity temp: %w", chmodErr)
+	}
+
+	// os.Link fails with EEXIST if path already exists (another process
+	// won the race). The winner's file is fully written before being
+	// linked, so the loser can safely read it.
+	if linkErr := os.Link(tmpPath, path); linkErr != nil {
+		os.Remove(tmpPath)
+		if os.IsExist(linkErr) {
 			// Another process created the file first. Read their key.
 			return loadOrCreateIdentity(path)
 		}
-		return nil, fmt.Errorf("create identity file: %w", err)
+		return nil, fmt.Errorf("create identity file: %w", linkErr)
 	}
-	defer f.Close()
-	if _, err := f.WriteString(id.String() + "\n"); err != nil {
-		f.Close()
-		os.Remove(path)
-		return nil, fmt.Errorf("write identity: %w", err)
-	}
+	os.Remove(tmpPath)
 	return id, nil
 }
 
@@ -87,6 +107,8 @@ func (s *Store) credPath(name string) (string, error) {
 }
 
 // Add encrypts and stores a credential with the given name.
+// Uses temp file + atomic rename so a concurrent Get never sees a
+// partial or truncated ciphertext file.
 func (s *Store) Add(name, value string) error {
 	path, err := s.credPath(name)
 	if err != nil {
@@ -103,7 +125,30 @@ func (s *Store) Add(name, value string) error {
 	if err := w.Close(); err != nil {
 		return fmt.Errorf("close: %w", err)
 	}
-	return os.WriteFile(path, buf.Bytes(), 0600)
+
+	tmpFile, err := os.CreateTemp(filepath.Dir(path), ".cred-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	if _, err := tmpFile.Write(buf.Bytes()); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write temp: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close temp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0600); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("chmod temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename temp: %w", err)
+	}
+	return nil
 }
 
 // Get decrypts and returns the credential with the given name.

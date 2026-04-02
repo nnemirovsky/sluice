@@ -78,25 +78,20 @@ func TestEnvProvider(t *testing.T) {
 }
 
 func TestHashiCorpProviderStub(t *testing.T) {
+	// The HashiCorp provider is not yet implemented, so construction
+	// must fail immediately rather than silently succeeding and then
+	// failing on every Get() call.
 	_, err := NewHashiCorpProvider(HashiCorpConfig{})
 	if err == nil {
-		t.Error("expected error for empty addr")
+		t.Error("expected error for unimplemented provider")
 	}
 
-	p, err := NewHashiCorpProvider(HashiCorpConfig{
+	_, err = NewHashiCorpProvider(HashiCorpConfig{
 		Addr:  "https://vault.example.com:8200",
 		Mount: "sluice",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Name() != "hashicorp" {
-		t.Errorf("expected name 'hashicorp', got %q", p.Name())
-	}
-
-	_, err = p.Get("some_secret")
 	if err == nil {
-		t.Error("expected error from stub implementation")
+		t.Error("expected error for unimplemented provider even with valid config")
 	}
 }
 

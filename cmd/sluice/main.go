@@ -5,14 +5,26 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"reflect"
 	"strconv"
 	"syscall"
+
+	"github.com/BurntSushi/toml"
 
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
 	"github.com/nemirovsky/sluice/internal/telegram"
+	"github.com/nemirovsky/sluice/internal/vault"
 )
+
+// sluiceConfig holds the vault and binding sections from the policy TOML file.
+// Parsed separately from the policy engine to avoid circular dependencies
+// (vault imports policy).
+type sluiceConfig struct {
+	Vault    vault.VaultConfig `toml:"vault"`
+	Bindings []vault.Binding   `toml:"binding"`
+}
 
 func main() {
 	// Handle subcommands before flag parsing.
@@ -87,6 +99,32 @@ func main() {
 		log.Printf("telegram not configured (ask rules will auto-deny)")
 	}
 
+	// Parse vault config and credential bindings from the same TOML file.
+	// These are optional: if no [[binding]] entries exist, credential
+	// injection is disabled and the proxy runs in pass-through mode.
+	// Decode errors are fatal because they indicate a real config mistake
+	// (type mismatches in [vault] or [[binding]] sections). TOML syntax
+	// errors would already be caught by policy.LoadFromFile above.
+	var slCfg sluiceConfig
+	if _, decodeErr := toml.DecodeFile(*policyPath, &slCfg); decodeErr != nil {
+		log.Fatalf("parse vault/binding config: %v", decodeErr)
+	}
+
+	var provider vault.Provider
+	var bindingResolver *vault.BindingResolver
+	if len(slCfg.Bindings) > 0 {
+		provider, err = vault.NewProviderFromConfig(slCfg.Vault)
+		if err != nil {
+			log.Fatalf("create vault provider: %v", err)
+		}
+		bindingResolver, err = vault.NewBindingResolver(slCfg.Bindings)
+		if err != nil {
+			log.Fatalf("create binding resolver: %v", err)
+		}
+		log.Printf("credential injection enabled: %d bindings, provider=%s",
+			len(slCfg.Bindings), provider.Name())
+	}
+
 	// Create the proxy first so the bot can share its engine pointer and
 	// reload mutex. This eliminates split-brain windows during SIGHUP
 	// reloads: both components see engine swaps and policy mutations
@@ -96,6 +134,9 @@ func main() {
 		Policy:     eng,
 		Audit:      logger,
 		Broker:     broker,
+		Provider:   provider,
+		Resolver:   bindingResolver,
+		VaultDir:   slCfg.Vault.Dir,
 	})
 	if err != nil {
 		log.Fatalf("start proxy: %v", err)
@@ -127,9 +168,10 @@ func main() {
 	sighupCh := make(chan os.Signal, 1)
 	signal.Notify(sighupCh, syscall.SIGHUP)
 
-	// Save the startup Telegram config so the SIGHUP handler can detect
-	// config drift (the Telegram runtime is not hot-reloadable).
+	// Save the startup Telegram and vault/binding config so the SIGHUP
+	// handler can detect config drift (these runtimes are not hot-reloadable).
 	startupTelegram := eng.Telegram
+	startupSlCfg := slCfg
 
 	go func() {
 		for range sighupCh {
@@ -169,6 +211,18 @@ func main() {
 			if newEng.Telegram.ChatIDEnv != startupTelegram.ChatIDEnv && !telegramChatIDExplicit {
 				log.Printf("WARNING: chat_id_env changed from %q to %q but env vars are only read at startup; restart required",
 					startupTelegram.ChatIDEnv, newEng.Telegram.ChatIDEnv)
+			}
+
+			// Warn if vault or binding config changed. The credential
+			// injection pipeline (provider, resolver, injector, SSH jump
+			// host, mail proxy) is wired once at startup and cannot be
+			// hot-reloaded. Binding or provider changes require a restart.
+			var newSlCfg sluiceConfig
+			if _, decodeErr := toml.DecodeFile(*policyPath, &newSlCfg); decodeErr == nil {
+				if !reflect.DeepEqual(newSlCfg.Vault, startupSlCfg.Vault) ||
+					!reflect.DeepEqual(newSlCfg.Bindings, startupSlCfg.Bindings) {
+					log.Printf("WARNING: [vault] or [[binding]] config changed but credential injection runtime is not hot-reloadable; restart required")
+				}
 			}
 		}
 	}()

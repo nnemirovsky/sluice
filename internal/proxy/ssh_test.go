@@ -178,14 +178,20 @@ func TestSSHJumpHostInjectsKey(t *testing.T) {
 	}
 
 	jumpHost := NewSSHJumpHost(store, proxyHostKey)
+	jumpHost.HostKeyCallback = ssh.InsecureIgnoreHostKey()
 
 	// Use a TCP connection pair (buffered, unlike net.Pipe).
 	agentConn, proxyConn := tcpConnPair(t)
 
+	ready := make(chan error, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- jumpHost.HandleConnection(proxyConn, sshServer.Addr().String(), binding)
+		errCh <- jumpHost.HandleConnection(proxyConn, []string{sshServer.Addr().String()}, sshServer.Addr().String(), binding, ready)
 	}()
+
+	if setupErr := <-ready; setupErr != nil {
+		t.Fatalf("handler setup: %v", setupErr)
+	}
 
 	// Agent SSH client connects with no credentials.
 	agentSSH, agentChans, agentReqs, err := ssh.NewClientConn(agentConn, "proxy", &ssh.ClientConfig{
@@ -229,6 +235,7 @@ func TestSSHJumpHostMissingCredential(t *testing.T) {
 	}
 
 	jumpHost := NewSSHJumpHost(store, proxyHostKey)
+	jumpHost.HostKeyCallback = ssh.InsecureIgnoreHostKey()
 
 	agentConn, proxyConn := tcpConnPair(t)
 	defer agentConn.Close()
@@ -238,7 +245,8 @@ func TestSSHJumpHostMissingCredential(t *testing.T) {
 		Template:   "testuser",
 	}
 
-	err = jumpHost.HandleConnection(proxyConn, "127.0.0.1:22", binding)
+	ready := make(chan error, 1)
+	err = jumpHost.HandleConnection(proxyConn, []string{"127.0.0.1:22"}, "127.0.0.1:22", binding, ready)
 	if err == nil {
 		t.Fatal("expected error for missing credential")
 	}
@@ -274,12 +282,14 @@ func TestSSHJumpHostBadKey(t *testing.T) {
 	}
 
 	jumpHost := NewSSHJumpHost(store, proxyHostKey)
+	jumpHost.HostKeyCallback = ssh.InsecureIgnoreHostKey()
 
 	agentConn, proxyConn := tcpConnPair(t)
 	defer agentConn.Close()
 
 	// HandleConnection should fail because the upstream rejects our key.
-	err = jumpHost.HandleConnection(proxyConn, sshServer.Addr().String(), binding)
+	ready := make(chan error, 1)
+	err = jumpHost.HandleConnection(proxyConn, []string{sshServer.Addr().String()}, sshServer.Addr().String(), binding, ready)
 	if err == nil {
 		t.Fatal("expected error when upstream rejects key")
 	}
@@ -311,13 +321,19 @@ func TestSSHVaultIntegrityAfterHandshake(t *testing.T) {
 	}
 
 	jumpHost := NewSSHJumpHost(store, proxyHostKey)
+	jumpHost.HostKeyCallback = ssh.InsecureIgnoreHostKey()
 
 	agentConn, proxyConn := tcpConnPair(t)
 
+	ready := make(chan error, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- jumpHost.HandleConnection(proxyConn, sshServer.Addr().String(), binding)
+		errCh <- jumpHost.HandleConnection(proxyConn, []string{sshServer.Addr().String()}, sshServer.Addr().String(), binding, ready)
 	}()
+
+	if setupErr := <-ready; setupErr != nil {
+		t.Fatalf("handler setup: %v", setupErr)
+	}
 
 	// Connect, run command, disconnect.
 	agentSSH, agentChans, agentReqs, err := ssh.NewClientConn(agentConn, "proxy", &ssh.ClientConfig{

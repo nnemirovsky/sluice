@@ -25,16 +25,11 @@ type HashiCorpProvider struct {
 	mount string
 }
 
-// NewHashiCorpProvider creates a HashiCorp Vault provider from config.
+// NewHashiCorpProvider returns an error because the HashiCorp Vault provider
+// is not yet implemented. This fails at construction time rather than silently
+// succeeding and then failing on every credential lookup.
 func NewHashiCorpProvider(cfg HashiCorpConfig) (*HashiCorpProvider, error) {
-	if cfg.Addr == "" {
-		return nil, fmt.Errorf("hashicorp vault: addr is required")
-	}
-	mount := cfg.Mount
-	if mount == "" {
-		mount = "secret"
-	}
-	return &HashiCorpProvider{addr: cfg.Addr, mount: mount}, nil
+	return nil, fmt.Errorf("hashicorp vault provider is not yet implemented; use \"age\" or \"env\" provider instead")
 }
 
 func (p *HashiCorpProvider) Get(name string) (SecureBytes, error) {
