@@ -1,10 +1,10 @@
 package audit
 
 import (
-	"bufio"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -92,32 +92,80 @@ func hashLine(data []byte) string {
 // recoverLastHash reads the last non-empty line from an existing log file
 // and returns its blake3 hash. If the file does not exist or is empty,
 // it returns the genesis hash (blake3 of empty string).
+//
+// The function reads backwards from the end of the file so it is O(line_length)
+// rather than O(file_size), and has no line-length limit.
 func recoverLastHash(path string) (string, error) {
-	genesisHash := hashLine([]byte(""))
+	genesis := hashLine([]byte(""))
 
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return genesisHash, nil
+			return genesis, nil
 		}
 		return "", err
 	}
 	defer f.Close()
 
-	var lastLine string
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line != "" {
-			lastLine = line
-		}
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
 	}
-	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("scan audit log: %w", err)
+	size := info.Size()
+	if size == 0 {
+		return genesis, nil
 	}
 
-	if lastLine == "" {
-		return genesisHash, nil
+	// Read backwards from end of file to find the last complete line.
+	// Audit lines are JSON objects terminated by '\n'.
+	const chunkSize = 4096
+	buf := make([]byte, 0, chunkSize)
+	offset := size
+
+	for offset > 0 {
+		readLen := int64(chunkSize)
+		if readLen > offset {
+			readLen = offset
+		}
+		offset -= readLen
+
+		chunk := make([]byte, readLen)
+		if _, err := f.ReadAt(chunk, offset); err != nil && err != io.EOF {
+			return "", fmt.Errorf("read audit log tail: %w", err)
+		}
+		buf = append(chunk, buf...)
+
+		// Look for the last complete line in what we have so far.
+		// Strip any trailing newline, then find the previous newline.
+		trimmed := buf
+		for len(trimmed) > 0 && trimmed[len(trimmed)-1] == '\n' {
+			trimmed = trimmed[:len(trimmed)-1]
+		}
+		if len(trimmed) == 0 {
+			continue
+		}
+
+		// Find start of the last line.
+		lastNL := -1
+		for i := len(trimmed) - 1; i >= 0; i-- {
+			if trimmed[i] == '\n' {
+				lastNL = i
+				break
+			}
+		}
+
+		if lastNL >= 0 || offset == 0 {
+			var line []byte
+			if lastNL >= 0 {
+				line = trimmed[lastNL+1:]
+			} else {
+				line = trimmed
+			}
+			if len(line) > 0 {
+				return hashLine(line), nil
+			}
+		}
 	}
-	return hashLine([]byte(lastLine)), nil
+
+	return genesis, nil
 }
