@@ -16,6 +16,7 @@ import (
 type GatewayConfig struct {
 	Upstreams  []UpstreamConfig
 	ToolPolicy *ToolPolicy
+	Inspector  *ContentInspector
 	Audit      *audit.FileLogger
 	Broker     *tg.ApprovalBroker
 	TimeoutSec int
@@ -28,6 +29,7 @@ type Gateway struct {
 	toolMap    map[string]string    // namespaced tool -> upstream name
 	allTools   []Tool
 	policy     *ToolPolicy
+	inspector  *ContentInspector
 	audit      *audit.FileLogger
 	broker     *tg.ApprovalBroker
 	timeoutSec int
@@ -40,6 +42,7 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 		upstreams:  make(map[string]*Upstream),
 		toolMap:    make(map[string]string),
 		policy:     cfg.ToolPolicy,
+		inspector:  cfg.Inspector,
 		audit:      cfg.Audit,
 		broker:     cfg.Broker,
 		timeoutSec: cfg.TimeoutSec,
@@ -126,6 +129,25 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 		// Approved: fall through to forward
 	}
 
+	// Inspect arguments before forwarding
+	if gw.inspector != nil {
+		inspection := gw.inspector.InspectArguments(req.Arguments)
+		if inspection.Blocked {
+			if gw.audit != nil {
+				gw.audit.Log(audit.Event{
+					Tool:    req.Name,
+					Action:  "inspect_block",
+					Verdict: "deny",
+					Reason:  inspection.Reason,
+				})
+			}
+			return &ToolResult{
+				Content: []ToolContent{{Type: "text", Text: fmt.Sprintf("Tool call blocked: %s", inspection.Reason)}},
+				IsError: true,
+			}, nil
+		}
+	}
+
 	// Find upstream
 	upstreamName, ok := gw.toolMap[req.Name]
 	if !ok {
@@ -157,6 +179,15 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 	var result ToolResult
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
 		return nil, fmt.Errorf("parse tool result: %w", err)
+	}
+
+	// Redact sensitive content in response
+	if gw.inspector != nil {
+		for i, c := range result.Content {
+			if c.Type == "text" && c.Text != "" {
+				result.Content[i].Text = gw.inspector.RedactResponse(c.Text)
+			}
+		}
 	}
 
 	// Add governance metadata

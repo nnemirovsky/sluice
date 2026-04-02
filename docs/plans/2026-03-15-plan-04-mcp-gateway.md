@@ -888,7 +888,7 @@ the agent).
 - Create: `internal/mcp/inspect_test.go`
 - Modify: `internal/mcp/gateway.go` (add inspection hooks)
 
-- [ ] **Step 1: Define inspection rules in policy TOML**
+- [x] **Step 1: Define inspection rules in policy TOML**
 
 ```toml
 # Content inspection rules (in policy.toml)
@@ -915,7 +915,7 @@ name = "email_in_response"
 note = "Redact email addresses in tool responses"
 ```
 
-- [ ] **Step 2: Implement inspection engine**
+- [x] **Step 2: Implement inspection engine**
 
 ```go
 // internal/mcp/inspect.go
@@ -939,7 +939,7 @@ func InspectArguments(args map[string]interface{}, rules []InspectBlockRule) Ins
 func RedactResponse(content string, rules []InspectRedactRule) string
 ```
 
-- [ ] **Step 3: Write tests for argument blocking**
+- [x] **Step 3: Write tests for argument blocking**
 
 ```go
 func TestInspectBlocksAPIKeyInArgs(t *testing.T) {
@@ -950,7 +950,7 @@ func TestInspectAllowsCleanArgs(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: Write tests for response redaction**
+- [x] **Step 4: Write tests for response redaction**
 
 ```go
 func TestRedactAPIKeyInResponse(t *testing.T) {
@@ -964,7 +964,7 @@ func TestRedactPreservesCleanContent(t *testing.T) {
 }
 ```
 
-- [ ] **Step 5: Integrate into gateway.go**
+- [x] **Step 5: Integrate into gateway.go**
 
 In the tool call handler:
 1. Before forwarding: run `InspectArguments`. If blocked, return error
@@ -972,17 +972,17 @@ In the tool call handler:
 2. After receiving response: run `RedactResponse` on content before
    returning to agent.
 
-- [ ] **Step 6: Add inspection rules to TOML parser**
+- [x] **Step 6: Add inspection rules to TOML parser**
 
 Extend `policyFile` struct to include `InspectBlock` and `InspectRedact`
 rule arrays.
 
-- [ ] **Step 7: Run tests**
+- [x] **Step 7: Run tests**
 
 Run: `go test ./internal/mcp/ -v`
 Expected: PASS
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add internal/mcp/inspect.go internal/mcp/inspect_test.go internal/mcp/gateway.go

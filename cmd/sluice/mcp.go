@@ -92,9 +92,21 @@ func handleMCPCommand(args []string) {
 		}
 	}
 
+	// Optional content inspector for argument blocking and response redaction.
+	var inspector *mcp.ContentInspector
+	if len(eng.InspectBlockRules) > 0 || len(eng.InspectRedactRules) > 0 {
+		inspector, err = mcp.NewContentInspector(eng.InspectBlockRules, eng.InspectRedactRules)
+		if err != nil {
+			log.Fatalf("create content inspector: %v", err)
+		}
+		log.Printf("content inspector: %d block rules, %d redact rules",
+			len(eng.InspectBlockRules), len(eng.InspectRedactRules))
+	}
+
 	gw, err := mcp.NewGateway(mcp.GatewayConfig{
 		Upstreams:  mcpCfg.MCPUpstreams,
 		ToolPolicy: toolPolicy,
+		Inspector:  inspector,
 		Audit:      logger,
 		Broker:     broker,
 		TimeoutSec: eng.TimeoutSec,

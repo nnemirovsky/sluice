@@ -23,17 +23,19 @@ type compiledEngine struct {
 
 // Engine holds the parsed policy rules and provides evaluation.
 type Engine struct {
-	mu             sync.RWMutex
-	Default        Verdict
-	AllowRules     []Rule
-	DenyRules      []Rule
-	AskRules       []Rule
-	ToolAllowRules []ToolRule
-	ToolDenyRules  []ToolRule
-	ToolAskRules   []ToolRule
-	TimeoutSec     int
-	Telegram       TelegramConfig
-	compiled       *compiledEngine
+	mu                 sync.RWMutex
+	Default            Verdict
+	AllowRules         []Rule
+	DenyRules          []Rule
+	AskRules           []Rule
+	ToolAllowRules     []ToolRule
+	ToolDenyRules      []ToolRule
+	ToolAskRules       []ToolRule
+	InspectBlockRules  []InspectBlockRule
+	InspectRedactRules []InspectRedactRule
+	TimeoutSec         int
+	Telegram           TelegramConfig
+	compiled           *compiledEngine
 }
 
 // LoadFromFile reads and parses a policy TOML file.
@@ -89,15 +91,17 @@ func LoadFromBytes(data []byte) (*Engine, error) {
 	}
 
 	eng := &Engine{
-		Default:        defaultVerdict,
-		AllowRules:     pf.Allow,
-		DenyRules:      pf.Deny,
-		AskRules:       pf.Ask,
-		ToolAllowRules: toolAllow,
-		ToolDenyRules:  toolDeny,
-		ToolAskRules:   toolAsk,
-		TimeoutSec:     timeout,
-		Telegram:       pf.Telegram,
+		Default:            defaultVerdict,
+		AllowRules:         pf.Allow,
+		DenyRules:          pf.Deny,
+		AskRules:           pf.Ask,
+		ToolAllowRules:     toolAllow,
+		ToolDenyRules:      toolDeny,
+		ToolAskRules:       toolAsk,
+		InspectBlockRules:  pf.InspectBlock,
+		InspectRedactRules: pf.InspectRedact,
+		TimeoutSec:         timeout,
+		Telegram:           pf.Telegram,
 	}
 	if err := eng.compile(); err != nil {
 		return nil, fmt.Errorf("compile policy rules: %w", err)

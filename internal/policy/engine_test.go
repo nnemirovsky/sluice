@@ -515,3 +515,22 @@ func TestLoadPolicyWithoutTelegram(t *testing.T) {
 		t.Errorf("expected empty chat_id_env, got %q", eng.Telegram.ChatIDEnv)
 	}
 }
+
+func TestLoadPolicyWithInspect(t *testing.T) {
+	eng, err := LoadFromFile("../../testdata/policy_with_inspect.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eng.InspectBlockRules) != 2 {
+		t.Errorf("expected 2 inspect_block rules, got %d", len(eng.InspectBlockRules))
+	}
+	if len(eng.InspectRedactRules) != 2 {
+		t.Errorf("expected 2 inspect_redact rules, got %d", len(eng.InspectRedactRules))
+	}
+	if eng.InspectBlockRules[0].Name != "api_key_leak" {
+		t.Errorf("expected block rule name %q, got %q", "api_key_leak", eng.InspectBlockRules[0].Name)
+	}
+	if eng.InspectRedactRules[0].Replacement != "[REDACTED_API_KEY]" {
+		t.Errorf("expected redact replacement %q, got %q", "[REDACTED_API_KEY]", eng.InspectRedactRules[0].Replacement)
+	}
+}
