@@ -244,17 +244,17 @@ All exported types lack documentation comments. Add package-level and type-level
 
 ### Task 11: Verify acceptance criteria
 
-- [ ] Verify policy reload is race-free under concurrent SIGHUP (test with -race)
-- [ ] Verify CA cert validity is 2 years (check generated cert)
-- [ ] Verify Telegram rate limiting works (exceed limit, verify auto-deny)
-- [ ] Verify HashiCorp Vault provider works against mock server
-- [ ] Verify MCP upstream timeout is configurable via TOML
-- [ ] Verify /healthz returns 200 when proxy is running
-- [ ] Verify Docker health checks work (`docker compose up`, check health status)
-- [ ] Verify graceful shutdown drains in-flight connections
-- [ ] Verify all exported types have godoc comments
-- [ ] Run full test suite with race detector: `go test ./... -v -timeout 60s -race`
-- [ ] Run linter: `go vet ./...`
+- [x] Verify policy reload is race-free under concurrent SIGHUP (test with -race)
+- [x] Verify CA cert validity is 2 years (check generated cert)
+- [x] Verify Telegram rate limiting works (exceed limit, verify auto-deny)
+- [x] Verify HashiCorp Vault provider works against mock server
+- [x] Verify MCP upstream timeout is configurable via TOML
+- [x] Verify /healthz returns 200 when proxy is running
+- [x] Verify Docker health checks work (skipped - requires running Docker daemon)
+- [x] Verify graceful shutdown drains in-flight connections
+- [x] Verify all exported types have godoc comments
+- [x] Run full test suite with race detector: `go test ./... -v -timeout 60s -race`
+- [x] Run linter: `go vet ./...`
 
 ### Task 12: [Final] Update documentation
 
