@@ -31,7 +31,12 @@ func handleMCPCommand(args []string) {
 	telegramChatIDStr := fs.String("telegram-chat-id", os.Getenv("TELEGRAM_CHAT_ID"), "Telegram chat ID for approvals")
 	fs.Parse(args)
 
-	eng, err := policy.LoadFromFile(*policyPath)
+	policyData, err := os.ReadFile(*policyPath)
+	if err != nil {
+		log.Fatalf("read policy file: %v", err)
+	}
+
+	eng, err := policy.LoadFromBytes(policyData)
 	if err != nil {
 		log.Fatalf("load policy: %v", err)
 	}
@@ -44,10 +49,10 @@ func handleMCPCommand(args []string) {
 		*telegramChatIDStr = os.Getenv(eng.Telegram.ChatIDEnv)
 	}
 
-	// Parse MCP upstream config from the same TOML file.
+	// Parse MCP upstream config from the already-read TOML bytes.
 	var mcpCfg mcpConfig
-	if _, decodeErr := toml.DecodeFile(*policyPath, &mcpCfg); decodeErr != nil {
-		log.Fatalf("parse MCP config: %v", decodeErr)
+	if err := toml.Unmarshal(policyData, &mcpCfg); err != nil {
+		log.Fatalf("parse MCP config: %v", err)
 	}
 
 	// Build tool policy from engine's tool rules.

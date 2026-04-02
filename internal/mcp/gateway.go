@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/policy"
@@ -84,17 +85,11 @@ func (gw *Gateway) Tools() []Tool {
 // the call to the correct upstream server.
 func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 	verdict := gw.policy.Evaluate(req.Name)
-
-	if gw.audit != nil {
-		gw.audit.Log(audit.Event{
-			Tool:    req.Name,
-			Action:  "tool_call",
-			Verdict: verdict.String(),
-		})
-	}
+	finalVerdict := verdict
 
 	switch verdict {
 	case policy.Deny:
+		gw.logAudit(req.Name, "tool_call", finalVerdict)
 		return &ToolResult{
 			Content: []ToolContent{{Type: "text", Text: "Tool call denied by policy"}},
 			IsError: true,
@@ -102,6 +97,7 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 
 	case policy.Ask:
 		if gw.broker == nil {
+			gw.logAudit(req.Name, "tool_call", policy.Deny)
 			return &ToolResult{
 				Content: []ToolContent{{Type: "text", Text: "Tool call requires approval (no broker configured)"}},
 				IsError: true,
@@ -109,25 +105,35 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 		}
 		argsStr := string(req.Arguments)
 		if len(argsStr) > 200 {
-			argsStr = argsStr[:200] + "..."
+			// Truncate without splitting multi-byte UTF-8 characters
+			argsStr = argsStr[:200]
+			for !utf8.ValidString(argsStr) {
+				argsStr = argsStr[:len(argsStr)-1]
+			}
+			argsStr += "..."
 		}
 		log.Printf("[MCP ASK] %s (args: %s)", req.Name, argsStr)
 		timeout := time.Duration(gw.timeoutSec) * time.Second
 		resp, err := gw.broker.Request(fmt.Sprintf("MCP:%s", req.Name), 0, timeout)
 		if err != nil {
+			gw.logAudit(req.Name, "tool_call", policy.Deny)
 			return &ToolResult{
 				Content: []ToolContent{{Type: "text", Text: "Approval timeout"}},
 				IsError: true,
 			}, nil
 		}
 		if resp == tg.ResponseDeny {
+			gw.logAudit(req.Name, "tool_call", policy.Deny)
 			return &ToolResult{
 				Content: []ToolContent{{Type: "text", Text: "Denied by user"}},
 				IsError: true,
 			}, nil
 		}
+		finalVerdict = policy.Allow
 		// Approved: fall through to forward
 	}
+
+	gw.logAudit(req.Name, "tool_call", finalVerdict)
 
 	// Inspect arguments before forwarding
 	if gw.inspector != nil {
@@ -201,6 +207,16 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 	}
 
 	return &result, nil
+}
+
+func (gw *Gateway) logAudit(tool, action string, verdict policy.Verdict) {
+	if gw.audit != nil {
+		gw.audit.Log(audit.Event{
+			Tool:    tool,
+			Action:  action,
+			Verdict: verdict.String(),
+		})
+	}
 }
 
 // Stop terminates all upstream server processes.

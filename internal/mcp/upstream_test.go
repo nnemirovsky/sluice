@@ -7,37 +7,6 @@ import (
 	"testing"
 )
 
-func TestUpstreamConfig(t *testing.T) {
-	cfg := UpstreamConfig{
-		Name:    "test",
-		Command: "echo",
-		Args:    []string{"hello"},
-	}
-	if cfg.Name != "test" {
-		t.Errorf("expected name test, got %q", cfg.Name)
-	}
-	if cfg.Command != "echo" {
-		t.Errorf("expected command echo, got %q", cfg.Command)
-	}
-	if len(cfg.Args) != 1 || cfg.Args[0] != "hello" {
-		t.Errorf("unexpected args: %v", cfg.Args)
-	}
-}
-
-func TestUpstreamConfigEnv(t *testing.T) {
-	cfg := UpstreamConfig{
-		Name:    "envtest",
-		Command: "cat",
-		Env:     map[string]string{"FOO": "bar", "BAZ": "qux"},
-	}
-	if len(cfg.Env) != 2 {
-		t.Errorf("expected 2 env vars, got %d", len(cfg.Env))
-	}
-	if cfg.Env["FOO"] != "bar" {
-		t.Errorf("expected FOO=bar, got %q", cfg.Env["FOO"])
-	}
-}
-
 // mockMCPServer is a bash script that acts as a minimal MCP server.
 // It reads JSON-RPC requests from stdin, line by line, and responds.
 const mockMCPServer = `#!/bin/bash

@@ -8,6 +8,17 @@ import (
 	"os"
 )
 
+func marshalResult(id json.RawMessage, v interface{}) *JSONRPCResponse {
+	result, err := json.Marshal(v)
+	if err != nil {
+		return &JSONRPCResponse{
+			JSONRPC: "2.0", ID: id,
+			Error: &JSONRPCError{Code: -32603, Message: fmt.Sprintf("internal marshal error: %v", err)},
+		}
+	}
+	return &JSONRPCResponse{JSONRPC: "2.0", ID: id, Result: result}
+}
+
 // RunStdio reads JSON-RPC requests from stdin, dispatches them through the
 // gateway, and writes responses to stdout. It runs until stdin is closed.
 func (gw *Gateway) RunStdio() error {
@@ -24,7 +35,9 @@ func (gw *Gateway) RunStdio() error {
 
 		resp := gw.handleRequest(req)
 		if resp != nil {
-			encoder.Encode(resp)
+			if err := encoder.Encode(resp); err != nil {
+				return fmt.Errorf("write response: %w", err)
+			}
 		}
 	}
 	return scanner.Err()
@@ -35,19 +48,17 @@ func (gw *Gateway) RunStdio() error {
 func (gw *Gateway) handleRequest(req JSONRPCRequest) *JSONRPCResponse {
 	switch req.Method {
 	case "initialize":
-		result, _ := json.Marshal(InitializeResult{
+		return marshalResult(req.ID, InitializeResult{
 			ProtocolVersion: "2025-03-26",
 			Capabilities:    Capabilities{Tools: &ToolsCapability{}},
 			ServerInfo:      Info{Name: "sluice", Version: "0.1.0"},
 		})
-		return &JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: result}
 
 	case "notifications/initialized":
 		return nil // notification, no response
 
 	case "tools/list":
-		result, _ := json.Marshal(ListToolsResult{Tools: gw.allTools})
-		return &JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: result}
+		return marshalResult(req.ID, ListToolsResult{Tools: gw.allTools})
 
 	case "tools/call":
 		var params CallToolParams
@@ -64,8 +75,7 @@ func (gw *Gateway) handleRequest(req JSONRPCRequest) *JSONRPCResponse {
 				Error: &JSONRPCError{Code: -32603, Message: err.Error()},
 			}
 		}
-		result, _ := json.Marshal(toolResult)
-		return &JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: result}
+		return marshalResult(req.ID, toolResult)
 
 	default:
 		return &JSONRPCResponse{

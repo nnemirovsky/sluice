@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // UpstreamConfig describes how to launch an upstream MCP server process.
@@ -34,8 +36,11 @@ type Upstream struct {
 // StartUpstream launches an upstream MCP server process.
 func StartUpstream(cfg UpstreamConfig) (*Upstream, error) {
 	cmd := exec.Command(cfg.Command, cfg.Args...)
-	for k, v := range cfg.Env {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+	if len(cfg.Env) > 0 {
+		cmd.Env = os.Environ()
+		for k, v := range cfg.Env {
+			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+		}
 	}
 
 	stdin, err := cmd.StdinPipe()
@@ -162,8 +167,20 @@ func (u *Upstream) CallTool(toolName string, arguments json.RawMessage) (*JSONRP
 	})
 }
 
-// Stop closes stdin and waits for the upstream process to exit.
+// Stop closes stdin and waits for the upstream process to exit. If the
+// process does not exit within 5 seconds, it is killed.
 func (u *Upstream) Stop() error {
 	u.stdin.Close()
-	return u.cmd.Wait()
+	done := make(chan error, 1)
+	go func() {
+		done <- u.cmd.Wait()
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(5 * time.Second):
+		u.cmd.Process.Kill()
+		<-done
+		return fmt.Errorf("upstream %s killed after timeout", u.name)
+	}
 }
