@@ -137,7 +137,7 @@ git commit -m "feat: MCP and JSON-RPC protocol types"
 - Create: `internal/mcp/upstream.go`
 - Create: `internal/mcp/upstream_test.go`
 
-- [ ] **Step 1: Write failing test**
+- [x] **Step 1: Write failing test**
 
 ```go
 // internal/mcp/upstream_test.go
@@ -157,7 +157,7 @@ func TestUpstreamConfig(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Implement upstream.go**
+- [x] **Step 2: Implement upstream.go**
 
 ```go
 // internal/mcp/upstream.go
@@ -323,12 +323,12 @@ func (u *Upstream) Stop() error {
 }
 ```
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `go test ./internal/mcp/ -v`
 Expected: PASS
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add internal/mcp/
