@@ -43,6 +43,9 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "audit":
+			handleAuditCommand(os.Args[2:])
+			return
 		}
 	}
 
