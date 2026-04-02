@@ -231,7 +231,14 @@ func main() {
 		for range sighupCh {
 			srv.ReloadMu().Lock()
 
-			newEng, loadErr := policy.LoadFromFile(*policyPath)
+			policyData, readErr := os.ReadFile(*policyPath)
+			if readErr != nil {
+				log.Printf("reload policy failed: %v", readErr)
+				drainSignals(sighupCh)
+				srv.ReloadMu().Unlock()
+				continue
+			}
+			newEng, loadErr := policy.LoadFromBytes(policyData)
 			if loadErr != nil {
 				log.Printf("reload policy failed: %v", loadErr)
 				drainSignals(sighupCh)
@@ -285,7 +292,7 @@ func main() {
 			// host, mail proxy) is wired once at startup and cannot be
 			// hot-reloaded. Binding or provider changes require a restart.
 			var newSlCfg sluiceConfig
-			if _, decodeErr := toml.DecodeFile(*policyPath, &newSlCfg); decodeErr != nil {
+			if decodeErr := toml.Unmarshal(policyData, &newSlCfg); decodeErr != nil {
 				log.Printf("WARNING: could not parse non-policy config sections: %v (vault/binding drift detection skipped)", decodeErr)
 			} else {
 				if !reflect.DeepEqual(newSlCfg.Vault, startupSlCfg.Vault) ||
