@@ -150,6 +150,13 @@ func main() {
 		log.Fatalf("start proxy: %v", err)
 	}
 
+	// Extract the vault.Store from the provider (if age backend) so
+	// Telegram /cred commands can add/remove/rotate credentials.
+	var vaultStore *vault.Store
+	if provider != nil {
+		vaultStore, _ = provider.(*vault.Store)
+	}
+
 	var bot *telegram.Bot
 	if telegramEnabled {
 		var botErr error
@@ -159,6 +166,7 @@ func main() {
 			EnginePtr: srv.EnginePtr(),
 			ReloadMu:  srv.ReloadMu(),
 			AuditPath: *auditPath,
+			Vault:     vaultStore,
 		}, broker)
 		if botErr != nil {
 			log.Fatalf("telegram bot: %v", botErr)
