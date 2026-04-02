@@ -16,6 +16,7 @@ services:
       - ./examples/policy.toml:/etc/sluice/policy.toml:ro
       - sluice-vault:/home/sluice/.sluice
       - sluice-audit:/var/log/sluice
+      - sluice-ca:/home/sluice/ca
     networks: [internal, external]
 
   tun2proxy:
@@ -33,6 +34,7 @@ services:
     env_file: .env.phantom
     volumes:
       - openclaw-data:/root/.openclaw
+      - sluice-ca:/usr/local/share/ca-certificates/sluice:ro
     depends_on: [tun2proxy]
 
 networks:
@@ -43,4 +45,5 @@ networks:
 volumes:
   sluice-vault:
   sluice-audit:
+  sluice-ca:
   openclaw-data:

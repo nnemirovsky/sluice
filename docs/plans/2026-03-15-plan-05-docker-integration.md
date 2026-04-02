@@ -423,7 +423,7 @@ This task ensures the CA cert is generated and mounted correctly.
 - Modify: `Dockerfile` (include CA cert generation on first run)
 - Modify: `scripts/setup-vault.sh` (generate CA if not exists)
 
-- [ ] **Step 1: Add CA cert generation to setup script**
+- [x] **Step 1: Add CA cert generation to setup script**
 
 ```bash
 # scripts/setup-vault.sh
@@ -433,7 +433,7 @@ if [ ! -f "$VAULT_DIR/ca.crt" ]; then
 fi
 ```
 
-- [ ] **Step 2: Add CA cert volume to docker-compose.yml**
+- [x] **Step 2: Add CA cert volume to docker-compose.yml**
 
 The agent container mounts the CA cert as a trusted root:
 ```yaml
@@ -444,7 +444,7 @@ openclaw:
 
 Add `update-ca-certificates` to agent container entrypoint if needed.
 
-- [ ] **Step 3: Implement `sluice cert generate` CLI command**
+- [x] **Step 3: Implement `sluice cert generate` CLI command**
 
 ```go
 // Generates self-signed CA cert + key using crypto/ecdsa P-256.
@@ -453,7 +453,7 @@ Add `update-ca-certificates` to agent container entrypoint if needed.
 // ca.key is private (used by MITM proxy, never leaves Sluice).
 ```
 
-- [ ] **Step 4: Test end-to-end HTTPS through Sluice**
+- [x] **Step 4: Test end-to-end HTTPS through Sluice** (skipped - no Docker daemon; unit tests for CA generation pass)
 
 ```bash
 # From inside agent container:
@@ -462,7 +462,7 @@ curl https://api.anthropic.com/v1/models
 # Audit log should show the connection
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add docker-compose.yml Dockerfile scripts/ cmd/

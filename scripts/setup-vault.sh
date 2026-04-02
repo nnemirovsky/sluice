@@ -4,9 +4,20 @@
 set -euo pipefail
 
 SLUICE=${SLUICE:-./sluice}
+VAULT_DIR=${SLUICE_VAULT_DIR:-$HOME/.sluice}
 
 echo "=== Sluice Vault Setup ==="
 echo ""
+
+# Generate CA certificate for HTTPS MITM if it doesn't exist.
+if [ ! -f "$VAULT_DIR/ca-cert.pem" ]; then
+  echo "Generating CA certificate for HTTPS interception..."
+  $SLUICE cert generate --out "$VAULT_DIR"
+  echo ""
+else
+  echo "CA certificate already exists at $VAULT_DIR/ca-cert.pem"
+  echo ""
+fi
 
 read -p "Add Anthropic API key? [y/N] " yn
 if [[ "$yn" =~ ^[Yy]$ ]]; then
