@@ -191,7 +191,7 @@ git commit -m "feat: docker-compose with OpenClaw + tun2proxy + Sluice"
 - Create: `scripts/setup-vault.sh`
 - Create: `scripts/gen-phantom-env.sh`
 
-- [ ] **Step 1: Create phantom env generator**
+- [x] **Step 1: Create phantom env generator**
 
 ```bash
 #!/usr/bin/env bash
@@ -211,7 +211,7 @@ echo "Generated .env.phantom"
 echo "These are fake tokens. Real credentials live in the Sluice vault."
 ```
 
-- [ ] **Step 2: Create vault setup script**
+- [x] **Step 2: Create vault setup script**
 
 ```bash
 #!/usr/bin/env bash
@@ -249,13 +249,13 @@ echo ""
 echo "Done. Run 'docker compose up' to start."
 ```
 
-- [ ] **Step 3: Make scripts executable**
+- [x] **Step 3: Make scripts executable**
 
 ```bash
 chmod +x scripts/setup-vault.sh scripts/gen-phantom-env.sh
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add scripts/ .gitignore
