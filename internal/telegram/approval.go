@@ -7,6 +7,14 @@ import (
 	"time"
 )
 
+// ErrPendingLimitExceeded is returned when the broker's pending request
+// limit is reached.
+var ErrPendingLimitExceeded = fmt.Errorf("approval pending limit exceeded")
+
+// ErrDestinationRateLimited is returned when a destination exceeds its
+// per-minute request allowance.
+var ErrDestinationRateLimited = fmt.Errorf("destination rate limited")
+
 type Response int
 
 const (
@@ -41,20 +49,71 @@ type ApprovalRequest struct {
 // never tap expired buttons.
 const timedOutTTL = 10 * time.Minute
 
+// ApprovalBroker mediates between the proxy (which needs approval for
+// connections) and the Telegram bot (which presents inline keyboards to the
+// operator). It enforces MaxPendingRequests and per-destination rate limits
+// to prevent approval queue flooding.
 type ApprovalBroker struct {
 	mu       sync.Mutex
 	pending  chan ApprovalRequest
 	waiters  map[string]chan Response
 	timedOut map[string]time.Time
 	nextID   atomic.Int64
+
+	// MaxPendingRequests is the maximum number of concurrent approval
+	// requests awaiting a response. When exceeded, new requests are
+	// auto-denied. Zero means no limit.
+	MaxPendingRequests int
+
+	// destRateMax is the maximum number of approval requests allowed per
+	// destination within destRateWindow. Zero means no per-destination limit.
+	destRateMax    int
+	destRateWindow time.Duration
+	destTimestamps map[string][]time.Time
+
+	// nowFunc is used for testing to control time. If nil, time.Now is used.
+	nowFunc func() time.Time
 }
 
-func NewApprovalBroker() *ApprovalBroker {
-	return &ApprovalBroker{
-		pending:  make(chan ApprovalRequest, 100),
-		waiters:  make(map[string]chan Response),
-		timedOut: make(map[string]time.Time),
+// BrokerOption configures an ApprovalBroker.
+type BrokerOption func(*ApprovalBroker)
+
+// WithMaxPending sets the maximum number of pending approval requests.
+func WithMaxPending(n int) BrokerOption {
+	return func(b *ApprovalBroker) {
+		b.MaxPendingRequests = n
 	}
+}
+
+// WithDestinationRateLimit sets the per-destination rate limit.
+func WithDestinationRateLimit(max int, window time.Duration) BrokerOption {
+	return func(b *ApprovalBroker) {
+		b.destRateMax = max
+		b.destRateWindow = window
+	}
+}
+
+func NewApprovalBroker(opts ...BrokerOption) *ApprovalBroker {
+	b := &ApprovalBroker{
+		pending:            make(chan ApprovalRequest, 100),
+		waiters:            make(map[string]chan Response),
+		timedOut:           make(map[string]time.Time),
+		MaxPendingRequests: 50,
+		destRateMax:        5,
+		destRateWindow:     time.Minute,
+		destTimestamps:     make(map[string][]time.Time),
+	}
+	for _, opt := range opts {
+		opt(b)
+	}
+	return b
+}
+
+func (b *ApprovalBroker) now() time.Time {
+	if b.nowFunc != nil {
+		return b.nowFunc()
+	}
+	return time.Now()
 }
 
 func (b *ApprovalBroker) Pending() <-chan ApprovalRequest {
@@ -66,6 +125,29 @@ func (b *ApprovalBroker) Request(dest string, port int, timeout time.Duration) (
 	ch := make(chan Response, 1)
 
 	b.mu.Lock()
+	// Check pending limit.
+	if b.MaxPendingRequests > 0 && len(b.waiters) >= b.MaxPendingRequests {
+		b.mu.Unlock()
+		return ResponseDeny, ErrPendingLimitExceeded
+	}
+	// Check per-destination rate limit.
+	if b.destRateMax > 0 && b.destRateWindow > 0 {
+		now := b.now()
+		cutoff := now.Add(-b.destRateWindow)
+		timestamps := b.destTimestamps[dest]
+		// Trim timestamps outside the window.
+		start := 0
+		for start < len(timestamps) && timestamps[start].Before(cutoff) {
+			start++
+		}
+		timestamps = timestamps[start:]
+		if len(timestamps) >= b.destRateMax {
+			b.destTimestamps[dest] = timestamps
+			b.mu.Unlock()
+			return ResponseDeny, ErrDestinationRateLimited
+		}
+		b.destTimestamps[dest] = append(timestamps, now)
+	}
 	b.waiters[id] = ch
 	b.mu.Unlock()
 
@@ -73,7 +155,7 @@ func (b *ApprovalBroker) Request(dest string, port int, timeout time.Duration) (
 		ID:          id,
 		Destination: dest,
 		Port:        port,
-		CreatedAt:   time.Now(),
+		CreatedAt:   b.now(),
 	}
 
 	// Single deadline for the entire request lifecycle (enqueue + wait)

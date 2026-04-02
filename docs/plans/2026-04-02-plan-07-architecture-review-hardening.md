@@ -123,12 +123,12 @@ An attacker could spam connections to Ask-policy destinations, flooding the Tele
 - Modify: `internal/telegram/approval.go`
 - Modify: `internal/telegram/approval_test.go`
 
-- [ ] Add `MaxPendingRequests` field to `ApprovalBroker` (default 50)
-- [ ] Return auto-deny when pending count exceeds limit, with audit log entry
-- [ ] Add per-destination rate limiting: max 5 requests per minute per destination
-- [ ] Write tests for pending limit exceeded behavior
-- [ ] Write tests for per-destination rate limiting
-- [ ] Run tests: `go test ./internal/telegram/ -v -timeout 30s`
+- [x] Add `MaxPendingRequests` field to `ApprovalBroker` (default 50)
+- [x] Return auto-deny when pending count exceeds limit, with audit log entry
+- [x] Add per-destination rate limiting: max 5 requests per minute per destination
+- [x] Write tests for pending limit exceeded behavior
+- [x] Write tests for per-destination rate limiting
+- [x] Run tests: `go test ./internal/telegram/ -v -timeout 30s`
 
 ### Task 4: Implement HashiCorp Vault provider
 
