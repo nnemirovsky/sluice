@@ -1,0 +1,71 @@
+# Development compose file. Builds sluice from source.
+# Usage: docker compose -f compose.dev.yml up --build
+services:
+  sluice:
+    build: .
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - SLUICE_AGENT_CONTAINER=openclaw
+    group_add:
+      - "${DOCKER_GID:-0}"
+    volumes:
+      - ./examples/policy.toml:/etc/sluice/policy.toml:ro
+      - sluice-vault:/home/sluice/.sluice
+      - sluice-audit:/var/log/sluice
+      - sluice-ca:/home/sluice/ca
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks: [internal, external]
+
+  tun2proxy:
+    image: ghcr.io/tun2proxy/tun2proxy-ubuntu:latest
+    restart: unless-stopped
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    command: ["--proxy", "socks5://sluice:1080"]
+    healthcheck:
+      test: ["CMD-SHELL", "ip link show tun0 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks: [internal]
+    depends_on:
+      sluice:
+        condition: service_healthy
+
+  openclaw:
+    image: openclaw/openclaw:latest
+    restart: unless-stopped
+    container_name: openclaw
+    network_mode: "service:tun2proxy"
+    env_file: .env.phantom
+    environment:
+      - SSL_CERT_FILE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
+      - REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
+      - NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
+    volumes:
+      - openclaw-data:/root/.openclaw
+      - sluice-ca:/usr/local/share/ca-certificates/sluice:ro
+    depends_on:
+      tun2proxy:
+        condition: service_healthy
+
+networks:
+  internal:
+    internal: true
+  external: {}
+
+volumes:
+  sluice-vault:
+  sluice-audit:
+  sluice-ca:
+  openclaw-data:

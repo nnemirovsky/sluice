@@ -1,21 +1,21 @@
-FROM golang:1.26-bookworm AS builder
+FROM golang:1.26-alpine AS builder
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o /sluice ./cmd/sluice/
 
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget && rm -rf /var/lib/apt/lists/*
-RUN useradd --create-home --shell /bin/bash sluice
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates wget && \
+    adduser -D -h /home/sluice sluice && \
+    mkdir -p /home/sluice/ca /home/sluice/.sluice /var/log/sluice /etc/sluice && \
+    chown sluice:sluice /home/sluice/ca /home/sluice/.sluice /var/log/sluice /etc/sluice
 COPY --from=builder /sluice /usr/local/bin/sluice
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh && \
-    mkdir -p /home/sluice/ca /home/sluice/.sluice /var/log/sluice && \
-    chown sluice:sluice /home/sluice/ca /home/sluice/.sluice /var/log/sluice
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 USER sluice
 WORKDIR /home/sluice
 EXPOSE 1080 3000
 HEALTHCHECK --interval=10s --timeout=3s CMD wget -qO- http://localhost:3000/healthz || exit 1
 ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["-listen", "0.0.0.0:1080"]
+CMD ["-listen", "0.0.0.0:1080", "-health-addr", "0.0.0.0:3000", "-policy", "/etc/sluice/policy.toml", "-audit", "/var/log/sluice/audit.jsonl"]

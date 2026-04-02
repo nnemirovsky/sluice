@@ -1,7 +1,23 @@
-.memsearch/
+# Binaries
+bin/
+/sluice
 
-# ralphex progress logs
-.ralphex/progress/
+# Coverage
+coverage.out
+coverage.html
+
+# goreleaser
+dist/
+
+# IDE
+.idea/
+.vscode/
+.zed/
+*.swp
+*.swo
+
+# OS
+.DS_Store
 
 # Go build cache
 .go/
@@ -10,8 +26,11 @@
 .gopath/
 .cache/
 
-# Binary
-/sluice
-
 # Generated phantom token env (created by scripts/gen-phantom-env.sh)
 .env.phantom
+
+# ralphex progress logs
+.ralphex/progress/
+
+# memsearch
+.memsearch/

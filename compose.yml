@@ -1,32 +1,24 @@
-# All services use restart: unless-stopped to recover from transient failures.
+# Production compose file. Uses pre-built image from ghcr.io.
+# For local development with build-from-source, use: docker compose -f compose.dev.yml up
+#
 # Startup order is enforced via healthcheck + condition: service_healthy:
 #   sluice starts first -> tun2proxy waits for sluice /healthz -> openclaw waits for tun2proxy TUN device.
 services:
   sluice:
-    build: .
+    image: ghcr.io/nnemirovsky/sluice:latest
     restart: unless-stopped
-    command:
-      - "-policy"
-      - "/etc/sluice/policy.toml"
-      - "-audit"
-      - "/var/log/sluice/audit.jsonl"
-      - "-listen"
-      - "0.0.0.0:1080"
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
-      - SLUICE_VAULT_DIR=/home/sluice/.sluice
       - SLUICE_AGENT_CONTAINER=openclaw
     group_add:
       - "${DOCKER_GID:-0}"
     volumes:
-      - ./examples/policy.toml:/etc/sluice/policy.toml:ro
+      - ./policy.toml:/etc/sluice/policy.toml:ro
       - sluice-vault:/home/sluice/.sluice
       - sluice-audit:/var/log/sluice
       - sluice-ca:/home/sluice/ca
       - /var/run/docker.sock:/var/run/docker.sock
-    # Health check hits the /healthz endpoint on port 3000 (served by sluice's built-in HTTP server).
-    # Returns 200 when the SOCKS5 proxy is listening and ready to accept connections.
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
       interval: 10s
@@ -42,7 +34,6 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     command: ["--proxy", "socks5://sluice:1080"]
-    # Health check verifies the TUN device is up. tun2proxy creates tun0 on successful startup.
     healthcheck:
       test: ["CMD-SHELL", "ip link show tun0 || exit 1"]
       interval: 10s

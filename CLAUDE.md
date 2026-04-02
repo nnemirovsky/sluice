@@ -54,7 +54,7 @@ go test ./... -v -timeout 30s
 - `internal/telegram/commands.go` - Telegram admin commands (/policy, /cred, /status, /audit, /help)
 - `internal/docker/manager.go` - Docker container manager for credential rotation (restart with updated phantom env)
 - `Dockerfile` - Multi-stage build for Sluice container
-- `docker-compose.yml` - Three-container setup (sluice + tun2proxy + openclaw)
+- `compose.yml` - Three-container setup (sluice + tun2proxy + openclaw)
 - `scripts/docker-entrypoint.sh` - Container entrypoint with CA cert generation and copy to shared volume
 - `scripts/setup-vault.sh` - Interactive credential and CA setup script
 - `scripts/gen-phantom-env.sh` - Phantom token env file generator for openclaw container
@@ -290,7 +290,7 @@ Mail credential injection: `MailProxy` intercepts IMAP LOGIN and SMTP AUTH PLAIN
 
 Docker integration: Three-container architecture (sluice + tun2proxy + openclaw) with `network_mode: "service:tun2proxy"` routing all openclaw traffic through sluice's SOCKS5 proxy. `docker.Manager` wraps a `ContainerClient` interface (production implementation pending, SDK added at deployment time). On credential mutation via Telegram `/cred` commands, `credMutationComplete` regenerates phantom environment variables using `GeneratePhantomEnv` (produces SDK-format-matching phantom tokens based on credential name heuristics) and calls `Manager.RestartWithEnv` to recreate the agent container with updated env. `BotConfig.Vault` and `BotConfig.DockerMgr` wire the vault and Docker manager into Telegram command handling. The sluice entrypoint generates a CA cert and copies it to a shared volume so openclaw can trust HTTPS MITM certificates via `SSL_CERT_FILE`.
 
-Health check: A minimal HTTP server on `:3000` (configurable via `--health-addr`) serves `/healthz`, returning 200 when the SOCKS5 proxy is listening. The Dockerfile includes a `HEALTHCHECK` directive using `wget` against this endpoint. docker-compose.yml uses `service_healthy` conditions to sequence startup: tun2proxy waits for sluice, openclaw waits for tun2proxy.
+Health check: A minimal HTTP server on `:3000` (configurable via `--health-addr`) serves `/healthz`, returning 200 when the SOCKS5 proxy is listening. The Dockerfile includes a `HEALTHCHECK` directive using `wget` against this endpoint. compose.yml uses `service_healthy` conditions to sequence startup: tun2proxy waits for sluice, openclaw waits for tun2proxy.
 
 Graceful shutdown: On SIGINT/SIGTERM, the proxy stops accepting new connections and drains in-flight connections up to `--shutdown-timeout` (default 10s). Pending Telegram approval requests are auto-denied with a "shutting down" reason. The audit logger is closed after all connections drain.
 
@@ -507,7 +507,7 @@ zeroized memory.
 
 ## Docker Compose
 
-See `docker-compose.yml` in the repo root. Key features:
+See `compose.yml` in the repo root. Key features:
 - Health checks: sluice exposes `/healthz` on `:3000`, tun2proxy checks TUN device
 - Startup ordering via `condition: service_healthy`
 - `restart: unless-stopped` on all services
@@ -541,7 +541,7 @@ See `docker-compose.yml` in the repo root. Key features:
 | Content inspection (tool args + responses) | ~200 | Regex patterns for secrets/PII |
 | Audit logger | ~200 | JSON lines, blake3 hash chains, chain verification CLI |
 | **Total custom code** | **~2450** | Single Go binary |
-| Docker setup + tun2proxy | Config only | docker-compose.yml |
+| Docker setup + tun2proxy | Config only | compose.yml |
 
 ## Future: Apple Container Support (last-mile, requires research)
 
