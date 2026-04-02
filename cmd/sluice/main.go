@@ -58,7 +58,7 @@ func main() {
 	auditPath := flag.String("audit", "audit.jsonl", "path to audit log file")
 	telegramToken := flag.String("telegram-token", os.Getenv("TELEGRAM_BOT_TOKEN"), "Telegram bot token")
 	telegramChatIDStr := flag.String("telegram-chat-id", os.Getenv("TELEGRAM_CHAT_ID"), "Telegram chat ID for approvals")
-	healthAddr := flag.String("health-addr", ":3000", "health check HTTP listen address (serves /healthz)")
+	healthAddr := flag.String("health-addr", "127.0.0.1:3000", "health check HTTP listen address (serves /healthz)")
 	shutdownTimeout := flag.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout for draining in-flight connections")
 	dockerSocket := flag.String("docker-socket", "", "Docker socket path (auto-detects from DOCKER_HOST or /var/run/docker.sock)")
 	dockerContainer := flag.String("docker-container", envDefault("SLUICE_AGENT_CONTAINER", "openclaw"), "Docker container name for auto-restart on credential changes")
