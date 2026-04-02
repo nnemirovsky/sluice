@@ -304,12 +304,12 @@ func (h *CommandHandler) handleStatus() string {
 	b.WriteString("Sluice Status\n\n")
 
 	b.WriteString("Policy: ")
-	b.WriteString(fmt.Sprintf("%d allow, %d deny, %d ask rules",
-		len(snap.AllowRules), len(snap.DenyRules), len(snap.AskRules)))
-	b.WriteString(fmt.Sprintf(" (default: %s)\n", snap.Default))
+	fmt.Fprintf(&b, "%d allow, %d deny, %d ask rules",
+		len(snap.AllowRules), len(snap.DenyRules), len(snap.AskRules))
+	fmt.Fprintf(&b, " (default: %s)\n", snap.Default)
 
 	if h.broker != nil {
-		b.WriteString(fmt.Sprintf("Pending approvals: %d\n", h.broker.PendingCount()))
+		fmt.Fprintf(&b, "Pending approvals: %d\n", h.broker.PendingCount())
 	}
 
 	return b.String()
@@ -400,7 +400,7 @@ func readLastLines(path string, n int) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	stat, err := f.Stat()
 	if err != nil {

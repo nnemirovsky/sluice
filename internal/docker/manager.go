@@ -25,6 +25,7 @@ type ContainerState struct {
 	Env         []string
 	Running     bool
 	Mounts      []Mount
+	Binds       []string // HostConfig.Binds preserving "source:dest:mode" format
 	Networks    []string
 	NetworkMode string
 	Cmd         []string
@@ -44,6 +45,7 @@ type ContainerSpec struct {
 	Image       string
 	Env         []string
 	Mounts      []Mount
+	Binds       []string // HostConfig.Binds preserving "source:dest:mode" format
 	Networks    []string
 	NetworkMode string
 	Cmd         []string
@@ -94,6 +96,7 @@ func (m *Manager) RestartWithEnv(ctx context.Context, envUpdates map[string]stri
 		Image:       info.Image,
 		Env:         env,
 		Mounts:      info.Mounts,
+		Binds:       info.Binds,
 		Networks:    info.Networks,
 		NetworkMode: info.NetworkMode,
 		Cmd:         info.Cmd,

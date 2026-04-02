@@ -65,6 +65,7 @@ func TestRestartWithEnv(t *testing.T) {
 				{Source: "/data", Destination: "/root/.openclaw", ReadOnly: false},
 				{Source: "/certs", Destination: "/usr/local/share/ca-certificates", ReadOnly: true},
 			},
+			Binds:       []string{"openclaw-data:/root/.openclaw", "sluice-ca:/usr/local/share/ca-certificates:ro"},
 			Networks:    []string{"internal"},
 			NetworkMode: "service:tun2proxy",
 			Cmd:         []string{"--model", "claude"},
@@ -150,6 +151,18 @@ func TestRestartWithEnv(t *testing.T) {
 	}
 	if mc.createdSpec.Name != "openclaw" {
 		t.Errorf("container name not set in spec: %s", mc.createdSpec.Name)
+	}
+
+	// Verify Binds are passed through for Docker API volume recreation.
+	if len(mc.createdSpec.Binds) != 2 {
+		t.Errorf("expected 2 binds, got %d", len(mc.createdSpec.Binds))
+	} else {
+		if mc.createdSpec.Binds[0] != "openclaw-data:/root/.openclaw" {
+			t.Errorf("first bind wrong: %s", mc.createdSpec.Binds[0])
+		}
+		if mc.createdSpec.Binds[1] != "sluice-ca:/usr/local/share/ca-certificates:ro" {
+			t.Errorf("second bind wrong: %s", mc.createdSpec.Binds[1])
+		}
 	}
 }
 

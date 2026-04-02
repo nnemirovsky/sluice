@@ -12,11 +12,15 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - SLUICE_VAULT_DIR=/home/sluice/.sluice
+      - SLUICE_AGENT_CONTAINER=openclaw
+    group_add:
+      - "${DOCKER_GID:-0}"
     volumes:
       - ./examples/policy.toml:/etc/sluice/policy.toml:ro
       - sluice-vault:/home/sluice/.sluice
       - sluice-audit:/var/log/sluice
       - sluice-ca:/home/sluice/ca
+      - /var/run/docker.sock:/var/run/docker.sock
     networks: [internal, external]
 
   tun2proxy:
@@ -30,6 +34,7 @@ services:
 
   openclaw:
     image: openclaw/openclaw:latest
+    container_name: openclaw
     network_mode: "service:tun2proxy"
     env_file: .env.phantom
     environment:

@@ -241,6 +241,6 @@ func (gw *Gateway) logAudit(tool, action string, verdict policy.Verdict) {
 func (gw *Gateway) Stop() {
 	for name, u := range gw.upstreams {
 		log.Printf("stopping upstream %s", name)
-		u.Stop()
+		_ = u.Stop()
 	}
 }

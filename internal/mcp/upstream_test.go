@@ -55,7 +55,7 @@ func TestStartUpstreamAndInitialize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartUpstream: %v", err)
 	}
-	defer u.Stop()
+	defer func() { _ = u.Stop() }()
 
 	if err := u.Initialize(); err != nil {
 		t.Fatalf("Initialize: %v", err)
@@ -74,7 +74,7 @@ func TestUpstreamDiscoverTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartUpstream: %v", err)
 	}
-	defer u.Stop()
+	defer func() { _ = u.Stop() }()
 
 	if err := u.Initialize(); err != nil {
 		t.Fatalf("Initialize: %v", err)

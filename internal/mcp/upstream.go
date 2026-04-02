@@ -292,13 +292,13 @@ func (u *Upstream) CallTool(toolName string, arguments json.RawMessage) (*JSONRP
 func (u *Upstream) Stop() error {
 	var result error
 	u.stopOnce.Do(func() {
-		u.stdin.Close()
+		_ = u.stdin.Close()
 		close(u.done) // unblock the scanner goroutine if the channel is full
 		select {
 		case err := <-u.waitCh:
 			result = err
 		case <-time.After(5 * time.Second):
-			u.cmd.Process.Kill()
+			_ = u.cmd.Process.Kill()
 			result = <-u.waitCh
 		}
 	})

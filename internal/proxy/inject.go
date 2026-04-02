@@ -218,7 +218,7 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 	// Replace phantom tokens in the request body.
 	if r.Body != nil && r.Body != http.NoBody {
 		body, readErr := io.ReadAll(r.Body)
-		r.Body.Close()
+		_ = r.Body.Close()
 		if readErr != nil {
 			log.Printf("[INJECT] body read error for %s:%d: %v", host, port, readErr)
 			return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusBadGateway, "request body read error")
