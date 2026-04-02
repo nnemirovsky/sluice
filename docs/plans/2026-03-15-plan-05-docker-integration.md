@@ -36,7 +36,7 @@ sluice/
 **Files:**
 - Create: `Dockerfile`
 
-- [ ] **Step 1: Write multi-stage Dockerfile**
+- [x] **Step 1: Write multi-stage Dockerfile**
 
 ```dockerfile
 FROM golang:1.22-bookworm AS builder
@@ -57,14 +57,14 @@ ENTRYPOINT ["sluice"]
 CMD ["proxy"]
 ```
 
-- [ ] **Step 2: Build and verify**
+- [x] **Step 2: Build and verify**
 
 ```bash
 docker build -t sluice:dev .
 docker run --rm sluice:dev --help
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add Dockerfile
