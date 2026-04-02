@@ -60,6 +60,7 @@ type Server struct {
 	mailProxy  *MailProxy
 	resolver   *vault.BindingResolver
 	closed     atomic.Bool
+	serving    atomic.Bool
 	activeConns sync.WaitGroup
 }
 
@@ -664,13 +665,14 @@ func (s *Server) Addr() string {
 // ListenAndServe starts accepting SOCKS5 connections. Accepted connections
 // are tracked so GracefulShutdown can wait for them to complete.
 func (s *Server) ListenAndServe() error {
+	s.serving.Store(true)
 	tracked := &trackedListener{Listener: s.listener, wg: &s.activeConns}
 	return s.socks.Serve(tracked)
 }
 
-// IsListening returns true if the server has not been closed.
+// IsListening returns true if the server is actively serving connections.
 func (s *Server) IsListening() bool {
-	return !s.closed.Load()
+	return s.serving.Load() && !s.closed.Load()
 }
 
 // Close stops the server by closing the listener and any internal resources.

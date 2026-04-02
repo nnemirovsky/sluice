@@ -57,12 +57,11 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 		gw.policy, _ = NewToolPolicy(nil, policy.Allow)
 	}
 
-	for i, ucfg := range cfg.Upstreams {
+	for _, ucfg := range cfg.Upstreams {
 		// Propagate the global timeout as a default for upstreams
 		// that do not specify their own timeout_sec.
 		if ucfg.TimeoutSec == 0 && gw.timeoutSec > 0 {
-			cfg.Upstreams[i].TimeoutSec = gw.timeoutSec
-			ucfg = cfg.Upstreams[i]
+			ucfg.TimeoutSec = gw.timeoutSec
 		}
 		if err := ValidateUpstreamName(ucfg.Name); err != nil {
 			gw.Stop()

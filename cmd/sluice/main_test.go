@@ -222,7 +222,21 @@ default = "deny"
 	// Give the HTTP server a moment to start accepting.
 	time.Sleep(10 * time.Millisecond)
 
-	// Proxy is running, should get 200.
+	// Proxy created but not yet serving, should get 503.
+	resp0, err := http.Get(healthURL)
+	if err != nil {
+		t.Fatalf("GET /healthz before serve: %v", err)
+	}
+	resp0.Body.Close()
+	if resp0.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 before proxy is serving, got %d", resp0.StatusCode)
+	}
+
+	// Start serving in background.
+	go srv.ListenAndServe()
+	time.Sleep(10 * time.Millisecond)
+
+	// Proxy is serving, should get 200.
 	resp, err := http.Get(healthURL)
 	if err != nil {
 		t.Fatalf("GET /healthz: %v", err)

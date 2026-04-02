@@ -292,11 +292,12 @@ func main() {
 				}
 			}
 
-			srv.ReloadMu().Unlock()
-
 			// Drain duplicate SIGHUPs that queued during reload to
-			// avoid redundant reload cycles.
+			// avoid redundant reload cycles. Done before Unlock so
+			// only signals queued while the lock was held are drained.
 			drainSignals(sighupCh)
+
+			srv.ReloadMu().Unlock()
 		}
 	}()
 
