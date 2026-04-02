@@ -17,10 +17,11 @@ import (
 
 // UpstreamConfig describes how to launch an upstream MCP server process.
 type UpstreamConfig struct {
-	Name    string            `toml:"name"`
-	Command string            `toml:"command"`
-	Args    []string          `toml:"args"`
-	Env     map[string]string `toml:"env"`
+	Name       string            `toml:"name"`
+	Command    string            `toml:"command"`
+	Args       []string          `toml:"args"`
+	Env        map[string]string `toml:"env"`
+	TimeoutSec int               `toml:"timeout_sec"`
 }
 
 // Upstream manages a running upstream MCP server process. Communication
@@ -87,6 +88,11 @@ func StartUpstream(cfg UpstreamConfig) (*Upstream, error) {
 		return nil, fmt.Errorf("start %q: %w", cfg.Command, err)
 	}
 
+	timeout := defaultUpstreamTimeout
+	if cfg.TimeoutSec > 0 {
+		timeout = time.Duration(cfg.TimeoutSec) * time.Second
+	}
+
 	u := &Upstream{
 		name:    cfg.Name,
 		cmd:     cmd,
@@ -94,7 +100,7 @@ func StartUpstream(cfg UpstreamConfig) (*Upstream, error) {
 		lines:   make(chan []byte, 64),
 		waitCh:  make(chan error, 1),
 		done:    make(chan struct{}),
-		timeout: defaultUpstreamTimeout,
+		timeout: timeout,
 	}
 
 	// Background goroutine owns the scanner. Lines are copied into the

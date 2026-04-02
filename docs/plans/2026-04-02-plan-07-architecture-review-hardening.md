@@ -159,12 +159,12 @@ The MCP upstream timeout is hardcoded at 120s in `upstream.go`. Users need to co
 - Modify: `internal/mcp/types.go` (add TimeoutSec to UpstreamConfig)
 - Modify: `internal/mcp/upstream_test.go`
 
-- [ ] Add `TimeoutSec int` field to `UpstreamConfig` in types.go
-- [ ] Use `TimeoutSec` in `StartUpstream` if set, fall back to 120s default
-- [ ] Parse `timeout_sec` from `[[mcp_upstream]]` TOML sections
-- [ ] Write test verifying custom timeout is applied
-- [ ] Write test verifying default timeout when not specified
-- [ ] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
+- [x] Add `TimeoutSec int` field to `UpstreamConfig` in types.go
+- [x] Use `TimeoutSec` in `StartUpstream` if set, fall back to 120s default
+- [x] Parse `timeout_sec` from `[[mcp_upstream]]` TOML sections
+- [x] Write test verifying custom timeout is applied
+- [x] Write test verifying default timeout when not specified
+- [x] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
 
 ### Task 6: Add MCP gateway tests
 

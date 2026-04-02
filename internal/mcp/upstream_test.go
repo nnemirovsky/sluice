@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // mockMCPServer is a bash script that acts as a minimal MCP server.
@@ -170,5 +171,69 @@ func TestUpstreamStop(t *testing.T) {
 
 	if err := u.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
+	}
+}
+
+func TestUpstreamCustomTimeout(t *testing.T) {
+	script := writeMockServer(t)
+	cfg := UpstreamConfig{
+		Name:       "mock",
+		Command:    "bash",
+		Args:       []string{script},
+		TimeoutSec: 30,
+	}
+
+	u, err := StartUpstream(cfg)
+	if err != nil {
+		t.Fatalf("StartUpstream: %v", err)
+	}
+	defer u.Stop()
+
+	if u.timeout != 30*time.Second {
+		t.Errorf("expected timeout 30s, got %v", u.timeout)
+	}
+
+	// Verify the upstream still works with the custom timeout.
+	if err := u.Initialize(); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+}
+
+func TestUpstreamDefaultTimeout(t *testing.T) {
+	script := writeMockServer(t)
+	cfg := UpstreamConfig{
+		Name:    "mock",
+		Command: "bash",
+		Args:    []string{script},
+	}
+
+	u, err := StartUpstream(cfg)
+	if err != nil {
+		t.Fatalf("StartUpstream: %v", err)
+	}
+	defer u.Stop()
+
+	if u.timeout != defaultUpstreamTimeout {
+		t.Errorf("expected default timeout %v, got %v", defaultUpstreamTimeout, u.timeout)
+	}
+}
+
+func TestUpstreamZeroTimeoutUsesDefault(t *testing.T) {
+	script := writeMockServer(t)
+	cfg := UpstreamConfig{
+		Name:       "mock",
+		Command:    "bash",
+		Args:       []string{script},
+		TimeoutSec: 0,
+	}
+
+	u, err := StartUpstream(cfg)
+	if err != nil {
+		t.Fatalf("StartUpstream: %v", err)
+	}
+	defer u.Stop()
+
+	if u.timeout != defaultUpstreamTimeout {
+		t.Errorf("expected default timeout %v for TimeoutSec=0, got %v", defaultUpstreamTimeout, u.timeout)
 	}
 }
