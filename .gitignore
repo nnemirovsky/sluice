@@ -8,6 +8,7 @@
 .gocache/
 .gomodcache/
 .gopath/
+.cache/
 
 # Binary
-sluice
+/sluice

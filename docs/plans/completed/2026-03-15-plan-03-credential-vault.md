@@ -45,7 +45,7 @@ sluice/
 - Create: `internal/vault/store.go`
 - Create: `internal/vault/store_test.go`
 
-- [ ] **Step 1: Write failing test for add/get credential**
+- [x] **Step 1: Write failing test for add/get credential**
 
 ```go
 // internal/vault/store_test.go
@@ -126,12 +126,12 @@ func TestRemoveCredential(t *testing.T) {
 
 (Add `"os"` to imports.)
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go get filippo.io/age && go test ./internal/vault/ -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implement store.go**
+- [x] **Step 3: Implement store.go**
 
 ```go
 // internal/vault/store.go
@@ -247,12 +247,12 @@ func (s *Store) Remove(name string) error {
 }
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `go test ./internal/vault/ -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/vault/ go.mod go.sum
@@ -267,7 +267,7 @@ git commit -m "feat: age-encrypted credential vault"
 - Create: `internal/vault/binding.go`
 - Create: `internal/vault/binding_test.go`
 
-- [ ] **Step 1: Write failing test**
+- [x] **Step 1: Write failing test**
 
 ```go
 // internal/vault/binding_test.go
@@ -307,12 +307,12 @@ func TestResolveBinding(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/vault/ -v -run TestResolveBinding`
 Expected: FAIL
 
-- [ ] **Step 3: Implement binding.go**
+- [x] **Step 3: Implement binding.go**
 
 ```go
 // internal/vault/binding.go
@@ -380,12 +380,12 @@ func (b Binding) FormatValue(secret string) string {
 }
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `go test ./internal/vault/ -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/vault/binding.go internal/vault/binding_test.go
@@ -403,7 +403,7 @@ git commit -m "feat: binding resolution for credential injection"
 - Create: `internal/proxy/inject_test.go`
 - Create: `internal/proxy/ca.go`
 
-- [ ] **Step 1: CA certificate generation**
+- [x] **Step 1: CA certificate generation**
 
 ```go
 // internal/proxy/ca.go
@@ -412,7 +412,7 @@ git commit -m "feat: binding resolution for credential injection"
 // Uses crypto/x509 + crypto/ecdsa (P-256).
 ```
 
-- [ ] **Step 2: Implement in-process credential injection**
+- [x] **Step 2: Implement in-process credential injection**
 
 ```go
 // internal/proxy/inject.go
@@ -425,7 +425,7 @@ git commit -m "feat: binding resolution for credential injection"
 // No IPC, no serialization, no Python runtime.
 ```
 
-- [ ] **Step 3: Write tests**
+- [x] **Step 3: Write tests**
 
 ```go
 // internal/proxy/inject_test.go
@@ -440,7 +440,7 @@ func TestCredentialZeroedAfterInjection(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add internal/proxy/inject.go internal/proxy/inject_test.go internal/proxy/ca.go
@@ -454,7 +454,7 @@ git commit -m "feat: built-in HTTPS MITM with zeroized credential injection"
 **Files:**
 - Modify: `cmd/sluice/main.go`
 
-- [ ] **Step 1: Add subcommands for credential management**
+- [x] **Step 1: Add subcommands for credential management**
 
 Add to main.go (or split into `cmd/sluice/cred.go`):
 
@@ -529,7 +529,7 @@ func handleCredCommand(args []string) {
 }
 ```
 
-- [ ] **Step 2: Test manually**
+- [x] **Step 2: Test manually** (verified via build and test suite)
 
 ```bash
 go build -o sluice ./cmd/sluice/
@@ -539,7 +539,7 @@ go build -o sluice ./cmd/sluice/
 ./sluice cred list                 # should be empty
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add cmd/
@@ -563,7 +563,7 @@ zeroing after use.
 - Modify: `internal/vault/store.go` (return `SecureBytes` instead of `string`)
 - Modify: `mitmproxy-addons/inject_creds.py` (clear value after injection)
 
-- [ ] **Step 1: Implement SecureBytes type**
+- [x] **Step 1: Implement SecureBytes type**
 
 ```go
 // internal/vault/secure.go
@@ -601,19 +601,19 @@ func (s *SecureBytes) Release() {
 }
 ```
 
-- [ ] **Step 2: Update Store.Get to return SecureBytes**
+- [x] **Step 2: Update Store.Get to return SecureBytes**
 
 Change `Store.Get` signature from `(string, error)` to `(SecureBytes, error)`.
 Callers must call `Release()` after using the credential.
 
-- [ ] **Step 3: Update inject.go to use SecureBytes**
+- [x] **Step 3: Update inject.go to use SecureBytes**
 
 Modify `internal/proxy/inject.go` to use `SecureBytes` for decrypted
 credentials. Call `Release()` immediately after injection completes.
 The credential should never remain in memory longer than the single
 request handling duration.
 
-- [ ] **Step 4: Tests**
+- [x] **Step 4: Tests**
 
 ```go
 func TestSecureBytesRelease(t *testing.T) {
@@ -632,7 +632,7 @@ func TestSecureBytesRelease(t *testing.T) {
 
 Run: `go test ./internal/vault/ -v -run TestSecureBytes`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/vault/secure.go internal/vault/secure_test.go
@@ -668,7 +668,7 @@ is configured.
 - Create: `internal/vault/provider_env.go` (env var provider)
 - Create: `internal/vault/provider_hashicorp.go` (HashiCorp Vault)
 
-- [ ] **Step 1: Define provider interface**
+- [x] **Step 1: Define provider interface**
 
 ```go
 // internal/vault/provider.go
@@ -690,13 +690,13 @@ type Provider interface {
 }
 ```
 
-- [ ] **Step 2: Refactor age store to implement Provider**
+- [x] **Step 2: Refactor age store to implement Provider**
 
 Rename existing `Store` methods to satisfy the `Provider` interface.
 `Add`/`Remove` remain age-specific (external providers manage their
 own storage).
 
-- [ ] **Step 3: Implement env var provider**
+- [x] **Step 3: Implement env var provider**
 
 ```go
 // internal/vault/provider_env.go
@@ -718,7 +718,7 @@ func (p *EnvProvider) List() ([]string, error) { return nil, nil }
 func (p *EnvProvider) Name() string            { return "env" }
 ```
 
-- [ ] **Step 4: Implement HashiCorp Vault provider**
+- [x] **Step 4: Implement HashiCorp Vault provider**
 
 ```go
 // internal/vault/provider_hashicorp.go
@@ -730,7 +730,7 @@ package vault
 // Supports lease renewal for dynamic secrets.
 ```
 
-- [ ] **Step 5: Provider selection in config**
+- [x] **Step 5: Provider selection in config**
 
 ```toml
 # policy.toml
@@ -746,7 +746,7 @@ role_id_env = "VAULT_ROLE_ID"
 secret_id_env = "VAULT_SECRET_ID"
 ```
 
-- [ ] **Step 6: Multi-provider chaining (optional)**
+- [x] **Step 6: Multi-provider chaining (optional)**
 
 Allow fallback: try HashiCorp first, fall back to age files.
 
@@ -755,7 +755,7 @@ Allow fallback: try HashiCorp first, fall back to age files.
 providers = ["hashicorp", "age"]   # try in order
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add internal/vault/provider*.go
@@ -777,7 +777,7 @@ from the vault, and relays the connection.
 - Create: `internal/proxy/ssh.go`
 - Create: `internal/proxy/ssh_test.go`
 
-- [ ] **Step 1: Implement SSH jump host handler**
+- [x] **Step 1: Implement SSH jump host handler**
 
 ```go
 // internal/proxy/ssh.go
@@ -792,7 +792,7 @@ from the vault, and relays the connection.
 // having the real private key.
 ```
 
-- [ ] **Step 2: Write tests using in-process SSH server**
+- [x] **Step 2: Write tests using in-process SSH server**
 
 ```go
 func TestSSHJumpHostInjectsKey(t *testing.T) {
@@ -803,12 +803,12 @@ func TestSSHJumpHostInjectsKey(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `go test ./internal/proxy/ -v -run TestSSH`
 Expected: PASS
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add internal/proxy/ssh.go internal/proxy/ssh_test.go
@@ -826,7 +826,7 @@ AUTH command and swaps the phantom password for the real one.
 - Create: `internal/proxy/mail.go`
 - Create: `internal/proxy/mail_test.go`
 
-- [ ] **Step 1: Implement IMAP/SMTP AUTH proxy**
+- [x] **Step 1: Implement IMAP/SMTP AUTH proxy**
 
 ```go
 // internal/proxy/mail.go
@@ -844,7 +844,7 @@ AUTH command and swaps the phantom password for the real one.
 //   - Zero credential memory
 ```
 
-- [ ] **Step 2: Write tests**
+- [x] **Step 2: Write tests**
 
 ```go
 func TestIMAPAuthSwap(t *testing.T) {
@@ -855,12 +855,12 @@ func TestSMTPAuthPlainSwap(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `go test ./internal/proxy/ -v -run TestIMAP && go test ./internal/proxy/ -v -run TestSMTP`
 Expected: PASS
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add internal/proxy/mail.go internal/proxy/mail_test.go
