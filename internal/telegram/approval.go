@@ -68,6 +68,18 @@ type ApprovalBroker struct {
 	timedOut map[string]time.Time
 	nextID   atomic.Int64
 
+	// closed is set to true by CancelAll under the mutex, before the done
+	// channel is closed. Request checks this flag under the same mutex to
+	// prevent registering new waiters after CancelAll has copied and reset
+	// the waiters map. Without this flag, a Request arriving between the
+	// mutex release and close(done) could register a waiter that CancelAll
+	// never sees, leaving it to block until timeout.
+	closed bool
+
+	// done is closed by CancelAll to unblock goroutines waiting to enqueue
+	// on the pending channel during graceful shutdown.
+	done chan struct{}
+
 	// MaxPendingRequests is the maximum number of concurrent approval
 	// requests awaiting a response. When exceeded, new requests are
 	// auto-denied. Zero means no limit.
@@ -106,6 +118,7 @@ func NewApprovalBroker(opts ...BrokerOption) *ApprovalBroker {
 		pending:            make(chan ApprovalRequest, 100),
 		waiters:            make(map[string]chan Response),
 		timedOut:           make(map[string]time.Time),
+		done:               make(chan struct{}),
 		MaxPendingRequests: 50,
 		destRateMax:        5,
 		destRateWindow:     time.Minute,
@@ -133,6 +146,12 @@ func (b *ApprovalBroker) Request(dest string, port int, timeout time.Duration) (
 	ch := make(chan Response, 1)
 
 	b.mu.Lock()
+	// Reject new requests after CancelAll has been called. This prevents
+	// registering a waiter that CancelAll will never see or deny.
+	if b.closed {
+		b.mu.Unlock()
+		return ResponseDeny, fmt.Errorf("approval broker shutting down")
+	}
 	// Check pending limit.
 	if b.MaxPendingRequests > 0 && len(b.waiters) >= b.MaxPendingRequests {
 		b.mu.Unlock()
@@ -185,9 +204,15 @@ func (b *ApprovalBroker) Request(dest string, port int, timeout time.Duration) (
 
 	// Use a timeout when sending to the pending channel to prevent proxy
 	// goroutines from blocking indefinitely when the channel is full
-	// (e.g., Telegram API outage).
+	// (e.g., Telegram API outage). The done channel unblocks this select
+	// during graceful shutdown so goroutines don't wait for the full timeout.
 	select {
 	case b.pending <- req:
+	case <-b.done:
+		b.mu.Lock()
+		delete(b.waiters, id)
+		b.mu.Unlock()
+		return ResponseDeny, fmt.Errorf("approval broker shutting down")
 	case <-deadline.C:
 		b.mu.Lock()
 		delete(b.waiters, id)
@@ -278,15 +303,21 @@ func (b *ApprovalBroker) Resolve(id string, resp Response) bool {
 
 // CancelAll auto-denies all pending approval requests. Called during
 // graceful shutdown so that in-flight proxy goroutines blocked on
-// approval can complete promptly.
+// approval can complete promptly. It also closes the done channel to
+// unblock goroutines waiting to enqueue on the pending channel.
 func (b *ApprovalBroker) CancelAll() {
 	b.mu.Lock()
+	b.closed = true
 	waiters := make(map[string]chan Response, len(b.waiters))
 	for id, ch := range b.waiters {
 		waiters[id] = ch
 	}
 	b.waiters = make(map[string]chan Response)
 	b.mu.Unlock()
+
+	// Close done first to unblock goroutines stuck on the enqueue select,
+	// then deny waiters that were already past the enqueue stage.
+	close(b.done)
 
 	for _, ch := range waiters {
 		ch <- ResponseDeny

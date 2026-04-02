@@ -233,18 +233,18 @@ func main() {
 
 			newEng, loadErr := policy.LoadFromFile(*policyPath)
 			if loadErr != nil {
-				srv.ReloadMu().Unlock()
 				log.Printf("reload policy failed: %v", loadErr)
 				drainSignals(sighupCh)
+				srv.ReloadMu().Unlock()
 				continue
 			}
 
 			// Validate the new engine before swapping to catch
 			// corrupted or incomplete compilation results.
 			if valErr := newEng.Validate(); valErr != nil {
-				srv.ReloadMu().Unlock()
 				log.Printf("reload policy validation failed: %v", valErr)
 				drainSignals(sighupCh)
+				srv.ReloadMu().Unlock()
 				continue
 			}
 
@@ -285,7 +285,9 @@ func main() {
 			// host, mail proxy) is wired once at startup and cannot be
 			// hot-reloaded. Binding or provider changes require a restart.
 			var newSlCfg sluiceConfig
-			if _, decodeErr := toml.DecodeFile(*policyPath, &newSlCfg); decodeErr == nil {
+			if _, decodeErr := toml.DecodeFile(*policyPath, &newSlCfg); decodeErr != nil {
+				log.Printf("WARNING: could not parse non-policy config sections: %v (vault/binding drift detection skipped)", decodeErr)
+			} else {
 				if !reflect.DeepEqual(newSlCfg.Vault, startupSlCfg.Vault) ||
 					!reflect.DeepEqual(newSlCfg.Bindings, startupSlCfg.Bindings) {
 					log.Printf("WARNING: [vault] or [[binding]] config changed but credential injection runtime is not hot-reloadable; restart required")

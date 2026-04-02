@@ -242,3 +242,32 @@ func TestCancelAllDeniesAllPending(t *testing.T) {
 		t.Errorf("expected 0 pending after CancelAll, got %d", broker.PendingCount())
 	}
 }
+
+func TestCancelAllRejectsNewRequests(t *testing.T) {
+	// Verify that Request() calls arriving after CancelAll() return
+	// promptly with a deny instead of blocking until timeout.
+	broker := NewApprovalBroker(WithMaxPending(0))
+
+	// Drain pending so existing requests don't block on enqueue.
+	go func() {
+		for range broker.Pending() {
+		}
+	}()
+
+	broker.CancelAll()
+
+	start := time.Now()
+	resp, err := broker.Request("post-cancel.com", 443, 5*time.Second)
+	elapsed := time.Since(start)
+
+	if resp != ResponseDeny {
+		t.Errorf("expected Deny, got %v", resp)
+	}
+	if err == nil {
+		t.Fatal("expected error from post-CancelAll request")
+	}
+	// Should return almost immediately, not wait for the 5s timeout.
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("Request after CancelAll took %v; expected prompt return", elapsed)
+	}
+}
