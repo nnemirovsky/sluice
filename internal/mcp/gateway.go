@@ -42,6 +42,7 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 	gw := &Gateway{
 		upstreams:  make(map[string]*Upstream),
 		toolMap:    make(map[string]string),
+		allTools:   []Tool{},
 		policy:     cfg.ToolPolicy,
 		inspector:  cfg.Inspector,
 		audit:      cfg.Audit,
@@ -58,6 +59,8 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 			gw.Stop()
 			return nil, fmt.Errorf("start upstream %s: %w", ucfg.Name, err)
 		}
+		// Register immediately so Stop() cleans it up on later errors.
+		gw.upstreams[ucfg.Name] = u
 		if err := u.Initialize(); err != nil {
 			gw.Stop()
 			return nil, fmt.Errorf("initialize upstream %s: %w", ucfg.Name, err)
@@ -67,7 +70,6 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 			gw.Stop()
 			return nil, fmt.Errorf("discover tools %s: %w", ucfg.Name, err)
 		}
-		gw.upstreams[ucfg.Name] = u
 		gw.allTools = append(gw.allTools, tools...)
 		for _, t := range tools {
 			gw.toolMap[t.Name] = ucfg.Name
@@ -128,6 +130,10 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 				Content: []ToolContent{{Type: "text", Text: "Denied by user"}},
 				IsError: true,
 			}, nil
+		}
+		if resp == tg.ResponseAlwaysAllow {
+			gw.policy.AddDynamicAllow(req.Name)
+			log.Printf("[MCP ALWAYS ALLOW] %s", req.Name)
 		}
 		finalVerdict = policy.Allow
 		// Approved: fall through to forward

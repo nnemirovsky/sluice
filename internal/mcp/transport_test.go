@@ -133,6 +133,19 @@ func TestHandleRequestUnknownMethod(t *testing.T) {
 	}
 }
 
+func TestHandleRequestUnknownNotification(t *testing.T) {
+	gw := newTestGateway()
+	req := JSONRPCRequest{
+		JSONRPC: "2.0",
+		Method:  "notifications/cancelled",
+	}
+
+	resp := gw.handleRequest(req)
+	if resp != nil {
+		t.Fatalf("expected nil for notification without ID, got %+v", resp)
+	}
+}
+
 func TestHandleRequestToolsCallUnknownTool(t *testing.T) {
 	gw := newTestGateway()
 	req := JSONRPCRequest{

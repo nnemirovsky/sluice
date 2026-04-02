@@ -30,6 +30,13 @@ func (gw *Gateway) RunStdio() error {
 		var req JSONRPCRequest
 		if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
 			log.Printf("parse error: %v", err)
+			resp := &JSONRPCResponse{
+				JSONRPC: "2.0",
+				Error:   &JSONRPCError{Code: -32700, Message: fmt.Sprintf("parse error: %v", err)},
+			}
+			if encErr := encoder.Encode(resp); encErr != nil {
+				return fmt.Errorf("write error response: %w", encErr)
+			}
 			continue
 		}
 
@@ -78,6 +85,10 @@ func (gw *Gateway) handleRequest(req JSONRPCRequest) *JSONRPCResponse {
 		return marshalResult(req.ID, toolResult)
 
 	default:
+		// Notifications (no ID) must not receive a response per JSON-RPC 2.0.
+		if req.ID == nil {
+			return nil
+		}
 		return &JSONRPCResponse{
 			JSONRPC: "2.0", ID: req.ID,
 			Error: &JSONRPCError{Code: -32601, Message: fmt.Sprintf("method not found: %s", req.Method)},

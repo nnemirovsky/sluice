@@ -136,7 +136,8 @@ func handleMCPCommand(args []string) {
 		log.Println("MCP gateway shutting down...")
 	case err := <-errCh:
 		if err != nil {
-			log.Fatalf("MCP gateway error: %v", err)
+			log.Printf("MCP gateway error: %v", err)
+			return
 		}
 		log.Println("MCP gateway stdin closed, exiting")
 	}

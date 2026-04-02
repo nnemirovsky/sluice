@@ -67,7 +67,9 @@ func StartUpstream(cfg UpstreamConfig) (*Upstream, error) {
 	return u, nil
 }
 
-// Send writes a JSON-RPC request to the upstream process and reads one response.
+// Send writes a JSON-RPC request to the upstream process and reads the
+// matching response. Server-initiated notifications (messages without an
+// id field) are logged and skipped so they cannot be misattributed.
 func (u *Upstream) Send(req JSONRPCRequest) (*JSONRPCResponse, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -81,15 +83,30 @@ func (u *Upstream) Send(req JSONRPCRequest) (*JSONRPCResponse, error) {
 		return nil, fmt.Errorf("write to upstream %s: %w", u.name, err)
 	}
 
-	if !u.scanner.Scan() {
-		return nil, fmt.Errorf("upstream %s closed", u.name)
-	}
+	for {
+		if !u.scanner.Scan() {
+			return nil, fmt.Errorf("upstream %s closed", u.name)
+		}
 
-	var resp JSONRPCResponse
-	if err := json.Unmarshal(u.scanner.Bytes(), &resp); err != nil {
-		return nil, fmt.Errorf("parse upstream %s response: %w", u.name, err)
+		// Peek at the raw message to check for an id field.
+		// Notifications have no id and must be skipped.
+		var peek struct {
+			ID json.RawMessage `json:"id"`
+		}
+		if err := json.Unmarshal(u.scanner.Bytes(), &peek); err != nil {
+			return nil, fmt.Errorf("parse upstream %s response: %w", u.name, err)
+		}
+		if peek.ID == nil {
+			log.Printf("upstream %s: skipping notification", u.name)
+			continue
+		}
+
+		var resp JSONRPCResponse
+		if err := json.Unmarshal(u.scanner.Bytes(), &resp); err != nil {
+			return nil, fmt.Errorf("parse upstream %s response: %w", u.name, err)
+		}
+		return &resp, nil
 	}
-	return &resp, nil
 }
 
 // Initialize performs the MCP initialize handshake with the upstream server.

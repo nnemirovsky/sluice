@@ -40,6 +40,16 @@ func NewToolPolicy(rules []policy.ToolRule, fallback policy.Verdict) *ToolPolicy
 	return &ToolPolicy{rules: compiled, fallback: fallback}
 }
 
+// AddDynamicAllow appends a runtime allow rule for the given tool name.
+// The rule is not persisted to disk.
+func (tp *ToolPolicy) AddDynamicAllow(toolName string) {
+	g, err := policy.CompileGlob(toolName)
+	if err != nil {
+		return
+	}
+	tp.rules = append(tp.rules, compiledToolRule{glob: g, verdict: policy.Allow})
+}
+
 // Evaluate checks the tool name against rules in priority order: deny, allow, ask.
 func (tp *ToolPolicy) Evaluate(toolName string) policy.Verdict {
 	for _, r := range tp.rules {
