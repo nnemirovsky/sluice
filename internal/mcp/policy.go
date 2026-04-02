@@ -51,7 +51,12 @@ func (tp *ToolPolicy) AddDynamicAllow(toolName string) {
 		return
 	}
 	tp.mu.Lock()
-	tp.rules = append(tp.rules, compiledToolRule{glob: g, verdict: policy.Allow})
+	// Copy-on-write: create a new backing array so that concurrent readers
+	// iterating the old slice are not affected by this append.
+	newRules := make([]compiledToolRule, len(tp.rules)+1)
+	copy(newRules, tp.rules)
+	newRules[len(tp.rules)] = compiledToolRule{glob: g, verdict: policy.Allow}
+	tp.rules = newRules
 	tp.mu.Unlock()
 }
 

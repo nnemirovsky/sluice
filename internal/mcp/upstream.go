@@ -31,6 +31,7 @@ type Upstream struct {
 	lines   chan []byte     // lines read by the background goroutine
 	scanErr atomic.Value   // stores the scanner error, if any
 	waitCh  chan error      // receives cmd.Wait() result exactly once
+	done    chan struct{}   // closed by Stop to unblock the scanner goroutine
 	mu      sync.Mutex
 	tools   []Tool
 	nextID  atomic.Int64
@@ -69,6 +70,7 @@ func StartUpstream(cfg UpstreamConfig) (*Upstream, error) {
 		stdin:   stdin,
 		lines:   make(chan []byte, 64),
 		waitCh:  make(chan error, 1),
+		done:    make(chan struct{}),
 		timeout: defaultUpstreamTimeout,
 	}
 
@@ -80,8 +82,15 @@ func StartUpstream(cfg UpstreamConfig) (*Upstream, error) {
 		for scanner.Scan() {
 			data := make([]byte, len(scanner.Bytes()))
 			copy(data, scanner.Bytes())
-			u.lines <- data
+			select {
+			case u.lines <- data:
+			case <-u.done:
+				// Stop was called; discard remaining output so we can
+				// reach cmd.Wait and avoid a deadlock.
+				goto drain
+			}
 		}
+	drain:
 		if err := scanner.Err(); err != nil {
 			u.scanErr.Store(err)
 		}
@@ -259,6 +268,7 @@ func (u *Upstream) CallTool(toolName string, arguments json.RawMessage) (*JSONRP
 // to waitCh.
 func (u *Upstream) Stop() error {
 	u.stdin.Close()
+	close(u.done) // unblock the scanner goroutine if the channel is full
 	select {
 	case err := <-u.waitCh:
 		return err
