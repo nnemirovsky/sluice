@@ -54,6 +54,10 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 	}
 
 	for _, ucfg := range cfg.Upstreams {
+		if _, exists := gw.upstreams[ucfg.Name]; exists {
+			gw.Stop()
+			return nil, fmt.Errorf("duplicate upstream name %q", ucfg.Name)
+		}
 		u, err := StartUpstream(ucfg)
 		if err != nil {
 			gw.Stop()

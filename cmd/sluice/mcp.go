@@ -23,7 +23,7 @@ type mcpConfig struct {
 	MCPUpstreams []mcp.UpstreamConfig `toml:"mcp_upstream"`
 }
 
-func handleMCPCommand(args []string) {
+func handleMCPCommand(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
 	policyPath := fs.String("policy", "policy.toml", "path to policy TOML file")
 	auditPath := fs.String("audit", "", "path to audit log file (optional)")
@@ -138,10 +138,9 @@ func handleMCPCommand(args []string) {
 	case err := <-errCh:
 		if err != nil {
 			log.Printf("MCP gateway error: %v", err)
-			// Return to let defers run, then exit non-zero.
-			gw.Stop()
-			os.Exit(1)
+			return err
 		}
 		log.Println("MCP gateway stdin closed, exiting")
 	}
+	return nil
 }
