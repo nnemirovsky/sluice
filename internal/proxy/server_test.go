@@ -640,3 +640,171 @@ destination = "127.0.0.1"
 		t.Fatal("expected timeout to deny connection")
 	}
 }
+
+func TestGracefulShutdownDrainsInFlight(t *testing.T) {
+	// Start a slow echo server that holds connections open briefly.
+	slowEcho, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer slowEcho.Close()
+	go func() {
+		for {
+			conn, err := slowEcho.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				time.Sleep(200 * time.Millisecond)
+				c.Write([]byte("done"))
+			}(conn)
+		}
+	}()
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.ListenAndServe()
+
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Establish an in-flight connection through the proxy.
+	conn, err := dialer.Dial("tcp", slowEcho.Addr().String())
+	if err != nil {
+		t.Fatalf("dial through proxy: %v", err)
+	}
+
+	// Start graceful shutdown while the connection is still in-flight.
+	// Use a generous timeout so the slow echo server has time to respond.
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- srv.GracefulShutdown(5 * time.Second)
+	}()
+
+	// Read the response from the slow echo server. This should complete
+	// before the shutdown timeout.
+	buf := make([]byte, 10)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read from in-flight connection: %v", err)
+	}
+	if string(buf[:n]) != "done" {
+		t.Errorf("expected 'done', got %q", string(buf[:n]))
+	}
+	conn.Close()
+
+	// Shutdown should complete without timeout error.
+	if err := <-shutdownDone; err != nil {
+		t.Errorf("graceful shutdown should succeed after connections drain: %v", err)
+	}
+}
+
+func TestGracefulShutdownTimesOut(t *testing.T) {
+	// Start a server that holds connections forever (until closed).
+	hangForever, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hangForever.Close()
+	go func() {
+		for {
+			conn, err := hangForever.Accept()
+			if err != nil {
+				return
+			}
+			// Hold open until the test cleans up.
+			go func(c net.Conn) {
+				buf := make([]byte, 1)
+				c.Read(buf)
+				c.Close()
+			}(conn)
+		}
+	}()
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.ListenAndServe()
+
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Establish an in-flight connection that will never complete.
+	conn, err := dialer.Dial("tcp", hangForever.Addr().String())
+	if err != nil {
+		t.Fatalf("dial through proxy: %v", err)
+	}
+	defer conn.Close()
+
+	// Graceful shutdown with a very short timeout should fail.
+	err = srv.GracefulShutdown(50 * time.Millisecond)
+	if err == nil {
+		t.Error("expected timeout error from graceful shutdown")
+	}
+}
+
+func TestGracefulShutdownRejectsNewConnections(t *testing.T) {
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.ListenAndServe()
+
+	addr := srv.Addr()
+
+	// Shut down the server.
+	if err := srv.GracefulShutdown(time.Second); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	// New connections should be rejected.
+	dialer, err := proxy.SOCKS5("tcp", addr, nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = dialer.Dial("tcp", "127.0.0.1:9999")
+	if err == nil {
+		t.Fatal("expected connection to be rejected after shutdown")
+	}
+}

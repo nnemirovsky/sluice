@@ -221,12 +221,12 @@ Currently `srv.Close()` is called on SIGINT/SIGTERM but there's no drain period 
 - Modify: `cmd/sluice/main.go`
 - Modify: `internal/proxy/server.go` (if Shutdown method needed)
 
-- [ ] Add a `--shutdown-timeout` flag (default 10s)
-- [ ] On SIGINT/SIGTERM, stop accepting new connections, wait for in-flight to complete up to timeout
-- [ ] Cancel pending Telegram approval requests on shutdown (auto-deny with reason "shutting down")
-- [ ] Close audit logger after all connections drain
-- [ ] Write test for graceful shutdown behavior (in-flight connection completes before close)
-- [ ] Run tests: `go test ./... -v -timeout 30s`
+- [x] Add a `--shutdown-timeout` flag (default 10s)
+- [x] On SIGINT/SIGTERM, stop accepting new connections, wait for in-flight to complete up to timeout
+- [x] Cancel pending Telegram approval requests on shutdown (auto-deny with reason "shutting down")
+- [x] Close audit logger after all connections drain
+- [x] Write test for graceful shutdown behavior (in-flight connection completes before close)
+- [x] Run tests: `go test ./... -v -timeout 30s`
 
 ### Task 10: Add godoc comments to exported types
 

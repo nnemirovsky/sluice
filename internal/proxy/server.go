@@ -60,6 +60,7 @@ type Server struct {
 	mailProxy  *MailProxy
 	resolver   *vault.BindingResolver
 	closed     atomic.Bool
+	activeConns sync.WaitGroup
 }
 
 type contextKey string
@@ -668,9 +669,11 @@ func (s *Server) Addr() string {
 	return s.listener.Addr().String()
 }
 
-// ListenAndServe starts accepting SOCKS5 connections.
+// ListenAndServe starts accepting SOCKS5 connections. Accepted connections
+// are tracked so GracefulShutdown can wait for them to complete.
 func (s *Server) ListenAndServe() error {
-	return s.socks.Serve(s.listener)
+	tracked := &trackedListener{Listener: s.listener, wg: &s.activeConns}
+	return s.socks.Serve(tracked)
 }
 
 // IsListening returns true if the server has not been closed.
@@ -685,4 +688,61 @@ func (s *Server) Close() error {
 		s.injectorLn.Close()
 	}
 	return s.listener.Close()
+}
+
+// GracefulShutdown stops accepting new connections, waits for in-flight
+// connections to complete up to the given timeout, then closes all
+// remaining resources. Returns nil if all connections drained within
+// the timeout, or an error if the timeout was exceeded.
+func (s *Server) GracefulShutdown(timeout time.Duration) error {
+	s.closed.Store(true)
+	// Stop accepting new connections.
+	s.listener.Close()
+	if s.injectorLn != nil {
+		s.injectorLn.Close()
+	}
+
+	// Wait for in-flight connections to complete, bounded by timeout.
+	done := make(chan struct{})
+	go func() {
+		s.activeConns.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("graceful shutdown timed out after %v", timeout)
+	}
+}
+
+// trackedListener wraps a net.Listener and increments/decrements a WaitGroup
+// for each accepted connection. This allows GracefulShutdown to wait for
+// all in-flight connections to complete.
+type trackedListener struct {
+	net.Listener
+	wg *sync.WaitGroup
+}
+
+func (l *trackedListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	l.wg.Add(1)
+	return &trackedConn{Conn: conn, wg: l.wg}, nil
+}
+
+// trackedConn wraps a net.Conn and decrements the WaitGroup when closed.
+type trackedConn struct {
+	net.Conn
+	wg   *sync.WaitGroup
+	once sync.Once
+}
+
+func (c *trackedConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() { c.wg.Done() })
+	return err
 }

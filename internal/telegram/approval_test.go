@@ -189,3 +189,56 @@ func TestDestinationRateLimitDisabled(t *testing.T) {
 		}
 	}
 }
+
+func TestCancelAllDeniesAllPending(t *testing.T) {
+	broker := NewApprovalBroker(WithMaxPending(0))
+
+	const n = 5
+	type result struct {
+		resp Response
+		err  error
+	}
+	results := make(chan result, n)
+
+	// Start n requests that will block waiting for approval.
+	for i := 0; i < n; i++ {
+		go func() {
+			resp, err := broker.Request("cancel-test.com", 443, 5*time.Second)
+			results <- result{resp, err}
+		}()
+	}
+
+	// Wait for all requests to be registered as waiters.
+	for {
+		if broker.PendingCount() == n {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Drain the pending channel so Request() calls don't block on enqueue.
+	go func() {
+		for range broker.Pending() {
+		}
+	}()
+
+	// Cancel all pending requests.
+	broker.CancelAll()
+
+	// All requests should complete with Deny and no error (they were
+	// resolved, not timed out).
+	for i := 0; i < n; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Errorf("request %d: unexpected error: %v", i, r.err)
+		}
+		if r.resp != ResponseDeny {
+			t.Errorf("request %d: expected Deny, got %v", i, r.resp)
+		}
+	}
+
+	// No pending requests should remain.
+	if broker.PendingCount() != 0 {
+		t.Errorf("expected 0 pending after CancelAll, got %d", broker.PendingCount())
+	}
+}

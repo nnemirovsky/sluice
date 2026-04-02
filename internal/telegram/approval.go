@@ -254,3 +254,20 @@ func (b *ApprovalBroker) Resolve(id string, resp Response) bool {
 	}
 	return ok
 }
+
+// CancelAll auto-denies all pending approval requests. Called during
+// graceful shutdown so that in-flight proxy goroutines blocked on
+// approval can complete promptly.
+func (b *ApprovalBroker) CancelAll() {
+	b.mu.Lock()
+	waiters := make(map[string]chan Response, len(b.waiters))
+	for id, ch := range b.waiters {
+		waiters[id] = ch
+	}
+	b.waiters = make(map[string]chan Response)
+	b.mu.Unlock()
+
+	for _, ch := range waiters {
+		ch <- ResponseDeny
+	}
+}

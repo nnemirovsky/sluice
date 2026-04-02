@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/BurntSushi/toml"
 
@@ -58,6 +59,7 @@ func main() {
 	telegramToken := flag.String("telegram-token", os.Getenv("TELEGRAM_BOT_TOKEN"), "Telegram bot token")
 	telegramChatIDStr := flag.String("telegram-chat-id", os.Getenv("TELEGRAM_CHAT_ID"), "Telegram chat ID for approvals")
 	healthAddr := flag.String("health-addr", ":3000", "health check HTTP listen address (serves /healthz)")
+	shutdownTimeout := flag.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout for draining in-flight connections")
 	dockerSocket := flag.String("docker-socket", "", "Docker socket path (auto-detects from DOCKER_HOST or /var/run/docker.sock)")
 	dockerContainer := flag.String("docker-container", envDefault("SLUICE_AGENT_CONTAINER", "openclaw"), "Docker container name for auto-restart on credential changes")
 	flag.Parse()
@@ -306,7 +308,15 @@ func main() {
 	select {
 	case <-sigCh:
 		log.Println("shutting down...")
-		srv.Close()
+		// Cancel pending Telegram approval requests so proxy goroutines
+		// blocked on approval can complete and connections can drain.
+		if broker != nil {
+			broker.CancelAll()
+		}
+		if err := srv.GracefulShutdown(*shutdownTimeout); err != nil {
+			log.Printf("WARNING: %v", err)
+		}
+		// Audit logger is closed via defer after all connections drain.
 	case err := <-errCh:
 		log.Fatalf("proxy failed: %v", err)
 	}
