@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/nemirovsky/sluice/internal/policy"
+	"github.com/nemirovsky/sluice/internal/vault"
 )
 
 // newTestHandler creates a CommandHandler backed by the given engine for tests.
@@ -271,7 +272,7 @@ default = "deny"
 	}
 }
 
-func TestHandleCred(t *testing.T) {
+func TestHandleCredNoVault(t *testing.T) {
 	eng, _ := policy.LoadFromBytes([]byte(`[policy]
 default = "deny"
 `))
@@ -280,6 +281,50 @@ default = "deny"
 
 	if !strings.Contains(result, "not available") {
 		t.Errorf("cred should say not available, got: %s", result)
+	}
+}
+
+func TestHandleCredWithVault(t *testing.T) {
+	eng, _ := policy.LoadFromBytes([]byte(`[policy]
+default = "deny"
+`))
+	handler := newTestHandler(eng, nil, "")
+
+	dir := t.TempDir()
+	store, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.SetVault(store)
+
+	// List should show empty.
+	result := handler.Handle(&Command{Name: "cred", Args: []string{"list"}})
+	if !strings.Contains(result, "No credentials") {
+		t.Errorf("should show no credentials, got: %s", result)
+	}
+
+	// Add a credential.
+	result = handler.Handle(&Command{Name: "cred", Args: []string{"add", "test_key", "secret123"}})
+	if !strings.Contains(result, "Added credential") {
+		t.Errorf("should confirm add, got: %s", result)
+	}
+
+	// List should show the credential.
+	result = handler.Handle(&Command{Name: "cred", Args: []string{"list"}})
+	if !strings.Contains(result, "test_key") {
+		t.Errorf("should show test_key, got: %s", result)
+	}
+
+	// Remove the credential.
+	result = handler.Handle(&Command{Name: "cred", Args: []string{"remove", "test_key"}})
+	if !strings.Contains(result, "Removed credential") {
+		t.Errorf("should confirm remove, got: %s", result)
+	}
+
+	// List should be empty again.
+	result = handler.Handle(&Command{Name: "cred", Args: []string{"list"}})
+	if !strings.Contains(result, "No credentials") {
+		t.Errorf("should show no credentials after remove, got: %s", result)
 	}
 }
 

@@ -331,7 +331,7 @@ environment variables. This happens via the Docker socket.
 - Create: `internal/docker/manager_test.go`
 - Modify: `internal/telegram/commands.go` (call manager on cred changes)
 
-- [ ] **Step 1: Implement Docker container manager**
+- [x] **Step 1: Implement Docker container manager**
 
 ```go
 // internal/docker/manager.go
@@ -356,7 +356,7 @@ func (m *Manager) Status() (ContainerStatus, error)
 func (m *Manager) Stop() error
 ```
 
-- [ ] **Step 2: Implement phantom env generation**
+- [x] **Step 2: Implement phantom env generation**
 
 ```go
 // GeneratePhantomEnv takes the vault's credential list and generates
@@ -372,14 +372,14 @@ Format-matching logic:
 - `sk-*` (OpenAI) -> `sk-phantom-<random>`
 - Unknown format -> random alphanumeric of same length
 
-- [ ] **Step 3: Wire into Telegram /cred commands**
+- [x] **Step 3: Wire into Telegram /cred commands**
 
 When `/cred add`, `/cred rotate`, or `/cred remove` completes:
 1. Regenerate phantom env map
 2. Call `manager.RestartWithEnv(phantomEnv)`
 3. Send confirmation to Telegram: "Credential updated. Agent container restarted."
 
-- [ ] **Step 4: Write tests**
+- [x] **Step 4: Write tests**
 
 ```go
 func TestGeneratePhantomEnv(t *testing.T) {
@@ -393,18 +393,18 @@ func TestPhantomTokenFormatMatching(t *testing.T) {
 
 Docker manager tests use a mock Docker client (interface-based).
 
-- [ ] **Step 5: Add Docker client dependency**
+- [x] **Step 5: Add Docker client dependency** (interface-based; SDK added at deployment time)
 
 ```bash
 go get github.com/docker/docker/client
 ```
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 Run: `go test ./internal/docker/ -v`
 Expected: PASS
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add internal/docker/ internal/telegram/commands.go

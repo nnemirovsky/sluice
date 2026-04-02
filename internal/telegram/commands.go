@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -8,7 +9,9 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/nemirovsky/sluice/internal/docker"
 	"github.com/nemirovsky/sluice/internal/policy"
+	"github.com/nemirovsky/sluice/internal/vault"
 )
 
 // Command represents a parsed Telegram command.
@@ -45,6 +48,18 @@ type CommandHandler struct {
 	reloadMu *sync.Mutex // shared with proxy; serializes engine swaps and policy mutations
 	broker    *ApprovalBroker
 	auditPath string
+	vault     *vault.Store
+	dockerMgr *docker.Manager
+}
+
+// SetVault enables credential management commands.
+func (h *CommandHandler) SetVault(store *vault.Store) {
+	h.vault = store
+}
+
+// SetDockerManager enables automatic container restart on credential changes.
+func (h *CommandHandler) SetDockerManager(mgr *docker.Manager) {
+	h.dockerMgr = mgr
 }
 
 // NewCommandHandler creates a command handler that shares the proxy's engine
@@ -181,9 +196,90 @@ func (h *CommandHandler) policyRemove(dest string) string {
 
 func (h *CommandHandler) handleCred(args []string) string {
 	if len(args) == 0 {
-		return "Usage: /cred add <name> | /cred list | /cred rotate <name> | /cred remove <name>"
+		return "Usage: /cred add <name> <value> | /cred list | /cred rotate <name> <value> | /cred remove <name>"
 	}
-	return "Credential management is not available (vault not configured)."
+	if h.vault == nil {
+		return "Credential management is not available (vault not configured)."
+	}
+
+	switch args[0] {
+	case "list":
+		return h.credList()
+	case "add":
+		if len(args) < 3 {
+			return "Usage: /cred add <name> <value>"
+		}
+		return h.credAdd(args[1], strings.Join(args[2:], " "))
+	case "rotate":
+		if len(args) < 3 {
+			return "Usage: /cred rotate <name> <value>"
+		}
+		return h.credRotate(args[1], strings.Join(args[2:], " "))
+	case "remove":
+		if len(args) < 2 {
+			return "Usage: /cred remove <name>"
+		}
+		return h.credRemove(args[1])
+	default:
+		return fmt.Sprintf("Unknown cred subcommand: %s", args[0])
+	}
+}
+
+func (h *CommandHandler) credList() string {
+	names, err := h.vault.List()
+	if err != nil {
+		return fmt.Sprintf("Failed to list credentials: %v", err)
+	}
+	if len(names) == 0 {
+		return "No credentials stored."
+	}
+	var b strings.Builder
+	b.WriteString("Stored credentials:\n")
+	for _, n := range names {
+		b.WriteString("  ")
+		b.WriteString(n)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func (h *CommandHandler) credAdd(name, value string) string {
+	if err := h.vault.Add(name, value); err != nil {
+		return fmt.Sprintf("Failed to add credential: %v", err)
+	}
+	return h.credMutationComplete(fmt.Sprintf("Added credential: %s", name))
+}
+
+func (h *CommandHandler) credRotate(name, value string) string {
+	if err := h.vault.Add(name, value); err != nil {
+		return fmt.Sprintf("Failed to rotate credential: %v", err)
+	}
+	return h.credMutationComplete(fmt.Sprintf("Rotated credential: %s", name))
+}
+
+func (h *CommandHandler) credRemove(name string) string {
+	if err := h.vault.Remove(name); err != nil {
+		return fmt.Sprintf("Failed to remove credential: %v", err)
+	}
+	return h.credMutationComplete(fmt.Sprintf("Removed credential: %s", name))
+}
+
+func (h *CommandHandler) credMutationComplete(msg string) string {
+	if h.dockerMgr == nil {
+		return msg
+	}
+
+	names, err := h.vault.List()
+	if err != nil {
+		return msg + "\nWarning: failed to list credentials for container restart: " + err.Error()
+	}
+
+	phantomEnv := docker.GeneratePhantomEnv(names)
+	if err := h.dockerMgr.RestartWithEnv(context.Background(), phantomEnv); err != nil {
+		return msg + "\nWarning: failed to restart agent container: " + err.Error()
+	}
+
+	return msg + "\nAgent container restarted with updated credentials."
 }
 
 func (h *CommandHandler) handleStatus() string {
@@ -246,7 +342,7 @@ func (h *CommandHandler) handleAudit(args []string) string {
 }
 
 func (h *CommandHandler) handleHelp() string {
-	return `Available commands:
+	help := `Available commands:
 
 /policy show - List current rules
 /policy allow <dest> - Add allow rule
@@ -254,10 +350,17 @@ func (h *CommandHandler) handleHelp() string {
 /policy remove <dest> - Remove rule
 /status - Show proxy status
 /audit recent [N] - Show last N audit entries
-/help - Show this message
+/help - Show this message`
 
-Planned (not yet available):
-/cred add|list|rotate|remove - Credential management`
+	if h.vault != nil {
+		help += `
+
+/cred list - List stored credentials
+/cred add <name> <value> - Add credential
+/cred rotate <name> <value> - Rotate credential
+/cred remove <name> - Remove credential`
+	}
+	return help
 }
 
 // IsAuthorizedChat checks if a message sender's chat ID matches the configured one.
