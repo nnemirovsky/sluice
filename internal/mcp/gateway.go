@@ -205,7 +205,7 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 		result.Meta = make(map[string]interface{})
 	}
 	result.Meta["governance"] = map[string]interface{}{
-		"verdict": verdict.String(),
+		"verdict": finalVerdict.String(),
 		"tool":    req.Name,
 		"version": "0.1.0",
 	}

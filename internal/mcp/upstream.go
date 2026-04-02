@@ -30,6 +30,7 @@ type Upstream struct {
 	stdin   io.WriteCloser
 	lines   chan []byte     // lines read by the background goroutine
 	scanErr atomic.Value   // stores the scanner error, if any
+	waitCh  chan error      // receives cmd.Wait() result exactly once
 	mu      sync.Mutex
 	tools   []Tool
 	nextID  atomic.Int64
@@ -67,6 +68,7 @@ func StartUpstream(cfg UpstreamConfig) (*Upstream, error) {
 		cmd:     cmd,
 		stdin:   stdin,
 		lines:   make(chan []byte, 64),
+		waitCh:  make(chan error, 1),
 		timeout: defaultUpstreamTimeout,
 	}
 
@@ -84,6 +86,9 @@ func StartUpstream(cfg UpstreamConfig) (*Upstream, error) {
 			u.scanErr.Store(err)
 		}
 		close(u.lines)
+		// Reap the process to prevent zombies. Wait is called exactly
+		// once here; Stop() reads the result from waitCh.
+		u.waitCh <- u.cmd.Wait()
 	}()
 
 	return u, nil
@@ -249,19 +254,16 @@ func (u *Upstream) CallTool(toolName string, arguments json.RawMessage) (*JSONRP
 }
 
 // Stop closes stdin and waits for the upstream process to exit. If the
-// process does not exit within 5 seconds, it is killed.
+// process does not exit within 5 seconds, it is killed. The background
+// scanner goroutine calls cmd.Wait() exactly once and sends the result
+// to waitCh.
 func (u *Upstream) Stop() error {
 	u.stdin.Close()
-	done := make(chan error, 1)
-	go func() {
-		done <- u.cmd.Wait()
-	}()
 	select {
-	case err := <-done:
+	case err := <-u.waitCh:
 		return err
 	case <-time.After(5 * time.Second):
 		u.cmd.Process.Kill()
-		<-done
-		return fmt.Errorf("upstream %s killed after timeout", u.name)
+		return <-u.waitCh
 	}
 }
