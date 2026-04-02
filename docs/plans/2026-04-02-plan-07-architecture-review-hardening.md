@@ -139,16 +139,16 @@ Replace the stub in `provider_hashicorp.go` with a working implementation using 
 - Modify: `internal/vault/provider_test.go`
 - Modify: `go.mod` (add `github.com/hashicorp/vault/api`)
 
-- [ ] Add `github.com/hashicorp/vault/api` dependency
-- [ ] Implement `NewHashiCorpProvider(cfg HashiCorpConfig) (*HashiCorpProvider, error)` with Vault client initialization
-- [ ] Implement `Get(name string) (SecureBytes, error)` reading from KV v2 at configurable mount/path
-- [ ] Implement `List() ([]string, error)` listing available secret keys
-- [ ] Support VAULT_ADDR and VAULT_TOKEN env vars, plus config overrides
-- [ ] Support AppRole auth as alternative to token auth
-- [ ] Write tests using a mock HTTP server that simulates Vault KV v2 responses
-- [ ] Write tests for auth methods (token, AppRole)
-- [ ] Write tests for error cases (connection refused, auth denied, secret not found)
-- [ ] Run tests: `go test ./internal/vault/ -v -timeout 30s`
+- [x] Add `github.com/hashicorp/vault/api` dependency
+- [x] Implement `NewHashiCorpProvider(cfg HashiCorpConfig) (*HashiCorpProvider, error)` with Vault client initialization
+- [x] Implement `Get(name string) (SecureBytes, error)` reading from KV v2 at configurable mount/path
+- [x] Implement `List() ([]string, error)` listing available secret keys
+- [x] Support VAULT_ADDR and VAULT_TOKEN env vars, plus config overrides
+- [x] Support AppRole auth as alternative to token auth
+- [x] Write tests using a mock HTTP server that simulates Vault KV v2 responses
+- [x] Write tests for auth methods (token, AppRole)
+- [x] Write tests for error cases (connection refused, auth denied, secret not found)
+- [x] Run tests: `go test ./internal/vault/ -v -timeout 30s`
 
 ### Task 5: Make MCP upstream timeout configurable
 

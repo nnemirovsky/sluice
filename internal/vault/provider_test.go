@@ -77,21 +77,13 @@ func TestEnvProvider(t *testing.T) {
 	}
 }
 
-func TestHashiCorpProviderStub(t *testing.T) {
-	// The HashiCorp provider is not yet implemented, so construction
-	// must fail immediately rather than silently succeeding and then
-	// failing on every Get() call.
+func TestHashiCorpProviderMissingConfig(t *testing.T) {
+	// No addr, no token, no env vars: should fail with a clear error.
+	t.Setenv("VAULT_TOKEN", "")
+	t.Setenv("VAULT_ADDR", "")
 	_, err := NewHashiCorpProvider(HashiCorpConfig{})
 	if err == nil {
-		t.Error("expected error for unimplemented provider")
-	}
-
-	_, err = NewHashiCorpProvider(HashiCorpConfig{
-		Addr:  "https://vault.example.com:8200",
-		Mount: "sluice",
-	})
-	if err == nil {
-		t.Error("expected error for unimplemented provider even with valid config")
+		t.Error("expected error when no token is configured")
 	}
 }
 
