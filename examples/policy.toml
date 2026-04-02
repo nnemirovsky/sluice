@@ -17,6 +17,7 @@ provider = "age"
 # For HashiCorp Vault (uncomment and configure):
 # [vault]
 # provider = "hashicorp"
+# [vault.hashicorp]
 # addr = "https://vault.example.com:8200"   # or set VAULT_ADDR env var
 # token = ""                                # token auth (or set VAULT_TOKEN env var)
 # mount = "secret"                          # KV v2 mount path (default: "secret")
