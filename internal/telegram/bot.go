@@ -12,7 +12,9 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/nemirovsky/sluice/internal/docker"
 	"github.com/nemirovsky/sluice/internal/policy"
+	"github.com/nemirovsky/sluice/internal/vault"
 )
 
 // tokenPattern matches Telegram bot tokens embedded in URLs or error messages.
@@ -37,6 +39,8 @@ type BotConfig struct {
 	EnginePtr *atomic.Pointer[policy.Engine]
 	ReloadMu  *sync.Mutex
 	AuditPath string
+	Vault     *vault.Store
+	DockerMgr *docker.Manager
 }
 
 type Bot struct {
@@ -62,6 +66,12 @@ func NewBot(cfg BotConfig, broker *ApprovalBroker) (*Bot, error) {
 	log.Printf("telegram bot authorized as @%s", api.Self.UserName)
 
 	cmdHandler := NewCommandHandler(cfg.EnginePtr, cfg.ReloadMu, broker, cfg.AuditPath)
+	if cfg.Vault != nil {
+		cmdHandler.SetVault(cfg.Vault)
+	}
+	if cfg.DockerMgr != nil {
+		cmdHandler.SetDockerManager(cfg.DockerMgr)
+	}
 
 	return &Bot{api: api, chatID: cfg.ChatID, broker: broker, commands: cmdHandler, done: make(chan struct{})}, nil
 }

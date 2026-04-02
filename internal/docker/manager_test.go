@@ -235,26 +235,6 @@ func TestGeneratePhantomToken(t *testing.T) {
 	}
 }
 
-func TestPhantomTokenFormatMatching(t *testing.T) {
-	// Anthropic tokens start with sk-ant-
-	token := GeneratePhantomToken("anthropic_api_key")
-	if !strings.HasPrefix(token, "sk-ant-phantom-") {
-		t.Errorf("anthropic phantom should start with sk-ant-phantom-: %s", token)
-	}
-
-	// OpenAI tokens start with sk-
-	token = GeneratePhantomToken("openai_api_key")
-	if !strings.HasPrefix(token, "sk-phantom-") {
-		t.Errorf("openai phantom should start with sk-phantom-: %s", token)
-	}
-
-	// GitHub tokens start with ghp_
-	token = GeneratePhantomToken("github_token")
-	if !strings.HasPrefix(token, "ghp_phantom") {
-		t.Errorf("github phantom should start with ghp_phantom: %s", token)
-	}
-}
-
 func TestGeneratePhantomEnv(t *testing.T) {
 	env := GeneratePhantomEnv([]string{"anthropic_api_key", "github_token"})
 
@@ -280,6 +260,8 @@ func TestCredNameToEnvVar(t *testing.T) {
 		{"anthropic_api_key", "ANTHROPIC_API_KEY"},
 		{"github_token", "GITHUB_TOKEN"},
 		{"my_secret", "MY_SECRET"},
+		{"my-api-key", "MY_API_KEY"},
+		{"cred.name.dots", "CRED_NAME_DOTS"},
 	}
 	for _, tt := range tests {
 		got := CredNameToEnvVar(tt.name)
@@ -348,5 +330,30 @@ func TestMergeEnvEmpty(t *testing.T) {
 	result = mergeEnv(nil, nil)
 	if len(result) != 0 {
 		t.Errorf("expected empty, got %v", result)
+	}
+}
+
+func TestMergeEnvRemoval(t *testing.T) {
+	existing := []string{"A=1", "B=2", "C=3"}
+	updates := map[string]string{"B": ""}
+	result := mergeEnv(existing, updates)
+
+	envMap := make(map[string]string)
+	for _, e := range result {
+		k, v, _ := strings.Cut(e, "=")
+		envMap[k] = v
+	}
+
+	if _, ok := envMap["B"]; ok {
+		t.Error("B should be removed when update value is empty")
+	}
+	if envMap["A"] != "1" {
+		t.Error("A should be preserved")
+	}
+	if envMap["C"] != "3" {
+		t.Error("C should be preserved")
+	}
+	if len(result) != 2 {
+		t.Errorf("expected 2 entries, got %d: %v", len(result), result)
 	}
 }

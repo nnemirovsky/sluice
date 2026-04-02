@@ -37,7 +37,15 @@ go test ./... -v -timeout 30s
 - `internal/audit/logger.go` - Thread-safe append-only JSON lines audit logger
 - `internal/telegram/approval.go` - Approval broker with channel-based request/response flow
 - `internal/telegram/bot.go` - Telegram bot lifecycle, inline keyboard approval messages
-- `internal/telegram/commands.go` - Telegram admin commands (/policy, /status, /audit, /help)
+- `internal/telegram/commands.go` - Telegram admin commands (/policy, /cred, /status, /audit, /help)
+- `internal/docker/manager.go` - Docker container manager for credential rotation (restart with updated phantom env)
+- `cmd/sluice/cert.go` - CLI subcommand handler for CA certificate generation (`cert generate`)
+- `Dockerfile` - Multi-stage build for Sluice container
+- `docker-compose.yml` - Three-container setup (sluice + tun2proxy + openclaw)
+- `scripts/docker-entrypoint.sh` - Container entrypoint with CA cert generation and copy to shared volume
+- `scripts/setup-vault.sh` - Interactive credential and CA setup script
+- `scripts/gen-phantom-env.sh` - Phantom token env file generator for openclaw container
+- `examples/policy.toml` - Example policy for OpenClaw deployment with bindings and MCP tool rules
 - `testdata/` - TOML policy fixtures for tests
 
 ## Architecture
@@ -61,6 +69,8 @@ HTTPS credential injection: `Injector` wraps `goproxy` as an in-process MITM pro
 SSH credential injection: `SSHJumpHost` accepts the agent's SSH connection with no authentication (`NoClientAuth`), decrypts the SSH private key from the vault, authenticates to the upstream server, and relays SSH channels/requests bidirectionally. `Binding.Template` holds the SSH username (defaults to "root").
 
 Mail credential injection: `MailProxy` intercepts IMAP LOGIN and SMTP AUTH PLAIN/LOGIN commands. For base64-encoded auth data, it decodes, replaces phantom tokens, and re-encodes. Non-auth traffic is relayed unchanged.
+
+Docker integration: Three-container architecture (sluice + tun2proxy + openclaw) with `network_mode: "service:tun2proxy"` routing all openclaw traffic through sluice's SOCKS5 proxy. `docker.Manager` wraps a `ContainerClient` interface (production implementation pending, SDK added at deployment time). On credential mutation via Telegram `/cred` commands, `credMutationComplete` regenerates phantom environment variables using `GeneratePhantomEnv` (produces SDK-format-matching phantom tokens based on credential name heuristics) and calls `Manager.RestartWithEnv` to recreate the agent container with updated env. `BotConfig.Vault` and `BotConfig.DockerMgr` wire the vault and Docker manager into Telegram command handling. The sluice entrypoint generates a CA cert and copies it to a shared volume so openclaw can trust HTTPS MITM certificates via `SSL_CERT_FILE`.
 
 MCP gateway: `Gateway` spawns upstream MCP servers as child processes via `StartUpstream`, performs `initialize` handshake and `notifications/initialized`, discovers tools via `tools/list`, and namespaces them with `<upstream>__<tool>`. The agent connects via stdio (`RunStdio`). On `tools/call`, the gateway evaluates `ToolPolicy` (deny/allow/ask priority, same as network policy), optionally requests Telegram approval via the shared `ApprovalBroker`, runs `ContentInspector.InspectArguments` to block arguments matching regex patterns (JSON is parsed before matching to prevent unicode escape bypass), strips the namespace prefix, forwards to the upstream, runs `ContentInspector.RedactResponse` on the result, and adds governance metadata. `ToolPolicy` reuses `policy.CompileGlob` for glob matching. The `mcp` subcommand reads `[[mcp_upstream]]`, `[[tool_allow]]`, `[[tool_deny]]`, `[[tool_ask]]`, `[[inspect_block]]`, and `[[inspect_redact]]` sections from the same TOML policy file.
 

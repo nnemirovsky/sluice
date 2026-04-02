@@ -20,12 +20,15 @@ type ContainerClient interface {
 
 // ContainerState holds the result of inspecting a container.
 type ContainerState struct {
-	ID       string
-	Image    string
-	Env      []string
-	Running  bool
-	Mounts   []Mount
-	Networks []string
+	ID          string
+	Image       string
+	Env         []string
+	Running     bool
+	Mounts      []Mount
+	Networks    []string
+	NetworkMode string
+	Cmd         []string
+	Entrypoint  []string
 }
 
 // Mount represents a container volume mount.
@@ -37,11 +40,14 @@ type Mount struct {
 
 // ContainerSpec holds parameters for creating a container.
 type ContainerSpec struct {
-	Name     string
-	Image    string
-	Env      []string
-	Mounts   []Mount
-	Networks []string
+	Name        string
+	Image       string
+	Env         []string
+	Mounts      []Mount
+	Networks    []string
+	NetworkMode string
+	Cmd         []string
+	Entrypoint  []string
 }
 
 // ContainerStatus holds container health information.
@@ -84,11 +90,14 @@ func (m *Manager) RestartWithEnv(ctx context.Context, envUpdates map[string]stri
 	}
 
 	newID, err := m.client.CreateContainer(ctx, ContainerSpec{
-		Name:     m.containerName,
-		Image:    info.Image,
-		Env:      env,
-		Mounts:   info.Mounts,
-		Networks: info.Networks,
+		Name:        m.containerName,
+		Image:       info.Image,
+		Env:         env,
+		Mounts:      info.Mounts,
+		Networks:    info.Networks,
+		NetworkMode: info.NetworkMode,
+		Cmd:         info.Cmd,
+		Entrypoint:  info.Entrypoint,
 	})
 	if err != nil {
 		return fmt.Errorf("create container: %w", err)
@@ -121,6 +130,7 @@ func (m *Manager) Stop(ctx context.Context) error {
 
 // mergeEnv merges updates into an existing environment variable list.
 // Existing variables are updated in place. New variables are appended.
+// Variables with an empty string value in updates are removed.
 // Insertion order of existing variables is preserved.
 func mergeEnv(existing []string, updates map[string]string) []string {
 	envMap := make(map[string]string, len(existing))
@@ -140,7 +150,12 @@ func mergeEnv(existing []string, updates map[string]string) []string {
 	}
 	result := make([]string, 0, len(order))
 	for _, k := range order {
-		result = append(result, k+"="+envMap[k])
+		v := envMap[k]
+		// Empty value in updates signals removal.
+		if _, isUpdate := updates[k]; isUpdate && v == "" {
+			continue
+		}
+		result = append(result, k+"="+v)
 	}
 	return result
 }
@@ -163,8 +178,19 @@ func GeneratePhantomToken(credName string) string {
 }
 
 // CredNameToEnvVar converts a credential name to an environment variable name.
+// Non-alphanumeric characters (hyphens, dots, etc.) are replaced with underscores
+// to produce valid shell environment variable names.
 func CredNameToEnvVar(name string) string {
-	return strings.ToUpper(name)
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, c := range strings.ToUpper(name) {
+		if (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+			b.WriteRune(c)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 // GeneratePhantomEnv generates phantom token environment variables for all

@@ -32,6 +32,10 @@ services:
     image: openclaw/openclaw:latest
     network_mode: "service:tun2proxy"
     env_file: .env.phantom
+    environment:
+      - SSL_CERT_FILE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
+      - REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
+      - NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
     volumes:
       - openclaw-data:/root/.openclaw
       - sluice-ca:/usr/local/share/ca-certificates/sluice:ro

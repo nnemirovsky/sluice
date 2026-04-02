@@ -78,12 +78,12 @@ tool = "exec__*"
 # --- Content inspection ---
 
 [[inspect_block]]
-pattern = "(?i)(sk-[a-zA-Z0-9]{20,})"
+pattern = "(?i)(sk-[a-zA-Z0-9_-]{20,})"
 name = "api_key_leak"
-note = "Block tool arguments containing API key patterns"
+note = "Block tool arguments containing API key patterns (covers both Anthropic sk-ant-* and OpenAI sk-* formats)"
 
 [[inspect_redact]]
-pattern = "(?i)(sk-[a-zA-Z0-9]{20,})"
+pattern = "(?i)(sk-[a-zA-Z0-9_-]{20,})"
 replacement = "[REDACTED_API_KEY]"
 name = "api_key_in_response"
 note = "Redact API keys in tool responses"

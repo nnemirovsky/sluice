@@ -29,7 +29,9 @@ func handleCertCommand(args []string) {
 func handleCertGenerate(args []string) {
 	fs := flag.NewFlagSet("cert generate", flag.ExitOnError)
 	outDir := fs.String("out", "", "output directory for CA cert and key (default: $SLUICE_VAULT_DIR or ~/.sluice)")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		log.Fatalf("parse flags: %v", err)
+	}
 
 	dir := *outDir
 	if dir == "" {

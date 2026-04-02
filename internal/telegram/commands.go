@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/nemirovsky/sluice/internal/docker"
 	"github.com/nemirovsky/sluice/internal/policy"
@@ -257,14 +258,15 @@ func (h *CommandHandler) credRotate(name, value string) string {
 	return h.credMutationComplete(fmt.Sprintf("Rotated credential: %s", name))
 }
 
+
 func (h *CommandHandler) credRemove(name string) string {
 	if err := h.vault.Remove(name); err != nil {
 		return fmt.Sprintf("Failed to remove credential: %v", err)
 	}
-	return h.credMutationComplete(fmt.Sprintf("Removed credential: %s", name))
+	return h.credMutationComplete(fmt.Sprintf("Removed credential: %s", name), name)
 }
 
-func (h *CommandHandler) credMutationComplete(msg string) string {
+func (h *CommandHandler) credMutationComplete(msg string, removedCreds ...string) string {
 	if h.dockerMgr == nil {
 		return msg
 	}
@@ -275,7 +277,17 @@ func (h *CommandHandler) credMutationComplete(msg string) string {
 	}
 
 	phantomEnv := docker.GeneratePhantomEnv(names)
-	if err := h.dockerMgr.RestartWithEnv(context.Background(), phantomEnv); err != nil {
+	// Mark removed credentials with empty values so mergeEnv removes them
+	// from the container's environment.
+	for _, removed := range removedCreds {
+		envVar := docker.CredNameToEnvVar(removed)
+		if _, exists := phantomEnv[envVar]; !exists {
+			phantomEnv[envVar] = ""
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := h.dockerMgr.RestartWithEnv(ctx, phantomEnv); err != nil {
 		return msg + "\nWarning: failed to restart agent container: " + err.Error()
 	}
 
