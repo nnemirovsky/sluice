@@ -625,6 +625,24 @@ func (s *Store) MCPUpstreamExists(name string) (bool, error) {
 	return count > 0, nil
 }
 
+// --- Store queries ---
+
+// IsEmpty returns true if the store has no rules, tool rules, bindings, or
+// config entries. Used to detect a fresh database that should be seeded.
+func (s *Store) IsEmpty() (bool, error) {
+	var count int
+	err := s.db.QueryRow(
+		`SELECT (SELECT COUNT(*) FROM rules) +
+		        (SELECT COUNT(*) FROM tool_rules) +
+		        (SELECT COUNT(*) FROM config) +
+		        (SELECT COUNT(*) FROM bindings)`,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("check store empty: %w", err)
+	}
+	return count == 0, nil
+}
+
 // --- Helpers ---
 
 // nilIfEmpty returns nil for empty strings, allowing SQLite to store NULL.

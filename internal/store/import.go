@@ -80,10 +80,32 @@ type importTelegramConfig struct {
 	ChatIDEnv   string `toml:"chat_id_env"`
 }
 
+// importVaultConfig is the TOML representation of the [vault] section.
+type importVaultConfig struct {
+	Provider  string                `toml:"provider"`
+	Providers []string              `toml:"providers"`
+	Dir       string                `toml:"dir"`
+	HashiCorp importHashiCorpConfig `toml:"hashicorp"`
+}
+
+// importHashiCorpConfig is the TOML representation of [vault.hashicorp].
+type importHashiCorpConfig struct {
+	Addr        string `toml:"addr"`
+	Mount       string `toml:"mount"`
+	Prefix      string `toml:"prefix"`
+	Auth        string `toml:"auth"`
+	Token       string `toml:"token"`
+	RoleID      string `toml:"role_id"`
+	SecretID    string `toml:"secret_id"`
+	RoleIDEnv   string `toml:"role_id_env"`
+	SecretIDEnv string `toml:"secret_id_env"`
+}
+
 // importFile is the top-level TOML structure for policy import.
 type importFile struct {
 	Policy        importPolicyConfig    `toml:"policy"`
 	Telegram      importTelegramConfig  `toml:"telegram"`
+	Vault         importVaultConfig     `toml:"vault"`
 	Allow         []importRule          `toml:"allow"`
 	Deny          []importRule          `toml:"deny"`
 	Ask           []importRule          `toml:"ask"`
@@ -213,6 +235,39 @@ func (s *Store) ImportTOML(data []byte) (*ImportResult, error) {
 			return nil, err
 		}
 		res.ConfigSet++
+	}
+
+	// Import vault config.
+	vaultConfigKeys := []struct {
+		key   string
+		value string
+	}{
+		{"vault_provider", f.Vault.Provider},
+		{"vault_dir", f.Vault.Dir},
+		{"vault_hashicorp_addr", f.Vault.HashiCorp.Addr},
+		{"vault_hashicorp_mount", f.Vault.HashiCorp.Mount},
+		{"vault_hashicorp_prefix", f.Vault.HashiCorp.Prefix},
+		{"vault_hashicorp_auth", f.Vault.HashiCorp.Auth},
+		{"vault_hashicorp_token", f.Vault.HashiCorp.Token},
+		{"vault_hashicorp_role_id", f.Vault.HashiCorp.RoleID},
+		{"vault_hashicorp_secret_id", f.Vault.HashiCorp.SecretID},
+		{"vault_hashicorp_role_id_env", f.Vault.HashiCorp.RoleIDEnv},
+		{"vault_hashicorp_secret_id_env", f.Vault.HashiCorp.SecretIDEnv},
+	}
+	if len(f.Vault.Providers) > 0 {
+		b, _ := json.Marshal(f.Vault.Providers)
+		vaultConfigKeys = append(vaultConfigKeys, struct {
+			key   string
+			value string
+		}{"vault_providers", string(b)})
+	}
+	for _, kv := range vaultConfigKeys {
+		if kv.value != "" {
+			if err := upsertConfig(tx, kv.key, kv.value); err != nil {
+				return nil, err
+			}
+			res.ConfigSet++
+		}
 	}
 
 	// Import bindings.

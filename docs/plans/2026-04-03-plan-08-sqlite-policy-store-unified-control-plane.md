@@ -189,17 +189,17 @@ Replace TOML file loading in main.go with SQLite store. The SIGHUP handler recom
 - Modify: `cmd/sluice/main.go`
 - Modify: `cmd/sluice/main_test.go`
 
-- [ ] Add `--db` flag (default `sluice.db`) for SQLite database path
-- [ ] On startup: open store, compile Engine from store, pass to proxy
-- [ ] Keep `--policy` flag but change semantics: if specified and DB is empty, auto-import the TOML file as seed
-- [ ] Refactor SIGHUP handler: instead of re-reading TOML, recompile Engine from store (picks up any rule changes from Telegram/CLI)
-- [ ] Remove `BurntSushi/toml` import from main.go (TOML parsing moves to store/import.go)
-- [ ] Remove `sluiceConfig` struct and secondary TOML decode
-- [ ] Read vault config and bindings from store instead of TOML
-- [ ] Update main_test.go: tests use temp SQLite DB instead of temp TOML files
-- [ ] Write test for startup with empty DB + TOML seed import
-- [ ] Write test for SIGHUP recompile from store
-- [ ] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
+- [x] Add `--db` flag (default `sluice.db`) for SQLite database path
+- [x] On startup: open store, compile Engine from store, pass to proxy
+- [x] Keep `--policy` flag but change semantics: if specified and DB is empty, auto-import the TOML file as seed
+- [x] Refactor SIGHUP handler: instead of re-reading TOML, recompile Engine from store (picks up any rule changes from Telegram/CLI)
+- [x] Remove `BurntSushi/toml` import from main.go (TOML parsing moves to store/import.go)
+- [x] Remove `sluiceConfig` struct and secondary TOML decode
+- [x] Read vault config and bindings from store instead of TOML
+- [x] Update main_test.go: tests use temp SQLite DB instead of temp TOML files
+- [x] Write test for startup with empty DB + TOML seed import
+- [x] Write test for SIGHUP recompile from store
+- [x] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
 
 ### Task 5: Add `sluice policy` CLI subcommand
 
