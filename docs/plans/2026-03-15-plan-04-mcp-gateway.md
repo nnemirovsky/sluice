@@ -847,7 +847,7 @@ git commit -m "feat: tool-level policy rules in TOML config"
 **Files:**
 - Modify: `cmd/sluice/main.go`
 
-- [ ] **Step 1: Add mcp subcommand**
+- [x] **Step 1: Add mcp subcommand**
 
 ```go
 case "mcp":
@@ -857,7 +857,7 @@ case "mcp":
 
 Implement `handleMCPCommand` that loads policy, creates tool policy from TOML rules, starts upstream servers, creates gateway, and runs stdio transport.
 
-- [ ] **Step 2: Test manually**
+- [x] **Step 2: Test manually**
 
 ```bash
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0.1"}}}' | ./sluice mcp
@@ -865,7 +865,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 Expected: JSON response with server info
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add cmd/

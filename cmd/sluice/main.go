@@ -33,6 +33,9 @@ func main() {
 		case "cred":
 			handleCredCommand(os.Args[2:])
 			return
+		case "mcp":
+			handleMCPCommand(os.Args[2:])
+			return
 		}
 	}
 
