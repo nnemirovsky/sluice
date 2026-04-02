@@ -123,21 +123,21 @@ CREATE TABLE mcp_upstreams (
 );
 ```
 
-- [ ] Add `modernc.org/sqlite` dependency
-- [ ] Create `internal/store/store.go` with `New(path string)` that opens/creates SQLite DB and runs migrations
-- [ ] Implement schema creation with `CREATE TABLE IF NOT EXISTS` for all 6 tables
-- [ ] Implement `AddRule(verdict, destination, ports, opts)` and `RemoveRule(id)`
-- [ ] Implement `ListRules(verdict)` returning all rules or filtered by verdict
-- [ ] Implement `AddToolRule(verdict, tool, note)` and `RemoveToolRule(id)`
-- [ ] Implement `ListToolRules(verdict)` 
-- [ ] Implement `AddInspectRule(kind, pattern, opts)` and `RemoveInspectRule(id)`
-- [ ] Implement `GetConfig(key)` and `SetConfig(key, value)` for config table
-- [ ] Implement `AddBinding(...)`, `RemoveBinding(id)`, `ListBindings()`
-- [ ] Implement `AddMCPUpstream(...)`, `RemoveMCPUpstream(name)`, `ListMCPUpstreams()`
-- [ ] Write tests for all CRUD operations (success + error cases)
-- [ ] Write tests for schema migration on fresh DB
-- [ ] Write tests for concurrent access (goroutine safety)
-- [ ] Run tests: `go test ./internal/store/ -v -timeout 30s`
+- [x] Add `modernc.org/sqlite` dependency
+- [x] Create `internal/store/store.go` with `New(path string)` that opens/creates SQLite DB and runs migrations
+- [x] Implement schema creation with `CREATE TABLE IF NOT EXISTS` for all 6 tables
+- [x] Implement `AddRule(verdict, destination, ports, opts)` and `RemoveRule(id)`
+- [x] Implement `ListRules(verdict)` returning all rules or filtered by verdict
+- [x] Implement `AddToolRule(verdict, tool, note)` and `RemoveToolRule(id)`
+- [x] Implement `ListToolRules(verdict)`
+- [x] Implement `AddInspectRule(kind, pattern, opts)` and `RemoveInspectRule(id)`
+- [x] Implement `GetConfig(key)` and `SetConfig(key, value)` for config table
+- [x] Implement `AddBinding(...)`, `RemoveBinding(id)`, `ListBindings()`
+- [x] Implement `AddMCPUpstream(...)`, `RemoveMCPUpstream(name)`, `ListMCPUpstreams()`
+- [x] Write tests for all CRUD operations (success + error cases)
+- [x] Write tests for schema migration on fresh DB
+- [x] Write tests for concurrent access (goroutine safety)
+- [x] Run tests: `go test ./internal/store/ -v -timeout 30s`
 
 ### Task 2: TOML import into SQLite store
 
