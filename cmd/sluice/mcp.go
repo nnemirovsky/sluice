@@ -31,6 +31,14 @@ func handleMCPCommand(args []string) error {
 	telegramChatIDStr := fs.String("telegram-chat-id", os.Getenv("TELEGRAM_CHAT_ID"), "Telegram chat ID for approvals")
 	fs.Parse(args)
 
+	// Track which flags were explicitly set on the command line so we can
+	// distinguish "user passed --telegram-token X" from "flag has the
+	// default value read from TELEGRAM_BOT_TOKEN env".
+	explicitFlags := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) {
+		explicitFlags[f.Name] = true
+	})
+
 	policyData, err := os.ReadFile(*policyPath)
 	if err != nil {
 		log.Fatalf("read policy file: %v", err)
@@ -41,11 +49,13 @@ func handleMCPCommand(args []string) error {
 		log.Fatalf("load policy: %v", err)
 	}
 
-	// If policy file specifies custom env var names for Telegram, use them.
-	if eng.Telegram.BotTokenEnv != "" {
+	// If the policy file specifies custom env var names for Telegram, use
+	// those instead of the hardcoded defaults (but only when the flag was
+	// not explicitly provided on the command line).
+	if eng.Telegram.BotTokenEnv != "" && !explicitFlags["telegram-token"] {
 		*telegramToken = os.Getenv(eng.Telegram.BotTokenEnv)
 	}
-	if eng.Telegram.ChatIDEnv != "" {
+	if eng.Telegram.ChatIDEnv != "" && !explicitFlags["telegram-chat-id"] {
 		*telegramChatIDStr = os.Getenv(eng.Telegram.ChatIDEnv)
 	}
 

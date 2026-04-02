@@ -22,18 +22,24 @@ type UpstreamConfig struct {
 }
 
 // Upstream manages a running upstream MCP server process. Communication
-// happens over JSON-RPC 2.0 via the process's stdin/stdout.
+// happens over JSON-RPC 2.0 via the process's stdin/stdout. A background
+// goroutine reads lines from stdout so that Send can enforce a read timeout.
 type Upstream struct {
 	name    string
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
-	scanner *bufio.Scanner
+	lines   chan []byte     // lines read by the background goroutine
+	scanErr atomic.Value   // stores the scanner error, if any
 	mu      sync.Mutex
 	tools   []Tool
 	nextID  atomic.Int64
+	timeout time.Duration
 }
 
-// StartUpstream launches an upstream MCP server process.
+const defaultUpstreamTimeout = 120 * time.Second
+
+// StartUpstream launches an upstream MCP server process and starts a
+// background goroutine that reads lines from its stdout into a channel.
 func StartUpstream(cfg UpstreamConfig) (*Upstream, error) {
 	cmd := exec.Command(cfg.Command, cfg.Args...)
 	if len(cfg.Env) > 0 {
@@ -60,16 +66,52 @@ func StartUpstream(cfg UpstreamConfig) (*Upstream, error) {
 		name:    cfg.Name,
 		cmd:     cmd,
 		stdin:   stdin,
-		scanner: bufio.NewScanner(stdout),
+		lines:   make(chan []byte, 64),
+		timeout: defaultUpstreamTimeout,
 	}
-	u.scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+
+	// Background goroutine owns the scanner. Lines are copied into the
+	// channel so Send can read them with a timeout via select.
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	go func() {
+		for scanner.Scan() {
+			data := make([]byte, len(scanner.Bytes()))
+			copy(data, scanner.Bytes())
+			u.lines <- data
+		}
+		if err := scanner.Err(); err != nil {
+			u.scanErr.Store(err)
+		}
+		close(u.lines)
+	}()
 
 	return u, nil
 }
 
+// readLine reads a single line from the background reader channel.
+// The caller-provided deadline channel enforces an overall timeout across
+// multiple readLine calls (e.g. when skipping notifications in Send).
+func (u *Upstream) readLine(deadline <-chan time.Time) ([]byte, error) {
+	select {
+	case line, ok := <-u.lines:
+		if !ok {
+			if err, ok := u.scanErr.Load().(error); ok {
+				return nil, fmt.Errorf("upstream %s: %w", u.name, err)
+			}
+			return nil, fmt.Errorf("upstream %s closed", u.name)
+		}
+		return line, nil
+	case <-deadline:
+		return nil, fmt.Errorf("upstream %s: read timeout after %v", u.name, u.timeout)
+	}
+}
+
 // Send writes a JSON-RPC request to the upstream process and reads the
-// matching response. Server-initiated notifications (messages without an
-// id field) are logged and skipped so they cannot be misattributed.
+// matching response. Notifications (no id) and server-initiated requests
+// (id present but includes a method field) are logged and skipped so they
+// cannot be misattributed. The response id must match the request id.
+// Returns an error if no matching response arrives within the timeout.
 func (u *Upstream) Send(req JSONRPCRequest) (*JSONRPCResponse, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -83,26 +125,48 @@ func (u *Upstream) Send(req JSONRPCRequest) (*JSONRPCResponse, error) {
 		return nil, fmt.Errorf("write to upstream %s: %w", u.name, err)
 	}
 
+	// Normalize the request id for comparison (e.g. strip whitespace).
+	wantID := string(req.ID)
+
+	// Single deadline for the entire Send operation. Notifications, server
+	// requests, and mismatched responses no longer reset the clock.
+	deadline := time.After(u.timeout)
+
 	for {
-		if !u.scanner.Scan() {
-			return nil, fmt.Errorf("upstream %s closed", u.name)
+		line, err := u.readLine(deadline)
+		if err != nil {
+			return nil, err
 		}
 
-		// Peek at the raw message to check for an id field.
-		// Notifications have no id and must be skipped.
+		// Peek at the raw message to check for id and method fields.
 		var peek struct {
-			ID json.RawMessage `json:"id"`
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
 		}
-		if err := json.Unmarshal(u.scanner.Bytes(), &peek); err != nil {
+		if err := json.Unmarshal(line, &peek); err != nil {
 			return nil, fmt.Errorf("parse upstream %s response: %w", u.name, err)
 		}
+
+		// Skip notifications (no id).
 		if peek.ID == nil {
 			log.Printf("upstream %s: skipping notification", u.name)
 			continue
 		}
 
+		// Skip server-initiated requests (has id AND method).
+		if peek.Method != "" {
+			log.Printf("upstream %s: skipping server request %q (id=%s)", u.name, peek.Method, string(peek.ID))
+			continue
+		}
+
+		// Verify the response id matches our request id.
+		if string(peek.ID) != wantID {
+			log.Printf("upstream %s: skipping mismatched response id=%s (want %s)", u.name, string(peek.ID), wantID)
+			continue
+		}
+
 		var resp JSONRPCResponse
-		if err := json.Unmarshal(u.scanner.Bytes(), &resp); err != nil {
+		if err := json.Unmarshal(line, &resp); err != nil {
 			return nil, fmt.Errorf("parse upstream %s response: %w", u.name, err)
 		}
 		return &resp, nil
@@ -111,7 +175,7 @@ func (u *Upstream) Send(req JSONRPCRequest) (*JSONRPCResponse, error) {
 
 // Initialize performs the MCP initialize handshake with the upstream server.
 func (u *Upstream) Initialize() error {
-	id := json.RawMessage(`1`)
+	id := json.RawMessage(fmt.Sprintf(`%d`, u.nextID.Add(1)))
 	params, _ := json.Marshal(InitializeParams{
 		ProtocolVersion: "2025-03-26",
 		Capabilities:    Capabilities{Tools: &ToolsCapability{}},
@@ -143,7 +207,7 @@ func (u *Upstream) Initialize() error {
 
 // DiscoverTools calls tools/list on the upstream and namespaces the results.
 func (u *Upstream) DiscoverTools() ([]Tool, error) {
-	id := json.RawMessage(`2`)
+	id := json.RawMessage(fmt.Sprintf(`%d`, u.nextID.Add(1)))
 	resp, err := u.Send(JSONRPCRequest{
 		JSONRPC: "2.0",
 		ID:      id,

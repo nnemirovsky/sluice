@@ -100,8 +100,22 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 			Content: []ToolContent{{Type: "text", Text: "Tool call denied by policy"}},
 			IsError: true,
 		}, nil
+	}
 
-	case policy.Ask:
+	// Inspect arguments before approval flow so that secrets in arguments
+	// are never logged or sent to the approval broker.
+	if gw.inspector != nil {
+		inspection := gw.inspector.InspectArguments(req.Arguments)
+		if inspection.Blocked {
+			gw.logAudit(req.Name, "inspect_block", policy.Deny)
+			return &ToolResult{
+				Content: []ToolContent{{Type: "text", Text: fmt.Sprintf("Tool call blocked: %s", inspection.Reason)}},
+				IsError: true,
+			}, nil
+		}
+	}
+
+	if verdict == policy.Ask {
 		if gw.broker == nil {
 			gw.logAudit(req.Name, "tool_call", policy.Deny)
 			return &ToolResult{
@@ -140,19 +154,6 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 			log.Printf("[MCP ALWAYS ALLOW] %s", req.Name)
 		}
 		finalVerdict = policy.Allow
-		// Approved: fall through to forward
-	}
-
-	// Inspect arguments before forwarding
-	if gw.inspector != nil {
-		inspection := gw.inspector.InspectArguments(req.Arguments)
-		if inspection.Blocked {
-			gw.logAudit(req.Name, "inspect_block", policy.Deny)
-			return &ToolResult{
-				Content: []ToolContent{{Type: "text", Text: fmt.Sprintf("Tool call blocked: %s", inspection.Reason)}},
-				IsError: true,
-			}, nil
-		}
 	}
 
 	gw.logAudit(req.Name, "tool_call", finalVerdict)
