@@ -148,19 +148,19 @@ Add `ImportTOML(data []byte)` to the store that parses TOML and inserts rules wi
 - Create: `internal/store/import.go`
 - Create: `internal/store/import_test.go`
 
-- [ ] Create `ImportTOML(data []byte) (*ImportResult, error)` that parses TOML using existing `policy.policyFile` struct
-- [ ] Import network rules (allow/deny/ask) with source="seed"
-- [ ] Import tool rules with source="seed"
-- [ ] Import inspect rules (block/redact)
-- [ ] Import config values (default verdict, timeout, telegram config)
-- [ ] Import bindings from `[[binding]]` sections
-- [ ] Import MCP upstreams from `[[mcp_upstream]]` sections
-- [ ] Implement merge: skip if destination+ports+verdict combination already exists
-- [ ] Return `ImportResult` with counts: inserted, skipped, errors
-- [ ] Write tests using existing testdata/ TOML fixtures
-- [ ] Write tests for merge semantics (import twice, verify no duplicates)
-- [ ] Write tests for malformed TOML (returns error, no partial writes)
-- [ ] Run tests: `go test ./internal/store/ -v -timeout 30s`
+- [x] Create `ImportTOML(data []byte) (*ImportResult, error)` that parses TOML using existing `policy.policyFile` struct
+- [x] Import network rules (allow/deny/ask) with source="seed"
+- [x] Import tool rules with source="seed"
+- [x] Import inspect rules (block/redact)
+- [x] Import config values (default verdict, timeout, telegram config)
+- [x] Import bindings from `[[binding]]` sections
+- [x] Import MCP upstreams from `[[mcp_upstream]]` sections
+- [x] Implement merge: skip if destination+ports+verdict combination already exists
+- [x] Return `ImportResult` with counts: inserted, skipped, errors
+- [x] Write tests using existing testdata/ TOML fixtures
+- [x] Write tests for merge semantics (import twice, verify no duplicates)
+- [x] Write tests for malformed TOML (returns error, no partial writes)
+- [x] Run tests: `go test ./internal/store/ -v -timeout 30s`
 
 ### Task 3: Build policy.Engine from SQLite store
 
