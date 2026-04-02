@@ -61,6 +61,8 @@ func StartUpstream(cfg UpstreamConfig) (*Upstream, error) {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
 
+	cmd.Stderr = os.Stderr
+
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %q: %w", cfg.Command, err)
 	}

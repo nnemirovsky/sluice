@@ -64,6 +64,9 @@ func (gw *Gateway) handleRequest(req JSONRPCRequest) *JSONRPCResponse {
 	case "notifications/initialized":
 		return nil // notification, no response
 
+	case "ping":
+		return marshalResult(req.ID, map[string]interface{}{})
+
 	case "tools/list":
 		return marshalResult(req.ID, ListToolsResult{Tools: gw.allTools})
 

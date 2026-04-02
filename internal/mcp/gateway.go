@@ -77,10 +77,14 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 			gw.Stop()
 			return nil, fmt.Errorf("discover tools %s: %w", ucfg.Name, err)
 		}
-		gw.allTools = append(gw.allTools, tools...)
 		for _, t := range tools {
+			if _, exists := gw.toolMap[t.Name]; exists {
+				gw.Stop()
+				return nil, fmt.Errorf("duplicate tool name %q from upstream %s", t.Name, ucfg.Name)
+			}
 			gw.toolMap[t.Name] = ucfg.Name
 		}
+		gw.allTools = append(gw.allTools, tools...)
 	}
 	return gw, nil
 }
