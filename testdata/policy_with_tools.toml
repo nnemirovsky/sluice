@@ -1,0 +1,15 @@
+[policy]
+default = "ask"
+
+[[allow]]
+destination = "api.anthropic.com"
+ports = [443]
+
+[[tool_allow]]
+tool = "github__list_*"
+
+[[tool_deny]]
+tool = "exec__*"
+
+[[tool_ask]]
+tool = "filesystem__write_*"

@@ -4,13 +4,6 @@ import (
 	"github.com/nemirovsky/sluice/internal/policy"
 )
 
-// ToolRule defines a single tool-level policy rule from TOML config.
-type ToolRule struct {
-	Tool    string `toml:"tool"`
-	Verdict string `toml:"verdict"`
-	Note    string `toml:"note"`
-}
-
 type compiledToolRule struct {
 	glob    *policy.Glob
 	verdict policy.Verdict
@@ -24,7 +17,7 @@ type ToolPolicy struct {
 
 // NewToolPolicy compiles tool rules and returns a ToolPolicy.
 // Rules with invalid globs or unknown verdicts are silently skipped.
-func NewToolPolicy(rules []ToolRule, fallback policy.Verdict) *ToolPolicy {
+func NewToolPolicy(rules []policy.ToolRule, fallback policy.Verdict) *ToolPolicy {
 	compiled := make([]compiledToolRule, 0, len(rules))
 	for _, r := range rules {
 		g, err := policy.CompileGlob(r.Tool)

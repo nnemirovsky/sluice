@@ -766,7 +766,7 @@ git commit -m "feat: MCP gateway stdio transport"
 **Files:**
 - Modify: `internal/policy/types.go`
 
-- [ ] **Step 1: Add tool policy sections to the policy file struct**
+- [x] **Step 1: Add tool policy sections to the policy file struct**
 
 Add to `policyFile` struct in types.go:
 
@@ -789,7 +789,7 @@ type ToolRule struct {
 
 Update the Engine to include tool rules and expose them.
 
-- [ ] **Step 2: Write test with tool policy in TOML**
+- [x] **Step 2: Write test with tool policy in TOML**
 
 Create `testdata/policy_with_tools.toml`:
 
@@ -811,7 +811,7 @@ tool = "exec__*"
 tool = "filesystem__write_*"
 ```
 
-- [ ] **Step 3: Test loading**
+- [x] **Step 3: Test loading**
 
 ```go
 func TestLoadPolicyWithTools(t *testing.T) {
@@ -828,12 +828,12 @@ func TestLoadPolicyWithTools(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: Run all tests**
+- [x] **Step 4: Run all tests**
 
 Run: `go test ./... -v -timeout 30s`
 Expected: ALL PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/ testdata/

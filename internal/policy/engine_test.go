@@ -222,6 +222,42 @@ default = "ask"
 	}
 }
 
+func TestLoadPolicyWithTools(t *testing.T) {
+	eng, err := LoadFromFile("../../testdata/policy_with_tools.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eng.ToolAllowRules) != 1 {
+		t.Errorf("expected 1 tool_allow, got %d", len(eng.ToolAllowRules))
+	}
+	if len(eng.ToolDenyRules) != 1 {
+		t.Errorf("expected 1 tool_deny, got %d", len(eng.ToolDenyRules))
+	}
+	if len(eng.ToolAskRules) != 1 {
+		t.Errorf("expected 1 tool_ask, got %d", len(eng.ToolAskRules))
+	}
+
+	// Verify verdicts are set from section names
+	if eng.ToolAllowRules[0].Verdict != "allow" {
+		t.Errorf("tool_allow verdict = %q, want %q", eng.ToolAllowRules[0].Verdict, "allow")
+	}
+	if eng.ToolAllowRules[0].Tool != "github__list_*" {
+		t.Errorf("tool_allow tool = %q, want %q", eng.ToolAllowRules[0].Tool, "github__list_*")
+	}
+	if eng.ToolDenyRules[0].Verdict != "deny" {
+		t.Errorf("tool_deny verdict = %q, want %q", eng.ToolDenyRules[0].Verdict, "deny")
+	}
+	if eng.ToolAskRules[0].Verdict != "ask" {
+		t.Errorf("tool_ask verdict = %q, want %q", eng.ToolAskRules[0].Verdict, "ask")
+	}
+
+	// Verify ToolRules() returns all combined
+	allRules := eng.ToolRules()
+	if len(allRules) != 3 {
+		t.Errorf("ToolRules() returned %d rules, want 3", len(allRules))
+	}
+}
+
 func TestLoadFromBytesErrors(t *testing.T) {
 	tests := []struct {
 		name  string

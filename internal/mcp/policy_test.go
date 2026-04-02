@@ -7,7 +7,7 @@ import (
 )
 
 func TestToolPolicyEvaluate(t *testing.T) {
-	tp := NewToolPolicy([]ToolRule{
+	tp := NewToolPolicy([]policy.ToolRule{
 		{Tool: "github__list_*", Verdict: "allow"},
 		{Tool: "github__delete_*", Verdict: "deny"},
 		{Tool: "filesystem__write_*", Verdict: "ask"},

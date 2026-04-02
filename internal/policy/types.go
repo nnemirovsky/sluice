@@ -40,10 +40,20 @@ type TelegramConfig struct {
 	ChatIDEnv   string `toml:"chat_id_env"`
 }
 
+// ToolRule defines a single tool-level policy rule for MCP gateway.
+type ToolRule struct {
+	Tool    string `toml:"tool"`
+	Verdict string `toml:"verdict"`
+	Note    string `toml:"note"`
+}
+
 type policyFile struct {
-	Policy   PolicyConfig   `toml:"policy"`
-	Telegram TelegramConfig `toml:"telegram"`
-	Allow    []Rule         `toml:"allow"`
-	Deny     []Rule         `toml:"deny"`
-	Ask      []Rule         `toml:"ask"`
+	Policy    PolicyConfig   `toml:"policy"`
+	Telegram  TelegramConfig `toml:"telegram"`
+	Allow     []Rule         `toml:"allow"`
+	Deny      []Rule         `toml:"deny"`
+	Ask       []Rule         `toml:"ask"`
+	ToolAllow []ToolRule     `toml:"tool_allow"`
+	ToolDeny  []ToolRule     `toml:"tool_deny"`
+	ToolAsk   []ToolRule     `toml:"tool_ask"`
 }
