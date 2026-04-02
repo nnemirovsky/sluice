@@ -408,6 +408,21 @@ func (e *Engine) ToolRules() []ToolRule {
 	return rules
 }
 
+// Validate performs a smoke-test to catch nil or inconsistent engine state.
+// Call this on a newly loaded engine before swapping it into the live pointer
+// to avoid storing a broken engine that would panic on first evaluation.
+func (e *Engine) Validate() error {
+	if e == nil {
+		return fmt.Errorf("engine is nil")
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.compiled == nil {
+		return fmt.Errorf("engine has no compiled rules")
+	}
+	return nil
+}
+
 // Evaluate checks a destination and port against the compiled policy rules.
 // Deny rules are checked first, then allow, then ask. Falls back to default.
 func (e *Engine) Evaluate(dest string, port int) Verdict {

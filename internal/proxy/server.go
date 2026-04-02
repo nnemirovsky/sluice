@@ -634,6 +634,15 @@ func (s *Server) ReloadPolicy(eng *policy.Engine) {
 	s.rules.engine.Store(eng)
 }
 
+// StoreEngine atomically stores a new policy engine without acquiring the
+// reload mutex. The caller must hold ReloadMu() when concurrent mutations
+// are possible. Use this instead of ReloadPolicy when the caller already
+// holds the mutex (e.g., the SIGHUP handler wrapping the entire reload
+// sequence in a single critical section).
+func (s *Server) StoreEngine(eng *policy.Engine) {
+	s.rules.engine.Store(eng)
+}
+
 // EnginePtr returns the shared atomic engine pointer. The Telegram command
 // handler uses this to read and mutate the same engine as the proxy, avoiding
 // split-brain windows during SIGHUP reloads.

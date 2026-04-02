@@ -214,17 +214,30 @@ func main() {
 
 	go func() {
 		for range sighupCh {
-			newEng, err := policy.LoadFromFile(*policyPath)
-			if err != nil {
-				log.Printf("reload policy failed: %v", err)
+			srv.ReloadMu().Lock()
+
+			newEng, loadErr := policy.LoadFromFile(*policyPath)
+			if loadErr != nil {
+				srv.ReloadMu().Unlock()
+				log.Printf("reload policy failed: %v", loadErr)
+				drainSignals(sighupCh)
 				continue
 			}
+
+			// Validate the new engine before swapping to catch
+			// corrupted or incomplete compilation results.
+			if valErr := newEng.Validate(); valErr != nil {
+				srv.ReloadMu().Unlock()
+				log.Printf("reload policy validation failed: %v", valErr)
+				drainSignals(sighupCh)
+				continue
+			}
+
 			log.Printf("reloaded policy: %d allow, %d deny, %d ask rules (default: %s)",
 				len(newEng.AllowRules), len(newEng.DenyRules), len(newEng.AskRules), newEng.Default)
-			// ReloadPolicy swaps the shared engine pointer under the shared
-			// mutex. The bot's command handler reads the same pointer, so
-			// it sees the new engine immediately with no separate update step.
-			srv.ReloadPolicy(newEng)
+			// StoreEngine swaps the engine pointer without acquiring
+			// reloadMu (we already hold it for the entire reload).
+			srv.StoreEngine(newEng)
 
 			// Warn if the reloaded policy's Telegram config changed.
 			// The Telegram runtime (broker, bot, chat ID) is wired once
@@ -263,6 +276,12 @@ func main() {
 					log.Printf("WARNING: [vault] or [[binding]] config changed but credential injection runtime is not hot-reloadable; restart required")
 				}
 			}
+
+			srv.ReloadMu().Unlock()
+
+			// Drain duplicate SIGHUPs that queued during reload to
+			// avoid redundant reload cycles.
+			drainSignals(sighupCh)
 		}
 	}()
 
@@ -286,6 +305,18 @@ func envDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// drainSignals discards any pending signals on ch so that duplicate
+// deliveries during a reload do not trigger redundant reload cycles.
+func drainSignals(ch <-chan os.Signal) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
 }
 
 // resolveDockerSocket returns the Docker socket path to use. If explicit is

@@ -93,11 +93,11 @@ The SIGHUP handler in main.go calls `policy.LoadFromFile` then `srv.ReloadPolicy
 **Files:**
 - Modify: `cmd/sluice/main.go`
 
-- [ ] Wrap the SIGHUP handler's `LoadFromFile` + `ReloadPolicy` + config drift checks inside `srv.ReloadMu().Lock()`/`Unlock()`
-- [ ] Add a `select` with `default` to drain duplicate SIGHUPs that arrive during reload
-- [ ] Validate new policy config before swapping (catch malformed TOML post-swap)
-- [ ] Write test that simulates rapid SIGHUP delivery and verifies no panic or data race
-- [ ] Run tests: `go test ./... -v -timeout 30s -race`
+- [x] Wrap the SIGHUP handler's `LoadFromFile` + `ReloadPolicy` + config drift checks inside `srv.ReloadMu().Lock()`/`Unlock()`
+- [x] Add a `select` with `default` to drain duplicate SIGHUPs that arrive during reload
+- [x] Validate new policy config before swapping (catch malformed TOML post-swap)
+- [x] Write test that simulates rapid SIGHUP delivery and verifies no panic or data race
+- [x] Run tests: `go test ./... -v -timeout 30s -race`
 
 ### Task 2: Reduce CA cert validity and add rotation
 
