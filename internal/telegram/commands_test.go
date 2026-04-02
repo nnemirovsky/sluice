@@ -328,6 +328,48 @@ default = "deny"
 	}
 }
 
+func TestHandleCredRotate(t *testing.T) {
+	eng, _ := policy.LoadFromBytes([]byte(`[policy]
+default = "deny"
+`))
+	handler := newTestHandler(eng, nil, "")
+
+	dir := t.TempDir()
+	store, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.SetVault(store)
+
+	// Rotate non-existent credential should fail.
+	result := handler.Handle(&Command{Name: "cred", Args: []string{"rotate", "nonexistent", "val"}})
+	if !strings.Contains(result, "not found") {
+		t.Errorf("rotate of non-existent credential should fail, got: %s", result)
+	}
+
+	// Add a credential first.
+	result = handler.Handle(&Command{Name: "cred", Args: []string{"add", "test_key", "original"}})
+	if !strings.Contains(result, "Added credential") {
+		t.Fatalf("add should succeed, got: %s", result)
+	}
+
+	// Rotate existing credential should succeed.
+	result = handler.Handle(&Command{Name: "cred", Args: []string{"rotate", "test_key", "rotated_value"}})
+	if !strings.Contains(result, "Rotated credential") {
+		t.Errorf("rotate should succeed, got: %s", result)
+	}
+
+	// Verify the value was updated by retrieving it.
+	sb, err := store.Get("test_key")
+	if err != nil {
+		t.Fatalf("get after rotate: %v", err)
+	}
+	defer sb.Release()
+	if string(sb.Bytes()) != "rotated_value" {
+		t.Errorf("credential value should be updated, got: %q", string(sb.Bytes()))
+	}
+}
+
 func TestHandleUnknownCommand(t *testing.T) {
 	eng, _ := policy.LoadFromBytes([]byte(`[policy]
 default = "deny"

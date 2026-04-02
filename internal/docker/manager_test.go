@@ -20,19 +20,27 @@ type mockClient struct {
 	stopped     bool
 	removed     bool
 	started     bool
+	// Track container names passed to each method.
+	inspectedName string
+	stoppedName   string
+	removedName   string
+	startedID     string
 }
 
-func (m *mockClient) InspectContainer(_ context.Context, _ string) (ContainerState, error) {
+func (m *mockClient) InspectContainer(_ context.Context, name string) (ContainerState, error) {
+	m.inspectedName = name
 	return m.state, m.inspectErr
 }
 
-func (m *mockClient) StopContainer(_ context.Context, _ string, _ int) error {
+func (m *mockClient) StopContainer(_ context.Context, name string, _ int) error {
 	m.stopped = true
+	m.stoppedName = name
 	return m.stopErr
 }
 
-func (m *mockClient) RemoveContainer(_ context.Context, _ string) error {
+func (m *mockClient) RemoveContainer(_ context.Context, name string) error {
 	m.removed = true
+	m.removedName = name
 	return m.removeErr
 }
 
@@ -41,8 +49,9 @@ func (m *mockClient) CreateContainer(_ context.Context, spec ContainerSpec) (str
 	return m.createdID, m.createErr
 }
 
-func (m *mockClient) StartContainer(_ context.Context, _ string) error {
+func (m *mockClient) StartContainer(_ context.Context, id string) error {
 	m.started = true
+	m.startedID = id
 	return m.startErr
 }
 
@@ -52,6 +61,14 @@ func TestRestartWithEnv(t *testing.T) {
 			ID:    "abc123",
 			Image: "openclaw/openclaw:latest",
 			Env:   []string{"EXISTING=value", "ANTHROPIC_API_KEY=old-phantom"},
+			Mounts: []Mount{
+				{Source: "/data", Destination: "/root/.openclaw", ReadOnly: false},
+				{Source: "/certs", Destination: "/usr/local/share/ca-certificates", ReadOnly: true},
+			},
+			Networks:    []string{"internal"},
+			NetworkMode: "service:tun2proxy",
+			Cmd:         []string{"--model", "claude"},
+			Entrypoint:  []string{"/usr/bin/openclaw"},
 		},
 		createdID: "def456",
 	}
@@ -75,6 +92,21 @@ func TestRestartWithEnv(t *testing.T) {
 		t.Error("new container should have been started")
 	}
 
+	// Verify container name was passed correctly to all operations.
+	if mc.inspectedName != "openclaw" {
+		t.Errorf("inspect used wrong name: %s", mc.inspectedName)
+	}
+	if mc.stoppedName != "openclaw" {
+		t.Errorf("stop used wrong name: %s", mc.stoppedName)
+	}
+	if mc.removedName != "openclaw" {
+		t.Errorf("remove used wrong name: %s", mc.removedName)
+	}
+	if mc.startedID != "def456" {
+		t.Errorf("start used wrong ID: %s", mc.startedID)
+	}
+
+	// Verify env vars.
 	envMap := make(map[string]string)
 	for _, e := range mc.createdSpec.Env {
 		k, v, _ := strings.Cut(e, "=")
@@ -91,6 +123,33 @@ func TestRestartWithEnv(t *testing.T) {
 	}
 	if mc.createdSpec.Image != "openclaw/openclaw:latest" {
 		t.Errorf("image should be preserved: %s", mc.createdSpec.Image)
+	}
+
+	// Verify Mounts, Networks, NetworkMode, Cmd, Entrypoint are preserved.
+	if len(mc.createdSpec.Mounts) != 2 {
+		t.Errorf("expected 2 mounts, got %d", len(mc.createdSpec.Mounts))
+	} else {
+		if mc.createdSpec.Mounts[0].Source != "/data" || mc.createdSpec.Mounts[0].Destination != "/root/.openclaw" {
+			t.Errorf("first mount wrong: %+v", mc.createdSpec.Mounts[0])
+		}
+		if mc.createdSpec.Mounts[1].ReadOnly != true {
+			t.Error("second mount should be read-only")
+		}
+	}
+	if len(mc.createdSpec.Networks) != 1 || mc.createdSpec.Networks[0] != "internal" {
+		t.Errorf("networks not preserved: %v", mc.createdSpec.Networks)
+	}
+	if mc.createdSpec.NetworkMode != "service:tun2proxy" {
+		t.Errorf("network mode not preserved: %s", mc.createdSpec.NetworkMode)
+	}
+	if len(mc.createdSpec.Cmd) != 2 || mc.createdSpec.Cmd[0] != "--model" {
+		t.Errorf("cmd not preserved: %v", mc.createdSpec.Cmd)
+	}
+	if len(mc.createdSpec.Entrypoint) != 1 || mc.createdSpec.Entrypoint[0] != "/usr/bin/openclaw" {
+		t.Errorf("entrypoint not preserved: %v", mc.createdSpec.Entrypoint)
+	}
+	if mc.createdSpec.Name != "openclaw" {
+		t.Errorf("container name not set in spec: %s", mc.createdSpec.Name)
 	}
 }
 

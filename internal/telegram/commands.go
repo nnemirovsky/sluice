@@ -252,12 +252,16 @@ func (h *CommandHandler) credAdd(name, value string) string {
 }
 
 func (h *CommandHandler) credRotate(name, value string) string {
+	existing, err := h.vault.Get(name)
+	if err != nil {
+		return fmt.Sprintf("Credential %q not found. Use /cred add to create new credentials.", name)
+	}
+	existing.Release()
 	if err := h.vault.Add(name, value); err != nil {
 		return fmt.Sprintf("Failed to rotate credential: %v", err)
 	}
 	return h.credMutationComplete(fmt.Sprintf("Rotated credential: %s", name))
 }
-
 
 func (h *CommandHandler) credRemove(name string) string {
 	if err := h.vault.Remove(name); err != nil {
