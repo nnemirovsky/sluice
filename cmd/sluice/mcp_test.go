@@ -192,24 +192,17 @@ func TestMCPUpstreamNameValidation(t *testing.T) {
 	}
 }
 
-// TestHandleMCPCommandMissingPolicy verifies handleMCPCommand exits
-// when the policy file does not exist.
+// TestHandleMCPCommandMissingPolicy verifies handleMCPCommand returns
+// an error when the policy file does not exist.
 func TestHandleMCPCommandMissingPolicy(t *testing.T) {
-	if os.Getenv("TEST_MCP_SUBPROCESS") == "missing_policy" {
-		handleMCPCommand([]string{"--policy", "/nonexistent/policy.toml"})
-		return
+	err := handleMCPCommand([]string{"--policy", "/nonexistent/policy.toml"})
+	if err == nil {
+		t.Fatal("expected error for missing policy file")
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=TestHandleMCPCommandMissingPolicy")
-	cmd.Env = append(os.Environ(), "TEST_MCP_SUBPROCESS=missing_policy")
-	err := cmd.Run()
-	if e, ok := err.(*exec.ExitError); ok && !e.Success() {
-		return
-	}
-	t.Fatal("expected non-zero exit code for missing policy file")
 }
 
-// TestHandleMCPCommandInvalidPolicy verifies handleMCPCommand exits
-// when the policy file has invalid TOML.
+// TestHandleMCPCommandInvalidPolicy verifies handleMCPCommand returns
+// an error when the policy file has invalid TOML.
 func TestHandleMCPCommandInvalidPolicy(t *testing.T) {
 	dir := t.TempDir()
 	badPolicy := filepath.Join(dir, "bad.toml")
@@ -217,17 +210,10 @@ func TestHandleMCPCommandInvalidPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if os.Getenv("TEST_MCP_SUBPROCESS") == "invalid_policy" {
-		handleMCPCommand([]string{"--policy", os.Getenv("TEST_POLICY_PATH")})
-		return
+	err := handleMCPCommand([]string{"--policy", badPolicy})
+	if err == nil {
+		t.Fatal("expected error for invalid policy")
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=TestHandleMCPCommandInvalidPolicy")
-	cmd.Env = append(os.Environ(), "TEST_MCP_SUBPROCESS=invalid_policy", "TEST_POLICY_PATH="+badPolicy)
-	err := cmd.Run()
-	if e, ok := err.(*exec.ExitError); ok && !e.Success() {
-		return
-	}
-	t.Fatal("expected non-zero exit code for invalid policy")
 }
 
 // TestHandleMCPCommandNoUpstreams verifies handleMCPCommand starts and

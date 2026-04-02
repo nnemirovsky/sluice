@@ -42,12 +42,12 @@ func handleMCPCommand(args []string) error {
 
 	policyData, err := os.ReadFile(*policyPath)
 	if err != nil {
-		log.Fatalf("read policy file: %v", err)
+		return fmt.Errorf("read policy file: %w", err)
 	}
 
 	eng, err := policy.LoadFromBytes(policyData)
 	if err != nil {
-		log.Fatalf("load policy: %v", err)
+		return fmt.Errorf("load policy: %w", err)
 	}
 
 	// If the policy file specifies custom env var names for Telegram, use
@@ -63,14 +63,14 @@ func handleMCPCommand(args []string) error {
 	// Parse MCP upstream config from the already-read TOML bytes.
 	var mcpCfg mcpConfig
 	if err := toml.Unmarshal(policyData, &mcpCfg); err != nil {
-		log.Fatalf("parse MCP config: %v", err)
+		return fmt.Errorf("parse MCP config: %w", err)
 	}
 
 	// Build tool policy from engine's tool rules.
 	toolRules := eng.ToolRules()
 	toolPolicy, err := mcp.NewToolPolicy(toolRules, eng.Default)
 	if err != nil {
-		log.Fatalf("compile tool policy: %v", err)
+		return fmt.Errorf("compile tool policy: %w", err)
 	}
 	log.Printf("MCP tool policy: %d rules (default: %s)", len(toolRules), eng.Default)
 
@@ -79,7 +79,7 @@ func handleMCPCommand(args []string) error {
 	if *auditPath != "" {
 		logger, err = audit.NewFileLogger(*auditPath)
 		if err != nil {
-			log.Fatalf("open audit log: %v", err)
+			return fmt.Errorf("open audit log: %w", err)
 		}
 		defer logger.Close()
 	}
@@ -149,6 +149,11 @@ func handleMCPCommand(args []string) error {
 	select {
 	case <-sigCh:
 		log.Println("MCP gateway shutting down...")
+		// Cancel pending Telegram approval requests so tool calls
+		// blocked on approval can complete promptly.
+		if broker != nil {
+			broker.CancelAll()
+		}
 	case err := <-errCh:
 		if err != nil {
 			log.Printf("MCP gateway error: %v", err)
