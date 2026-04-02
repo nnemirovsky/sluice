@@ -353,9 +353,9 @@ func drainSignals(ch <-chan os.Signal) {
 }
 
 // resolveDockerSocket returns the Docker socket path to use. If explicit is
-// non-empty it is returned as-is. Otherwise it checks DOCKER_HOST env and
-// falls back to the default /var/run/docker.sock. Returns an error when a
-// non-unix scheme is detected.
+// non-empty it is validated and used. Otherwise it checks DOCKER_HOST env and
+// falls back to the default /var/run/docker.sock. A unix:// prefix is stripped.
+// Returns an error when a non-unix scheme is detected.
 func resolveDockerSocket(explicit string) (string, error) {
 	raw := explicit
 	if raw == "" {

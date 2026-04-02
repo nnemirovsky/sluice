@@ -2,6 +2,7 @@ package vault
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -75,10 +76,11 @@ func NewHashiCorpProvider(cfg HashiCorpConfig) (*HashiCorpProvider, error) {
 	// If cfg.Addr is empty, the SDK reads VAULT_ADDR automatically.
 
 	// Set a timeout on the HTTP client to prevent indefinite blocking
-	// if the Vault server is unresponsive. The SDK default has no timeout.
-	if apiCfg.HttpClient != nil {
-		apiCfg.HttpClient.Timeout = 30 * time.Second
+	// if the Vault server is unresponsive.
+	if apiCfg.HttpClient == nil {
+		apiCfg.HttpClient = &http.Client{}
 	}
+	apiCfg.HttpClient.Timeout = 30 * time.Second
 
 	client, err := vaultapi.NewClient(apiCfg)
 	if err != nil {
