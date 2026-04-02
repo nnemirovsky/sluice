@@ -10,8 +10,20 @@ bot_token_env = "TELEGRAM_BOT_TOKEN"
 chat_id_env = "TELEGRAM_CHAT_ID"
 
 # Vault configuration (age-encrypted credential store)
+# For age-encrypted local vault:
 [vault]
 provider = "age"
+
+# For HashiCorp Vault (uncomment and configure):
+# [vault]
+# provider = "hashicorp"
+# addr = "https://vault.example.com:8200"   # or set addr_env = "VAULT_ADDR"
+# token_env = "VAULT_TOKEN"                 # token auth
+# mount = "secret"                          # KV v2 mount path (default: "secret")
+# path_prefix = "sluice"                    # key prefix (default: "sluice")
+# # For AppRole auth instead of token:
+# # role_id_env = "VAULT_ROLE_ID"
+# # secret_id_env = "VAULT_SECRET_ID"
 
 # --- Network policy rules ---
 
@@ -51,6 +63,22 @@ ports = [443]
 credential = "openai_api_key"
 inject_header = "Authorization"
 template = "Bearer {value}"
+
+# --- MCP upstream servers ---
+# Each upstream is spawned as a child process by the MCP gateway.
+# timeout_sec sets the per-upstream request timeout (default: 120s).
+
+# [[mcp_upstream]]
+# name = "github"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-github"]
+# timeout_sec = 60
+
+# [[mcp_upstream]]
+# name = "filesystem"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+# timeout_sec = 30
 
 # --- MCP tool policies ---
 

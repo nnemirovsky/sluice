@@ -258,10 +258,10 @@ All exported types lack documentation comments. Add package-level and type-level
 
 ### Task 12: [Final] Update documentation
 
-- [ ] Update CLAUDE.md Libraries section with `github.com/hashicorp/vault/api`
-- [ ] Update CLAUDE.md Implementation Details with health check endpoint, graceful shutdown, rate limiting
-- [ ] Update examples/policy.toml with HashiCorp Vault config example and MCP upstream timeout_sec
-- [ ] Update docker-compose.yml comments to document health check and restart behavior
+- [x] Update CLAUDE.md Libraries section with `github.com/hashicorp/vault/api`
+- [x] Update CLAUDE.md Implementation Details with health check endpoint, graceful shutdown, rate limiting
+- [x] Update examples/policy.toml with HashiCorp Vault config example and MCP upstream timeout_sec
+- [x] Update docker-compose.yml comments to document health check and restart behavior
 
 ## Technical Details
 

@@ -1,3 +1,6 @@
+# All services use restart: unless-stopped to recover from transient failures.
+# Startup order is enforced via healthcheck + condition: service_healthy:
+#   sluice starts first -> tun2proxy waits for sluice /healthz -> openclaw waits for tun2proxy TUN device.
 services:
   sluice:
     build: .
@@ -22,6 +25,8 @@ services:
       - sluice-audit:/var/log/sluice
       - sluice-ca:/home/sluice/ca
       - /var/run/docker.sock:/var/run/docker.sock
+    # Health check hits the /healthz endpoint on port 3000 (served by sluice's built-in HTTP server).
+    # Returns 200 when the SOCKS5 proxy is listening and ready to accept connections.
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
       interval: 10s
@@ -37,6 +42,7 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     command: ["--proxy", "socks5://sluice:1080"]
+    # Health check verifies the TUN device is up. tun2proxy creates tun0 on successful startup.
     healthcheck:
       test: ["CMD-SHELL", "ip link show tun0 || exit 1"]
       interval: 10s
