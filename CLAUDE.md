@@ -19,7 +19,7 @@ go test ./... -v -timeout 30s
 - `internal/proxy/mail.go` - IMAP/SMTP AUTH command proxy with phantom token replacement (including base64)
 - `internal/policy/engine.go` - Policy loading from TOML, compilation of glob patterns, and evaluation
 - `internal/policy/glob.go` - Glob pattern to regex compilation (`*` = single label, `**` = across dots)
-- `internal/policy/types.go` - Verdict enum (Allow/Deny/Ask), Rule struct, PolicyConfig
+- `internal/policy/types.go` - Verdict enum (Allow/Deny/Ask), Rule struct, PolicyConfig, ToolRule, InspectBlockRule, InspectRedactRule
 - `internal/vault/store.go` - Age-encrypted credential storage with X25519 identity key management
 - `internal/vault/secure.go` - SecureBytes type with best-effort zeroizing memory release
 - `internal/vault/binding.go` - Binding resolution mapping destinations to credentials via glob matching
@@ -27,6 +27,13 @@ go test ./... -v -timeout 30s
 - `internal/vault/provider_age.go` - Age file backend (Store satisfies Provider)
 - `internal/vault/provider_env.go` - Environment variable credential provider
 - `internal/vault/provider_hashicorp.go` - HashiCorp Vault provider stub (not yet implemented)
+- `cmd/sluice/mcp.go` - CLI subcommand handler for MCP gateway mode
+- `internal/mcp/gateway.go` - MCP gateway core with tool policy enforcement and upstream forwarding
+- `internal/mcp/inspect.go` - Content inspection: argument blocking and response redaction using regex rules
+- `internal/mcp/policy.go` - Tool-level policy evaluation using glob patterns (deny/allow/ask priority)
+- `internal/mcp/transport.go` - Stdio transport for MCP gateway (JSON-RPC over stdin/stdout)
+- `internal/mcp/types.go` - JSON-RPC 2.0 and MCP protocol type definitions
+- `internal/mcp/upstream.go` - Upstream MCP server process management (spawn, handshake, tool discovery)
 - `internal/audit/logger.go` - Thread-safe append-only JSON lines audit logger
 - `internal/telegram/approval.go` - Approval broker with channel-based request/response flow
 - `internal/telegram/bot.go` - Telegram bot lifecycle, inline keyboard approval messages
@@ -54,6 +61,8 @@ HTTPS credential injection: `Injector` wraps `goproxy` as an in-process MITM pro
 SSH credential injection: `SSHJumpHost` accepts the agent's SSH connection with no authentication (`NoClientAuth`), decrypts the SSH private key from the vault, authenticates to the upstream server, and relays SSH channels/requests bidirectionally. `Binding.Template` holds the SSH username (defaults to "root").
 
 Mail credential injection: `MailProxy` intercepts IMAP LOGIN and SMTP AUTH PLAIN/LOGIN commands. For base64-encoded auth data, it decodes, replaces phantom tokens, and re-encodes. Non-auth traffic is relayed unchanged.
+
+MCP gateway: `Gateway` spawns upstream MCP servers as child processes via `StartUpstream`, performs `initialize` handshake and `notifications/initialized`, discovers tools via `tools/list`, and namespaces them with `<upstream>__<tool>`. The agent connects via stdio (`RunStdio`). On `tools/call`, the gateway evaluates `ToolPolicy` (deny/allow/ask priority, same as network policy), optionally requests Telegram approval via the shared `ApprovalBroker`, runs `ContentInspector.InspectArguments` to block arguments matching regex patterns (JSON is parsed before matching to prevent unicode escape bypass), strips the namespace prefix, forwards to the upstream, runs `ContentInspector.RedactResponse` on the result, and adds governance metadata. `ToolPolicy` reuses `policy.CompileGlob` for glob matching. The `mcp` subcommand reads `[[mcp_upstream]]`, `[[tool_allow]]`, `[[tool_deny]]`, `[[tool_ask]]`, `[[inspect_block]]`, and `[[inspect_redact]]` sections from the same TOML policy file.
 
 ## Libraries
 

@@ -41,7 +41,7 @@ sluice/
 **Files:**
 - Create: `internal/mcp/types.go`
 
-- [ ] **Step 1: Implement protocol types**
+- [x] **Step 1: Implement protocol types**
 
 ```go
 // internal/mcp/types.go
@@ -122,7 +122,7 @@ type ToolContent struct {
 }
 ```
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add internal/mcp/types.go
@@ -137,7 +137,7 @@ git commit -m "feat: MCP and JSON-RPC protocol types"
 - Create: `internal/mcp/upstream.go`
 - Create: `internal/mcp/upstream_test.go`
 
-- [ ] **Step 1: Write failing test**
+- [x] **Step 1: Write failing test**
 
 ```go
 // internal/mcp/upstream_test.go
@@ -157,7 +157,7 @@ func TestUpstreamConfig(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Implement upstream.go**
+- [x] **Step 2: Implement upstream.go**
 
 ```go
 // internal/mcp/upstream.go
@@ -323,12 +323,12 @@ func (u *Upstream) Stop() error {
 }
 ```
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `go test ./internal/mcp/ -v`
 Expected: PASS
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add internal/mcp/
@@ -345,7 +345,7 @@ git commit -m "feat: MCP upstream server management"
 - Create: `internal/mcp/policy.go`
 - Create: `internal/mcp/policy_test.go`
 
-- [ ] **Step 1: Write failing test**
+- [x] **Step 1: Write failing test**
 
 ```go
 // internal/mcp/policy_test.go
@@ -387,12 +387,12 @@ func TestToolPolicyEvaluate(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/mcp/ -v -run TestToolPolicyEvaluate`
 Expected: FAIL
 
-- [ ] **Step 3: Implement policy.go**
+- [x] **Step 3: Implement policy.go**
 
 ```go
 // internal/mcp/policy.go
@@ -464,12 +464,12 @@ func (tp *ToolPolicy) Evaluate(toolName string) policy.Verdict {
 }
 ```
 
-- [ ] **Step 4: Run test**
+- [x] **Step 4: Run test**
 
 Run: `go test ./internal/mcp/ -v -run TestToolPolicyEvaluate`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/mcp/policy.go internal/mcp/policy_test.go
@@ -483,7 +483,7 @@ git commit -m "feat: tool-level policy evaluation for MCP gateway"
 **Files:**
 - Create: `internal/mcp/gateway.go`
 
-- [ ] **Step 1: Implement the gateway**
+- [x] **Step 1: Implement the gateway**
 
 ```go
 // internal/mcp/gateway.go
@@ -660,7 +660,7 @@ func (gw *Gateway) Stop() {
 }
 ```
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add internal/mcp/gateway.go
@@ -674,7 +674,7 @@ git commit -m "feat: MCP gateway core with tool policy and approval"
 **Files:**
 - Create: `internal/mcp/transport.go`
 
-- [ ] **Step 1: Implement stdio server**
+- [x] **Step 1: Implement stdio server**
 
 ```go
 // internal/mcp/transport.go
@@ -752,7 +752,7 @@ func (gw *Gateway) handleRequest(req JSONRPCRequest) *JSONRPCResponse {
 }
 ```
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add internal/mcp/transport.go
@@ -766,7 +766,7 @@ git commit -m "feat: MCP gateway stdio transport"
 **Files:**
 - Modify: `internal/policy/types.go`
 
-- [ ] **Step 1: Add tool policy sections to the policy file struct**
+- [x] **Step 1: Add tool policy sections to the policy file struct**
 
 Add to `policyFile` struct in types.go:
 
@@ -789,7 +789,7 @@ type ToolRule struct {
 
 Update the Engine to include tool rules and expose them.
 
-- [ ] **Step 2: Write test with tool policy in TOML**
+- [x] **Step 2: Write test with tool policy in TOML**
 
 Create `testdata/policy_with_tools.toml`:
 
@@ -811,7 +811,7 @@ tool = "exec__*"
 tool = "filesystem__write_*"
 ```
 
-- [ ] **Step 3: Test loading**
+- [x] **Step 3: Test loading**
 
 ```go
 func TestLoadPolicyWithTools(t *testing.T) {
@@ -828,12 +828,12 @@ func TestLoadPolicyWithTools(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: Run all tests**
+- [x] **Step 4: Run all tests**
 
 Run: `go test ./... -v -timeout 30s`
 Expected: ALL PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/ testdata/
@@ -847,7 +847,7 @@ git commit -m "feat: tool-level policy rules in TOML config"
 **Files:**
 - Modify: `cmd/sluice/main.go`
 
-- [ ] **Step 1: Add mcp subcommand**
+- [x] **Step 1: Add mcp subcommand**
 
 ```go
 case "mcp":
@@ -857,7 +857,7 @@ case "mcp":
 
 Implement `handleMCPCommand` that loads policy, creates tool policy from TOML rules, starts upstream servers, creates gateway, and runs stdio transport.
 
-- [ ] **Step 2: Test manually**
+- [x] **Step 2: Test manually**
 
 ```bash
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0.1"}}}' | ./sluice mcp
@@ -865,7 +865,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 Expected: JSON response with server info
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add cmd/
@@ -888,7 +888,7 @@ the agent).
 - Create: `internal/mcp/inspect_test.go`
 - Modify: `internal/mcp/gateway.go` (add inspection hooks)
 
-- [ ] **Step 1: Define inspection rules in policy TOML**
+- [x] **Step 1: Define inspection rules in policy TOML**
 
 ```toml
 # Content inspection rules (in policy.toml)
@@ -915,7 +915,7 @@ name = "email_in_response"
 note = "Redact email addresses in tool responses"
 ```
 
-- [ ] **Step 2: Implement inspection engine**
+- [x] **Step 2: Implement inspection engine**
 
 ```go
 // internal/mcp/inspect.go
@@ -939,7 +939,7 @@ func InspectArguments(args map[string]interface{}, rules []InspectBlockRule) Ins
 func RedactResponse(content string, rules []InspectRedactRule) string
 ```
 
-- [ ] **Step 3: Write tests for argument blocking**
+- [x] **Step 3: Write tests for argument blocking**
 
 ```go
 func TestInspectBlocksAPIKeyInArgs(t *testing.T) {
@@ -950,7 +950,7 @@ func TestInspectAllowsCleanArgs(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: Write tests for response redaction**
+- [x] **Step 4: Write tests for response redaction**
 
 ```go
 func TestRedactAPIKeyInResponse(t *testing.T) {
@@ -964,7 +964,7 @@ func TestRedactPreservesCleanContent(t *testing.T) {
 }
 ```
 
-- [ ] **Step 5: Integrate into gateway.go**
+- [x] **Step 5: Integrate into gateway.go**
 
 In the tool call handler:
 1. Before forwarding: run `InspectArguments`. If blocked, return error
@@ -972,17 +972,17 @@ In the tool call handler:
 2. After receiving response: run `RedactResponse` on content before
    returning to agent.
 
-- [ ] **Step 6: Add inspection rules to TOML parser**
+- [x] **Step 6: Add inspection rules to TOML parser**
 
 Extend `policyFile` struct to include `InspectBlock` and `InspectRedact`
 rule arrays.
 
-- [ ] **Step 7: Run tests**
+- [x] **Step 7: Run tests**
 
 Run: `go test ./internal/mcp/ -v`
 Expected: PASS
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add internal/mcp/inspect.go internal/mcp/inspect_test.go internal/mcp/gateway.go

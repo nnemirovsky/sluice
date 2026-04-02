@@ -40,10 +40,37 @@ type TelegramConfig struct {
 	ChatIDEnv   string `toml:"chat_id_env"`
 }
 
+// ToolRule defines a single tool-level policy rule for MCP gateway.
+type ToolRule struct {
+	Tool    string `toml:"tool"`
+	Verdict string `toml:"verdict"`
+	Note    string `toml:"note"`
+}
+
+// InspectBlockRule defines a pattern that blocks tool arguments when matched.
+type InspectBlockRule struct {
+	Pattern string `toml:"pattern"`
+	Name    string `toml:"name"`
+	Note    string `toml:"note"`
+}
+
+// InspectRedactRule defines a pattern that redacts matched content in tool responses.
+type InspectRedactRule struct {
+	Pattern     string `toml:"pattern"`
+	Replacement string `toml:"replacement"`
+	Name        string `toml:"name"`
+	Note        string `toml:"note"`
+}
+
 type policyFile struct {
-	Policy   PolicyConfig   `toml:"policy"`
-	Telegram TelegramConfig `toml:"telegram"`
-	Allow    []Rule         `toml:"allow"`
-	Deny     []Rule         `toml:"deny"`
-	Ask      []Rule         `toml:"ask"`
+	Policy        PolicyConfig      `toml:"policy"`
+	Telegram      TelegramConfig    `toml:"telegram"`
+	Allow         []Rule            `toml:"allow"`
+	Deny          []Rule            `toml:"deny"`
+	Ask           []Rule            `toml:"ask"`
+	ToolAllow     []ToolRule        `toml:"tool_allow"`
+	ToolDeny      []ToolRule        `toml:"tool_deny"`
+	ToolAsk       []ToolRule        `toml:"tool_ask"`
+	InspectBlock  []InspectBlockRule  `toml:"inspect_block"`
+	InspectRedact []InspectRedactRule `toml:"inspect_redact"`
 }

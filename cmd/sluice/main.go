@@ -33,6 +33,11 @@ func main() {
 		case "cred":
 			handleCredCommand(os.Args[2:])
 			return
+		case "mcp":
+			if err := handleMCPCommand(os.Args[2:]); err != nil {
+				os.Exit(1)
+			}
+			return
 		}
 	}
 

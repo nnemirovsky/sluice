@@ -222,6 +222,42 @@ default = "ask"
 	}
 }
 
+func TestLoadPolicyWithTools(t *testing.T) {
+	eng, err := LoadFromFile("../../testdata/policy_with_tools.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eng.ToolAllowRules) != 1 {
+		t.Errorf("expected 1 tool_allow, got %d", len(eng.ToolAllowRules))
+	}
+	if len(eng.ToolDenyRules) != 1 {
+		t.Errorf("expected 1 tool_deny, got %d", len(eng.ToolDenyRules))
+	}
+	if len(eng.ToolAskRules) != 1 {
+		t.Errorf("expected 1 tool_ask, got %d", len(eng.ToolAskRules))
+	}
+
+	// Verify verdicts are set from section names
+	if eng.ToolAllowRules[0].Verdict != "allow" {
+		t.Errorf("tool_allow verdict = %q, want %q", eng.ToolAllowRules[0].Verdict, "allow")
+	}
+	if eng.ToolAllowRules[0].Tool != "github__list_*" {
+		t.Errorf("tool_allow tool = %q, want %q", eng.ToolAllowRules[0].Tool, "github__list_*")
+	}
+	if eng.ToolDenyRules[0].Verdict != "deny" {
+		t.Errorf("tool_deny verdict = %q, want %q", eng.ToolDenyRules[0].Verdict, "deny")
+	}
+	if eng.ToolAskRules[0].Verdict != "ask" {
+		t.Errorf("tool_ask verdict = %q, want %q", eng.ToolAskRules[0].Verdict, "ask")
+	}
+
+	// Verify ToolRules() returns all combined
+	allRules := eng.ToolRules()
+	if len(allRules) != 3 {
+		t.Errorf("ToolRules() returned %d rules, want 3", len(allRules))
+	}
+}
+
 func TestLoadFromBytesErrors(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -477,5 +513,24 @@ func TestLoadPolicyWithoutTelegram(t *testing.T) {
 	}
 	if eng.Telegram.ChatIDEnv != "" {
 		t.Errorf("expected empty chat_id_env, got %q", eng.Telegram.ChatIDEnv)
+	}
+}
+
+func TestLoadPolicyWithInspect(t *testing.T) {
+	eng, err := LoadFromFile("../../testdata/policy_with_inspect.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eng.InspectBlockRules) != 2 {
+		t.Errorf("expected 2 inspect_block rules, got %d", len(eng.InspectBlockRules))
+	}
+	if len(eng.InspectRedactRules) != 2 {
+		t.Errorf("expected 2 inspect_redact rules, got %d", len(eng.InspectRedactRules))
+	}
+	if eng.InspectBlockRules[0].Name != "api_key_leak" {
+		t.Errorf("expected block rule name %q, got %q", "api_key_leak", eng.InspectBlockRules[0].Name)
+	}
+	if eng.InspectRedactRules[0].Replacement != "[REDACTED_API_KEY]" {
+		t.Errorf("expected redact replacement %q, got %q", "[REDACTED_API_KEY]", eng.InspectRedactRules[0].Replacement)
 	}
 }

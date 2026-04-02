@@ -23,14 +23,19 @@ type compiledEngine struct {
 
 // Engine holds the parsed policy rules and provides evaluation.
 type Engine struct {
-	mu         sync.RWMutex
-	Default    Verdict
-	AllowRules []Rule
-	DenyRules  []Rule
-	AskRules   []Rule
-	TimeoutSec int
-	Telegram   TelegramConfig
-	compiled   *compiledEngine
+	mu                 sync.RWMutex
+	Default            Verdict
+	AllowRules         []Rule
+	DenyRules          []Rule
+	AskRules           []Rule
+	ToolAllowRules     []ToolRule
+	ToolDenyRules      []ToolRule
+	ToolAskRules       []ToolRule
+	InspectBlockRules  []InspectBlockRule
+	InspectRedactRules []InspectRedactRule
+	TimeoutSec         int
+	Telegram           TelegramConfig
+	compiled           *compiledEngine
 }
 
 // LoadFromFile reads and parses a policy TOML file.
@@ -68,13 +73,35 @@ func LoadFromBytes(data []byte) (*Engine, error) {
 		timeout = 120
 	}
 
+	// Populate tool rules with verdict derived from TOML section name
+	toolAllow := make([]ToolRule, len(pf.ToolAllow))
+	copy(toolAllow, pf.ToolAllow)
+	for i := range toolAllow {
+		toolAllow[i].Verdict = "allow"
+	}
+	toolDeny := make([]ToolRule, len(pf.ToolDeny))
+	copy(toolDeny, pf.ToolDeny)
+	for i := range toolDeny {
+		toolDeny[i].Verdict = "deny"
+	}
+	toolAsk := make([]ToolRule, len(pf.ToolAsk))
+	copy(toolAsk, pf.ToolAsk)
+	for i := range toolAsk {
+		toolAsk[i].Verdict = "ask"
+	}
+
 	eng := &Engine{
-		Default:    defaultVerdict,
-		AllowRules: pf.Allow,
-		DenyRules:  pf.Deny,
-		AskRules:   pf.Ask,
-		TimeoutSec: timeout,
-		Telegram:   pf.Telegram,
+		Default:            defaultVerdict,
+		AllowRules:         pf.Allow,
+		DenyRules:          pf.Deny,
+		AskRules:           pf.Ask,
+		ToolAllowRules:     toolAllow,
+		ToolDenyRules:      toolDeny,
+		ToolAskRules:       toolAsk,
+		InspectBlockRules:  pf.InspectBlock,
+		InspectRedactRules: pf.InspectRedact,
+		TimeoutSec:         timeout,
+		Telegram:           pf.Telegram,
 	}
 	if err := eng.compile(); err != nil {
 		return nil, fmt.Errorf("compile policy rules: %w", err)
@@ -368,6 +395,17 @@ func (e *Engine) Snapshot() RulesSnapshot {
 		DenyRules:  append([]Rule(nil), e.DenyRules...),
 		AskRules:   append([]Rule(nil), e.AskRules...),
 	}
+}
+
+// ToolRules returns all tool-level policy rules combined from allow, deny, and ask sections.
+func (e *Engine) ToolRules() []ToolRule {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	var rules []ToolRule
+	rules = append(rules, e.ToolAllowRules...)
+	rules = append(rules, e.ToolDenyRules...)
+	rules = append(rules, e.ToolAskRules...)
+	return rules
 }
 
 // Evaluate checks a destination and port against the compiled policy rules.
