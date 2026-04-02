@@ -130,6 +130,25 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	return os.Rename(tmpPath, path)
 }
 
+// IsCACertExpiring checks whether the CA certificate at the given path expires
+// within the provided threshold duration. Returns true if the cert is expiring
+// soon or already expired. Returns an error if the cert cannot be read or parsed.
+func IsCACertExpiring(path string, threshold time.Duration) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read CA cert: %w", err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return false, fmt.Errorf("no PEM block found in %s", path)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return false, fmt.Errorf("parse CA cert: %w", err)
+	}
+	return time.Until(cert.NotAfter) < threshold, nil
+}
+
 // GenerateCA creates a new self-signed CA certificate and key in memory.
 func GenerateCA() (tls.Certificate, *x509.Certificate, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -149,7 +168,7 @@ func GenerateCA() (tls.Certificate, *x509.Certificate, error) {
 			CommonName:   "Sluice CA",
 		},
 		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
+		NotAfter:              time.Now().Add(2 * 365 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
 		IsCA:                  true,

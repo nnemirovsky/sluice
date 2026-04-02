@@ -342,6 +342,11 @@ func New(cfg Config) (*Server, error) {
 			return nil, fmt.Errorf("load CA: %w", caErr)
 		}
 
+		certPath := filepath.Join(vaultDir, "ca-cert.pem")
+		if expiring, expiryErr := IsCACertExpiring(certPath, 30*24*time.Hour); expiryErr == nil && expiring {
+			log.Printf("WARNING: CA certificate at %s expires within 30 days. Delete and restart to regenerate.", certPath)
+		}
+
 		// Generate a random auth token so only our SOCKS5 dial function
 		// can use the injector listener. Without this, any local process
 		// that discovers the port could bypass policy and audit logging.

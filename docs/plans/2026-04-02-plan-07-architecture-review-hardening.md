@@ -107,13 +107,13 @@ The self-signed MITM CA in `proxy/ca.go` has a 10-year NotAfter. For a MITM CA t
 - Modify: `internal/proxy/ca.go`
 - Create: `internal/proxy/ca_test.go`
 
-- [ ] Reduce CA cert NotAfter from 10 years to 2 years
-- [ ] Add `IsCACertExpiring(path string, threshold time.Duration) (bool, error)` function that checks if the CA cert expires within the threshold
-- [ ] Log a warning on startup if CA cert expires within 30 days
-- [ ] Write tests for CA generation (verify cert fields, key type, validity period)
-- [ ] Write tests for `IsCACertExpiring` (expired, expiring soon, valid)
-- [ ] Write test for atomic CA file creation (concurrent calls don't corrupt)
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] Reduce CA cert NotAfter from 10 years to 2 years
+- [x] Add `IsCACertExpiring(path string, threshold time.Duration) (bool, error)` function that checks if the CA cert expires within the threshold
+- [x] Log a warning on startup if CA cert expires within 30 days
+- [x] Write tests for CA generation (verify cert fields, key type, validity period)
+- [x] Write tests for `IsCACertExpiring` (expired, expiring soon, valid)
+- [x] Write test for atomic CA file creation (concurrent calls don't corrupt)
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 3: Add rate limiting to Telegram approval requests
 
