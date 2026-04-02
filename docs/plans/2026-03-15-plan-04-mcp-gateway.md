@@ -483,7 +483,7 @@ git commit -m "feat: tool-level policy evaluation for MCP gateway"
 **Files:**
 - Create: `internal/mcp/gateway.go`
 
-- [ ] **Step 1: Implement the gateway**
+- [x] **Step 1: Implement the gateway**
 
 ```go
 // internal/mcp/gateway.go
@@ -660,7 +660,7 @@ func (gw *Gateway) Stop() {
 }
 ```
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add internal/mcp/gateway.go
