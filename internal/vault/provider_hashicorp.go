@@ -25,37 +25,37 @@ func validateCredentialName(name string) error {
 type HashiCorpConfig struct {
 	// Addr is the Vault server address (e.g. "https://vault.example.com:8200").
 	// Falls back to VAULT_ADDR env var if empty.
-	Addr string `toml:"addr"`
+	Addr string
 
 	// Mount is the KV v2 secrets engine mount path (default "secret").
-	Mount string `toml:"mount"`
+	Mount string
 
 	// Prefix is an optional path prefix prepended to credential names
 	// when reading from Vault (e.g. "sluice/" reads "sluice/<name>").
-	Prefix string `toml:"prefix"`
+	Prefix string
 
 	// Auth selects the authentication method: "token" (default) or "approle".
-	Auth string `toml:"auth"`
+	Auth string
 
 	// Token is the Vault token. Falls back to VAULT_TOKEN env var if empty.
 	// Used when Auth is "token" or empty.
-	Token string `toml:"token"`
+	Token string
 
 	// RoleID is the AppRole role_id. Falls back to env var named by
 	// RoleIDEnv if empty.
-	RoleID string `toml:"role_id"`
+	RoleID string
 
 	// SecretID is the AppRole secret_id. Falls back to env var named by
 	// SecretIDEnv if empty.
-	SecretID string `toml:"secret_id"`
+	SecretID string
 
 	// RoleIDEnv is the env var name holding the AppRole role_id
 	// (default "VAULT_ROLE_ID").
-	RoleIDEnv string `toml:"role_id_env"`
+	RoleIDEnv string
 
 	// SecretIDEnv is the env var name holding the AppRole secret_id
 	// (default "VAULT_SECRET_ID").
-	SecretIDEnv string `toml:"secret_id_env"`
+	SecretIDEnv string
 }
 
 // HashiCorpProvider retrieves credentials from HashiCorp Vault's KV v2 engine.

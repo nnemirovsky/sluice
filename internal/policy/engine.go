@@ -3,7 +3,6 @@ package policy
 import (
 	"fmt"
 	"net"
-	"os"
 	"strings"
 	"sync"
 
@@ -38,21 +37,8 @@ type Engine struct {
 	compiled           *compiledEngine
 }
 
-// LoadFromFile reads and parses a policy TOML file.
-//
-// Deprecated: Use LoadFromStore for runtime policy loading. This function is
-// retained for backward compatibility during the migration to SQLite-backed
-// policy storage and will be removed in a future release.
-func LoadFromFile(path string) (*Engine, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read policy file: %w", err)
-	}
-	return LoadFromBytes(data)
-}
-
-// LoadFromBytes parses policy from raw TOML bytes. Primarily used by
-// store/import.go for TOML seeding and by tests that construct policy inline.
+// LoadFromBytes parses policy from raw TOML bytes. Used by tests that
+// construct policy inline. Runtime code should use LoadFromStore instead.
 func LoadFromBytes(data []byte) (*Engine, error) {
 	var pf policyFile
 	if err := toml.Unmarshal(data, &pf); err != nil {

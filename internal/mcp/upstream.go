@@ -17,11 +17,11 @@ import (
 
 // UpstreamConfig describes how to launch an upstream MCP server process.
 type UpstreamConfig struct {
-	Name       string            `toml:"name"`
-	Command    string            `toml:"command"`
-	Args       []string          `toml:"args"`
-	Env        map[string]string `toml:"env"`
-	TimeoutSec int               `toml:"timeout_sec"`
+	Name       string
+	Command    string
+	Args       []string
+	Env        map[string]string
+	TimeoutSec int
 }
 
 // Upstream manages a running upstream MCP server process. Communication

@@ -9,12 +9,12 @@ import (
 
 // Binding maps a destination pattern to a credential and injection strategy.
 type Binding struct {
-	Destination  string `toml:"destination"`
-	Ports        []int  `toml:"ports"`
-	Credential   string `toml:"credential"`
-	InjectHeader string `toml:"inject_header"`
-	Template     string `toml:"template"`
-	Protocol     string `toml:"protocol"`
+	Destination  string
+	Ports        []int
+	Credential   string
+	InjectHeader string
+	Template     string
+	Protocol     string
 }
 
 type compiledBinding struct {

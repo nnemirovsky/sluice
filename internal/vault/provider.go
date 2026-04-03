@@ -22,12 +22,12 @@ type Provider interface {
 }
 
 // VaultConfig controls which credential provider is used and how it's
-// configured. Parsed from a [vault] section in policy.toml.
+// configured. Populated from the SQLite store's config table.
 type VaultConfig struct {
-	Provider  string          `toml:"provider"`
-	Providers []string        `toml:"providers"`
-	Dir       string          `toml:"dir"`
-	HashiCorp HashiCorpConfig `toml:"hashicorp"`
+	Provider  string
+	Providers []string
+	Dir       string
+	HashiCorp HashiCorpConfig
 }
 
 // NewProviderFromConfig creates a Provider (or ChainProvider) based on config.

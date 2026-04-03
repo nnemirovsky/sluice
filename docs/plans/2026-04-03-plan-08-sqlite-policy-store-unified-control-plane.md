@@ -306,12 +306,12 @@ Remove BurntSushi/toml from runtime imports. It stays only in `store/import.go` 
 - Modify: `internal/policy/types.go`
 - Remove or update: `testdata/*.toml` (keep for import tests only)
 
-- [ ] Remove `toml` struct tags from types that no longer need them (Engine internals)
-- [ ] Keep `toml` tags on types used by `store/import.go` (policyFile, Rule, etc.)
-- [ ] Verify `go.mod` still lists `BurntSushi/toml` only as needed by import.go
-- [ ] Remove any dead code paths that were TOML-specific
-- [ ] Run `go vet ./...`
-- [ ] Run tests: `go test ./... -v -timeout 30s`
+- [x] Remove `toml` struct tags from types that no longer need them (Engine internals)
+- [x] Keep `toml` tags on types used by `store/import.go` (policyFile, Rule, etc.)
+- [x] Verify `go.mod` still lists `BurntSushi/toml` only as needed by import.go
+- [x] Remove any dead code paths that were TOML-specific
+- [x] Run `go vet ./...`
+- [x] Run tests: `go test ./... -v -timeout 30s`
 
 ### Task 11: Verify acceptance criteria
 

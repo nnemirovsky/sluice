@@ -1,6 +1,7 @@
-// Package policy provides TOML-based policy evaluation for network connections
-// and MCP tool calls. Rules are compiled from glob patterns and evaluated in
-// deny-then-allow-then-ask priority order.
+// Package policy provides policy evaluation for network connections and MCP
+// tool calls. Rules are compiled from glob patterns and evaluated in
+// deny-then-allow-then-ask priority order. Runtime state is stored in SQLite
+// via the store package. TOML parsing is retained for test convenience.
 package policy
 
 // Verdict represents the policy decision for a connection request.
