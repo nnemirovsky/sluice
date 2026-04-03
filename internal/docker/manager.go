@@ -7,6 +7,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -18,6 +20,7 @@ type ContainerClient interface {
 	RemoveContainer(ctx context.Context, name string) error
 	CreateContainer(ctx context.Context, spec ContainerSpec) (string, error)
 	StartContainer(ctx context.Context, id string) error
+	ExecInContainer(ctx context.Context, name string, cmd []string) error
 }
 
 // ContainerState holds the result of inspecting a container.
@@ -73,6 +76,37 @@ func NewManager(client ContainerClient, containerName string) *Manager {
 		client:        client,
 		containerName: containerName,
 	}
+}
+
+// ReloadSecrets writes phantom token files to a shared volume directory and
+// signals the agent container to reload them via docker exec. Each entry in
+// phantomEnv is written as a separate file (key = filename, value = contents).
+// If the exec command fails (e.g. the agent image does not support "secrets
+// reload"), it falls back to RestartWithEnv for backward compatibility.
+func (m *Manager) ReloadSecrets(ctx context.Context, phantomDir string, phantomEnv map[string]string) error {
+	// Write each phantom token as a file in the shared volume.
+	for name, value := range phantomEnv {
+		path := filepath.Join(phantomDir, name)
+		if value == "" {
+			// Empty value means removal.
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove phantom file %s: %w", name, err)
+			}
+			continue
+		}
+		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
+			return fmt.Errorf("write phantom file %s: %w", name, err)
+		}
+	}
+
+	// Signal the agent container to reload secrets.
+	err := m.client.ExecInContainer(ctx, m.containerName,
+		[]string{"openclaw", "secrets", "reload"})
+	if err != nil {
+		// Fallback to full container restart if exec fails.
+		return m.RestartWithEnv(ctx, phantomEnv)
+	}
+	return nil
 }
 
 // RestartWithEnv recreates the container with updated environment variables.

@@ -15,6 +15,7 @@ services:
       - sluice-vault:/home/sluice/.sluice
       - sluice-audit:/var/log/sluice
       - sluice-ca:/home/sluice/ca
+      - sluice-phantoms:/home/sluice/phantoms
       - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
@@ -55,6 +56,7 @@ services:
     volumes:
       - openclaw-data:/root/.openclaw
       - sluice-ca:/usr/local/share/ca-certificates/sluice:ro
+      - sluice-phantoms:/phantoms:ro
     depends_on:
       tun2proxy:
         condition: service_healthy
@@ -68,4 +70,5 @@ volumes:
   sluice-vault:
   sluice-audit:
   sluice-ca:
+  sluice-phantoms:
   openclaw-data:

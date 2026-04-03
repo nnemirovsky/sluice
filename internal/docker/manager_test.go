@@ -3,6 +3,8 @@ package docker
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -15,16 +17,20 @@ type mockClient struct {
 	removeErr   error
 	createErr   error
 	startErr    error
+	execErr     error
 	createdID   string
 	createdSpec ContainerSpec
 	stopped     bool
 	removed     bool
 	started     bool
+	execCalled  bool
+	execCmd     []string
 	// Track container names passed to each method.
 	inspectedName string
 	stoppedName   string
 	removedName   string
 	startedID     string
+	execName      string
 }
 
 func (m *mockClient) InspectContainer(_ context.Context, name string) (ContainerState, error) {
@@ -53,6 +59,13 @@ func (m *mockClient) StartContainer(_ context.Context, id string) error {
 	m.started = true
 	m.startedID = id
 	return m.startErr
+}
+
+func (m *mockClient) ExecInContainer(_ context.Context, name string, cmd []string) error {
+	m.execCalled = true
+	m.execName = name
+	m.execCmd = cmd
+	return m.execErr
 }
 
 func TestRestartWithEnv(t *testing.T) {
@@ -427,5 +440,143 @@ func TestMergeEnvRemoval(t *testing.T) {
 	}
 	if len(result) != 2 {
 		t.Errorf("expected 2 entries, got %d: %v", len(result), result)
+	}
+}
+
+func TestReloadSecretsWritesFiles(t *testing.T) {
+	dir := t.TempDir()
+	mc := &mockClient{}
+	mgr := NewManager(mc, "openclaw")
+
+	phantomEnv := map[string]string{
+		"ANTHROPIC_API_KEY": "sk-ant-phantom-abc123",
+		"GITHUB_TOKEN":      "ghp_phantom0000000000",
+	}
+
+	err := mgr.ReloadSecrets(context.Background(), dir, phantomEnv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify files were written.
+	for name, expected := range phantomEnv {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Errorf("failed to read phantom file %s: %v", name, err)
+			continue
+		}
+		if string(data) != expected {
+			t.Errorf("phantom file %s = %q, want %q", name, string(data), expected)
+		}
+	}
+
+	// Verify file permissions are restricted.
+	for name := range phantomEnv {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Errorf("stat phantom file %s: %v", name, err)
+			continue
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Errorf("phantom file %s has mode %o, want 0600", name, info.Mode().Perm())
+		}
+	}
+}
+
+func TestReloadSecretsRemovesFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	// Pre-create a file that should be removed.
+	path := filepath.Join(dir, "OLD_TOKEN")
+	if err := os.WriteFile(path, []byte("old-value"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	mc := &mockClient{}
+	mgr := NewManager(mc, "openclaw")
+
+	err := mgr.ReloadSecrets(context.Background(), dir, map[string]string{
+		"OLD_TOKEN": "", // empty = remove
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("phantom file should have been removed")
+	}
+}
+
+func TestReloadSecretsCallsExec(t *testing.T) {
+	dir := t.TempDir()
+	mc := &mockClient{}
+	mgr := NewManager(mc, "openclaw")
+
+	err := mgr.ReloadSecrets(context.Background(), dir, map[string]string{
+		"API_KEY": "phantom-value",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !mc.execCalled {
+		t.Error("ExecInContainer should have been called")
+	}
+	if mc.execName != "openclaw" {
+		t.Errorf("exec container name = %q, want openclaw", mc.execName)
+	}
+	if len(mc.execCmd) != 3 || mc.execCmd[0] != "openclaw" || mc.execCmd[1] != "secrets" || mc.execCmd[2] != "reload" {
+		t.Errorf("exec cmd = %v, want [openclaw secrets reload]", mc.execCmd)
+	}
+}
+
+func TestReloadSecretsFallbackToRestart(t *testing.T) {
+	dir := t.TempDir()
+	mc := &mockClient{
+		execErr:   fmt.Errorf("exec failed: command not found"),
+		state:     ContainerState{ID: "abc", Image: "openclaw:latest"},
+		createdID: "new123",
+	}
+	mgr := NewManager(mc, "openclaw")
+
+	err := mgr.ReloadSecrets(context.Background(), dir, map[string]string{
+		"API_KEY": "phantom-value",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Exec was attempted.
+	if !mc.execCalled {
+		t.Error("ExecInContainer should have been called")
+	}
+	// Fallback to restart should have happened.
+	if !mc.stopped {
+		t.Error("container should have been stopped (fallback restart)")
+	}
+	if !mc.removed {
+		t.Error("container should have been removed (fallback restart)")
+	}
+	if !mc.started {
+		t.Error("new container should have been started (fallback restart)")
+	}
+}
+
+func TestReloadSecretsFallbackRestartFails(t *testing.T) {
+	dir := t.TempDir()
+	mc := &mockClient{
+		execErr:    fmt.Errorf("exec failed"),
+		inspectErr: fmt.Errorf("container not found"),
+	}
+	mgr := NewManager(mc, "openclaw")
+
+	err := mgr.ReloadSecrets(context.Background(), dir, map[string]string{
+		"API_KEY": "phantom-value",
+	})
+	if err == nil {
+		t.Fatal("expected error when both exec and restart fail")
+	}
+	if !strings.Contains(err.Error(), "inspect container") {
+		t.Errorf("error should propagate restart failure: %v", err)
 	}
 }

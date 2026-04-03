@@ -255,6 +255,70 @@ func TestSocketClientStart(t *testing.T) {
 	}
 }
 
+func TestSocketClientExecInContainer(t *testing.T) {
+	client, mux, cleanup := newTestServer(t)
+	defer cleanup()
+
+	var execCreateBody execCreateRequest
+	mux.HandleFunc("/v1.25/containers/mycontainer/exec", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "want POST", http.StatusMethodNotAllowed)
+			return
+		}
+		data, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(data, &execCreateBody)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "exec123"})
+	})
+
+	mux.HandleFunc("/v1.25/exec/exec123/start", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "want POST", http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mux.HandleFunc("/v1.25/exec/exec123/json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"ExitCode": 0})
+	})
+
+	err := client.ExecInContainer(context.Background(), "mycontainer", []string{"openclaw", "secrets", "reload"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(execCreateBody.Cmd) != 3 || execCreateBody.Cmd[0] != "openclaw" {
+		t.Errorf("exec Cmd = %v, want [openclaw secrets reload]", execCreateBody.Cmd)
+	}
+}
+
+func TestSocketClientExecNonZeroExit(t *testing.T) {
+	client, mux, cleanup := newTestServer(t)
+	defer cleanup()
+
+	mux.HandleFunc("/v1.25/containers/mycontainer/exec", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "exec456"})
+	})
+
+	mux.HandleFunc("/v1.25/exec/exec456/start", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mux.HandleFunc("/v1.25/exec/exec456/json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"ExitCode": 127})
+	})
+
+	err := client.ExecInContainer(context.Background(), "mycontainer", []string{"openclaw", "secrets", "reload"})
+	if err == nil {
+		t.Fatal("expected error for non-zero exit code")
+	}
+	if !strings.Contains(err.Error(), "127") {
+		t.Errorf("error should mention exit code: %v", err)
+	}
+}
+
 func TestSocketClientAPIError(t *testing.T) {
 	client, mux, cleanup := newTestServer(t)
 	defer cleanup()

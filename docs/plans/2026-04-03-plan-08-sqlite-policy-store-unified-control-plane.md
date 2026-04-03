@@ -249,18 +249,18 @@ Replace `docker.Manager.RestartWithEnv` with file-based phantom token injection 
 - Modify: `internal/docker/manager_test.go`
 - Modify: `internal/telegram/commands.go` (credMutationComplete)
 
-- [ ] Add `ReloadSecrets(ctx, phantomDir string, phantomEnv map[string]string) error` to Manager
-- [ ] `ReloadSecrets` writes each phantom token as a file (e.g. `/phantoms/ANTHROPIC_API_KEY`) in the shared volume
-- [ ] `ReloadSecrets` calls `docker exec <container> openclaw secrets reload` via the Docker API exec endpoint
-- [ ] Add `ExecInContainer(ctx, containerName, cmd []string) error` to `ContainerClient` interface
-- [ ] Implement `ExecInContainer` in `SocketClient` using Docker exec API
-- [ ] Update `credMutationComplete` in commands.go: call `ReloadSecrets` instead of `RestartWithEnv`
-- [ ] Keep `RestartWithEnv` as fallback (called if exec fails with "command not found")
-- [ ] Update compose.dev.yml and compose.yml: add shared `sluice-phantoms` volume mounted in both sluice and openclaw
-- [ ] Write tests for file-based phantom token writing
-- [ ] Write tests for exec-based reload (mock Docker API)
-- [ ] Write tests for fallback to restart on exec failure
-- [ ] Run tests: `go test ./internal/docker/ -v -timeout 30s`
+- [x] Add `ReloadSecrets(ctx, phantomDir string, phantomEnv map[string]string) error` to Manager
+- [x] `ReloadSecrets` writes each phantom token as a file (e.g. `/phantoms/ANTHROPIC_API_KEY`) in the shared volume
+- [x] `ReloadSecrets` calls `docker exec <container> openclaw secrets reload` via the Docker API exec endpoint
+- [x] Add `ExecInContainer(ctx, containerName, cmd []string) error` to `ContainerClient` interface
+- [x] Implement `ExecInContainer` in `SocketClient` using Docker exec API
+- [x] Update `credMutationComplete` in commands.go: call `ReloadSecrets` instead of `RestartWithEnv`
+- [x] Keep `RestartWithEnv` as fallback (called if exec fails with "command not found")
+- [x] Update compose.dev.yml and compose.yml: add shared `sluice-phantoms` volume mounted in both sluice and openclaw
+- [x] Write tests for file-based phantom token writing
+- [x] Write tests for exec-based reload (mock Docker API)
+- [x] Write tests for fallback to restart on exec failure
+- [x] Run tests: `go test ./internal/docker/ -v -timeout 30s`
 
 ### Task 8: Add `sluice mcp add/list/remove` CLI subcommands
 

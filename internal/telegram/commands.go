@@ -46,13 +46,14 @@ func ParseCommand(text string) *Command {
 
 // CommandHandler holds the dependencies needed by command handlers.
 type CommandHandler struct {
-	engine    *atomic.Pointer[policy.Engine]
-	reloadMu *sync.Mutex // shared with proxy; serializes engine swaps and policy mutations
-	broker    *ApprovalBroker
-	auditPath string
-	vault     *vault.Store
-	dockerMgr *docker.Manager
-	store     *store.Store
+	engine     *atomic.Pointer[policy.Engine]
+	reloadMu   *sync.Mutex // shared with proxy; serializes engine swaps and policy mutations
+	broker     *ApprovalBroker
+	auditPath  string
+	vault      *vault.Store
+	dockerMgr  *docker.Manager
+	store      *store.Store
+	phantomDir string // shared volume path for phantom token files
 }
 
 // SetVault enables credential management commands.
@@ -68,6 +69,11 @@ func (h *CommandHandler) SetDockerManager(mgr *docker.Manager) {
 // SetStore enables persistent policy management via SQLite.
 func (h *CommandHandler) SetStore(s *store.Store) {
 	h.store = s
+}
+
+// SetPhantomDir sets the shared volume path for phantom token files.
+func (h *CommandHandler) SetPhantomDir(dir string) {
+	h.phantomDir = dir
 }
 
 // recompileAndSwap rebuilds the policy Engine from the SQLite store and
@@ -398,24 +404,33 @@ func (h *CommandHandler) credMutationComplete(msg string, removedCreds ...string
 
 	names, err := h.vault.List()
 	if err != nil {
-		return msg + "\nWarning: failed to list credentials for container restart: " + err.Error()
+		return msg + "\nWarning: failed to list credentials for container update: " + err.Error()
 	}
 
 	phantomEnv := docker.GeneratePhantomEnv(names)
-	// Mark removed credentials with empty values so mergeEnv removes them
-	// from the container's environment.
+	// Mark removed credentials with empty values so they are cleaned up.
 	for _, removed := range removedCreds {
 		envVar := docker.CredNameToEnvVar(removed)
 		if _, exists := phantomEnv[envVar]; !exists {
 			phantomEnv[envVar] = ""
 		}
 	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+
+	// Prefer hot-reload via shared volume when phantomDir is configured.
+	if h.phantomDir != "" {
+		if err := h.dockerMgr.ReloadSecrets(ctx, h.phantomDir, phantomEnv); err != nil {
+			return msg + "\nWarning: failed to reload agent secrets: " + err.Error()
+		}
+		return msg + "\nAgent secrets reloaded."
+	}
+
+	// Fallback to full container restart.
 	if err := h.dockerMgr.RestartWithEnv(ctx, phantomEnv); err != nil {
 		return msg + "\nWarning: failed to restart agent container: " + err.Error()
 	}
-
 	return msg + "\nAgent container restarted with updated credentials."
 }
 

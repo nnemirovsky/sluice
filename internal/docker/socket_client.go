@@ -166,6 +166,72 @@ func (c *SocketClient) StartContainer(ctx context.Context, id string) error {
 	return nil
 }
 
+func (c *SocketClient) ExecInContainer(ctx context.Context, name string, cmd []string) error {
+	// Step 1: Create exec instance.
+	createBody := execCreateRequest{
+		Cmd:          cmd,
+		AttachStdout: true,
+		AttachStderr: true,
+	}
+	payload, err := json.Marshal(createBody)
+	if err != nil {
+		return fmt.Errorf("marshal exec create: %w", err)
+	}
+
+	resp, err := c.doRequest(ctx, "POST",
+		"/containers/"+url.PathEscape(name)+"/exec",
+		bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusCreated {
+		return apiError(resp)
+	}
+
+	var cr execCreateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		return fmt.Errorf("decode exec create response: %w", err)
+	}
+
+	// Step 2: Start the exec instance.
+	startBody, _ := json.Marshal(map[string]bool{"Detach": false})
+	resp2, err := c.doRequest(ctx, "POST",
+		"/exec/"+url.PathEscape(cr.ID)+"/start",
+		bytes.NewReader(startBody))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp2.Body.Close() }()
+
+	if resp2.StatusCode != http.StatusOK {
+		return apiError(resp2)
+	}
+	// Drain output so the exec completes.
+	_, _ = io.Copy(io.Discard, resp2.Body)
+
+	// Step 3: Check exit code.
+	resp3, err := c.doRequest(ctx, "GET", "/exec/"+url.PathEscape(cr.ID)+"/json", nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp3.Body.Close() }()
+
+	if resp3.StatusCode != http.StatusOK {
+		return apiError(resp3)
+	}
+
+	var inspectResp execInspectResponse
+	if err := json.NewDecoder(resp3.Body).Decode(&inspectResp); err != nil {
+		return fmt.Errorf("decode exec inspect response: %w", err)
+	}
+	if inspectResp.ExitCode != 0 {
+		return fmt.Errorf("exec exited with code %d", inspectResp.ExitCode)
+	}
+	return nil
+}
+
 func (c *SocketClient) doRequest(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.apiURL(path), body)
 	if err != nil {
@@ -236,4 +302,20 @@ type createRequest struct {
 
 type createResponseBody struct {
 	ID string `json:"Id"`
+}
+
+// Docker API JSON types for exec create/inspect.
+
+type execCreateRequest struct {
+	Cmd          []string `json:"Cmd"`
+	AttachStdout bool     `json:"AttachStdout"`
+	AttachStderr bool     `json:"AttachStderr"`
+}
+
+type execCreateResponse struct {
+	ID string `json:"Id"`
+}
+
+type execInspectResponse struct {
+	ExitCode int `json:"ExitCode"`
 }
