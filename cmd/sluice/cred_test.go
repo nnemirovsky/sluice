@@ -22,7 +22,7 @@ func setupVaultDB(t *testing.T, dir string) string {
 	if err != nil {
 		t.Fatalf("create test DB: %v", err)
 	}
-	if err := db.SetConfig("vault_dir", dir); err != nil {
+	if err := db.UpdateConfig(store.ConfigUpdate{VaultDir: &dir}); err != nil {
 		t.Fatalf("set vault_dir: %v", err)
 	}
 	db.Close()
@@ -371,7 +371,7 @@ func TestHandleCredAddWithDestination(t *testing.T) {
 	}
 	defer db.Close()
 
-	rules, err := db.ListRules("allow")
+	rules, err := db.ListRules(store.RuleFilter{Verdict: "allow"})
 	if err != nil {
 		t.Fatalf("list rules: %v", err)
 	}
@@ -381,8 +381,8 @@ func TestHandleCredAddWithDestination(t *testing.T) {
 	if rules[0].Destination != "api.anthropic.com" {
 		t.Errorf("rule destination = %q, want %q", rules[0].Destination, "api.anthropic.com")
 	}
-	if rules[0].Source != credAddSourcePrefix + "anthropic_key" {
-		t.Errorf("rule source = %q, want %q", rules[0].Source, credAddSourcePrefix + "anthropic_key")
+	if rules[0].Source != credAddSourcePrefix+"anthropic_key" {
+		t.Errorf("rule source = %q, want %q", rules[0].Source, credAddSourcePrefix+"anthropic_key")
 	}
 	if len(rules[0].Ports) != 1 || rules[0].Ports[0] != 443 {
 		t.Errorf("rule ports = %v, want [443]", rules[0].Ports)
@@ -402,8 +402,8 @@ func TestHandleCredAddWithDestination(t *testing.T) {
 	if bindings[0].Credential != "anthropic_key" {
 		t.Errorf("binding credential = %q, want %q", bindings[0].Credential, "anthropic_key")
 	}
-	if bindings[0].InjectHeader != "x-api-key" {
-		t.Errorf("binding inject_header = %q, want %q", bindings[0].InjectHeader, "x-api-key")
+	if bindings[0].Header != "x-api-key" {
+		t.Errorf("binding header = %q, want %q", bindings[0].Header, "x-api-key")
 	}
 }
 
@@ -485,9 +485,9 @@ func TestHandleCredListWithBindings(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = db.AddBinding("api.example.com", "mykey", store.BindingOpts{
-		Ports:        []int{443},
-		InjectHeader: "Authorization",
-		Template:     "Bearer {value}",
+		Ports:    []int{443},
+		Header:   "Authorization",
+		Template: "Bearer {value}",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -542,24 +542,28 @@ func TestHandleCredRemoveWithBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.AddRule("allow", "api.cleanup.com", []int{443}, store.RuleOpts{
-		Source: credAddSourcePrefix + "cleanup_key",
-		Note:   "auto-created for credential \"cleanup_key\"",
+	_, err = db.AddRule("allow", store.RuleOpts{
+		Destination: "api.cleanup.com",
+		Ports:       []int{443},
+		Source:      credAddSourcePrefix + "cleanup_key",
+		Name:        "auto-created for credential \"cleanup_key\"",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, err = db.AddBinding("api.cleanup.com", "cleanup_key", store.BindingOpts{
-		Ports:        []int{443},
-		InjectHeader: "Authorization",
+		Ports:  []int{443},
+		Header: "Authorization",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Also add a manually created rule for the same destination (should NOT be removed).
-	_, err = db.AddRule("allow", "api.cleanup.com", []int{80}, store.RuleOpts{
-		Source: "manual",
-		Note:   "manually added",
+	_, err = db.AddRule("allow", store.RuleOpts{
+		Destination: "api.cleanup.com",
+		Ports:       []int{80},
+		Source:      "manual",
+		Name:        "manually added",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -611,7 +615,7 @@ func TestHandleCredRemoveWithBindings(t *testing.T) {
 	}
 	defer db.Close()
 
-	rules, err := db.ListRules("")
+	rules, err := db.ListRules(store.RuleFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -679,7 +683,7 @@ func TestHandleCredAddThenRemoveIntegrated(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 
-	rules, err := db.ListRules("allow")
+	rules, err := db.ListRules(store.RuleFilter{Verdict: "allow"})
 	if err != nil {
 		t.Fatalf("list rules: %v", err)
 	}
@@ -720,7 +724,7 @@ func TestHandleCredAddThenRemoveIntegrated(t *testing.T) {
 	}
 	defer db.Close()
 
-	rules, err = db.ListRules("")
+	rules, err = db.ListRules(store.RuleFilter{})
 	if err != nil {
 		t.Fatalf("list rules after remove: %v", err)
 	}

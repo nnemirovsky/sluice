@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -52,7 +51,7 @@ func handleCredCommand(args []string) {
 func openVaultStore(dbPath string) *vault.Store {
 	var vaultDir string
 
-	// Read vault_dir and provider from the DB to ensure the CLI uses the
+	// Read vault config from the DB to ensure the CLI uses the
 	// same backend as the running proxy.
 	if dbPath != "" {
 		if _, statErr := os.Stat(dbPath); statErr != nil && !os.IsNotExist(statErr) {
@@ -62,42 +61,24 @@ func openVaultStore(dbPath string) *vault.Store {
 			if dbErr != nil {
 				log.Fatalf("open store %s: %v", dbPath, dbErr)
 			}
-			dir, dirErr := db.GetConfig("vault_dir")
-			if dirErr != nil {
+			cfg, cfgErr := db.GetConfig()
+			if cfgErr != nil {
 				db.Close()
-				log.Fatalf("read vault_dir from store: %v", dirErr)
-			}
-			if dir != "" {
-				vaultDir = dir
-			}
-			prov, provErr := db.GetConfig("vault_provider")
-			if provErr != nil {
-				db.Close()
-				log.Fatalf("read vault_provider from store: %v", provErr)
-			}
-
-			// Also check vault_providers (chain provider config). The proxy
-			// runtime prefers vault_providers over vault_provider when both
-			// are set, so we must check it to avoid silently writing to the
-			// wrong backend.
-			providersJSON, chainErr := db.GetConfig("vault_providers")
-			if chainErr != nil {
-				db.Close()
-				log.Fatalf("read vault_providers from store: %v", chainErr)
+				log.Fatalf("read config from store: %v", cfgErr)
 			}
 			db.Close()
+
+			if cfg.VaultDir != "" {
+				vaultDir = cfg.VaultDir
+			}
 
 			// If a chain provider is configured, verify that the age backend
 			// is part of the chain. If age is not included, the CLI would
 			// write credentials that the proxy never reads.
-			if providersJSON != "" {
-				var providers []string
-				if err := json.Unmarshal([]byte(providersJSON), &providers); err != nil {
-					log.Fatalf("parse vault_providers config: %v", err)
-				}
+			if len(cfg.VaultProviders) > 0 {
 				hasAge := false
 				ageFirst := false
-				for i, p := range providers {
+				for i, p := range cfg.VaultProviders {
 					if p == "age" {
 						hasAge = true
 						if i == 0 {
@@ -109,17 +90,17 @@ func openVaultStore(dbPath string) *vault.Store {
 				if !hasAge {
 					log.Fatalf("vault_providers is configured as %v without the age backend. "+
 						"CLI credential management only supports the age backend. "+
-						"Manage credentials through the configured providers' native tools.", providers)
+						"Manage credentials through the configured providers' native tools.", cfg.VaultProviders)
 				}
 				if !ageFirst {
 					log.Printf("warning: vault_providers is %v. The age backend is not the "+
 						"primary provider. Credentials added via CLI may be shadowed by "+
-						"earlier providers in the chain.", providers)
+						"earlier providers in the chain.", cfg.VaultProviders)
 				}
-			} else if prov != "" && prov != "age" {
+			} else if cfg.VaultProvider != "" && cfg.VaultProvider != "age" {
 				// Single provider that is not age.
 				log.Fatalf("vault provider is %q; CLI credential management only supports the age backend. "+
-					"Manage credentials through the %s provider's native tools.", prov, prov)
+					"Manage credentials through the %s provider's native tools.", cfg.VaultProvider, cfg.VaultProvider)
 			}
 		}
 	}
@@ -235,16 +216,18 @@ func handleCredAdd(args []string) {
 	// what we wrote, avoiding clobber of concurrent writes.
 	if db != nil {
 		ruleID, bindingID, err := db.AddRuleAndBinding(
-			"allow", *destination, ports,
+			"allow",
 			store.RuleOpts{
-				Note:   fmt.Sprintf("auto-created for credential %q", name),
-				Source: credAddSourcePrefix + name,
+				Destination: *destination,
+				Ports:       ports,
+				Name:        fmt.Sprintf("auto-created for credential %q", name),
+				Source:      credAddSourcePrefix + name,
 			},
 			name,
 			store.BindingOpts{
-				Ports:        ports,
-				InjectHeader: *header,
-				Template:     *template,
+				Ports:    ports,
+				Header:   *header,
+				Template: *template,
 			},
 		)
 		if err != nil {
@@ -326,8 +309,8 @@ func handleCredList(args []string) {
 				ports = ":" + strings.Join(portStrs, ",")
 			}
 			hdr := ""
-			if b.InjectHeader != "" {
-				hdr = " header=" + b.InjectHeader
+			if b.Header != "" {
+				hdr = " header=" + b.Header
 			}
 			tmpl := ""
 			if b.Template != "" {

@@ -9,9 +9,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/nemirovsky/sluice/internal/audit"
+	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
-	tg "github.com/nemirovsky/sluice/internal/telegram"
 )
 
 // GatewayConfig holds configuration for the MCP gateway.
@@ -20,7 +20,7 @@ type GatewayConfig struct {
 	ToolPolicy *ToolPolicy
 	Inspector  *ContentInspector
 	Audit      *audit.FileLogger
-	Broker     *tg.ApprovalBroker
+	Broker     *channel.Broker
 	TimeoutSec int
 	Store      *store.Store
 }
@@ -34,7 +34,7 @@ type Gateway struct {
 	policy     *ToolPolicy
 	inspector  *ContentInspector
 	audit      *audit.FileLogger
-	broker     *tg.ApprovalBroker
+	broker     *channel.Broker
 	timeoutSec int
 	store      *store.Store
 }
@@ -163,16 +163,16 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 				IsError: true,
 			}, nil
 		}
-		if resp == tg.ResponseDeny {
+		if resp == channel.ResponseDeny {
 			gw.logAudit(req.Name, "tool_call", policy.Deny)
 			return &ToolResult{
 				Content: []ToolContent{{Type: "text", Text: "Denied by user"}},
 				IsError: true,
 			}, nil
 		}
-		if resp == tg.ResponseAlwaysAllow {
+		if resp == channel.ResponseAlwaysAllow {
 			if gw.store != nil {
-				if _, storeErr := gw.store.AddToolRule("allow", req.Name, "user approved always", "approval"); storeErr != nil {
+				if _, storeErr := gw.store.AddRule("allow", store.RuleOpts{Tool: req.Name, Name: "user approved always", Source: "approval"}); storeErr != nil {
 					log.Printf("[WARN] failed to persist tool allow rule for %s: %v", req.Name, storeErr)
 				}
 			}

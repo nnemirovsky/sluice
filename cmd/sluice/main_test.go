@@ -24,8 +24,9 @@ func TestReloadPolicyConcurrent(t *testing.T) {
 	defer db.Close()
 
 	// Seed with initial policy.
-	db.SetConfig("default_verdict", "deny")
-	db.AddRule("allow", "api.example.com", []int{443}, store.RuleOpts{})
+	dv := "deny"
+	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dv})
+	db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}})
 
 	eng, err := policy.LoadFromStore(db)
 	if err != nil {
@@ -51,9 +52,11 @@ func TestReloadPolicyConcurrent(t *testing.T) {
 			defer wg.Done()
 			// Alternate between adding/removing a rule to vary state.
 			if n%2 == 0 {
-				db.SetConfig("default_verdict", "deny")
+				vd := "deny"
+				db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &vd})
 			} else {
-				db.SetConfig("default_verdict", "allow")
+				va := "allow"
+				db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &va})
 			}
 			newEng, loadErr := policy.LoadFromStore(db)
 			if loadErr != nil {
@@ -89,8 +92,9 @@ func TestReloadPolicyValidation(t *testing.T) {
 	}
 	defer db.Close()
 
-	db.SetConfig("default_verdict", "deny")
-	db.AddRule("allow", "api.example.com", []int{443}, store.RuleOpts{})
+	dvVal := "deny"
+	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvVal})
+	db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}})
 
 	eng, err := policy.LoadFromStore(db)
 	if err != nil {
@@ -108,14 +112,15 @@ func TestReloadPolicyValidation(t *testing.T) {
 
 	// Set an invalid default verdict in the store. With typed config, the
 	// CHECK constraint rejects the invalid value at the DB level.
-	setErr := db.SetConfig("default_verdict", "invalid_verdict")
+	invalidVal := "invalid_verdict"
+	setErr := db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &invalidVal})
 	if setErr == nil {
 		t.Fatal("expected error setting invalid default verdict (CHECK constraint)")
 	}
 	// LoadFromStore should still succeed with the original valid config.
 	_, loadErr := policy.LoadFromStore(db)
 	if loadErr != nil {
-		t.Fatalf("unexpected error loading policy after rejected SetConfig: %v", loadErr)
+		t.Fatalf("unexpected error loading policy after rejected UpdateConfig: %v", loadErr)
 	}
 
 	// Engine should still be the original.
@@ -164,8 +169,9 @@ func TestEngineValidate(t *testing.T) {
 	}
 	defer db.Close()
 
-	db.SetConfig("default_verdict", "deny")
-	db.AddRule("allow", "example.com", nil, store.RuleOpts{})
+	dvEV := "deny"
+	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvEV})
+	db.AddRule("allow", store.RuleOpts{Destination: "example.com"})
 
 	eng, err := policy.LoadFromStore(db)
 	if err != nil {
@@ -191,7 +197,8 @@ func TestHealthzEndpoint(t *testing.T) {
 	}
 	defer db.Close()
 
-	db.SetConfig("default_verdict", "deny")
+	dvHealth := "deny"
+	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvHealth})
 
 	eng, err := policy.LoadFromStore(db)
 	if err != nil {
@@ -449,7 +456,8 @@ func TestSIGHUPRecompileFromStore(t *testing.T) {
 	defer db.Close()
 
 	// Initial state: deny everything.
-	db.SetConfig("default_verdict", "deny")
+	dvSIG := "deny"
+	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvSIG})
 
 	eng, err := policy.LoadFromStore(db)
 	if err != nil {
@@ -472,7 +480,7 @@ func TestSIGHUPRecompileFromStore(t *testing.T) {
 	}
 
 	// Add a rule to the store (as would happen via CLI or Telegram).
-	db.AddRule("allow", "api.example.com", []int{443}, store.RuleOpts{Source: "manual"})
+	db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}, Source: "manual"})
 
 	// Simulate SIGHUP reload: recompile from store and swap.
 	srv.ReloadMu().Lock()
@@ -513,9 +521,14 @@ func TestReadVaultConfig(t *testing.T) {
 	}
 
 	// Set some vault config.
-	db.SetConfig("vault_provider", "hashicorp")
-	db.SetConfig("vault_hashicorp_addr", "https://vault.example.com:8200")
-	db.SetConfig("vault_hashicorp_mount", "secret")
+	vprov := "hashicorp"
+	vaddr := "https://vault.example.com:8200"
+	vmount := "secret"
+	db.UpdateConfig(store.ConfigUpdate{
+		VaultProvider:      &vprov,
+		VaultHashicorpAddr: &vaddr,
+		VaultHashicorpMount: &vmount,
+	})
 
 	cfg, err = readVaultConfig(db)
 	if err != nil {
@@ -552,13 +565,13 @@ func TestReadBindings(t *testing.T) {
 
 	// Add bindings.
 	db.AddBinding("api.example.com", "my_key", store.BindingOpts{
-		Ports:        []int{443},
-		InjectHeader: "Authorization",
-		Template:     "Bearer {value}",
+		Ports:    []int{443},
+		Header:   "Authorization",
+		Template: "Bearer {value}",
 	})
 	db.AddBinding("github.com", "gh_key", store.BindingOpts{
-		Ports:    []int{22},
-		Protocol: "ssh",
+		Ports:     []int{22},
+		Protocols: []string{"ssh"},
 	})
 
 	bindings, err = readBindings(db)
@@ -597,7 +610,7 @@ func TestStoreIsEmpty(t *testing.T) {
 
 	// Config changes don't affect emptiness (typed singleton always exists).
 	// Adding a rule makes it non-empty.
-	db.AddRule("allow", "example.com", nil, store.RuleOpts{})
+	db.AddRule("allow", store.RuleOpts{Destination: "example.com"})
 
 	empty, err = db.IsEmpty()
 	if err != nil {

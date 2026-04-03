@@ -306,19 +306,19 @@ Move the ApprovalBroker logic and Bot into a Telegram-specific Channel implement
 - Modify: `internal/telegram/bot_test.go`
 - Modify: `internal/telegram/commands_test.go`
 
-- [ ] Create `TelegramChannel` struct implementing `channel.Channel` (wraps Bot + Telegram API interactions)
-- [ ] Implement non-blocking `RequestApproval`: send inline keyboard to Telegram (was sync in old broker, now async)
-- [ ] Implement `CancelApproval`: edit Telegram message to show "resolved via another channel"
-- [ ] Implement `Commands() <-chan channel.Command`: forward Telegram /commands as `channel.Command` values
-- [ ] Move `Response` enum (AllowOnce, Deny, AlwaysAllow) to `internal/channel/` package, update all references
-- [ ] Move `ApprovalRequest` type to `internal/channel/` package, update all references
-- [ ] Remove `ApprovalBroker` from `internal/telegram/` (logic moved to `channel.Broker` in Task 4)
-- [ ] Add `Type() channel.ChannelType` returning `channel.ChannelTelegram`
-- [ ] Update all callers in `internal/proxy/server.go`, `internal/mcp/gateway.go`, `cmd/sluice/main.go` to use `*channel.Broker` instead of `*telegram.ApprovalBroker`
-- [ ] main.go: read all enabled channels from store, instantiate each, pass slice to `channel.NewBroker(channels, opts...)`
-- [ ] Update tests to use channel.Broker and channel.Channel interface types
-- [ ] Run tests: `go test ./internal/telegram/ -v -timeout 30s`
-- [ ] Run tests: `go test ./... -v -timeout 30s`
+- [x] Create `TelegramChannel` struct implementing `channel.Channel` (wraps Bot + Telegram API interactions)
+- [x] Implement non-blocking `RequestApproval`: send inline keyboard to Telegram (was sync in old broker, now async)
+- [x] Implement `CancelApproval`: edit Telegram message to show "resolved via another channel"
+- [x] Implement `Commands() <-chan channel.Command`: forward Telegram /commands as `channel.Command` values
+- [x] Move `Response` enum (AllowOnce, Deny, AlwaysAllow) to `internal/channel/` package, update all references
+- [x] Move `ApprovalRequest` type to `internal/channel/` package, update all references
+- [x] Remove `ApprovalBroker` from `internal/telegram/` (logic moved to `channel.Broker` in Task 4)
+- [x] Add `Type() channel.ChannelType` returning `channel.ChannelTelegram`
+- [x] Update all callers in `internal/proxy/server.go`, `internal/mcp/gateway.go`, `cmd/sluice/main.go` to use `*channel.Broker` instead of `*telegram.ApprovalBroker`
+- [x] main.go: read all enabled channels from store, instantiate each, pass slice to `channel.NewBroker(channels, opts...)`
+- [x] Update tests to use channel.Broker and channel.Channel interface types
+- [x] Run tests: `go test ./internal/telegram/ -v -timeout 30s`
+- [x] Run tests: `go test ./... -v -timeout 30s`
 
 ### Task 6: Rewrite TOML import for unified schema
 

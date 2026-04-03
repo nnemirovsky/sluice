@@ -2,7 +2,6 @@ package policy
 
 import (
 	"fmt"
-	"strconv"
 
 	"github.com/nemirovsky/sluice/internal/store"
 )
@@ -11,49 +10,31 @@ import (
 // tool rules, inspect rules, and config values are all read from the database.
 // The returned Engine is compiled and ready for evaluation.
 func LoadFromStore(s *store.Store) (*Engine, error) {
-	// Read default verdict.
+	cfg, err := s.GetConfig()
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+
 	defaultVerdict := Deny
-	if dv, err := s.GetConfig("default_verdict"); err != nil {
-		return nil, fmt.Errorf("read default_verdict: %w", err)
-	} else if dv != "" {
-		switch dv {
-		case "allow":
-			defaultVerdict = Allow
-		case "deny":
-			defaultVerdict = Deny
-		case "ask":
-			defaultVerdict = Ask
-		default:
-			return nil, fmt.Errorf("unknown default verdict: %q", dv)
-		}
+	switch cfg.DefaultVerdict {
+	case "allow":
+		defaultVerdict = Allow
+	case "deny":
+		defaultVerdict = Deny
+	case "ask":
+		defaultVerdict = Ask
+	case "":
+		// Use default (Deny)
+	default:
+		return nil, fmt.Errorf("unknown default verdict: %q", cfg.DefaultVerdict)
 	}
 
-	// Read timeout.
-	timeout := 120
-	if ts, err := s.GetConfig("timeout_sec"); err != nil {
-		return nil, fmt.Errorf("read timeout_sec: %w", err)
-	} else if ts != "" {
-		if v, err := strconv.Atoi(ts); err != nil {
-			return nil, fmt.Errorf("invalid timeout_sec %q: %w", ts, err)
-		} else {
-			timeout = v
-		}
+	timeout := cfg.TimeoutSec
+	if timeout == 0 {
+		timeout = 120
 	}
 
-	// Read Telegram config.
-	var telegram TelegramConfig
-	if v, err := s.GetConfig("telegram_bot_token_env"); err != nil {
-		return nil, fmt.Errorf("read telegram_bot_token_env: %w", err)
-	} else {
-		telegram.BotTokenEnv = v
-	}
-	if v, err := s.GetConfig("telegram_chat_id_env"); err != nil {
-		return nil, fmt.Errorf("read telegram_chat_id_env: %w", err)
-	} else {
-		telegram.ChatIDEnv = v
-	}
-
-	// Read network rules.
+	// Read network rules (destination set).
 	allowRules, err := loadNetworkRules(s, "allow")
 	if err != nil {
 		return nil, err
@@ -67,26 +48,28 @@ func LoadFromStore(s *store.Store) (*Engine, error) {
 		return nil, err
 	}
 
-	// Read tool rules.
-	toolAllow, err := loadToolRules(s, "allow")
+	// Read tool rules (tool set).
+	toolAllow, err := loadToolRulesFromStore(s, "allow")
 	if err != nil {
 		return nil, err
 	}
-	toolDeny, err := loadToolRules(s, "deny")
+	toolDeny, err := loadToolRulesFromStore(s, "deny")
 	if err != nil {
 		return nil, err
 	}
-	toolAsk, err := loadToolRules(s, "ask")
+	toolAsk, err := loadToolRulesFromStore(s, "ask")
 	if err != nil {
 		return nil, err
 	}
 
-	// Read inspect rules.
-	blockRules, err := loadInspectBlockRules(s)
+	// Read inspect block rules (pattern set, verdict=deny).
+	blockRules, err := loadInspectBlockFromStore(s)
 	if err != nil {
 		return nil, err
 	}
-	redactRules, err := loadInspectRedactRules(s)
+
+	// Read inspect redact rules (pattern set, verdict=redact).
+	redactRules, err := loadInspectRedactFromStore(s)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +85,6 @@ func LoadFromStore(s *store.Store) (*Engine, error) {
 		InspectBlockRules:  blockRules,
 		InspectRedactRules: redactRules,
 		TimeoutSec:         timeout,
-		Telegram:           telegram,
 	}
 	if err := eng.compile(); err != nil {
 		return nil, fmt.Errorf("compile policy rules: %w", err)
@@ -111,7 +93,7 @@ func LoadFromStore(s *store.Store) (*Engine, error) {
 }
 
 func loadNetworkRules(s *store.Store, verdict string) ([]Rule, error) {
-	rows, err := s.ListRules(verdict)
+	rows, err := s.ListRules(store.RuleFilter{Verdict: verdict, Type: "network"})
 	if err != nil {
 		return nil, fmt.Errorf("list %s rules: %w", verdict, err)
 	}
@@ -125,8 +107,8 @@ func loadNetworkRules(s *store.Store, verdict string) ([]Rule, error) {
 	return rules, nil
 }
 
-func loadToolRules(s *store.Store, verdict string) ([]ToolRule, error) {
-	rows, err := s.ListToolRules(verdict)
+func loadToolRulesFromStore(s *store.Store, verdict string) ([]ToolRule, error) {
+	rows, err := s.ListRules(store.RuleFilter{Verdict: verdict, Type: "tool"})
 	if err != nil {
 		return nil, fmt.Errorf("list tool_%s rules: %w", verdict, err)
 	}
@@ -134,15 +116,15 @@ func loadToolRules(s *store.Store, verdict string) ([]ToolRule, error) {
 	for i, r := range rows {
 		rules[i] = ToolRule{
 			Tool:    r.Tool,
-			Verdict: r.Verdict,
-			Note:    r.Note,
+			Verdict: verdict,
+			Note:    r.Name,
 		}
 	}
 	return rules, nil
 }
 
-func loadInspectBlockRules(s *store.Store) ([]InspectBlockRule, error) {
-	rows, err := s.ListInspectRules("block")
+func loadInspectBlockFromStore(s *store.Store) ([]InspectBlockRule, error) {
+	rows, err := s.ListRules(store.RuleFilter{Verdict: "deny", Type: "pattern"})
 	if err != nil {
 		return nil, fmt.Errorf("list inspect_block rules: %w", err)
 	}
@@ -150,14 +132,14 @@ func loadInspectBlockRules(s *store.Store) ([]InspectBlockRule, error) {
 	for i, r := range rows {
 		rules[i] = InspectBlockRule{
 			Pattern: r.Pattern,
-			Name:    r.Description,
+			Name:    r.Name,
 		}
 	}
 	return rules, nil
 }
 
-func loadInspectRedactRules(s *store.Store) ([]InspectRedactRule, error) {
-	rows, err := s.ListInspectRules("redact")
+func loadInspectRedactFromStore(s *store.Store) ([]InspectRedactRule, error) {
+	rows, err := s.ListRules(store.RuleFilter{Verdict: "redact", Type: "pattern"})
 	if err != nil {
 		return nil, fmt.Errorf("list inspect_redact rules: %w", err)
 	}
@@ -166,7 +148,7 @@ func loadInspectRedactRules(s *store.Store) ([]InspectRedactRule, error) {
 		rules[i] = InspectRedactRule{
 			Pattern:     r.Pattern,
 			Replacement: r.Replacement,
-			Name:        r.Description,
+			Name:        r.Name,
 		}
 	}
 	return rules, nil

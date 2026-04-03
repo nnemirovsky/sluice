@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/nemirovsky/sluice/internal/audit"
+	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/docker"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
@@ -61,18 +61,6 @@ func main() {
 	phantomDir := flag.String("phantom-dir", "", "shared volume path for phantom token files (enables hot-reload)")
 	flag.Parse()
 
-	// Track which flags were explicitly set on the command line so we can
-	// distinguish "user passed --telegram-token X" from "flag has the
-	// default value read from TELEGRAM_BOT_TOKEN env".
-	explicitFlags := make(map[string]bool)
-	flag.Visit(func(f *flag.Flag) {
-		explicitFlags[f.Name] = true
-	})
-	// Whether explicit flags were provided for Telegram settings.
-	// Captured once so the SIGHUP handler can detect config drift.
-	telegramTokenExplicit := explicitFlags["telegram-token"]
-	telegramChatIDExplicit := explicitFlags["telegram-chat-id"]
-
 	// Open the SQLite store.
 	db, err := store.New(*dbPath)
 	if err != nil {
@@ -114,14 +102,17 @@ func main() {
 	log.Printf("loaded policy: %d allow, %d deny, %d ask rules (default: %s)",
 		len(eng.AllowRules), len(eng.DenyRules), len(eng.AskRules), eng.Default)
 
-	// If the store specifies custom env var names for the Telegram bot,
-	// use those instead of the hardcoded defaults (but only when the flag was
-	// not explicitly provided on the command line).
-	if eng.Telegram.BotTokenEnv != "" && !explicitFlags["telegram-token"] {
-		*telegramToken = os.Getenv(eng.Telegram.BotTokenEnv)
+	// Read Telegram env vars directly (hardcoded env var names).
+	// CLI flags take precedence over env vars via flag defaults.
+	if eng.Telegram.BotTokenEnv != "" {
+		if envVal := os.Getenv(eng.Telegram.BotTokenEnv); envVal != "" && *telegramToken == "" {
+			*telegramToken = envVal
+		}
 	}
-	if eng.Telegram.ChatIDEnv != "" && !explicitFlags["telegram-chat-id"] {
-		*telegramChatIDStr = os.Getenv(eng.Telegram.ChatIDEnv)
+	if eng.Telegram.ChatIDEnv != "" {
+		if envVal := os.Getenv(eng.Telegram.ChatIDEnv); envVal != "" && *telegramChatIDStr == "" {
+			*telegramChatIDStr = envVal
+		}
 	}
 
 	logger, err := audit.NewFileLogger(*auditPath)
@@ -130,9 +121,10 @@ func main() {
 	}
 	defer logger.Close()
 
-	// Parse Telegram chat ID early so we can pass the broker to the proxy.
-	var broker *telegram.ApprovalBroker
+	// Parse Telegram chat ID early so we can set up the channel.
+	var broker *channel.Broker
 	var telegramChatID int64
+	var tgChannel *telegram.TelegramChannel
 	telegramEnabled := false
 
 	if *telegramToken != "" && *telegramChatIDStr != "" {
@@ -144,7 +136,6 @@ func main() {
 		if telegramChatID == 0 {
 			log.Printf("telegram chat ID is zero, telegram disabled (ask rules will auto-deny)")
 		} else {
-			broker = telegram.NewApprovalBroker()
 			telegramEnabled = true
 		}
 	} else {
@@ -163,9 +154,7 @@ func main() {
 
 	// Create the vault provider so injection handlers exist even when the
 	// DB starts with zero bindings. Bindings added later via CLI or
-	// Telegram + SIGHUP will work without a full restart. When no bindings
-	// exist and the provider cannot be created (e.g. read-only filesystem),
-	// fall back to policy-only mode so pure network governance still works.
+	// Telegram + SIGHUP will work without a full restart.
 	provider, err := vault.NewProviderFromConfig(vaultCfg)
 	if err != nil {
 		if len(bindings) > 0 {
@@ -187,24 +176,6 @@ func main() {
 		log.Printf("vault provider ready (%s), no bindings yet", provider.Name())
 	} else {
 		log.Printf("no bindings and no vault provider; credential injection disabled")
-	}
-
-	// Create the proxy first so the bot can share its engine pointer and
-	// reload mutex. This eliminates split-brain windows during SIGHUP
-	// reloads: both components see engine swaps and policy mutations
-	// through the same atomic pointer, serialized by the same mutex.
-	srv, err := proxy.New(proxy.Config{
-		ListenAddr: *listenAddr,
-		Policy:     eng,
-		Audit:      logger,
-		Broker:     broker,
-		Provider:   provider,
-		Resolver:   bindingResolver,
-		VaultDir:   vaultCfg.Dir,
-		Store:      db,
-	})
-	if err != nil {
-		log.Fatalf("start proxy: %v", err)
 	}
 
 	// Extract the vault.Store from the provider (if age backend) so
@@ -231,17 +202,26 @@ func main() {
 		}
 	}
 
-	// Start health check HTTP server on :3000 (or --health-addr).
-	healthLn, healthSrv := startHealthServer(*healthAddr, srv)
-	if healthLn != nil {
-		defer healthSrv.Close()
-		log.Printf("health check server listening on %s", healthLn.Addr())
+	// Create the proxy first so the bot can share its engine pointer and
+	// reload mutex.
+	srv, err := proxy.New(proxy.Config{
+		ListenAddr: *listenAddr,
+		Policy:     eng,
+		Audit:      logger,
+		Broker:     broker, // nil until channel setup below
+		Provider:   provider,
+		Resolver:   bindingResolver,
+		VaultDir:   vaultCfg.Dir,
+		Store:      db,
+	})
+	if err != nil {
+		log.Fatalf("start proxy: %v", err)
 	}
 
-	var bot *telegram.Bot
+	// Set up the Telegram channel and channel.Broker.
 	if telegramEnabled {
-		var botErr error
-		bot, botErr = telegram.NewBot(telegram.BotConfig{
+		var channelErr error
+		tgChannel, channelErr = telegram.NewTelegramChannel(telegram.ChannelConfig{
 			Token:       *telegramToken,
 			ChatID:      telegramChatID,
 			EnginePtr:   srv.EnginePtr(),
@@ -252,13 +232,29 @@ func main() {
 			DockerMgr:   dockerMgr,
 			Store:       db,
 			PhantomDir:  *phantomDir,
-		}, broker)
-		if botErr != nil {
-			log.Fatalf("telegram bot: %v", botErr)
+		})
+		if channelErr != nil {
+			log.Fatalf("telegram channel: %v", channelErr)
 		}
-		go bot.Run()
-		defer bot.Stop()
-		log.Printf("telegram approval bot started")
+
+		broker = channel.NewBroker([]channel.Channel{tgChannel})
+		tgChannel.SetBroker(broker)
+
+		// Update the proxy's broker reference now that it's created.
+		srv.SetBroker(broker)
+
+		if err := tgChannel.Start(); err != nil {
+			log.Fatalf("start telegram channel: %v", err)
+		}
+		defer tgChannel.Stop()
+		log.Printf("telegram approval channel started")
+	}
+
+	// Start health check HTTP server on :3000 (or --health-addr).
+	healthLn, healthSrv := startHealthServer(*healthAddr, srv)
+	if healthLn != nil {
+		defer healthSrv.Close()
+		log.Printf("health check server listening on %s", healthLn.Addr())
 	}
 
 	log.Printf("sluice SOCKS5 proxy listening on %s", srv.Addr())
@@ -268,9 +264,6 @@ func main() {
 
 	sighupCh := make(chan os.Signal, 1)
 	signal.Notify(sighupCh, syscall.SIGHUP)
-
-	// Save the startup Telegram config so the SIGHUP handler can detect drift.
-	startupTelegram := eng.Telegram
 
 	go func() {
 		for range sighupCh {
@@ -295,8 +288,6 @@ func main() {
 
 			log.Printf("reloaded policy: %d allow, %d deny, %d ask rules (default: %s)",
 				len(newEng.AllowRules), len(newEng.DenyRules), len(newEng.AskRules), newEng.Default)
-			// StoreEngine swaps the engine pointer without acquiring
-			// reloadMu (we already hold it for the entire reload).
 			srv.StoreEngine(newEng)
 
 			// Rebuild binding resolver so credential injection picks up
@@ -316,37 +307,13 @@ func main() {
 				srv.StoreResolver(nil)
 			}
 
-			// Warn if the reloaded policy's Telegram config changed.
-			// The Telegram runtime (broker, bot, chat ID) is wired once
-			// at startup and cannot be hot-reloaded. Env var names or
-			// enable/disable changes require a full restart.
-			if newEng.Telegram != startupTelegram {
-				log.Printf("WARNING: telegram config changed in store but Telegram runtime is not hot-reloadable; restart required")
-			}
-
 			// Warn if the reloaded policy has ask rules but no approval
-			// broker is running. This can happen when Telegram was not
-			// configured at startup and ask rules were added later.
+			// broker is running.
 			if broker == nil && (len(newEng.AskRules) > 0 || newEng.Default == policy.Ask) {
-				log.Printf("WARNING: policy has ask rules but no Telegram approval broker is running; ask verdicts will auto-deny")
+				log.Printf("WARNING: policy has ask rules but no approval broker is running; ask verdicts will auto-deny")
 			}
 
-			// Warn if env var names changed and CLI flags were not used.
-			// The operator may expect the new env var names to take effect.
-			if newEng.Telegram.BotTokenEnv != startupTelegram.BotTokenEnv && !telegramTokenExplicit {
-				log.Printf("WARNING: bot_token_env changed from %q to %q but env vars are only read at startup; restart required",
-					startupTelegram.BotTokenEnv, newEng.Telegram.BotTokenEnv)
-			}
-			if newEng.Telegram.ChatIDEnv != startupTelegram.ChatIDEnv && !telegramChatIDExplicit {
-				log.Printf("WARNING: chat_id_env changed from %q to %q but env vars are only read at startup; restart required",
-					startupTelegram.ChatIDEnv, newEng.Telegram.ChatIDEnv)
-			}
-
-			// Drain duplicate SIGHUPs that queued during reload to
-			// avoid redundant reload cycles. Done before Unlock so
-			// only signals queued while the lock was held are drained.
 			drainSignals(sighupCh)
-
 			srv.ReloadMu().Unlock()
 		}
 	}()
@@ -359,7 +326,7 @@ func main() {
 	select {
 	case <-sigCh:
 		log.Println("shutting down...")
-		// Cancel pending Telegram approval requests so proxy goroutines
+		// Cancel pending approval requests so proxy goroutines
 		// blocked on approval can complete and connections can drain.
 		if broker != nil {
 			broker.CancelAll()
@@ -375,62 +342,37 @@ func main() {
 
 // readVaultConfig reconstructs a vault.VaultConfig from the store's config table.
 func readVaultConfig(db *store.Store) (vault.VaultConfig, error) {
-	cfg := vault.VaultConfig{}
-
-	provider, err := db.GetConfig("vault_provider")
+	cfg, err := db.GetConfig()
 	if err != nil {
-		return cfg, err
+		return vault.VaultConfig{}, err
 	}
-	cfg.Provider = provider
 
-	dir, err := db.GetConfig("vault_dir")
-	if err != nil {
-		return cfg, err
+	vc := vault.VaultConfig{
+		Provider: cfg.VaultProvider,
+		Dir:      cfg.VaultDir,
 	}
-	cfg.Dir = dir
 
 	// If no dir in config, use default.
-	if cfg.Dir == "" {
+	if vc.Dir == "" {
 		home, err := os.UserHomeDir()
 		if err == nil {
-			cfg.Dir = filepath.Join(home, ".sluice")
+			vc.Dir = filepath.Join(home, ".sluice")
 		}
 	}
 
-	providersJSON, err := db.GetConfig("vault_providers")
-	if err != nil {
-		return cfg, err
-	}
-	if providersJSON != "" {
-		if err := json.Unmarshal([]byte(providersJSON), &cfg.Providers); err != nil {
-			return cfg, fmt.Errorf("unmarshal vault_providers: %w", err)
-		}
-	}
+	vc.Providers = cfg.VaultProviders
 
-	// HashiCorp config.
-	hcKeys := []struct {
-		key  string
-		dest *string
-	}{
-		{"vault_hashicorp_addr", &cfg.HashiCorp.Addr},
-		{"vault_hashicorp_mount", &cfg.HashiCorp.Mount},
-		{"vault_hashicorp_prefix", &cfg.HashiCorp.Prefix},
-		{"vault_hashicorp_auth", &cfg.HashiCorp.Auth},
-		{"vault_hashicorp_token", &cfg.HashiCorp.Token},
-		{"vault_hashicorp_role_id", &cfg.HashiCorp.RoleID},
-		{"vault_hashicorp_secret_id", &cfg.HashiCorp.SecretID},
-		{"vault_hashicorp_role_id_env", &cfg.HashiCorp.RoleIDEnv},
-		{"vault_hashicorp_secret_id_env", &cfg.HashiCorp.SecretIDEnv},
-	}
-	for _, kv := range hcKeys {
-		v, err := db.GetConfig(kv.key)
-		if err != nil {
-			return cfg, err
-		}
-		*kv.dest = v
-	}
+	vc.HashiCorp.Addr = cfg.VaultHashicorpAddr
+	vc.HashiCorp.Mount = cfg.VaultHashicorpMount
+	vc.HashiCorp.Prefix = cfg.VaultHashicorpPrefix
+	vc.HashiCorp.Auth = cfg.VaultHashicorpAuth
+	vc.HashiCorp.Token = cfg.VaultHashicorpToken
+	vc.HashiCorp.RoleID = cfg.VaultHashicorpRoleID
+	vc.HashiCorp.SecretID = cfg.VaultHashicorpSecretID
+	vc.HashiCorp.RoleIDEnv = cfg.VaultHashicorpRoleIDEnv
+	vc.HashiCorp.SecretIDEnv = cfg.VaultHashicorpSecretIDEnv
 
-	return cfg, nil
+	return vc, nil
 }
 
 // readBindings reads credential bindings from the store and converts them
@@ -446,9 +388,11 @@ func readBindings(db *store.Store) ([]vault.Binding, error) {
 			Destination:  r.Destination,
 			Ports:        r.Ports,
 			Credential:   r.Credential,
-			InjectHeader: r.InjectHeader,
+			InjectHeader: r.Header,
 			Template:     r.Template,
-			Protocol:     r.Protocol,
+		}
+		if len(r.Protocols) > 0 {
+			bindings[i].Protocol = r.Protocols[0]
 		}
 	}
 	return bindings, nil
@@ -486,10 +430,6 @@ func resolveDockerSocket(explicit string) (string, error) {
 	if raw == "" {
 		return "/var/run/docker.sock", nil
 	}
-	// Reject non-unix schemes. Docker supports tcp://, ssh://, etc. but
-	// Sluice only supports local unix sockets for security. The Docker
-	// socket gives full container control so it must not traverse the
-	// network.
 	if strings.Contains(raw, "://") {
 		scheme := strings.SplitN(raw, "://", 2)[0]
 		if scheme != "unix" {
@@ -501,8 +441,6 @@ func resolveDockerSocket(explicit string) (string, error) {
 }
 
 // startHealthServer starts a minimal HTTP server serving /healthz.
-// Returns the listener and server for deferred cleanup, or nil if the
-// address is empty or the listener fails.
 func startHealthServer(addr string, srv *proxy.Server) (net.Listener, *http.Server) {
 	if addr == "" {
 		return nil, nil

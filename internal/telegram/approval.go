@@ -1,329 +1,339 @@
 // Package telegram provides Telegram bot integration for human approval of
-// agent actions. It supports inline keyboard approval UX, admin commands for
-// policy and credential management, and rate limiting of approval requests.
+// agent actions. TelegramChannel implements the channel.Channel interface,
+// providing inline keyboard approval UX, admin commands for policy and
+// credential management, and one-way notifications.
 package telegram
 
 import (
+	"context"
 	"fmt"
+	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
+	"github.com/nemirovsky/sluice/internal/channel"
+	"github.com/nemirovsky/sluice/internal/docker"
+	"github.com/nemirovsky/sluice/internal/policy"
+	"github.com/nemirovsky/sluice/internal/store"
+	"github.com/nemirovsky/sluice/internal/vault"
 )
 
-// ErrPendingLimitExceeded is returned when the broker's pending request
-// limit is reached.
-var ErrPendingLimitExceeded = fmt.Errorf("approval pending limit exceeded")
-
-// ErrDestinationRateLimited is returned when a destination exceeds its
-// per-minute request allowance.
-var ErrDestinationRateLimited = fmt.Errorf("destination rate limited")
-
-// Response represents a human operator's decision on an approval request.
-type Response int
-
-const (
-	// ResponseAllowOnce permits the connection for this request only.
-	ResponseAllowOnce Response = iota
-	// ResponseAlwaysAllow permits the connection and adds a dynamic allow rule.
-	ResponseAlwaysAllow
-	// ResponseDeny rejects the connection request.
-	ResponseDeny
-)
-
-func (r Response) String() string {
-	switch r {
-	case ResponseAllowOnce:
-		return "allow_once"
-	case ResponseAlwaysAllow:
-		return "always_allow"
-	case ResponseDeny:
-		return "deny"
-	default:
-		return "unknown"
-	}
+// ChannelConfig holds configuration for creating a TelegramChannel.
+type ChannelConfig struct {
+	Token       string
+	ChatID      int64
+	EnginePtr   *atomic.Pointer[policy.Engine]
+	ResolverPtr *atomic.Pointer[vault.BindingResolver]
+	ReloadMu    *sync.Mutex
+	AuditPath   string
+	Vault       *vault.Store
+	DockerMgr   *docker.Manager
+	Store       *store.Store
+	PhantomDir  string
 }
 
-// ApprovalRequest represents a pending connection that requires human approval.
-type ApprovalRequest struct {
-	ID          string
-	Destination string
-	Port        int
-	CreatedAt   time.Time
+// TelegramChannel implements channel.Channel for Telegram bot interaction.
+// It sends approval requests as inline keyboard messages, processes callback
+// responses, and handles admin commands.
+type TelegramChannel struct {
+	api      *tgbotapi.BotAPI
+	chatID   int64
+	broker   *channel.Broker
+	commands *CommandHandler
+	msgMap   sync.Map // request ID -> int (Telegram message ID)
+	cmdCh    chan channel.Command
+	done     chan struct{}
+	stopOnce sync.Once
 }
 
-// timedOutTTL is how long timed-out request IDs are retained for bot-side
-// cleanup. After this duration, unclaimed entries are garbage collected
-// during the next timeout to prevent unbounded map growth when operators
-// never tap expired buttons.
-const timedOutTTL = 10 * time.Minute
+// NewTelegramChannel creates a TelegramChannel. Call SetBroker after creating
+// the channel.Broker, then call Start to begin processing Telegram updates.
+func NewTelegramChannel(cfg ChannelConfig) (*TelegramChannel, error) {
+	api, err := tgbotapi.NewBotAPI(cfg.Token)
+	if err != nil {
+		// Do not wrap the original error: the telegram-bot-api library
+		// includes the full request URL (which contains the bot token) in
+		// HTTP errors, so propagating it would leak the token in logs.
+		return nil, fmt.Errorf("telegram bot init failed (check token and network connectivity)")
+	}
+	log.Printf("telegram bot authorized as @%s", api.Self.UserName)
 
-// ApprovalBroker mediates between the proxy (which needs approval for
-// connections) and the Telegram bot (which presents inline keyboards to the
-// operator). It enforces MaxPendingRequests and per-destination rate limits
-// to prevent approval queue flooding.
-type ApprovalBroker struct {
-	mu       sync.Mutex
-	pending  chan ApprovalRequest
-	waiters  map[string]chan Response
-	timedOut map[string]time.Time
-	nextID   atomic.Int64
+	tc := &TelegramChannel{
+		api:    api,
+		chatID: cfg.ChatID,
+		cmdCh:  make(chan channel.Command, 100),
+		done:   make(chan struct{}),
+	}
 
-	// closed is set to true by CancelAll under the mutex, before the done
-	// channel is closed. Request checks this flag under the same mutex to
-	// prevent registering new waiters after CancelAll has copied and reset
-	// the waiters map. Without this flag, a Request arriving between the
-	// mutex release and close(done) could register a waiter that CancelAll
-	// never sees, leaving it to block until timeout.
-	closed bool
+	cmdHandler := NewCommandHandler(cfg.EnginePtr, cfg.ReloadMu, cfg.AuditPath)
+	if cfg.Store != nil {
+		cmdHandler.SetStore(cfg.Store)
+	}
+	if cfg.Vault != nil {
+		cmdHandler.SetVault(cfg.Vault)
+	}
+	if cfg.DockerMgr != nil {
+		cmdHandler.SetDockerManager(cfg.DockerMgr)
+	}
+	if cfg.PhantomDir != "" {
+		cmdHandler.SetPhantomDir(cfg.PhantomDir)
+	}
+	if cfg.ResolverPtr != nil {
+		cmdHandler.SetResolverPtr(cfg.ResolverPtr)
+	}
 
-	// done is closed by CancelAll to unblock goroutines waiting to enqueue
-	// on the pending channel during graceful shutdown.
-	done chan struct{}
-
-	// MaxPendingRequests is the maximum number of concurrent approval
-	// requests awaiting a response. When exceeded, new requests are
-	// auto-denied. Zero means no limit.
-	MaxPendingRequests int
-
-	// destRateMax is the maximum number of approval requests allowed per
-	// destination within destRateWindow. Zero means no per-destination limit.
-	destRateMax    int
-	destRateWindow time.Duration
-	destTimestamps map[string][]time.Time
-
-	// nowFunc is used for testing to control time. If nil, time.Now is used.
-	nowFunc func() time.Time
+	tc.commands = cmdHandler
+	return tc, nil
 }
 
-// BrokerOption configures an ApprovalBroker.
-type BrokerOption func(*ApprovalBroker)
-
-// WithMaxPending sets the maximum number of pending approval requests.
-func WithMaxPending(n int) BrokerOption {
-	return func(b *ApprovalBroker) {
-		b.MaxPendingRequests = n
-	}
+// SetBroker sets the broker reference for resolving approval requests.
+// Must be called after channel.NewBroker creates the broker with this channel.
+func (tc *TelegramChannel) SetBroker(b *channel.Broker) {
+	tc.broker = b
+	tc.commands.SetBroker(b)
 }
 
-// WithDestinationRateLimit sets the per-destination rate limit.
-func WithDestinationRateLimit(max int, window time.Duration) BrokerOption {
-	return func(b *ApprovalBroker) {
-		b.destRateMax = max
-		b.destRateWindow = window
-	}
+// RequestApproval sends an approval prompt to Telegram (non-blocking).
+// The message includes inline keyboard buttons for Allow Once, Always Allow,
+// and Deny. The broker is notified via Resolve when the operator responds.
+func (tc *TelegramChannel) RequestApproval(_ context.Context, req channel.ApprovalRequest) error {
+	go tc.sendApprovalMessage(req)
+	return nil
 }
 
-func NewApprovalBroker(opts ...BrokerOption) *ApprovalBroker {
-	b := &ApprovalBroker{
-		pending:            make(chan ApprovalRequest, 100),
-		waiters:            make(map[string]chan Response),
-		timedOut:           make(map[string]time.Time),
-		done:               make(chan struct{}),
-		MaxPendingRequests: 50,
-		destRateMax:        5,
-		destRateWindow:     time.Minute,
-		destTimestamps:     make(map[string][]time.Time),
-	}
-	for _, opt := range opts {
-		opt(b)
-	}
-	return b
-}
-
-func (b *ApprovalBroker) now() time.Time {
-	if b.nowFunc != nil {
-		return b.nowFunc()
-	}
-	return time.Now()
-}
-
-func (b *ApprovalBroker) Pending() <-chan ApprovalRequest {
-	return b.pending
-}
-
-func (b *ApprovalBroker) Request(dest string, port int, timeout time.Duration) (Response, error) {
-	id := fmt.Sprintf("req_%d", b.nextID.Add(1))
-	ch := make(chan Response, 1)
-
-	b.mu.Lock()
-	// Reject new requests after CancelAll has been called. This prevents
-	// registering a waiter that CancelAll will never see or deny.
-	if b.closed {
-		b.mu.Unlock()
-		return ResponseDeny, fmt.Errorf("approval broker shutting down")
-	}
-	// Check pending limit.
-	if b.MaxPendingRequests > 0 && len(b.waiters) >= b.MaxPendingRequests {
-		b.mu.Unlock()
-		return ResponseDeny, ErrPendingLimitExceeded
-	}
-	// Check per-destination rate limit.
-	if b.destRateMax > 0 && b.destRateWindow > 0 {
-		now := b.now()
-		cutoff := now.Add(-b.destRateWindow)
-		timestamps := b.destTimestamps[dest]
-		// Trim timestamps outside the window.
-		start := 0
-		for start < len(timestamps) && timestamps[start].Before(cutoff) {
-			start++
-		}
-		timestamps = timestamps[start:]
-		if len(timestamps) >= b.destRateMax {
-			b.destTimestamps[dest] = timestamps
-			b.mu.Unlock()
-			return ResponseDeny, ErrDestinationRateLimited
-		}
-		b.destTimestamps[dest] = append(timestamps, now)
-		// Lazy cleanup: prune stale destination entries to prevent
-		// unbounded map growth from destinations that stop sending requests.
-		if len(b.destTimestamps) > 100 {
-			for k, ts := range b.destTimestamps {
-				if k == dest {
-					continue
-				}
-				if len(ts) == 0 || ts[len(ts)-1].Before(cutoff) {
-					delete(b.destTimestamps, k)
-				}
-			}
-		}
-	}
-	b.waiters[id] = ch
-	b.mu.Unlock()
-
-	req := ApprovalRequest{
-		ID:          id,
-		Destination: dest,
-		Port:        port,
-		CreatedAt:   b.now(),
-	}
-
-	// Single deadline for the entire request lifecycle (enqueue + wait)
-	// to prevent blocking for 2x the configured timeout.
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-
-	// Use a timeout when sending to the pending channel to prevent proxy
-	// goroutines from blocking indefinitely when the channel is full
-	// (e.g., Telegram API outage). The done channel unblocks this select
-	// during graceful shutdown so goroutines don't wait for the full timeout.
-	select {
-	case b.pending <- req:
-	case <-b.done:
-		b.mu.Lock()
-		delete(b.waiters, id)
-		b.mu.Unlock()
-		return ResponseDeny, fmt.Errorf("approval broker shutting down")
-	case <-deadline.C:
-		b.mu.Lock()
-		delete(b.waiters, id)
-		b.mu.Unlock()
-		return ResponseDeny, fmt.Errorf("approval queue full (timeout after %v)", timeout)
-	}
-
-	select {
-	case resp := <-ch:
-		return resp, nil
-	case <-deadline.C:
-		b.mu.Lock()
-		_, stillPending := b.waiters[id]
-		if stillPending {
-			delete(b.waiters, id)
-			b.timedOut[id] = b.now()
-			// Garbage-collect stale timedOut entries that were never
-			// consumed by the bot (operator never tapped the button).
-			now := b.now()
-			for k, t := range b.timedOut {
-				if now.Sub(t) > timedOutTTL {
-					delete(b.timedOut, k)
-				}
-			}
-		}
-		b.mu.Unlock()
-		if !stillPending {
-			// Resolve already consumed the waiter and sent a response
-			// on the buffered channel. Honor it so the proxy decision
-			// matches what the Telegram message shows to the operator.
-			return <-ch, nil
-		}
-		return ResponseDeny, fmt.Errorf("approval timeout after %v", timeout)
-	}
-}
-
-// PendingCount returns the number of approval requests awaiting a response.
-func (b *ApprovalBroker) PendingCount() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return len(b.waiters)
-}
-
-// HasWaiter reports whether a request ID still has an active waiter.
-// Returns false if the request has already timed out or been resolved.
-func (b *ApprovalBroker) HasWaiter(id string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	_, ok := b.waiters[id]
-	return ok
-}
-
-// WasTimedOut reports whether a request timed out (as opposed to being
-// resolved by a callback). This is a non-destructive read. Call
-// ClearTimedOut to remove the entry after handling it.
-func (b *ApprovalBroker) WasTimedOut(id string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	_, ok := b.timedOut[id]
-	return ok
-}
-
-// ClearTimedOut removes the timed-out flag for a request ID.
-// Call this after successfully handling the timeout (e.g. editing the
-// Telegram message) so other code paths do not attempt to handle it again.
-func (b *ApprovalBroker) ClearTimedOut(id string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.timedOut, id)
-}
-
-// Resolve delivers a response to a pending approval request.
-// Returns true if the request was still pending, false if it had already
-// timed out or been resolved (so the caller can show an appropriate message).
-func (b *ApprovalBroker) Resolve(id string, resp Response) bool {
-	b.mu.Lock()
-	ch, ok := b.waiters[id]
-	if ok {
-		delete(b.waiters, id)
-	}
-	b.mu.Unlock()
-
-	if ok {
-		ch <- resp
-	}
-	return ok
-}
-
-// CancelAll auto-denies all pending approval requests. Called during
-// graceful shutdown so that in-flight proxy goroutines blocked on
-// approval can complete promptly. It also closes the done channel to
-// unblock goroutines waiting to enqueue on the pending channel.
-func (b *ApprovalBroker) CancelAll() {
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
+func (tc *TelegramChannel) sendApprovalMessage(req channel.ApprovalRequest) {
+	// Skip requests whose waiter has already been cleaned up (timed out
+	// or resolved while queued).
+	if tc.broker != nil && !tc.broker.HasWaiter(req.ID) {
+		tc.broker.ClearTimedOut(req.ID)
 		return
 	}
-	b.closed = true
-	waiters := make(map[string]chan Response, len(b.waiters))
-	for id, ch := range b.waiters {
-		waiters[id] = ch
+
+	msg := tgbotapi.NewMessage(tc.chatID, FormatApprovalMessage(req.Destination, req.Port))
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Allow Once", req.ID+"|allow_once"),
+			tgbotapi.NewInlineKeyboardButtonData("Always Allow", req.ID+"|always_allow"),
+			tgbotapi.NewInlineKeyboardButtonData("Deny", req.ID+"|deny"),
+		),
+	)
+	sent, err := tc.api.Send(msg)
+	if err != nil {
+		log.Printf("telegram send error: %s", sanitizeError(err))
+		if tc.broker != nil {
+			tc.broker.Resolve(req.ID, channel.ResponseDeny)
+			tc.broker.ClearTimedOut(req.ID)
+		}
+		return
 	}
-	b.waiters = make(map[string]chan Response)
-	b.mu.Unlock()
+	tc.msgMap.Store(req.ID, sent.MessageID)
 
-	// Close done first to unblock goroutines stuck on the enqueue select,
-	// then deny waiters that were already past the enqueue stage.
-	close(b.done)
+	// If the request timed out while the Telegram API call was in
+	// flight, update the message immediately so the user does not
+	// see a stale prompt.
+	if tc.broker != nil && tc.broker.WasTimedOut(req.ID) {
+		edit := tgbotapi.NewEditMessageText(tc.chatID, sent.MessageID,
+			FormatApprovalMessage(req.Destination, req.Port)+"\n\n(request timed out)")
+		if _, editErr := tc.api.Send(edit); editErr == nil {
+			tc.broker.ClearTimedOut(req.ID)
+		}
+	}
+}
 
-	for _, ch := range waiters {
-		ch <- ResponseDeny
+// CancelApproval edits the Telegram message to indicate the request was
+// resolved via another channel, removing the inline keyboard.
+func (tc *TelegramChannel) CancelApproval(id string) error {
+	msgIDVal, ok := tc.msgMap.LoadAndDelete(id)
+	if !ok {
+		return nil
+	}
+	msgID := msgIDVal.(int)
+	edit := tgbotapi.NewEditMessageText(tc.chatID, msgID,
+		"(resolved via another channel)")
+	_, _ = tc.api.Send(edit)
+	return nil
+}
+
+// Commands returns incoming admin commands from Telegram.
+func (tc *TelegramChannel) Commands() <-chan channel.Command {
+	return tc.cmdCh
+}
+
+// Notify sends a one-way message to the Telegram chat.
+func (tc *TelegramChannel) Notify(_ context.Context, text string) error {
+	msg := tgbotapi.NewMessage(tc.chatID, text)
+	_, err := tc.api.Send(msg)
+	if err != nil {
+		return fmt.Errorf("telegram notify: %s", sanitizeError(err))
+	}
+	return nil
+}
+
+// Start begins polling for Telegram updates (callbacks and commands).
+func (tc *TelegramChannel) Start() error {
+	u := tgbotapi.NewUpdate(0)
+	u.Timeout = 30
+	updates := tc.api.GetUpdatesChan(u)
+
+	go func() {
+		for {
+			select {
+			case update, ok := <-updates:
+				if !ok {
+					return
+				}
+				if update.CallbackQuery != nil {
+					tc.handleCallback(update.CallbackQuery)
+					continue
+				}
+				if update.Message != nil && update.Message.Text != "" {
+					tc.handleMessage(update.Message)
+				}
+			case <-tc.done:
+				return
+			}
+		}
+	}()
+	return nil
+}
+
+// Stop halts the Telegram bot and stops processing updates.
+func (tc *TelegramChannel) Stop() {
+	tc.stopOnce.Do(func() {
+		close(tc.done)
+		tc.api.StopReceivingUpdates()
+	})
+}
+
+// Type returns channel.ChannelTelegram.
+func (tc *TelegramChannel) Type() channel.ChannelType {
+	return channel.ChannelTelegram
+}
+
+func (tc *TelegramChannel) handleCallback(cq *tgbotapi.CallbackQuery) {
+	if cq.Message == nil {
+		return
+	}
+	if cq.Message.Chat.ID != tc.chatID {
+		log.Printf("unauthorized callback from chat %d (expected %d)", cq.Message.Chat.ID, tc.chatID)
+		return
+	}
+
+	parts := strings.SplitN(cq.Data, "|", 2)
+	if len(parts) != 2 {
+		return
+	}
+	reqID, action := parts[0], parts[1]
+
+	var resp channel.Response
+	var label string
+	switch action {
+	case "allow_once":
+		resp = channel.ResponseAllowOnce
+		label = "Allowed (once)"
+	case "always_allow":
+		resp = channel.ResponseAlwaysAllow
+		label = "Always allowed"
+	case "deny":
+		resp = channel.ResponseDeny
+		label = "Denied"
+	default:
+		return
+	}
+
+	resolved := false
+	if tc.broker != nil {
+		resolved = tc.broker.Resolve(reqID, resp)
+	}
+
+	if resolved {
+		callback := tgbotapi.NewCallback(cq.ID, label)
+		_, _ = tc.api.Request(callback)
+
+		// Do not use Markdown parse mode here: cq.Message.Text is Telegram's
+		// plain-text extraction of the original Markdown message. Re-parsing
+		// it as Markdown breaks when the destination contains underscores or
+		// other Markdown-special characters (common in DNS names).
+		edit := tgbotapi.NewEditMessageText(tc.chatID, cq.Message.MessageID,
+			fmt.Sprintf("%s\n\n%s at %s", cq.Message.Text, label, time.Now().UTC().Format("15:04:05")))
+		_, _ = tc.api.Send(edit)
+		tc.msgMap.Delete(reqID)
+	} else if tc.broker != nil && tc.broker.WasTimedOut(reqID) {
+		tc.broker.ClearTimedOut(reqID)
+		callback := tgbotapi.NewCallback(cq.ID, "Request timed out")
+		_, _ = tc.api.Request(callback)
+
+		edit := tgbotapi.NewEditMessageText(tc.chatID, cq.Message.MessageID,
+			cq.Message.Text+"\n\n(request timed out)")
+		_, _ = tc.api.Send(edit)
+		tc.msgMap.Delete(reqID)
+	} else {
+		// Request was already resolved by a previous callback (e.g. double-tap
+		// or another user in a group chat).
+		callback := tgbotapi.NewCallback(cq.ID, "Already resolved")
+		_, _ = tc.api.Request(callback)
+	}
+}
+
+func (tc *TelegramChannel) handleMessage(msg *tgbotapi.Message) {
+	if !IsAuthorizedChat(msg.Chat.ID, tc.chatID) {
+		log.Printf("unauthorized command from chat %d (expected %d)", msg.Chat.ID, tc.chatID)
+		return
+	}
+
+	cmd := ParseCommand(msg.Text)
+	if cmd == nil {
+		return
+	}
+
+	// Delete messages that contain credential values before processing
+	// to minimize exposure in chat history.
+	if cmd.Name == "cred" && len(cmd.Args) >= 1 &&
+		(cmd.Args[0] == "add" || cmd.Args[0] == "rotate") {
+		del := tgbotapi.NewDeleteMessage(msg.Chat.ID, msg.MessageID)
+		if _, err := tc.api.Request(del); err != nil {
+			log.Printf("failed to delete credential message: %s", sanitizeError(err))
+		}
+	}
+
+	// Forward as channel.Command (non-blocking, drop if full).
+	select {
+	case tc.cmdCh <- channel.Command{
+		Name:        cmd.Name,
+		Args:        strings.Join(cmd.Args, " "),
+		ChannelType: channel.ChannelTelegram,
+		Reply: func(ctx context.Context, text string) error {
+			reply := tgbotapi.NewMessage(tc.chatID, text)
+			_, sendErr := tc.api.Send(reply)
+			return sendErr
+		},
+	}:
+	default:
+	}
+
+	// Handle internally via CommandHandler.
+	response := tc.commands.Handle(cmd)
+	if response == "" {
+		return
+	}
+
+	if len(response) > telegramMaxMessage {
+		// Truncate at a valid UTF-8 rune boundary to avoid splitting
+		// multi-byte characters, which Telegram would reject.
+		cut := telegramMaxMessage
+		for cut > 0 && !utf8.RuneStart(response[cut]) {
+			cut--
+		}
+		response = response[:cut] + "\n\n(truncated)"
+	}
+
+	reply := tgbotapi.NewMessage(tc.chatID, response)
+	if _, err := tc.api.Send(reply); err != nil {
+		log.Printf("telegram send error: %s", sanitizeError(err))
 	}
 }

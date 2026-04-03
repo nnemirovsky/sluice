@@ -50,7 +50,7 @@ func handlePolicyList(args []string) {
 	}
 	defer db.Close()
 
-	rules, err := db.ListRules(*verdict)
+	rules, err := db.ListRules(store.RuleFilter{Verdict: *verdict})
 	if err != nil {
 		log.Fatalf("list rules: %v", err)
 	}
@@ -61,6 +61,13 @@ func handlePolicyList(args []string) {
 	}
 
 	for _, r := range rules {
+		target := r.Destination
+		if target == "" {
+			target = r.Tool
+		}
+		if target == "" {
+			target = r.Pattern
+		}
 		ports := ""
 		if len(r.Ports) > 0 {
 			portStrs := make([]string, len(r.Ports))
@@ -70,14 +77,14 @@ func handlePolicyList(args []string) {
 			ports = " ports=" + strings.Join(portStrs, ",")
 		}
 		proto := ""
-		if r.Protocol != "" {
-			proto = " protocol=" + r.Protocol
+		if len(r.Protocols) > 0 {
+			proto = " protocols=" + strings.Join(r.Protocols, ",")
 		}
-		note := ""
-		if r.Note != "" {
-			note = " (" + r.Note + ")"
+		name := ""
+		if r.Name != "" {
+			name = " (" + r.Name + ")"
 		}
-		fmt.Printf("[%d] %s %s%s%s%s [%s]\n", r.ID, r.Verdict, r.Destination, ports, proto, note, r.Source)
+		fmt.Printf("[%d] %s %s%s%s%s [%s]\n", r.ID, r.Verdict, target, ports, proto, name, r.Source)
 	}
 }
 
@@ -130,7 +137,7 @@ func handlePolicyAdd(args []string) {
 	}
 	defer db.Close()
 
-	id, err := db.AddRule(verdict, destination, ports, store.RuleOpts{Note: *note})
+	id, err := db.AddRule(verdict, store.RuleOpts{Destination: destination, Ports: ports, Name: *note})
 	if err != nil {
 		log.Fatalf("add rule: %v", err)
 	}
@@ -218,112 +225,69 @@ func handlePolicyExport(args []string) {
 	defer db.Close()
 
 	// Config section.
-	defaultVerdict, err := db.GetConfig("default_verdict")
+	cfg, err := db.GetConfig()
 	if err != nil {
-		log.Fatalf("read config default_verdict: %v", err)
+		log.Fatalf("read config: %v", err)
 	}
-	timeoutStr, err := db.GetConfig("timeout_sec")
-	if err != nil {
-		log.Fatalf("read config timeout_sec: %v", err)
-	}
-	if defaultVerdict != "" || timeoutStr != "" {
+	if cfg.DefaultVerdict != "" || cfg.TimeoutSec != 0 {
 		fmt.Println("[policy]")
-		if defaultVerdict != "" {
-			fmt.Printf("default = %q\n", defaultVerdict)
+		if cfg.DefaultVerdict != "" {
+			fmt.Printf("default = %q\n", cfg.DefaultVerdict)
 		}
-		if timeoutStr != "" {
-			if n, parseErr := strconv.Atoi(timeoutStr); parseErr == nil {
-				fmt.Printf("timeout_sec = %d\n", n)
-			} else {
-				fmt.Printf("timeout_sec = %q\n", timeoutStr)
-			}
-		}
-		fmt.Println()
-	}
-
-	// Telegram section.
-	botTokenEnv, err := db.GetConfig("telegram_bot_token_env")
-	if err != nil {
-		log.Fatalf("read config telegram_bot_token_env: %v", err)
-	}
-	chatIDEnv, err := db.GetConfig("telegram_chat_id_env")
-	if err != nil {
-		log.Fatalf("read config telegram_chat_id_env: %v", err)
-	}
-	if botTokenEnv != "" || chatIDEnv != "" {
-		fmt.Println("[telegram]")
-		if botTokenEnv != "" {
-			fmt.Printf("bot_token_env = %q\n", botTokenEnv)
-		}
-		if chatIDEnv != "" {
-			fmt.Printf("chat_id_env = %q\n", chatIDEnv)
+		if cfg.TimeoutSec != 0 {
+			fmt.Printf("timeout_sec = %d\n", cfg.TimeoutSec)
 		}
 		fmt.Println()
 	}
 
 	// Vault section.
-	vaultProvider, err := db.GetConfig("vault_provider")
-	if err != nil {
-		log.Fatalf("read config vault_provider: %v", err)
-	}
-	vaultDir, err := db.GetConfig("vault_dir")
-	if err != nil {
-		log.Fatalf("read config vault_dir: %v", err)
-	}
-	vaultProviders, err := db.GetConfig("vault_providers")
-	if err != nil {
-		log.Fatalf("read config vault_providers: %v", err)
-	}
-	if vaultProvider != "" || vaultDir != "" || vaultProviders != "" {
+	if cfg.VaultProvider != "" || cfg.VaultDir != "" || len(cfg.VaultProviders) > 0 {
 		fmt.Println("[vault]")
-		if vaultProvider != "" {
-			fmt.Printf("provider = %q\n", vaultProvider)
+		if cfg.VaultProvider != "" {
+			fmt.Printf("provider = %q\n", cfg.VaultProvider)
 		}
-		if vaultDir != "" {
-			fmt.Printf("dir = %q\n", vaultDir)
+		if cfg.VaultDir != "" {
+			fmt.Printf("dir = %q\n", cfg.VaultDir)
 		}
-		if vaultProviders != "" {
-			// vault_providers is stored as a JSON array; decode and format as TOML.
-			var providers []string
-			if err := json.Unmarshal([]byte(vaultProviders), &providers); err == nil {
-				quoted := make([]string, len(providers))
-				for i, p := range providers {
-					quoted[i] = fmt.Sprintf("%q", p)
-				}
-				fmt.Printf("providers = [%s]\n", strings.Join(quoted, ", "))
+		if len(cfg.VaultProviders) > 0 {
+			quoted := make([]string, len(cfg.VaultProviders))
+			for i, p := range cfg.VaultProviders {
+				quoted[i] = fmt.Sprintf("%q", p)
 			}
+			fmt.Printf("providers = [%s]\n", strings.Join(quoted, ", "))
 		}
 		fmt.Println()
 	}
 
 	// Warn if sensitive HashiCorp values exist but are excluded from export.
-	for _, sensitiveKey := range []string{"vault_hashicorp_token", "vault_hashicorp_role_id", "vault_hashicorp_secret_id"} {
-		val, _ := db.GetConfig(sensitiveKey)
-		if val != "" {
-			fmt.Fprintf(os.Stderr, "warning: %s excluded from export (use env var indirection instead)\n", sensitiveKey)
+	for _, val := range []struct {
+		v    string
+		name string
+	}{
+		{cfg.VaultHashicorpToken, "vault_hashicorp_token"},
+		{cfg.VaultHashicorpRoleID, "vault_hashicorp_role_id"},
+		{cfg.VaultHashicorpSecretID, "vault_hashicorp_secret_id"},
+	} {
+		if val.v != "" {
+			fmt.Fprintf(os.Stderr, "warning: %s excluded from export (use env var indirection instead)\n", val.name)
 		}
 	}
 
-	// Vault HashiCorp sub-section. Sensitive values (token, role_id,
-	// secret_id) are excluded from export. Use env var indirection instead.
-	hcKeys := []struct {
-		dbKey, tomlKey string
-	}{
-		{"vault_hashicorp_addr", "addr"},
-		{"vault_hashicorp_mount", "mount"},
-		{"vault_hashicorp_prefix", "prefix"},
-		{"vault_hashicorp_auth", "auth"},
-		{"vault_hashicorp_role_id_env", "role_id_env"},
-		{"vault_hashicorp_secret_id_env", "secret_id_env"},
-	}
+	// Vault HashiCorp sub-section.
 	var hcLines []string
-	for _, kv := range hcKeys {
-		val, hcErr := db.GetConfig(kv.dbKey)
-		if hcErr != nil {
-			log.Fatalf("read config %s: %v", kv.dbKey, hcErr)
-		}
-		if val != "" {
-			hcLines = append(hcLines, fmt.Sprintf("%s = %q", kv.tomlKey, val))
+	hcPairs := []struct {
+		val, key string
+	}{
+		{cfg.VaultHashicorpAddr, "addr"},
+		{cfg.VaultHashicorpMount, "mount"},
+		{cfg.VaultHashicorpPrefix, "prefix"},
+		{cfg.VaultHashicorpAuth, "auth"},
+		{cfg.VaultHashicorpRoleIDEnv, "role_id_env"},
+		{cfg.VaultHashicorpSecretIDEnv, "secret_id_env"},
+	}
+	for _, kv := range hcPairs {
+		if kv.val != "" {
+			hcLines = append(hcLines, fmt.Sprintf("%s = %q", kv.key, kv.val))
 		}
 	}
 	if len(hcLines) > 0 {
@@ -336,7 +300,7 @@ func handlePolicyExport(args []string) {
 
 	// Network rules.
 	for _, verdict := range []string{"allow", "deny", "ask"} {
-		rules, err := db.ListRules(verdict)
+		rules, err := db.ListRules(store.RuleFilter{Verdict: verdict, Type: "network"})
 		if err != nil {
 			log.Fatalf("list %s rules: %v", verdict, err)
 		}
@@ -347,11 +311,54 @@ func handlePolicyExport(args []string) {
 				portsJSON, _ := json.Marshal(r.Ports)
 				fmt.Printf("ports = %s\n", string(portsJSON))
 			}
-			if r.Protocol != "" {
-				fmt.Printf("protocol = %q\n", r.Protocol)
+			if len(r.Protocols) > 0 {
+				protocolsJSON, _ := json.Marshal(r.Protocols)
+				fmt.Printf("protocols = %s\n", string(protocolsJSON))
 			}
-			if r.Note != "" {
-				fmt.Printf("note = %q\n", r.Note)
+			if r.Name != "" {
+				fmt.Printf("name = %q\n", r.Name)
+			}
+			fmt.Println()
+		}
+	}
+
+	// Tool rules.
+	for _, verdict := range []string{"allow", "deny", "ask"} {
+		toolRules, err := db.ListRules(store.RuleFilter{Verdict: verdict, Type: "tool"})
+		if err != nil {
+			log.Fatalf("list tool_%s rules: %v", verdict, err)
+		}
+		for _, r := range toolRules {
+			fmt.Printf("[[tool_%s]]\n", verdict)
+			fmt.Printf("tool = %q\n", r.Tool)
+			if r.Name != "" {
+				fmt.Printf("note = %q\n", r.Name)
+			}
+			fmt.Println()
+		}
+	}
+
+	// Inspect rules (pattern-based: deny=block, redact=redact).
+	patternRules, err := db.ListRules(store.RuleFilter{Type: "pattern"})
+	if err != nil {
+		log.Fatalf("list pattern rules: %v", err)
+	}
+	for _, r := range patternRules {
+		if r.Verdict == "deny" {
+			fmt.Println("[[inspect_block]]")
+			fmt.Printf("pattern = %q\n", r.Pattern)
+			if r.Name != "" {
+				fmt.Printf("name = %q\n", r.Name)
+			}
+			fmt.Println()
+		} else if r.Verdict == "redact" {
+			fmt.Println("[[inspect_redact]]")
+			fmt.Printf("pattern = %q\n", r.Pattern)
+			if r.Replacement != "" {
+				fmt.Printf("replacement = %q\n", r.Replacement)
+			}
+			if r.Name != "" {
+				fmt.Printf("name = %q\n", r.Name)
 			}
 			fmt.Println()
 		}
@@ -370,14 +377,15 @@ func handlePolicyExport(args []string) {
 			fmt.Printf("ports = %s\n", string(portsJSON))
 		}
 		fmt.Printf("credential = %q\n", b.Credential)
-		if b.InjectHeader != "" {
-			fmt.Printf("inject_header = %q\n", b.InjectHeader)
+		if b.Header != "" {
+			fmt.Printf("header = %q\n", b.Header)
 		}
 		if b.Template != "" {
 			fmt.Printf("template = %q\n", b.Template)
 		}
-		if b.Protocol != "" {
-			fmt.Printf("protocol = %q\n", b.Protocol)
+		if len(b.Protocols) > 0 {
+			protocolsJSON, _ := json.Marshal(b.Protocols)
+			fmt.Printf("protocols = %s\n", string(protocolsJSON))
 		}
 		fmt.Println()
 	}
@@ -411,47 +419,5 @@ func handlePolicyExport(args []string) {
 			fmt.Printf("env = {%s}\n", strings.Join(parts, ", "))
 		}
 		fmt.Println()
-	}
-
-	// Tool rules.
-	for _, verdict := range []string{"allow", "deny", "ask"} {
-		toolRules, err := db.ListToolRules(verdict)
-		if err != nil {
-			log.Fatalf("list tool_%s rules: %v", verdict, err)
-		}
-		for _, r := range toolRules {
-			fmt.Printf("[[tool_%s]]\n", verdict)
-			fmt.Printf("tool = %q\n", r.Tool)
-			if r.Note != "" {
-				fmt.Printf("note = %q\n", r.Note)
-			}
-			fmt.Println()
-		}
-	}
-
-	// Inspect rules.
-	inspectRules, err := db.ListInspectRules("")
-	if err != nil {
-		log.Fatalf("list inspect rules: %v", err)
-	}
-	for _, r := range inspectRules {
-		if r.Kind == "block" {
-			fmt.Println("[[inspect_block]]")
-			fmt.Printf("pattern = %q\n", r.Pattern)
-			if r.Description != "" {
-				fmt.Printf("name = %q\n", r.Description)
-			}
-			fmt.Println()
-		} else if r.Kind == "redact" {
-			fmt.Println("[[inspect_redact]]")
-			fmt.Printf("pattern = %q\n", r.Pattern)
-			if r.Replacement != "" {
-				fmt.Printf("replacement = %q\n", r.Replacement)
-			}
-			if r.Description != "" {
-				fmt.Printf("name = %q\n", r.Description)
-			}
-			fmt.Println()
-		}
 	}
 }

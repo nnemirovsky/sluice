@@ -566,11 +566,12 @@ func TestLoadFromStoreWithRules(t *testing.T) {
 	}
 	defer s.Close()
 
-	s.SetConfig("default_verdict", "ask")
-	s.SetConfig("timeout_sec", "60")
-	s.AddRule("allow", "api.example.com", []int{443}, store.RuleOpts{})
-	s.AddRule("deny", "evil.com", nil, store.RuleOpts{Note: "bad site"})
-	s.AddRule("ask", "*.unknown.com", []int{80, 443}, store.RuleOpts{})
+	dvAsk := "ask"
+	tsVal := 60
+	s.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvAsk, TimeoutSec: &tsVal})
+	s.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}})
+	s.AddRule("deny", store.RuleOpts{Destination: "evil.com", Name: "bad site"})
+	s.AddRule("ask", store.RuleOpts{Destination: "*.unknown.com", Ports: []int{80, 443}})
 
 	eng, err := LoadFromStore(s)
 	if err != nil {
@@ -614,9 +615,9 @@ func TestLoadFromStoreWithToolRules(t *testing.T) {
 	}
 	defer s.Close()
 
-	s.AddToolRule("allow", "github__list_*", "read-only", "manual")
-	s.AddToolRule("deny", "exec__*", "block exec", "manual")
-	s.AddToolRule("ask", "filesystem__write_*", "", "manual")
+	s.AddRule("allow", store.RuleOpts{Tool: "github__list_*", Name: "read-only"})
+	s.AddRule("deny", store.RuleOpts{Tool: "exec__*", Name: "block exec"})
+	s.AddRule("ask", store.RuleOpts{Tool: "filesystem__write_*"})
 
 	eng, err := LoadFromStore(s)
 	if err != nil {
@@ -646,11 +647,13 @@ func TestLoadFromStoreWithInspectRules(t *testing.T) {
 	}
 	defer s.Close()
 
-	s.AddInspectRule("block", `(?i)(sk-[a-zA-Z0-9]{20,})`, store.InspectRuleOpts{
-		Description: "api_key_leak",
+	s.AddRule("deny", store.RuleOpts{
+		Pattern: `(?i)(sk-[a-zA-Z0-9]{20,})`,
+		Name:    "api_key_leak",
 	})
-	s.AddInspectRule("redact", `(?i)(sk-[a-zA-Z0-9]{20,})`, store.InspectRuleOpts{
-		Description: "api_key_in_response",
+	s.AddRule("redact", store.RuleOpts{
+		Pattern:     `(?i)(sk-[a-zA-Z0-9]{20,})`,
+		Name:        "api_key_in_response",
 		Replacement: "[REDACTED]",
 	})
 
@@ -679,9 +682,8 @@ func TestLoadFromStoreWithTelegram(t *testing.T) {
 	}
 	defer s.Close()
 
-	// Telegram env var names are now hardcoded. SetConfig silently ignores them.
-	s.SetConfig("telegram_bot_token_env", "MY_BOT_TOKEN")
-	s.SetConfig("telegram_chat_id_env", "MY_CHAT_ID")
+	// Telegram env var names are now hardcoded. Config table has no telegram
+	// columns, so there is nothing to set here.
 
 	eng, err := LoadFromStore(s)
 	if err != nil {
@@ -704,23 +706,29 @@ func TestLoadFromStoreInvalidDefaultVerdict(t *testing.T) {
 	defer s.Close()
 
 	// With typed config, the CHECK constraint rejects invalid values at the DB level.
-	err = s.SetConfig("default_verdict", "invalid")
+	invalidDV := "invalid"
+	err = s.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &invalidDV})
 	if err == nil {
 		t.Error("expected error for invalid default verdict from CHECK constraint")
 	}
 }
 
-func TestLoadFromStoreInvalidTimeout(t *testing.T) {
+func TestLoadFromStoreZeroTimeoutUsesDefault(t *testing.T) {
 	s, err := store.New(":memory:")
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
 	defer s.Close()
 
-	s.SetConfig("timeout_sec", "not_a_number")
-	_, err = LoadFromStore(s)
-	if err == nil {
-		t.Error("expected error for invalid timeout_sec")
+	// Timeout 0 should fall back to the default (120).
+	zeroTimeout := 0
+	s.UpdateConfig(store.ConfigUpdate{TimeoutSec: &zeroTimeout})
+	eng, err := LoadFromStore(s)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if eng.TimeoutSec != 120 {
+		t.Errorf("expected default timeout 120 for zero value, got %d", eng.TimeoutSec)
 	}
 }
 
@@ -732,8 +740,9 @@ func TestLoadFromStoreRecompile(t *testing.T) {
 	}
 	defer s.Close()
 
-	s.SetConfig("default_verdict", "deny")
-	s.AddRule("allow", "api.example.com", []int{443}, store.RuleOpts{})
+	dvRC := "deny"
+	s.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvRC})
+	s.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}})
 
 	eng1, err := LoadFromStore(s)
 	if err != nil {
@@ -747,7 +756,7 @@ func TestLoadFromStoreRecompile(t *testing.T) {
 	}
 
 	// Add a new rule and recompile
-	s.AddRule("allow", "new.example.com", []int{443}, store.RuleOpts{Source: "telegram"})
+	s.AddRule("allow", store.RuleOpts{Destination: "new.example.com", Ports: []int{443}, Source: "telegram"})
 	eng2, err := LoadFromStore(s)
 	if err != nil {
 		t.Fatalf("second load: %v", err)

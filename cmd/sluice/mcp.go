@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/nemirovsky/sluice/internal/audit"
+	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/mcp"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
@@ -138,32 +139,35 @@ func handleMCPGateway(args []string) error {
 		defer logger.Close()
 	}
 
-	// Optional Telegram approval broker.
-	var broker *telegram.ApprovalBroker
+	// Optional Telegram approval channel and broker.
+	var broker *channel.Broker
 	if *telegramToken != "" && *telegramChatIDStr != "" {
 		chatID, parseErr := strconv.ParseInt(*telegramChatIDStr, 10, 64)
 		if parseErr != nil {
 			return fmt.Errorf("invalid telegram-chat-id: %w", parseErr)
 		}
 		if chatID != 0 {
-			broker = telegram.NewApprovalBroker()
 			var enginePtr atomic.Pointer[policy.Engine]
 			enginePtr.Store(eng)
 			var reloadMu sync.Mutex
-			bot, botErr := telegram.NewBot(telegram.BotConfig{
+			tgChannel, channelErr := telegram.NewTelegramChannel(telegram.ChannelConfig{
 				Token:     *telegramToken,
 				ChatID:    chatID,
 				EnginePtr: &enginePtr,
 				ReloadMu:  &reloadMu,
 				AuditPath: *auditPath,
 				Store:     db,
-			}, broker)
-			if botErr != nil {
-				return fmt.Errorf("telegram bot: %w", botErr)
+			})
+			if channelErr != nil {
+				return fmt.Errorf("telegram channel: %w", channelErr)
 			}
-			go bot.Run()
-			defer bot.Stop()
-			log.Printf("telegram approval bot started for MCP gateway")
+			broker = channel.NewBroker([]channel.Channel{tgChannel})
+			tgChannel.SetBroker(broker)
+			if err := tgChannel.Start(); err != nil {
+				return fmt.Errorf("start telegram channel: %w", err)
+			}
+			defer tgChannel.Stop()
+			log.Printf("telegram approval channel started for MCP gateway")
 		}
 	}
 

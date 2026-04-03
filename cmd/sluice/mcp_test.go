@@ -141,10 +141,11 @@ func TestMCPToolPolicyFromStore(t *testing.T) {
 	}
 	defer db.Close()
 
-	db.SetConfig("default_verdict", "ask")
-	db.AddToolRule("allow", "github__list_*", "Read-only GitHub operations", "manual")
-	db.AddToolRule("deny", "exec__*", "Block all exec", "manual")
-	db.AddToolRule("ask", "filesystem__write_file", "File writes need approval", "manual")
+	dvTP := "ask"
+	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvTP})
+	db.AddRule("allow", store.RuleOpts{Tool: "github__list_*", Name: "Read-only GitHub operations"})
+	db.AddRule("deny", store.RuleOpts{Tool: "exec__*", Name: "Block all exec"})
+	db.AddRule("ask", store.RuleOpts{Tool: "filesystem__write_file", Name: "File writes need approval"})
 
 	eng, err := policy.LoadFromStore(db)
 	if err != nil {
@@ -491,7 +492,8 @@ func TestHandleMCPGatewayNoUpstreams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db.SetConfig("default_verdict", "deny")
+	dvMCP := "deny"
+	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvMCP})
 	db.Close()
 
 	if os.Getenv("TEST_MCP_SUBPROCESS") == "no_upstreams" {
@@ -533,7 +535,8 @@ func TestHandleMCPGatewayInvalidChatID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db.SetConfig("default_verdict", "deny")
+	dvMCP2 := "deny"
+	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvMCP2})
 	db.Close()
 
 	if os.Getenv("TEST_MCP_SUBPROCESS") == "invalid_chat_id" {

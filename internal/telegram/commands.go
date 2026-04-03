@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/docker"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
@@ -50,7 +51,7 @@ type CommandHandler struct {
 	engine      *atomic.Pointer[policy.Engine]
 	resolverPtr *atomic.Pointer[vault.BindingResolver] // shared with proxy; nil if not wired
 	reloadMu    *sync.Mutex                            // shared with proxy; serializes engine swaps and policy mutations
-	broker      *ApprovalBroker
+	broker      *channel.Broker
 	auditPath   string
 	vault       *vault.Store
 	dockerMgr   *docker.Manager
@@ -84,6 +85,11 @@ func (h *CommandHandler) SetResolverPtr(ptr *atomic.Pointer[vault.BindingResolve
 	h.resolverPtr = ptr
 }
 
+// SetBroker sets the channel broker for status reporting.
+func (h *CommandHandler) SetBroker(b *channel.Broker) {
+	h.broker = b
+}
+
 // rebuildResolver reads bindings from the store, creates a new BindingResolver,
 // and atomically swaps it into the shared pointer. The caller must hold reloadMu.
 func (h *CommandHandler) rebuildResolver() error {
@@ -104,9 +110,11 @@ func (h *CommandHandler) rebuildResolver() error {
 			Destination:  r.Destination,
 			Ports:        r.Ports,
 			Credential:   r.Credential,
-			InjectHeader: r.InjectHeader,
+			InjectHeader: r.Header,
 			Template:     r.Template,
-			Protocol:     r.Protocol,
+		}
+		if len(r.Protocols) > 0 {
+			bindings[i].Protocol = r.Protocols[0]
 		}
 	}
 	resolver, err := vault.NewBindingResolver(bindings)
@@ -136,11 +144,10 @@ func (h *CommandHandler) recompileAndSwap() error {
 // pointer and reload mutex. Sharing these prevents split-brain windows during
 // SIGHUP reloads: a single mutex serializes engine swaps and policy mutations
 // across both the proxy and the bot.
-func NewCommandHandler(enginePtr *atomic.Pointer[policy.Engine], reloadMu *sync.Mutex, broker *ApprovalBroker, auditPath string) *CommandHandler {
+func NewCommandHandler(enginePtr *atomic.Pointer[policy.Engine], reloadMu *sync.Mutex, auditPath string) *CommandHandler {
 	return &CommandHandler{
 		engine:    enginePtr,
 		reloadMu:  reloadMu,
-		broker:    broker,
 		auditPath: auditPath,
 	}
 }
@@ -234,15 +241,16 @@ func (h *CommandHandler) policyShow() string {
 }
 
 func (h *CommandHandler) policyShowFromStore() string {
-	dv, err := h.store.GetConfig("default_verdict")
+	cfg, err := h.store.GetConfig()
 	if err != nil {
 		return fmt.Sprintf("Failed to read config: %v", err)
 	}
+	dv := cfg.DefaultVerdict
 	if dv == "" {
 		dv = "deny"
 	}
 
-	rules, err := h.store.ListRules("")
+	rules, err := h.store.ListRules(store.RuleFilter{Type: "network"})
 	if err != nil {
 		return fmt.Sprintf("Failed to list rules: %v", err)
 	}
@@ -260,7 +268,7 @@ func (h *CommandHandler) policyShowFromStore() string {
 		{"DENY", "deny"},
 		{"ASK", "ask"},
 	} {
-		var sectionRules []store.NetworkRule
+		var sectionRules []store.Rule
 		for _, r := range rules {
 			if r.Verdict == section.verdict {
 				sectionRules = append(sectionRules, r)
@@ -301,7 +309,7 @@ func (h *CommandHandler) policyAllow(dest string) string {
 	defer h.reloadMu.Unlock()
 
 	if h.store != nil {
-		if _, err := h.store.AddRule("allow", dest, nil, store.RuleOpts{Source: "telegram"}); err != nil {
+		if _, err := h.store.AddRule("allow", store.RuleOpts{Destination: dest, Source: "telegram"}); err != nil {
 			return fmt.Sprintf("Failed to add allow rule: %v", err)
 		}
 		if err := h.recompileAndSwap(); err != nil {
@@ -326,7 +334,7 @@ func (h *CommandHandler) policyDeny(dest string) string {
 	defer h.reloadMu.Unlock()
 
 	if h.store != nil {
-		if _, err := h.store.AddRule("deny", dest, nil, store.RuleOpts{Source: "telegram"}); err != nil {
+		if _, err := h.store.AddRule("deny", store.RuleOpts{Destination: dest, Source: "telegram"}); err != nil {
 			return fmt.Sprintf("Failed to add deny rule: %v", err)
 		}
 		if err := h.recompileAndSwap(); err != nil {

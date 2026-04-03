@@ -17,7 +17,7 @@ func TestPolicyListEmpty(t *testing.T) {
 	}
 	defer db.Close()
 
-	rules, err := db.ListRules("")
+	rules, err := db.ListRules(store.RuleFilter{})
 	if err != nil {
 		t.Fatalf("list rules: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestPolicyAddAndList(t *testing.T) {
 	defer db.Close()
 
 	// Add allow rule.
-	id1, err := db.AddRule("allow", "api.example.com", []int{443, 80}, store.RuleOpts{Note: "API access"})
+	id1, err := db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443, 80}, Name: "API access"})
 	if err != nil {
 		t.Fatalf("add allow rule: %v", err)
 	}
@@ -44,19 +44,19 @@ func TestPolicyAddAndList(t *testing.T) {
 	}
 
 	// Add deny rule.
-	id2, err := db.AddRule("deny", "evil.example.com", nil, store.RuleOpts{Note: "blocked"})
+	id2, err := db.AddRule("deny", store.RuleOpts{Destination: "evil.example.com", Name: "blocked"})
 	if err != nil {
 		t.Fatalf("add deny rule: %v", err)
 	}
 
 	// Add ask rule.
-	id3, err := db.AddRule("ask", "unknown.example.com", []int{443}, store.RuleOpts{})
+	id3, err := db.AddRule("ask", store.RuleOpts{Destination: "unknown.example.com", Ports: []int{443}})
 	if err != nil {
 		t.Fatalf("add ask rule: %v", err)
 	}
 
 	// List all rules.
-	all, err := db.ListRules("")
+	all, err := db.ListRules(store.RuleFilter{})
 	if err != nil {
 		t.Fatalf("list all: %v", err)
 	}
@@ -74,12 +74,12 @@ func TestPolicyAddAndList(t *testing.T) {
 	if len(all[0].Ports) != 2 || all[0].Ports[0] != 443 || all[0].Ports[1] != 80 {
 		t.Errorf("expected ports [443,80], got %v", all[0].Ports)
 	}
-	if all[0].Note != "API access" {
-		t.Errorf("expected note 'API access', got %q", all[0].Note)
+	if all[0].Name != "API access" {
+		t.Errorf("expected name 'API access', got %q", all[0].Name)
 	}
 
 	// List filtered by verdict.
-	allows, err := db.ListRules("allow")
+	allows, err := db.ListRules(store.RuleFilter{Verdict: "allow"})
 	if err != nil {
 		t.Fatalf("list allow: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestPolicyAddAndList(t *testing.T) {
 		t.Errorf("expected 1 allow rule, got %d", len(allows))
 	}
 
-	denies, err := db.ListRules("deny")
+	denies, err := db.ListRules(store.RuleFilter{Verdict: "deny"})
 	if err != nil {
 		t.Fatalf("list deny: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestPolicyRemove(t *testing.T) {
 	}
 	defer db.Close()
 
-	id, err := db.AddRule("allow", "api.example.com", []int{443}, store.RuleOpts{})
+	id, err := db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestPolicyRemove(t *testing.T) {
 	}
 
 	// Verify it's gone.
-	rules, err := db.ListRules("")
+	rules, err := db.ListRules(store.RuleFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,26 +227,26 @@ func TestPolicyExportRoundTrip(t *testing.T) {
 	}
 
 	// Populate the store.
-	db.SetConfig("default_verdict", "deny")
-	db.SetConfig("timeout_sec", "120")
-	db.SetConfig("telegram_bot_token_env", "MY_BOT")
-	db.SetConfig("telegram_chat_id_env", "MY_CHAT")
-	db.AddRule("allow", "api.example.com", []int{443}, store.RuleOpts{Note: "API"})
-	db.AddRule("deny", "evil.example.com", nil, store.RuleOpts{})
-	db.AddToolRule("allow", "github__list_*", "", "manual")
-	db.AddToolRule("deny", "exec__*", "blocked", "manual")
+	dv := "deny"
+	ts := 120
+	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dv, TimeoutSec: &ts})
+	db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}, Name: "API"})
+	db.AddRule("deny", store.RuleOpts{Destination: "evil.example.com"})
+	db.AddRule("allow", store.RuleOpts{Tool: "github__list_*"})
+	db.AddRule("deny", store.RuleOpts{Tool: "exec__*", Name: "blocked"})
 	db.AddBinding("api.example.com", "my_key", store.BindingOpts{
-		Ports:        []int{443},
-		InjectHeader: "Authorization",
-		Template:     "Bearer {value}",
+		Ports:    []int{443},
+		Header:   "Authorization",
+		Template: "Bearer {value}",
 	})
 	db.AddMCPUpstream("github", "npx", store.MCPUpstreamOpts{
 		Args:       []string{"-y", "@mcp/server-github"},
 		TimeoutSec: 60,
 	})
-	db.AddInspectRule("block", "(?i)(sk-[a-zA-Z0-9_-]{20,})", store.InspectRuleOpts{Description: "api_key_leak"})
-	db.AddInspectRule("redact", "(?i)(sk-[a-zA-Z0-9_-]{20,})", store.InspectRuleOpts{
-		Description: "api_key_in_response",
+	db.AddRule("deny", store.RuleOpts{Pattern: "(?i)(sk-[a-zA-Z0-9_-]{20,})", Name: "api_key_leak"})
+	db.AddRule("redact", store.RuleOpts{
+		Pattern:     "(?i)(sk-[a-zA-Z0-9_-]{20,})",
+		Name:        "api_key_in_response",
 		Replacement: "[REDACTED]",
 	})
 	db.Close()
@@ -259,12 +259,12 @@ func TestPolicyExportRoundTrip(t *testing.T) {
 	defer db2.Close()
 
 	// Verify all data is present by reading it back.
-	rules, _ := db2.ListRules("")
+	rules, _ := db2.ListRules(store.RuleFilter{Type: "network"})
 	if len(rules) != 2 {
-		t.Errorf("expected 2 rules, got %d", len(rules))
+		t.Errorf("expected 2 network rules, got %d", len(rules))
 	}
 
-	toolRules, _ := db2.ListToolRules("")
+	toolRules, _ := db2.ListRules(store.RuleFilter{Type: "tool"})
 	if len(toolRules) != 2 {
 		t.Errorf("expected 2 tool rules, got %d", len(toolRules))
 	}
@@ -279,14 +279,14 @@ func TestPolicyExportRoundTrip(t *testing.T) {
 		t.Errorf("expected 1 upstream, got %d", len(upstreams))
 	}
 
-	inspectRules, _ := db2.ListInspectRules("")
+	inspectRules, _ := db2.ListRules(store.RuleFilter{Type: "pattern"})
 	if len(inspectRules) != 2 {
 		t.Errorf("expected 2 inspect rules, got %d", len(inspectRules))
 	}
 
-	dv, _ := db2.GetConfig("default_verdict")
-	if dv != "deny" {
-		t.Errorf("expected default_verdict deny, got %q", dv)
+	cfg, _ := db2.GetConfig()
+	if cfg.DefaultVerdict != "deny" {
+		t.Errorf("expected default_verdict deny, got %q", cfg.DefaultVerdict)
 	}
 }
 
@@ -326,9 +326,9 @@ ports = [443]
 		t.Errorf("expected 1 rule inserted, got %d", result.RulesInserted)
 	}
 
-	dv, _ := db.GetConfig("default_verdict")
-	if dv != "ask" {
-		t.Errorf("expected default_verdict ask, got %q", dv)
+	cfg, _ := db.GetConfig()
+	if cfg.DefaultVerdict != "ask" {
+		t.Errorf("expected default_verdict ask, got %q", cfg.DefaultVerdict)
 	}
 }
 
@@ -340,7 +340,7 @@ func TestPolicyAddInvalidVerdict(t *testing.T) {
 	}
 	defer db.Close()
 
-	_, err = db.AddRule("invalid", "example.com", nil, store.RuleOpts{})
+	_, err = db.AddRule("invalid", store.RuleOpts{Destination: "example.com"})
 	if err == nil {
 		t.Error("expected error for invalid verdict")
 	}
@@ -355,7 +355,7 @@ func TestPolicyAddWithAllVerdicts(t *testing.T) {
 	defer db.Close()
 
 	for _, v := range []string{"allow", "deny", "ask"} {
-		id, err := db.AddRule(v, v+".example.com", []int{443}, store.RuleOpts{Note: v + " rule"})
+		id, err := db.AddRule(v, store.RuleOpts{Destination: v + ".example.com", Ports: []int{443}, Name: v + " rule"})
 		if err != nil {
 			t.Fatalf("add %s rule: %v", v, err)
 		}
@@ -364,7 +364,7 @@ func TestPolicyAddWithAllVerdicts(t *testing.T) {
 		}
 	}
 
-	all, err := db.ListRules("")
+	all, err := db.ListRules(store.RuleFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +387,7 @@ func TestPolicyImportMalformedTOML(t *testing.T) {
 	}
 
 	// Store should still be empty.
-	rules, _ := db.ListRules("")
+	rules, _ := db.ListRules(store.RuleFilter{})
 	if len(rules) != 0 {
 		t.Error("store should be empty after failed import")
 	}
@@ -401,31 +401,32 @@ func TestPolicyExportContainsExpectedSections(t *testing.T) {
 	}
 	defer db.Close()
 
-	db.SetConfig("default_verdict", "deny")
-	db.SetConfig("timeout_sec", "60")
-	db.AddRule("allow", "api.example.com", []int{443}, store.RuleOpts{Note: "API"})
-	db.AddRule("deny", "evil.example.com", nil, store.RuleOpts{})
-	db.AddToolRule("allow", "github__list_*", "", "manual")
+	dvs := "deny"
+	tss := 60
+	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvs, TimeoutSec: &tss})
+	db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}, Name: "API"})
+	db.AddRule("deny", store.RuleOpts{Destination: "evil.example.com"})
+	db.AddRule("allow", store.RuleOpts{Tool: "github__list_*"})
 	db.AddBinding("api.example.com", "my_key", store.BindingOpts{
-		Ports:        []int{443},
-		InjectHeader: "Authorization",
+		Ports:  []int{443},
+		Header: "Authorization",
 	})
 
 	// Read back and verify the data that would be exported.
-	dv, _ := db.GetConfig("default_verdict")
-	if dv != "deny" {
-		t.Errorf("expected deny, got %q", dv)
+	cfg, _ := db.GetConfig()
+	if cfg.DefaultVerdict != "deny" {
+		t.Errorf("expected deny, got %q", cfg.DefaultVerdict)
 	}
 
-	rules, _ := db.ListRules("")
+	rules, _ := db.ListRules(store.RuleFilter{Type: "network"})
 	if len(rules) != 2 {
-		t.Fatalf("expected 2 rules, got %d", len(rules))
+		t.Fatalf("expected 2 network rules, got %d", len(rules))
 	}
 	if rules[0].Destination != "api.example.com" {
 		t.Errorf("expected api.example.com, got %s", rules[0].Destination)
 	}
 
-	toolRules, _ := db.ListToolRules("")
+	toolRules, _ := db.ListRules(store.RuleFilter{Type: "tool"})
 	if len(toolRules) != 1 {
 		t.Fatalf("expected 1 tool rule, got %d", len(toolRules))
 	}
@@ -445,13 +446,13 @@ func TestPolicyWorkflow(t *testing.T) {
 	defer db.Close()
 
 	// Add.
-	id, err := db.AddRule("allow", "api.example.com", []int{443}, store.RuleOpts{Note: "test"})
+	id, err := db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}, Name: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// List.
-	rules, err := db.ListRules("")
+	rules, err := db.ListRules(store.RuleFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,7 +476,7 @@ func TestPolicyWorkflow(t *testing.T) {
 	}
 
 	// List again.
-	rules, err = db.ListRules("")
+	rules, err = db.ListRules(store.RuleFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}

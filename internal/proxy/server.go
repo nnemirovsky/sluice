@@ -21,9 +21,9 @@ import (
 	"github.com/armon/go-socks5"
 
 	"github.com/nemirovsky/sluice/internal/audit"
+	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
-	"github.com/nemirovsky/sluice/internal/telegram"
 	"github.com/nemirovsky/sluice/internal/vault"
 )
 
@@ -44,7 +44,7 @@ type Config struct {
 	ListenAddr string
 	Policy     *policy.Engine
 	Audit      *audit.FileLogger
-	Broker     *telegram.ApprovalBroker
+	Broker     *channel.Broker
 	Provider   vault.Provider           // nil = no credential injection
 	Resolver   *vault.BindingResolver   // nil = no credential injection
 	VaultDir   string                   // CA cert storage dir (defaults to ~/.sluice)
@@ -53,16 +53,17 @@ type Config struct {
 
 // Server wraps a SOCKS5 server with policy enforcement and audit logging.
 type Server struct {
-	listener   net.Listener
-	socks      *socks5.Server
-	rules      *policyRuleSet
-	injector   *Injector
-	injectorLn net.Listener
-	sshJump    *SSHJumpHost
-	mailProxy  *MailProxy
-	resolver   atomic.Pointer[vault.BindingResolver]
-	closed     atomic.Bool
-	serving    atomic.Bool
+	listener    net.Listener
+	socks       *socks5.Server
+	rules       *policyRuleSet
+	dnsResolver *policyResolver
+	injector    *Injector
+	injectorLn  net.Listener
+	sshJump     *SSHJumpHost
+	mailProxy   *MailProxy
+	resolver    atomic.Pointer[vault.BindingResolver]
+	closed      atomic.Bool
+	serving     atomic.Bool
 	activeConns sync.WaitGroup
 }
 
@@ -97,7 +98,7 @@ func isPrivateIP(ip net.IP) bool {
 type policyResolver struct {
 	engine *atomic.Pointer[policy.Engine]
 	audit  *audit.FileLogger
-	broker *telegram.ApprovalBroker
+	broker *channel.Broker
 }
 
 func (r *policyResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
@@ -174,7 +175,7 @@ type policyRuleSet struct {
 	engine   *atomic.Pointer[policy.Engine]
 	reloadMu *sync.Mutex // serializes engine swaps and dynamic rule mutations
 	audit    *audit.FileLogger
-	broker   *telegram.ApprovalBroker
+	broker   *channel.Broker
 	store    *store.Store
 }
 
@@ -232,12 +233,12 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 				log.Printf("[ASK->DENY] %s:%d (timeout: %v)", dest, port, err)
 			} else {
 				switch resp {
-				case telegram.ResponseAllowOnce:
+				case channel.ResponseAllowOnce:
 					allowed = true
 					effectiveVerdict = policy.Allow
 					reason = "user approved once"
 					log.Printf("[ASK->ALLOW] %s:%d (user approved once)", dest, port)
-				case telegram.ResponseAlwaysAllow:
+				case channel.ResponseAlwaysAllow:
 					allowed = true
 					effectiveVerdict = policy.Allow
 					reason = "user approved always"
@@ -248,7 +249,7 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 					func() {
 						defer r.reloadMu.Unlock()
 						if r.store != nil {
-							if _, storeErr := r.store.AddRule("allow", dest, []int{port}, store.RuleOpts{Source: "approval"}); storeErr != nil {
+							if _, storeErr := r.store.AddRule("allow", store.RuleOpts{Destination: dest, Ports: []int{port}, Source: "approval"}); storeErr != nil {
 								log.Printf("[WARN] failed to persist allow rule for %s:%d: %v", dest, port, storeErr)
 							}
 							if newEng, recompErr := policy.LoadFromStore(r.store); recompErr != nil {
@@ -368,12 +369,13 @@ func New(cfg Config) (*Server, error) {
 	reloadMu := new(sync.Mutex)
 
 	rules := &policyRuleSet{engine: enginePtr, reloadMu: reloadMu, audit: cfg.Audit, broker: cfg.Broker, store: cfg.Store}
-	dnsResolver := &policyResolver{engine: enginePtr, audit: cfg.Audit, broker: cfg.Broker}
+	dnsRes := &policyResolver{engine: enginePtr, audit: cfg.Audit, broker: cfg.Broker}
 	srv.rules = rules
+	srv.dnsResolver = dnsRes
 
 	socksCfg := &socks5.Config{
 		Rules:    rules,
-		Resolver: dnsResolver,
+		Resolver: dnsRes,
 		Dial:     srv.dial,
 	}
 	socksServer, err := socks5.New(socksCfg)
@@ -667,6 +669,14 @@ func dialWithHandler(handler func(net.Conn, chan<- error)) (net.Conn, error) {
 		return nil, fmt.Errorf("handler setup: %w", setupErr)
 	}
 	return socksEnd, nil
+}
+
+// SetBroker sets the approval broker after construction. This is needed when
+// the proxy is created before the broker (e.g. to share the engine pointer
+// with the TelegramChannel that is passed to the broker).
+func (s *Server) SetBroker(b *channel.Broker) {
+	s.rules.broker = b
+	s.dnsResolver.broker = b
 }
 
 // StoreEngine atomically stores a new policy engine without acquiring the

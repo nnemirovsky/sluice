@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
@@ -27,7 +28,7 @@ func newTestStore(t *testing.T) *store.Store {
 
 // newTestHandlerWithStore creates a CommandHandler backed by an in-memory
 // SQLite store. The engine is compiled from the store after setup.
-func newTestHandlerWithStore(t *testing.T, s *store.Store, broker *ApprovalBroker, auditPath string) *CommandHandler {
+func newTestHandlerWithStore(t *testing.T, s *store.Store, broker *channel.Broker, auditPath string) *CommandHandler {
 	t.Helper()
 	eng, err := policy.LoadFromStore(s)
 	if err != nil {
@@ -35,17 +36,24 @@ func newTestHandlerWithStore(t *testing.T, s *store.Store, broker *ApprovalBroke
 	}
 	ptr := new(atomic.Pointer[policy.Engine])
 	ptr.Store(eng)
-	h := NewCommandHandler(ptr, new(sync.Mutex), broker, auditPath)
+	h := NewCommandHandler(ptr, new(sync.Mutex), auditPath)
 	h.SetStore(s)
+	if broker != nil {
+		h.SetBroker(broker)
+	}
 	return h
 }
 
 // newTestHandler creates a CommandHandler backed by the given engine for tests
 // (without a store, for backward compatibility with tests that don't need persistence).
-func newTestHandler(eng *policy.Engine, broker *ApprovalBroker, auditPath string) *CommandHandler {
+func newTestHandler(eng *policy.Engine, broker *channel.Broker, auditPath string) *CommandHandler {
 	ptr := new(atomic.Pointer[policy.Engine])
 	ptr.Store(eng)
-	return NewCommandHandler(ptr, new(sync.Mutex), broker, auditPath)
+	h := NewCommandHandler(ptr, new(sync.Mutex), auditPath)
+	if broker != nil {
+		h.SetBroker(broker)
+	}
+	return h
 }
 
 func TestParseCommand(t *testing.T) {
@@ -93,9 +101,8 @@ func TestParseCommand(t *testing.T) {
 
 func TestHandlePolicyShow(t *testing.T) {
 	s := newTestStore(t)
-	s.SetConfig("default_verdict", "deny")
-	s.AddRule("allow", "api.anthropic.com", []int{443}, store.RuleOpts{})
-	s.AddRule("deny", "evil.com", nil, store.RuleOpts{})
+	s.AddRule("allow", store.RuleOpts{Destination: "api.anthropic.com", Ports: []int{443}})
+	s.AddRule("deny", store.RuleOpts{Destination: "evil.com"})
 
 	handler := newTestHandlerWithStore(t, s, nil, "")
 	result := handler.Handle(&Command{Name: "policy", Args: []string{"show"}})
@@ -117,7 +124,6 @@ func TestHandlePolicyShow(t *testing.T) {
 
 func TestHandlePolicyAllow(t *testing.T) {
 	s := newTestStore(t)
-	s.SetConfig("default_verdict", "deny")
 
 	handler := newTestHandlerWithStore(t, s, nil, "")
 	result := handler.Handle(&Command{Name: "policy", Args: []string{"allow", "example.com"}})
@@ -131,21 +137,26 @@ func TestHandlePolicyAllow(t *testing.T) {
 	}
 
 	// Verify rule was persisted.
-	rules, err := s.ListRules("allow")
+	rules, err := s.ListRules(store.RuleFilter{Verdict: "allow"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rules) != 1 || rules[0].Destination != "example.com" {
-		t.Errorf("allow rule not persisted to store: %v", rules)
+	found := false
+	for _, r := range rules {
+		if r.Destination == "example.com" {
+			found = true
+			if r.Source != "telegram" {
+				t.Errorf("expected source 'telegram', got %q", r.Source)
+			}
+		}
 	}
-	if rules[0].Source != "telegram" {
-		t.Errorf("expected source 'telegram', got %q", rules[0].Source)
+	if !found {
+		t.Errorf("allow rule not persisted to store: %v", rules)
 	}
 }
 
 func TestHandlePolicyDeny(t *testing.T) {
 	s := newTestStore(t)
-	s.SetConfig("default_verdict", "allow")
 
 	handler := newTestHandlerWithStore(t, s, nil, "")
 	result := handler.Handle(&Command{Name: "policy", Args: []string{"deny", "bad.com"}})
@@ -157,32 +168,38 @@ func TestHandlePolicyDeny(t *testing.T) {
 		t.Errorf("should not contain in-memory warning when store is used, got: %s", result)
 	}
 
-	rules, err := s.ListRules("deny")
+	rules, err := s.ListRules(store.RuleFilter{Verdict: "deny"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rules) != 1 || rules[0].Destination != "bad.com" {
+	found := false
+	for _, r := range rules {
+		if r.Destination == "bad.com" {
+			found = true
+		}
+	}
+	if !found {
 		t.Errorf("deny rule not persisted to store: %v", rules)
 	}
 }
 
 func TestHandlePolicyRemove(t *testing.T) {
 	s := newTestStore(t)
-	s.SetConfig("default_verdict", "deny")
-	id, err := s.AddRule("allow", "removeme.com", nil, store.RuleOpts{})
+	id, err := s.AddRule("allow", store.RuleOpts{Destination: "removeme.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	handler := newTestHandlerWithStore(t, s, nil, "")
-	result := handler.Handle(&Command{Name: "policy", Args: []string{"remove", "1"}})
+	idStr := strconv.FormatInt(id, 10)
+	result := handler.Handle(&Command{Name: "policy", Args: []string{"remove", idStr}})
 
 	if !strings.Contains(result, "Removed rule ID") {
 		t.Errorf("expected removal confirmation, got: %s", result)
 	}
 
 	// Verify rule was removed from store.
-	rules, err := s.ListRules("")
+	rules, err := s.ListRules(store.RuleFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +212,6 @@ func TestHandlePolicyRemove(t *testing.T) {
 
 func TestHandlePolicyRemoveNotFound(t *testing.T) {
 	s := newTestStore(t)
-	s.SetConfig("default_verdict", "deny")
 
 	handler := newTestHandlerWithStore(t, s, nil, "")
 	result := handler.Handle(&Command{Name: "policy", Args: []string{"remove", "999"}})
@@ -218,10 +234,10 @@ func TestHandlePolicyRemoveInvalidID(t *testing.T) {
 
 func TestHandleStatus(t *testing.T) {
 	s := newTestStore(t)
-	s.SetConfig("default_verdict", "deny")
-	s.AddRule("allow", "example.com", nil, store.RuleOpts{})
+	s.AddRule("allow", store.RuleOpts{Destination: "example.com"})
 
-	broker := NewApprovalBroker()
+	// Create a channel.Broker for PendingCount.
+	broker := channel.NewBroker(nil)
 	handler := newTestHandlerWithStore(t, s, broker, "")
 	result := handler.Handle(&Command{Name: "status"})
 
@@ -246,7 +262,6 @@ func TestHandleAuditRecent(t *testing.T) {
 	}
 
 	s := newTestStore(t)
-	s.SetConfig("default_verdict", "deny")
 	handler := newTestHandlerWithStore(t, s, nil, auditFile)
 
 	result := handler.Handle(&Command{Name: "audit", Args: []string{"recent", "2"}})
@@ -276,7 +291,6 @@ func TestHandleAuditEmpty(t *testing.T) {
 	}
 
 	s := newTestStore(t)
-	s.SetConfig("default_verdict", "deny")
 	handler := newTestHandlerWithStore(t, s, nil, auditFile)
 
 	result := handler.Handle(&Command{Name: "audit", Args: []string{"recent"}})
@@ -404,7 +418,6 @@ func TestHandleUnknownCommand(t *testing.T) {
 }
 
 func TestSecureChatIDCheck(t *testing.T) {
-	// IsAuthorized should only allow the configured chatID
 	if !IsAuthorizedChat(12345, 12345) {
 		t.Error("same chatID should be authorized")
 	}
@@ -415,7 +428,6 @@ func TestSecureChatIDCheck(t *testing.T) {
 
 func TestPolicyPersistence(t *testing.T) {
 	s := newTestStore(t)
-	s.SetConfig("default_verdict", "deny")
 
 	handler := newTestHandlerWithStore(t, s, nil, "")
 
@@ -447,8 +459,7 @@ func TestPolicyPersistence(t *testing.T) {
 
 func TestPolicyRemoveThenRecompile(t *testing.T) {
 	s := newTestStore(t)
-	s.SetConfig("default_verdict", "deny")
-	id, err := s.AddRule("allow", "to-remove.com", nil, store.RuleOpts{})
+	id, err := s.AddRule("allow", store.RuleOpts{Destination: "to-remove.com"})
 	if err != nil {
 		t.Fatal(err)
 	}

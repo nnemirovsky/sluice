@@ -9,10 +9,39 @@ import (
 	"testing"
 	"time"
 
+	"context"
+
 	"github.com/nemirovsky/sluice/internal/audit"
+	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/policy"
-	tg "github.com/nemirovsky/sluice/internal/telegram"
 )
+
+// autoResolveChannel is a mock channel that automatically resolves approval
+// requests with a preconfigured response. Used by gateway tests.
+type autoResolveChannel struct {
+	broker   *channel.Broker
+	response channel.Response
+}
+
+func (c *autoResolveChannel) RequestApproval(_ context.Context, req channel.ApprovalRequest) error {
+	go c.broker.Resolve(req.ID, c.response)
+	return nil
+}
+func (c *autoResolveChannel) CancelApproval(_ string) error            { return nil }
+func (c *autoResolveChannel) Commands() <-chan channel.Command          { return nil }
+func (c *autoResolveChannel) Notify(_ context.Context, _ string) error { return nil }
+func (c *autoResolveChannel) Start() error                             { return nil }
+func (c *autoResolveChannel) Stop()                                    {}
+func (c *autoResolveChannel) Type() channel.ChannelType                { return channel.ChannelTelegram }
+
+// newAutoResolveBroker creates a Broker with a single mock channel that
+// auto-resolves every request with the given response.
+func newAutoResolveBroker(resp channel.Response) *channel.Broker {
+	ch := &autoResolveChannel{response: resp}
+	broker := channel.NewBroker([]channel.Channel{ch})
+	ch.broker = broker
+	return broker
+}
 
 // mockMCPServerFS is a mock MCP server that provides filesystem-like tools
 // and returns a distinguishable response for routing verification.
@@ -421,7 +450,7 @@ func TestGatewayToolCallPolicyAskApproved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	broker := tg.NewApprovalBroker()
+	broker := newAutoResolveBroker(channel.ResponseAllowOnce)
 
 	gw := newGatewayForTest(t, GatewayConfig{
 		Upstreams: []UpstreamConfig{{
@@ -433,12 +462,6 @@ func TestGatewayToolCallPolicyAskApproved(t *testing.T) {
 		Broker:     broker,
 		TimeoutSec: 5,
 	})
-
-	// Goroutine to approve the request.
-	go func() {
-		req := <-broker.Pending()
-		broker.Resolve(req.ID, tg.ResponseAllowOnce)
-	}()
 
 	result, err := gw.HandleToolCall(CallToolParams{
 		Name:      "test__greet",
@@ -463,7 +486,7 @@ func TestGatewayToolCallPolicyAskDenied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	broker := tg.NewApprovalBroker()
+	broker := newAutoResolveBroker(channel.ResponseDeny)
 
 	gw := newGatewayForTest(t, GatewayConfig{
 		Upstreams: []UpstreamConfig{{
@@ -475,12 +498,6 @@ func TestGatewayToolCallPolicyAskDenied(t *testing.T) {
 		Broker:     broker,
 		TimeoutSec: 5,
 	})
-
-	// Goroutine to deny the request.
-	go func() {
-		req := <-broker.Pending()
-		broker.Resolve(req.ID, tg.ResponseDeny)
-	}()
 
 	result, err := gw.HandleToolCall(CallToolParams{
 		Name:      "test__greet",
@@ -539,7 +556,7 @@ func TestGatewayToolCallPolicyAskAlwaysAllow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	broker := tg.NewApprovalBroker()
+	broker := newAutoResolveBroker(channel.ResponseAlwaysAllow)
 
 	gw := newGatewayForTest(t, GatewayConfig{
 		Upstreams: []UpstreamConfig{{
@@ -551,12 +568,6 @@ func TestGatewayToolCallPolicyAskAlwaysAllow(t *testing.T) {
 		Broker:     broker,
 		TimeoutSec: 5,
 	})
-
-	// First call: approve with "always allow".
-	go func() {
-		req := <-broker.Pending()
-		broker.Resolve(req.ID, tg.ResponseAlwaysAllow)
-	}()
 
 	result, err := gw.HandleToolCall(CallToolParams{
 		Name:      "test__greet",
@@ -678,7 +689,7 @@ func TestGatewayInspectBlockBeforeApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	broker := tg.NewApprovalBroker()
+	broker := channel.NewBroker(nil)
 
 	gw := newGatewayForTest(t, GatewayConfig{
 		Upstreams: []UpstreamConfig{{
@@ -692,7 +703,7 @@ func TestGatewayInspectBlockBeforeApproval(t *testing.T) {
 		TimeoutSec: 5,
 	})
 
-	// No goroutine to handle broker requests. If the broker is hit,
+	// No channel to handle broker requests. If the broker is hit,
 	// the test will hang until timeout. The inspector should block first.
 	result, err := gw.HandleToolCall(CallToolParams{
 		Name:      "test__greet",

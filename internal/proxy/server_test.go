@@ -8,9 +8,36 @@ import (
 
 	"golang.org/x/net/proxy"
 
+	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/policy"
-	"github.com/nemirovsky/sluice/internal/telegram"
 )
+
+// autoResolveChannel is a mock channel that automatically resolves approval
+// requests with a preconfigured response. Used by proxy server tests.
+type autoResolveChannel struct {
+	broker   *channel.Broker
+	response channel.Response
+}
+
+func (c *autoResolveChannel) RequestApproval(_ context.Context, req channel.ApprovalRequest) error {
+	go c.broker.Resolve(req.ID, c.response)
+	return nil
+}
+func (c *autoResolveChannel) CancelApproval(_ string) error             { return nil }
+func (c *autoResolveChannel) Commands() <-chan channel.Command           { return nil }
+func (c *autoResolveChannel) Notify(_ context.Context, _ string) error  { return nil }
+func (c *autoResolveChannel) Start() error                              { return nil }
+func (c *autoResolveChannel) Stop()                                     {}
+func (c *autoResolveChannel) Type() channel.ChannelType                 { return channel.ChannelTelegram }
+
+// newAutoResolveBroker creates a Broker with a single mock channel that
+// auto-resolves every request with the given response.
+func newAutoResolveBroker(resp channel.Response) *channel.Broker {
+	ch := &autoResolveChannel{response: resp}
+	broker := channel.NewBroker([]channel.Channel{ch})
+	ch.broker = broker
+	return broker
+}
 
 // resolveLocalhost looks up "localhost" and returns the first IP address
 // as a string. Tests that exercise the FQDN resolution path use this to
@@ -442,7 +469,7 @@ destination = "127.0.0.1"
 		t.Fatal(err)
 	}
 
-	broker := telegram.NewApprovalBroker()
+	broker := newAutoResolveBroker(channel.ResponseAllowOnce)
 
 	srv, err := New(Config{
 		ListenAddr: "127.0.0.1:0",
@@ -454,12 +481,6 @@ destination = "127.0.0.1"
 	}
 	go srv.ListenAndServe()
 	defer srv.Close()
-
-	// Simulate user approving the request
-	go func() {
-		req := <-broker.Pending()
-		broker.Resolve(req.ID, telegram.ResponseAllowOnce)
-	}()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -494,7 +515,7 @@ destination = "127.0.0.1"
 		t.Fatal(err)
 	}
 
-	broker := telegram.NewApprovalBroker()
+	broker := newAutoResolveBroker(channel.ResponseDeny)
 
 	srv, err := New(Config{
 		ListenAddr: "127.0.0.1:0",
@@ -506,12 +527,6 @@ destination = "127.0.0.1"
 	}
 	go srv.ListenAndServe()
 	defer srv.Close()
-
-	// Simulate user denying the request
-	go func() {
-		req := <-broker.Pending()
-		broker.Resolve(req.ID, telegram.ResponseDeny)
-	}()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -552,7 +567,7 @@ destination = "127.0.0.1"
 		t.Fatal(err)
 	}
 
-	broker := telegram.NewApprovalBroker()
+	broker := newAutoResolveBroker(channel.ResponseAlwaysAllow)
 
 	srv, err := New(Config{
 		ListenAddr: "127.0.0.1:0",
@@ -564,12 +579,6 @@ destination = "127.0.0.1"
 	}
 	go srv.ListenAndServe()
 	defer srv.Close()
-
-	// Simulate user approving "always allow"
-	go func() {
-		req := <-broker.Pending()
-		broker.Resolve(req.ID, telegram.ResponseAlwaysAllow)
-	}()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -616,7 +625,7 @@ destination = "127.0.0.1"
 		t.Fatal(err)
 	}
 
-	broker := telegram.NewApprovalBroker()
+	broker := channel.NewBroker(nil)
 
 	srv, err := New(Config{
 		ListenAddr: "127.0.0.1:0",
