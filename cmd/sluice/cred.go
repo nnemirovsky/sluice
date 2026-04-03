@@ -175,6 +175,7 @@ func handleCredList(args []string) {
 	}
 	db, dbErr := store.New(*dbPath)
 	if dbErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not open store %s: %v\n", *dbPath, dbErr)
 		for _, n := range names {
 			fmt.Println(n)
 		}

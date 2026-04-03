@@ -398,7 +398,7 @@ func handlePolicyExport(args []string) {
 			sort.Strings(keys)
 			parts := make([]string, 0, len(u.Env))
 			for _, k := range keys {
-				parts = append(parts, fmt.Sprintf("%s = %q", k, u.Env[k]))
+				parts = append(parts, fmt.Sprintf("%q = %q", k, u.Env[k]))
 			}
 			fmt.Printf("env = {%s}\n", strings.Join(parts, ", "))
 		}
