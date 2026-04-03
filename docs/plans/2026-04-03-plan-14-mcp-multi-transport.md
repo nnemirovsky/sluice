@@ -128,7 +128,48 @@ Route upstream creation to the correct transport based on config.
 - [ ] Write test with mixed upstream types
 - [ ] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
 
-### Task 5: Expose gateway via Streamable HTTP server
+### Task 5: MCP upstream credential injection via env vars
+
+Inject real credentials from the vault into MCP upstream child processes as environment variables. The env config in `[[mcp_upstream]]` specifies vault credential names. Sluice resolves them to real values at spawn time. The agent never sees the credentials. MCP tool policy and response redaction prevent credential leakage to the agent.
+
+**Files:**
+- Modify: `internal/mcp/upstream.go` (resolve credentials before process spawn)
+- Modify: `internal/mcp/gateway.go` (pass vault provider to upstream spawner)
+- Modify: `internal/mcp/upstream_test.go`
+
+**Flow:**
+```toml
+[[mcp_upstream]]
+name = "github"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+# [mcp_upstream.env]
+# GITHUB_PERSONAL_ACCESS_TOKEN = "vault:github_token"
+```
+
+```
+Startup:
+  1. Read env config: GITHUB_PERSONAL_ACCESS_TOKEN = "vault:github_token"
+  2. Resolve "vault:github_token" -> real credential from vault
+  3. Set env var on child process: GITHUB_PERSONAL_ACCESS_TOKEN=ghp_real_xxx
+  4. Child process (server-github) uses it normally
+  5. Agent calls github__create_repo -> tool policy check -> forward to child
+  6. Response -> redact rules strip any leaked credentials -> return to agent
+```
+
+The `vault:` prefix in env values signals that the value is a vault credential name to resolve. Plain values are passed through as-is.
+
+- [ ] In `StartUpstream`: scan env map for values with `vault:` prefix
+- [ ] For each `vault:` value: call `provider.Get(name)`, set the real credential as the env var value
+- [ ] Plain env values (no prefix) pass through unchanged
+- [ ] Release credential memory after setting env (best-effort, Go copies strings)
+- [ ] On credential rotation (vault change): stop and restart the upstream process to pick up new credentials
+- [ ] Write test: env value with `vault:` prefix is resolved from mock provider
+- [ ] Write test: env value without prefix is passed through unchanged
+- [ ] Write test: missing vault credential returns clear error on startup
+- [ ] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
+
+### Task 6: Expose gateway via Streamable HTTP server
 
 Allow OpenClaw (or any MCP client) to connect to sluice's gateway via HTTP instead of stdio. This runs on the existing port 3000 alongside `/healthz` and `/api/*`.
 
@@ -146,7 +187,7 @@ Allow OpenClaw (or any MCP client) to connect to sluice's gateway via HTTP inste
 - [ ] Write tests with httptest verifying full MCP handshake + tool call
 - [ ] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
 
-### Task 6: Auto-inject sluice as MCP server into OpenClaw
+### Task 7: Auto-inject sluice as MCP server into OpenClaw
 
 On startup (and after MCP upstream changes), automatically configure OpenClaw to use sluice as its MCP gateway via Streamable HTTP. No Docker socket needed in the OpenClaw container.
 
@@ -178,7 +219,7 @@ On startup (and after MCP upstream changes), automatically configure OpenClaw to
 - [ ] Run tests: `go test ./internal/docker/ -v -timeout 30s`
 - [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
-### Task 7: Verify acceptance criteria
+### Task 8: Verify acceptance criteria
 
 - [ ] Verify stdio upstreams still work (no regression)
 - [ ] Verify Streamable HTTP upstream connects to a remote MCP server
@@ -193,7 +234,7 @@ On startup (and after MCP upstream changes), automatically configure OpenClaw to
 - [ ] Run full test suite: `go test ./... -v -timeout 60s -race`
 - [ ] Run linter: `go vet ./...`
 
-### Task 8: [Final] Update documentation
+### Task 9: [Final] Update documentation
 
 - [ ] Update CLAUDE.md: document MCP transport types (stdio, http, websocket)
 - [ ] Update CLAUDE.md: document `/mcp` Streamable HTTP server endpoint
