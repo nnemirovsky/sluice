@@ -178,8 +178,16 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 
 	// 1. Binding-specific header injection: set the configured header
 	// with the formatted credential value for hosts with a binding.
+	// Use the request scheme (not the port heuristic) since the injector
+	// only handles HTTP/HTTPS traffic and the scheme is known from the
+	// request. This ensures bindings with protocols=["http"] match on
+	// non-standard ports (e.g. 8000) where DetectProtocol returns "generic".
+	proto := r.URL.Scheme
+	if proto == "" {
+		proto = string(DetectProtocol(port))
+	}
 	if res := inj.resolver.Load(); res != nil {
-		if binding, ok := res.Resolve(host, port); ok {
+		if binding, ok := res.ResolveForProtocol(host, port, proto); ok {
 			secret, err := inj.provider.Get(binding.Credential)
 			if err != nil {
 				log.Printf("[INJECT] credential %q lookup failed: %v", binding.Credential, err)

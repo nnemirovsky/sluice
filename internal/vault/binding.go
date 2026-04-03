@@ -14,7 +14,7 @@ type Binding struct {
 	Credential   string
 	InjectHeader string
 	Template     string
-	Protocol     string
+	Protocols    []string
 }
 
 type compiledBinding struct {
@@ -58,6 +58,75 @@ func (r *BindingResolver) Resolve(dest string, port int) (Binding, bool) {
 		return cb.binding, true
 	}
 	return Binding{}, false
+}
+
+// ResolveForProtocol finds the first binding matching destination, port, and
+// protocol. A binding with an empty Protocols list matches any protocol. If
+// proto is empty, this behaves like Resolve. When no protocol-specific binding
+// matches, falls back to the first binding with an empty Protocols list
+// (protocol-agnostic binding).
+func (r *BindingResolver) ResolveForProtocol(dest string, port int, proto string) (Binding, bool) {
+	if proto == "" {
+		return r.Resolve(dest, port)
+	}
+	var fallback *Binding
+	for _, cb := range r.bindings {
+		if !cb.glob.Match(dest) {
+			continue
+		}
+		if len(cb.ports) > 0 && !cb.ports[port] {
+			continue
+		}
+		if len(cb.binding.Protocols) == 0 {
+			if fallback == nil {
+				b := cb.binding
+				fallback = &b
+			}
+			continue
+		}
+		for _, bp := range cb.binding.Protocols {
+			if bp == proto {
+				return cb.binding, true
+			}
+		}
+	}
+	if fallback != nil {
+		return *fallback, true
+	}
+	return Binding{}, false
+}
+
+// ResolveProtocolHint scans bindings matching dest+port and returns the
+// protocol from a single-protocol binding, but only when unambiguous.
+// If multiple single-protocol bindings exist for the same dest+port with
+// different protocols, no hint is returned because the correct protocol
+// cannot be determined without inspecting actual traffic. This helps
+// determine the correct protocol on non-standard ports where port-based
+// detection returns "generic" but a binding carries an explicit protocol
+// annotation.
+func (r *BindingResolver) ResolveProtocolHint(dest string, port int) (string, bool) {
+	hint := ""
+	for _, cb := range r.bindings {
+		if !cb.glob.Match(dest) {
+			continue
+		}
+		if len(cb.ports) > 0 && !cb.ports[port] {
+			continue
+		}
+		if len(cb.binding.Protocols) == 1 {
+			if hint == "" {
+				hint = cb.binding.Protocols[0]
+			} else if hint != cb.binding.Protocols[0] {
+				// Multiple single-protocol bindings with different
+				// protocols. Ambiguous, so return no hint.
+				return "", false
+			}
+		}
+	}
+	if hint != "" {
+		return hint, true
+	}
+	return "", false
 }
 
 // FormatValue applies the binding's template to a secret value.

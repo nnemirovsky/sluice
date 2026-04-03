@@ -311,6 +311,13 @@ func (b *Broker) CancelAll() {
 	close(b.done)
 }
 
+// IsClosed reports whether the broker has been shut down via CancelAll.
+func (b *Broker) IsClosed() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.closed
+}
+
 // Channels returns the list of channels registered with this broker.
 func (b *Broker) Channels() []Channel {
 	return b.channels

@@ -174,7 +174,7 @@ func TestSSHJumpHostInjectsKey(t *testing.T) {
 	binding := vault.Binding{
 		Credential: "ssh_key",
 		Template:   "testuser",
-		Protocol:   "ssh",
+		Protocols:  []string{"ssh"},
 	}
 
 	jumpHost := NewSSHJumpHost(store, proxyHostKey)

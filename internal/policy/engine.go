@@ -10,8 +10,29 @@ import (
 )
 
 type compiledRule struct {
-	glob  *Glob
-	ports map[int]bool
+	glob      *Glob
+	ports     map[int]bool
+	protocols map[string]bool
+}
+
+// portToProtocol maps well-known ports to protocol names for protocol-scoped
+// rule matching. Returns "" for non-standard ports where the protocol is
+// ambiguous.
+func portToProtocol(port int) string {
+	switch port {
+	case 80, 8080:
+		return "http"
+	case 443, 8443:
+		return "https"
+	case 22:
+		return "ssh"
+	case 143, 993:
+		return "imap"
+	case 25, 587, 465:
+		return "smtp"
+	default:
+		return ""
+	}
 }
 
 type compiledEngine struct {
@@ -181,7 +202,11 @@ func compileRules(rules []Rule) ([]compiledRule, error) {
 			}
 			ports[p] = true
 		}
-		out = append(out, compiledRule{glob: g, ports: ports})
+		protocols := make(map[string]bool, len(r.Protocols))
+		for _, p := range r.Protocols {
+			protocols[p] = true
+		}
+		out = append(out, compiledRule{glob: g, ports: ports, protocols: protocols})
 	}
 	return out, nil
 }
@@ -215,9 +240,16 @@ func matchRules(rules []compiledRule, dest string, port int) bool {
 		if !r.glob.Match(dest) {
 			continue
 		}
-		if len(r.ports) == 0 || r.ports[port] {
-			return true
+		if len(r.ports) > 0 && !r.ports[port] {
+			continue
 		}
+		if len(r.protocols) > 0 {
+			proto := portToProtocol(port)
+			if proto == "" || !r.protocols[proto] {
+				continue
+			}
+		}
+		return true
 	}
 	return false
 }
@@ -283,10 +315,13 @@ func (e *Engine) CouldBeAllowed(dest string, includeAsk bool) bool {
 		return e.Default == Allow
 	}
 
-	// A portless deny rule denies all ports and takes precedence over
-	// allow/ask rules in Evaluate, so the destination cannot be allowed.
+	// A portless, protocol-less deny rule denies all traffic and takes
+	// precedence over allow/ask rules in Evaluate, so the destination
+	// cannot be allowed. Protocol-scoped deny rules (e.g. protocols=["ssh"])
+	// only deny that protocol, so DNS must still be resolved for other
+	// protocols to work.
 	for _, r := range e.compiled.denyRules {
-		if len(r.ports) == 0 && r.glob.Match(dest) {
+		if len(r.ports) == 0 && len(r.protocols) == 0 && r.glob.Match(dest) {
 			return false
 		}
 	}

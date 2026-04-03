@@ -122,8 +122,18 @@ func handleMCPGateway(args []string) error {
 	}
 
 	// Optional Telegram approval channel and broker.
+	// Check the store-backed channel enabled flag before parsing env vars
+	// so a disabled channel skips setup entirely (avoids error on malformed
+	// TELEGRAM_CHAT_ID when the channel is disabled in the store).
 	var broker *channel.Broker
-	if *telegramToken != "" && *telegramChatIDStr != "" {
+	telegramStoreDisabled := false
+	if ch, chErr := db.GetChannel(1); chErr != nil {
+		log.Printf("WARNING: failed to read channel state from store: %v", chErr)
+	} else if ch != nil && !ch.Enabled {
+		log.Printf("telegram channel disabled in store (ask rules will auto-deny)")
+		telegramStoreDisabled = true
+	}
+	if !telegramStoreDisabled && *telegramToken != "" && *telegramChatIDStr != "" {
 		chatID, parseErr := strconv.ParseInt(*telegramChatIDStr, 10, 64)
 		if parseErr != nil {
 			return fmt.Errorf("invalid telegram-chat-id: %w", parseErr)

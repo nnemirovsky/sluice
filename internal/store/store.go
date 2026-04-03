@@ -158,6 +158,9 @@ func (s *Store) AddRule(verdict string, opts RuleOpts) (int64, error) {
 	if set > 1 {
 		return 0, fmt.Errorf("destination, tool, and pattern are mutually exclusive")
 	}
+	if opts.Pattern != "" && verdict != "deny" && verdict != "redact" {
+		return 0, fmt.Errorf("pattern rules only support deny or redact verdict, got %q", verdict)
+	}
 	source := opts.Source
 	if source == "" {
 		source = "manual"

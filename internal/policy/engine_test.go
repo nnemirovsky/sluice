@@ -462,6 +462,43 @@ destination = "evil.com"
 	}
 }
 
+func TestCouldBeAllowedProtocolScopedDeny(t *testing.T) {
+	// A deny rule scoped to a specific protocol should NOT block DNS
+	// resolution for other protocols. Only portless AND protocol-less
+	// deny rules are treated as blanket denies in CouldBeAllowed.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+
+[[deny]]
+destination = "example.com"
+protocols = ["ssh"]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// Protocol-scoped deny should NOT prevent DNS resolution.
+	if !eng.CouldBeAllowed("example.com", true) {
+		t.Error("CouldBeAllowed should be true: deny is scoped to ssh only, HTTPS should still work")
+	}
+
+	// But a blanket deny (no protocols) should still block.
+	eng2, err := LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+
+[[deny]]
+destination = "example.com"
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if eng2.CouldBeAllowed("example.com", true) {
+		t.Error("CouldBeAllowed should be false: blanket deny with no protocol restriction")
+	}
+}
+
 func TestLoadFromBytesGlobWithMetachars(t *testing.T) {
 	// After regex injection fix, patterns with metacharacters compile fine as literals
 	input := `

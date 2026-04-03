@@ -580,8 +580,8 @@ func TestReadBindings(t *testing.T) {
 	if bindings[0].Template != "Bearer {value}" {
 		t.Errorf("expected template 'Bearer {value}', got %q", bindings[0].Template)
 	}
-	if bindings[1].Protocol != "ssh" {
-		t.Errorf("expected protocol ssh, got %q", bindings[1].Protocol)
+	if len(bindings[1].Protocols) != 1 || bindings[1].Protocols[0] != "ssh" {
+		t.Errorf("expected protocols [ssh], got %v", bindings[1].Protocols)
 	}
 }
 

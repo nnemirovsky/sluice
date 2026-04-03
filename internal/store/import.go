@@ -260,6 +260,10 @@ func insertRuleIfNew(tx *sql.Tx, verdict string, r importRule) (bool, error) {
 		return false, fmt.Errorf("%s rule: destination, tool, and pattern are mutually exclusive", verdict)
 	}
 
+	if r.Pattern != "" && verdict != "deny" && verdict != "redact" {
+		return false, fmt.Errorf("pattern rules only support deny or redact verdict, got %q", verdict)
+	}
+
 	for _, p := range r.Ports {
 		if p < 1 || p > 65535 {
 			return false, fmt.Errorf("rule: invalid port %d (must be 1-65535)", p)

@@ -459,11 +459,40 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 			_, portStr, _ := net.SplitHostPort(addr)
 			port, _ := strconv.Atoi(portStr)
 
-			if binding, ok := r.Resolve(fqdn, port); ok {
-				proto := ProtocolFromContext(ctx)
-				if binding.Protocol != "" {
-					proto = Protocol(binding.Protocol)
+			proto := ProtocolFromContext(ctx)
+			// Use protocol-aware resolution so the correct binding is
+			// selected when multiple bindings exist for the same host:port
+			// with different protocols (e.g. one for SSH, one for HTTPS).
+			binding, ok := r.ResolveForProtocol(fqdn, port, string(proto))
+			if !ok {
+				// No protocol-specific or protocol-agnostic binding
+				// matched. Fall back to any dest+port binding and adopt
+				// its protocol when unambiguous. ResolveProtocolHint
+				// scans ALL bindings for this dest+port and returns false
+				// when multiple single-protocol bindings disagree,
+				// preventing order-dependent protocol selection.
+				binding, ok = r.Resolve(fqdn, port)
+				if ok && len(binding.Protocols) == 1 {
+					if hint, hok := r.ResolveProtocolHint(fqdn, port); hok {
+						proto = Protocol(hint)
+					}
 				}
+			}
+			// When protocol is still generic (non-standard port) and
+			// resolution returned a protocol-agnostic binding, check
+			// if a single-protocol binding exists for this dest+port.
+			// Without this, the agnostic fallback from ResolveForProtocol
+			// masks protocol-specific bindings and the connection falls
+			// through to direct dial, bypassing the injector.
+			if ok && proto == ProtoGeneric && len(binding.Protocols) == 0 {
+				if hint, hok := r.ResolveProtocolHint(fqdn, port); hok {
+					proto = Protocol(hint)
+					if specific, sok := r.ResolveForProtocol(fqdn, port, hint); sok {
+						binding = specific
+					}
+				}
+			}
+			if ok {
 				// hostAddr uses the FQDN for TLS SNI and SSH known_hosts
 				// verification. addr (the go-socks5 dial target) uses the
 				// policy-approved resolved IP for the actual TCP connection,

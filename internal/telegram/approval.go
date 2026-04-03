@@ -146,15 +146,21 @@ func (tc *TelegramChannel) sendApprovalMessage(req channel.ApprovalRequest) {
 }
 
 // CancelApproval edits the Telegram message to indicate the request was
-// resolved via another channel, removing the inline keyboard.
+// resolved, timed out, or cancelled, removing the inline keyboard.
 func (tc *TelegramChannel) CancelApproval(id string) error {
 	msgIDVal, ok := tc.msgMap.LoadAndDelete(id)
 	if !ok {
 		return nil
 	}
 	msgID := msgIDVal.(int)
-	edit := tgbotapi.NewEditMessageText(tc.chatID, msgID,
-		"(resolved via another channel)")
+	reason := "(resolved via another channel)"
+	if tc.broker != nil && tc.broker.WasTimedOut(id) {
+		reason = "(request timed out)"
+		tc.broker.ClearTimedOut(id)
+	} else if tc.broker != nil && tc.broker.IsClosed() {
+		reason = "(proxy shutting down)"
+	}
+	edit := tgbotapi.NewEditMessageText(tc.chatID, msgID, reason)
 	_, _ = tc.api.Send(edit)
 	return nil
 }

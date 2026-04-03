@@ -112,9 +112,7 @@ func (h *CommandHandler) rebuildResolver() error {
 			Credential:   r.Credential,
 			InjectHeader: r.Header,
 			Template:     r.Template,
-		}
-		if len(r.Protocols) > 0 {
-			bindings[i].Protocol = r.Protocols[0]
+			Protocols:    r.Protocols,
 		}
 	}
 	resolver, err := vault.NewBindingResolver(bindings)

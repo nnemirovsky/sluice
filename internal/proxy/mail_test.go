@@ -161,7 +161,7 @@ func TestIMAPAuthSwap(t *testing.T) {
 
 	binding := vault.Binding{
 		Credential: "imap_pass",
-		Protocol:   "imap",
+		Protocols:  []string{"imap"},
 	}
 
 	mailProxy := NewMailProxy(store, nil)
@@ -228,7 +228,7 @@ func TestSMTPAuthPlainSwap(t *testing.T) {
 
 	binding := vault.Binding{
 		Credential: "smtp_pass",
-		Protocol:   "smtp",
+		Protocols:  []string{"smtp"},
 	}
 
 	mailProxy := NewMailProxy(store, nil)
@@ -397,7 +397,7 @@ func TestSMTPAuthLoginSwap(t *testing.T) {
 
 	binding := vault.Binding{
 		Credential: "smtp_login_pass",
-		Protocol:   "smtp",
+		Protocols:  []string{"smtp"},
 	}
 
 	mailProxy := NewMailProxy(store, nil)
@@ -638,7 +638,7 @@ func TestAuthContinuationRequiresServerPrompt(t *testing.T) {
 
 	binding := vault.Binding{
 		Credential: "exfil_test",
-		Protocol:   "smtp",
+		Protocols:  []string{"smtp"},
 	}
 
 	mailProxy := NewMailProxy(store, nil)
@@ -731,7 +731,7 @@ func TestIMAPVaultIntegrityAfterAuth(t *testing.T) {
 
 	binding := vault.Binding{
 		Credential: "imap_zero",
-		Protocol:   "imap",
+		Protocols:  []string{"imap"},
 	}
 
 	mailProxy := NewMailProxy(store, nil)
@@ -791,7 +791,7 @@ func TestIMAPImplicitTLSAuthSwap(t *testing.T) {
 
 	binding := vault.Binding{
 		Credential: "imaps_pass",
-		Protocol:   "imap",
+		Protocols:  []string{"imap"},
 	}
 
 	mailProxy := NewMailProxy(store, &caCert)

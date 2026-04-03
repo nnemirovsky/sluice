@@ -109,12 +109,24 @@ func main() {
 	defer logger.Close()
 
 	// Parse Telegram chat ID early so we can set up the channel.
+	// Check the store-backed channel enabled flag first so that a disabled
+	// channel skips env var parsing entirely (avoids fatal on malformed
+	// TELEGRAM_CHAT_ID when the channel is disabled in the store).
 	var broker *channel.Broker
 	var telegramChatID int64
 	var tgChannel *telegram.TelegramChannel
 	telegramEnabled := false
 
-	if *telegramToken != "" && *telegramChatIDStr != "" {
+	telegramStoreDisabled := false
+	if ch, chErr := db.GetChannel(1); chErr != nil {
+		log.Printf("WARNING: failed to read channel state from store: %v", chErr)
+	} else if ch != nil && !ch.Enabled {
+		telegramStoreDisabled = true
+	}
+
+	if telegramStoreDisabled {
+		log.Printf("telegram channel disabled in store (ask rules will auto-deny)")
+	} else if *telegramToken != "" && *telegramChatIDStr != "" {
 		var parseErr error
 		telegramChatID, parseErr = strconv.ParseInt(*telegramChatIDStr, 10, 64)
 		if parseErr != nil {
@@ -377,9 +389,7 @@ func readBindings(db *store.Store) ([]vault.Binding, error) {
 			Credential:   r.Credential,
 			InjectHeader: r.Header,
 			Template:     r.Template,
-		}
-		if len(r.Protocols) > 0 {
-			bindings[i].Protocol = r.Protocols[0]
+			Protocols:    r.Protocols,
 		}
 	}
 	return bindings, nil
