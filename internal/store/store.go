@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	_ "modernc.org/sqlite"
@@ -25,6 +26,20 @@ func New(path string) (*Store, error) {
 		// Shared cache ensures all connections in the pool see the same
 		// in-memory database (needed for concurrent access in tests).
 		dsn = "file::memory:?cache=shared"
+	} else {
+		// Create the file with restricted permissions (0600) before SQLite
+		// opens it. The DB may contain sensitive config values (e.g.
+		// HashiCorp Vault tokens). If the file already exists, tighten
+		// permissions in case it was created with a wider umask.
+		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+			f, createErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0600)
+			if createErr != nil {
+				return nil, fmt.Errorf("create db file %q: %w", path, createErr)
+			}
+			f.Close()
+		} else if statErr == nil {
+			_ = os.Chmod(path, 0600)
+		}
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -129,6 +144,10 @@ CREATE TABLE IF NOT EXISTS mcp_upstreams (
 );
 `
 
+func validVerdict(v string) bool {
+	return v == "allow" || v == "deny" || v == "ask"
+}
+
 // --- Rule types ---
 
 // NetworkRule represents a row in the rules table.
@@ -154,6 +173,9 @@ type RuleOpts struct {
 func (s *Store) AddRule(verdict, destination string, ports []int, opts RuleOpts) (int64, error) {
 	if verdict == "" || destination == "" {
 		return 0, fmt.Errorf("verdict and destination are required")
+	}
+	if !validVerdict(verdict) {
+		return 0, fmt.Errorf("invalid verdict %q: must be allow, deny, or ask", verdict)
 	}
 	source := opts.Source
 	if source == "" {
@@ -235,6 +257,9 @@ type ToolRuleRow struct {
 func (s *Store) AddToolRule(verdict, tool, note, source string) (int64, error) {
 	if verdict == "" || tool == "" {
 		return 0, fmt.Errorf("verdict and tool are required")
+	}
+	if !validVerdict(verdict) {
+		return 0, fmt.Errorf("invalid verdict %q: must be allow, deny, or ask", verdict)
 	}
 	if source == "" {
 		source = "manual"

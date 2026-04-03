@@ -296,6 +296,14 @@ func handlePolicyExport(args []string) {
 		fmt.Println()
 	}
 
+	// Warn if sensitive HashiCorp values exist but are excluded from export.
+	for _, sensitiveKey := range []string{"vault_hashicorp_token", "vault_hashicorp_role_id", "vault_hashicorp_secret_id"} {
+		val, _ := db.GetConfig(sensitiveKey)
+		if val != "" {
+			fmt.Fprintf(os.Stderr, "warning: %s excluded from export (use env var indirection instead)\n", sensitiveKey)
+		}
+	}
+
 	// Vault HashiCorp sub-section. Sensitive values (token, role_id,
 	// secret_id) are excluded from export. Use env var indirection instead.
 	hcKeys := []struct {
