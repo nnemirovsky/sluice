@@ -402,6 +402,18 @@ func (h *CommandHandler) credRotate(name, value string) string {
 }
 
 func (h *CommandHandler) credRemove(name string) string {
+	// Clean up associated bindings and auto-created rules before removing,
+	// mirroring the CLI cred remove behavior (cmd/sluice/cred.go).
+	if h.store != nil {
+		bindings, err := h.store.ListBindingsByCredential(name)
+		if err == nil {
+			for _, b := range bindings {
+				h.store.RemoveRulesByDestinationAndSource(b.Destination, "cred-add")
+			}
+		}
+		h.store.RemoveBindingsByCredential(name)
+	}
+
 	if err := h.vault.Remove(name); err != nil {
 		return fmt.Sprintf("Failed to remove credential: %v", err)
 	}
