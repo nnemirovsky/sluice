@@ -680,15 +680,18 @@ func (s *Store) RemoveRulesByDestinationAndSource(destination, source string) (i
 
 // --- Store queries ---
 
-// IsEmpty returns true if the store has no rules, tool rules, bindings, or
-// config entries. Used to detect a fresh database that should be seeded.
+// IsEmpty returns true if the store has no rules, tool rules, bindings, config
+// entries, inspect rules, or MCP upstreams. Used to detect a fresh database
+// that should be seeded.
 func (s *Store) IsEmpty() (bool, error) {
 	var count int
 	err := s.db.QueryRow(
 		`SELECT (SELECT COUNT(*) FROM rules) +
 		        (SELECT COUNT(*) FROM tool_rules) +
 		        (SELECT COUNT(*) FROM config) +
-		        (SELECT COUNT(*) FROM bindings)`,
+		        (SELECT COUNT(*) FROM bindings) +
+		        (SELECT COUNT(*) FROM inspect_rules) +
+		        (SELECT COUNT(*) FROM mcp_upstreams)`,
 	).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("check store empty: %w", err)

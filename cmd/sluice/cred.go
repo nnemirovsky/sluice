@@ -108,6 +108,9 @@ func handleCredAdd(args []string) {
 				if err != nil {
 					log.Fatalf("invalid port %q: %v", ps, err)
 				}
+				if p < 1 || p > 65535 {
+					log.Fatalf("port %d out of range (1-65535)", p)
+				}
 				ports = append(ports, p)
 			}
 		}

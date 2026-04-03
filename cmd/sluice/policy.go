@@ -111,6 +111,9 @@ func handlePolicyAdd(args []string) {
 			if err != nil {
 				log.Fatalf("invalid port %q: %v", ps, err)
 			}
+			if p < 1 || p > 65535 {
+				log.Fatalf("port %d out of range (1-65535)", p)
+			}
 			ports = append(ports, p)
 		}
 	}
@@ -209,8 +212,14 @@ func handlePolicyExport(args []string) {
 	defer db.Close()
 
 	// Config section.
-	defaultVerdict, _ := db.GetConfig("default_verdict")
-	timeoutStr, _ := db.GetConfig("timeout_sec")
+	defaultVerdict, err := db.GetConfig("default_verdict")
+	if err != nil {
+		log.Fatalf("read config default_verdict: %v", err)
+	}
+	timeoutStr, err := db.GetConfig("timeout_sec")
+	if err != nil {
+		log.Fatalf("read config timeout_sec: %v", err)
+	}
 	if defaultVerdict != "" || timeoutStr != "" {
 		fmt.Println("[policy]")
 		if defaultVerdict != "" {
@@ -223,8 +232,14 @@ func handlePolicyExport(args []string) {
 	}
 
 	// Telegram section.
-	botTokenEnv, _ := db.GetConfig("telegram_bot_token_env")
-	chatIDEnv, _ := db.GetConfig("telegram_chat_id_env")
+	botTokenEnv, err := db.GetConfig("telegram_bot_token_env")
+	if err != nil {
+		log.Fatalf("read config telegram_bot_token_env: %v", err)
+	}
+	chatIDEnv, err := db.GetConfig("telegram_chat_id_env")
+	if err != nil {
+		log.Fatalf("read config telegram_chat_id_env: %v", err)
+	}
 	if botTokenEnv != "" || chatIDEnv != "" {
 		fmt.Println("[telegram]")
 		if botTokenEnv != "" {
@@ -237,8 +252,14 @@ func handlePolicyExport(args []string) {
 	}
 
 	// Vault section.
-	vaultProvider, _ := db.GetConfig("vault_provider")
-	vaultDir, _ := db.GetConfig("vault_dir")
+	vaultProvider, err := db.GetConfig("vault_provider")
+	if err != nil {
+		log.Fatalf("read config vault_provider: %v", err)
+	}
+	vaultDir, err := db.GetConfig("vault_dir")
+	if err != nil {
+		log.Fatalf("read config vault_dir: %v", err)
+	}
 	if vaultProvider != "" || vaultDir != "" {
 		fmt.Println("[vault]")
 		if vaultProvider != "" {
@@ -311,14 +332,14 @@ func handlePolicyExport(args []string) {
 			argsJSON, _ := json.Marshal(u.Args)
 			fmt.Printf("args = %s\n", string(argsJSON))
 		}
+		if u.TimeoutSec != 120 {
+			fmt.Printf("timeout_sec = %d\n", u.TimeoutSec)
+		}
 		if len(u.Env) > 0 {
 			fmt.Println("[mcp_upstream.env]")
 			for k, v := range u.Env {
 				fmt.Printf("%s = %q\n", k, v)
 			}
-		}
-		if u.TimeoutSec != 120 {
-			fmt.Printf("timeout_sec = %d\n", u.TimeoutSec)
 		}
 		fmt.Println()
 	}
