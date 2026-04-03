@@ -265,13 +265,51 @@ func handlePolicyExport(args []string) {
 	if err != nil {
 		log.Fatalf("read config vault_dir: %v", err)
 	}
-	if vaultProvider != "" || vaultDir != "" {
+	vaultProviders, err := db.GetConfig("vault_providers")
+	if err != nil {
+		log.Fatalf("read config vault_providers: %v", err)
+	}
+	if vaultProvider != "" || vaultDir != "" || vaultProviders != "" {
 		fmt.Println("[vault]")
 		if vaultProvider != "" {
 			fmt.Printf("provider = %q\n", vaultProvider)
 		}
 		if vaultDir != "" {
 			fmt.Printf("dir = %q\n", vaultDir)
+		}
+		if vaultProviders != "" {
+			// vault_providers is stored as a JSON array; output as TOML array.
+			fmt.Printf("providers = %s\n", vaultProviders)
+		}
+		fmt.Println()
+	}
+
+	// Vault HashiCorp sub-section. Sensitive values (token, role_id,
+	// secret_id) are excluded from export. Use env var indirection instead.
+	hcKeys := []struct {
+		dbKey, tomlKey string
+	}{
+		{"vault_hashicorp_addr", "addr"},
+		{"vault_hashicorp_mount", "mount"},
+		{"vault_hashicorp_prefix", "prefix"},
+		{"vault_hashicorp_auth", "auth"},
+		{"vault_hashicorp_role_id_env", "role_id_env"},
+		{"vault_hashicorp_secret_id_env", "secret_id_env"},
+	}
+	var hcLines []string
+	for _, kv := range hcKeys {
+		val, hcErr := db.GetConfig(kv.dbKey)
+		if hcErr != nil {
+			log.Fatalf("read config %s: %v", kv.dbKey, hcErr)
+		}
+		if val != "" {
+			hcLines = append(hcLines, fmt.Sprintf("%s = %q", kv.tomlKey, val))
+		}
+	}
+	if len(hcLines) > 0 {
+		fmt.Println("[vault.hashicorp]")
+		for _, line := range hcLines {
+			fmt.Println(line)
 		}
 		fmt.Println()
 	}

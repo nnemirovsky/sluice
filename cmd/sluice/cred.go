@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
 	"golang.org/x/term"
@@ -100,6 +101,10 @@ func handleCredAdd(args []string) {
 
 	// If --destination is provided, also create an allow rule and binding.
 	if *destination != "" {
+		if _, err := policy.CompileGlob(*destination); err != nil {
+			log.Fatalf("invalid destination pattern %q: %v", *destination, err)
+		}
+
 		var ports []int
 		if *portsStr != "" {
 			for _, ps := range strings.Split(*portsStr, ",") {
@@ -213,15 +218,22 @@ func handleCredRemove(args []string) {
 	if dbErr == nil {
 		defer db.Close()
 
-		bindings, _ := db.ListBindingsByCredential(name)
+		bindings, listErr := db.ListBindingsByCredential(name)
+		if listErr != nil {
+			log.Printf("warning: failed to list bindings for %q: %v", name, listErr)
+		}
 		for _, b := range bindings {
-			n, _ := db.RemoveRulesByDestinationAndSource(b.Destination, credAddSource)
-			if n > 0 {
+			n, rmErr := db.RemoveRulesByDestinationAndSource(b.Destination, credAddSource)
+			if rmErr != nil {
+				log.Printf("warning: failed to remove rules for %s: %v", b.Destination, rmErr)
+			} else if n > 0 {
 				fmt.Printf("removed %d auto-created rule(s) for %s\n", n, b.Destination)
 			}
 		}
-		removed, _ := db.RemoveBindingsByCredential(name)
-		if removed > 0 {
+		removed, rmBindErr := db.RemoveBindingsByCredential(name)
+		if rmBindErr != nil {
+			log.Printf("warning: failed to remove bindings for %q: %v", name, rmBindErr)
+		} else if removed > 0 {
 			fmt.Printf("removed %d binding(s) for %q\n", removed, name)
 		}
 	}

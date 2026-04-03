@@ -251,6 +251,8 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 						}
 						if newEng, recompErr := policy.LoadFromStore(r.store); recompErr != nil {
 							log.Printf("[WARN] failed to recompile engine after always-allow: %v", recompErr)
+						} else if valErr := newEng.Validate(); valErr != nil {
+							log.Printf("[WARN] engine validation failed after always-allow: %v", valErr)
 						} else {
 							r.engine.Store(newEng)
 						}
