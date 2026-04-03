@@ -18,4 +18,4 @@ WORKDIR /home/sluice
 EXPOSE 1080 3000
 HEALTHCHECK --interval=10s --timeout=3s CMD wget -qO- http://localhost:3000/healthz || exit 1
 ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["-listen", "0.0.0.0:1080", "-health-addr", "0.0.0.0:3000", "-db", "/home/sluice/.sluice/sluice.db", "-policy", "/etc/sluice/policy.toml", "-audit", "/var/log/sluice/audit.jsonl", "-phantom-dir", "/home/sluice/phantoms"]
+CMD ["-listen", "0.0.0.0:1080", "-health-addr", "0.0.0.0:3000", "-db", "/home/sluice/.sluice/sluice.db", "-config", "/etc/sluice/config.toml", "-audit", "/var/log/sluice/audit.jsonl", "-phantom-dir", "/home/sluice/phantoms"]

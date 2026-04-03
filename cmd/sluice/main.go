@@ -50,7 +50,7 @@ func main() {
 
 	listenAddr := flag.String("listen", "127.0.0.1:1080", "SOCKS5 listen address")
 	dbPath := flag.String("db", "sluice.db", "path to SQLite database")
-	policyPath := flag.String("policy", "", "path to policy TOML file (seeds DB on first run if DB is empty)")
+	configPath := flag.String("config", "", "path to config TOML file (seeds DB on first run if DB is empty)")
 	auditPath := flag.String("audit", "audit.jsonl", "path to audit log file")
 	telegramToken := flag.String("telegram-token", os.Getenv("TELEGRAM_BOT_TOKEN"), "Telegram bot token")
 	telegramChatIDStr := flag.String("telegram-chat-id", os.Getenv("TELEGRAM_CHAT_ID"), "Telegram chat ID for approvals")
@@ -68,28 +68,28 @@ func main() {
 	}
 	defer db.Close()
 
-	// If --policy is specified and the DB is empty, auto-import the TOML file as seed.
-	if *policyPath != "" {
+	// If --config is specified and the DB is empty, auto-import the TOML file as seed.
+	if *configPath != "" {
 		empty, err := db.IsEmpty()
 		if err != nil {
 			log.Fatalf("check store: %v", err)
 		}
 		if empty {
-			data, err := os.ReadFile(*policyPath)
+			data, err := os.ReadFile(*configPath)
 			if err != nil {
 				if os.IsNotExist(err) {
-					log.Printf("policy seed file %s not found, starting with empty DB", *policyPath)
+					log.Printf("config seed file %s not found, starting with empty DB", *configPath)
 				} else {
-					log.Fatalf("read policy seed file: %v", err)
+					log.Fatalf("read config seed file: %v", err)
 				}
 			}
 			if data != nil {
 				result, err := db.ImportTOML(data)
 				if err != nil {
-					log.Fatalf("import policy seed: %v", err)
+					log.Fatalf("import config seed: %v", err)
 				}
 				log.Printf("seeded DB from %s: %d rules, %d bindings, %d upstreams, %d config",
-					*policyPath, result.RulesInserted,
+					*configPath, result.RulesInserted,
 					result.BindingsInserted, result.UpstreamsInserted, result.ConfigSet)
 			}
 		}
@@ -101,15 +101,6 @@ func main() {
 	}
 	log.Printf("loaded policy: %d allow, %d deny, %d ask rules (default: %s)",
 		len(eng.AllowRules), len(eng.DenyRules), len(eng.AskRules), eng.Default)
-
-	// Read Telegram env vars directly (hardcoded env var names).
-	// CLI flags take precedence over env vars.
-	if envVal := os.Getenv("TELEGRAM_BOT_TOKEN"); envVal != "" && *telegramToken == "" {
-		*telegramToken = envVal
-	}
-	if envVal := os.Getenv("TELEGRAM_CHAT_ID"); envVal != "" && *telegramChatIDStr == "" {
-		*telegramChatIDStr = envVal
-	}
 
 	logger, err := audit.NewFileLogger(*auditPath)
 	if err != nil {

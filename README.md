@@ -8,10 +8,10 @@ Credential-injecting approval proxy for AI agents. Two layers of governance: MCP
 
 ```bash
 go build -o sluice ./cmd/sluice/
-./sluice --db sluice.db --policy examples/policy.toml
+./sluice --db sluice.db --config examples/config.toml
 ```
 
-On first run with an empty database, `--policy` seeds the DB from the TOML file. Subsequent runs use the SQLite store directly.
+On first run with an empty database, `--config` seeds the DB from the TOML file. Subsequent runs use the SQLite store directly.
 
 Test with curl:
 
@@ -25,7 +25,7 @@ curl -x socks5h://127.0.0.1:1080 https://api.anthropic.com/
 |------|---------|-------------|
 | `--listen` | `127.0.0.1:1080` | SOCKS5 listen address |
 | `--db` | `sluice.db` | Path to SQLite policy database |
-| `--policy` | (none) | TOML seed file (imported only when DB is empty) |
+| `--config` | (none) | TOML seed file (imported only when DB is empty) |
 | `--audit` | `audit.jsonl` | Path to audit log file |
 | `--telegram-token` | `$TELEGRAM_BOT_TOKEN` | Telegram bot token for approval flow |
 | `--telegram-chat-id` | `$TELEGRAM_CHAT_ID` | Telegram chat ID for approvals |
@@ -105,16 +105,6 @@ ports = [443]
 Glob patterns: `*` matches within a single DNS label (not across dots). `**` matches across dots (any depth of subdomains). `?` matches a single non-dot character. Matching is case-insensitive (RFC 4343). An empty ports list matches all ports.
 
 Evaluation order: deny rules first, then allow, then ask, then the default verdict.
-
-### Telegram Config in TOML Seed
-
-```toml
-[telegram]
-bot_token_env = "MY_BOT_TOKEN"   # env var name (default: TELEGRAM_BOT_TOKEN)
-chat_id_env = "MY_CHAT_ID"       # env var name (default: TELEGRAM_CHAT_ID)
-```
-
-When present, these override the default environment variable names unless the corresponding CLI flag was explicitly provided.
 
 ## Telegram Approval Bot
 

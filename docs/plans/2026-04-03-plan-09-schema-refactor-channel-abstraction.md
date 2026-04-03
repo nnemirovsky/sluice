@@ -419,16 +419,16 @@ Remove configurable env var name indirection. Use channel.Channel interface. Ren
 - Modify: `Dockerfile`
 - Modify: `compose.yml`, `compose.dev.yml`
 
-- [ ] Hardcode `os.Getenv("TELEGRAM_BOT_TOKEN")` and `os.Getenv("TELEGRAM_CHAT_ID")` directly. Remove the indirection that reads env var names from the engine/config.
-- [ ] Remove the `eng.Telegram.BotTokenEnv` / `eng.Telegram.ChatIDEnv` lookups
-- [ ] Rename `--policy` flag to `--config` (same auto-seed behavior)
-- [ ] Update Dockerfile CMD: replace `-policy /etc/sluice/policy.toml` with `-config /etc/sluice/config.toml`
-- [ ] Update compose.yml: rename volume mount from `./policy.toml:/etc/sluice/policy.toml:ro` to `./config.toml:/etc/sluice/config.toml:ro`
-- [ ] Update compose.dev.yml: rename `./examples/policy.toml` to `./examples/config.toml`
-- [ ] Use `channel.Channel` interface for broker throughout main.go instead of `*telegram.ApprovalBroker`
-- [ ] Update Telegram commands to use typed config from store (no more string key lookups)
-- [ ] Update tests
-- [ ] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
+- [x] Hardcode `os.Getenv("TELEGRAM_BOT_TOKEN")` and `os.Getenv("TELEGRAM_CHAT_ID")` directly. Remove the indirection that reads env var names from the engine/config.
+- [x] Remove the `eng.Telegram.BotTokenEnv` / `eng.Telegram.ChatIDEnv` lookups
+- [x] Rename `--policy` flag to `--config` (same auto-seed behavior)
+- [x] Update Dockerfile CMD: replace `-policy /etc/sluice/policy.toml` with `-config /etc/sluice/config.toml`
+- [x] Update compose.yml: rename volume mount from `./policy.toml:/etc/sluice/policy.toml:ro` to `./config.toml:/etc/sluice/config.toml:ro`
+- [x] Update compose.dev.yml: rename `./examples/policy.toml` to `./examples/config.toml`
+- [x] Use `channel.Channel` interface for broker throughout main.go instead of `*telegram.ApprovalBroker`
+- [x] Update Telegram commands to use typed config from store (no more string key lookups)
+- [x] Update tests
+- [x] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
 
 ### Task 9: Fix phantom token injection to cover all MITMed traffic
 

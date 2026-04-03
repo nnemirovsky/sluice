@@ -48,19 +48,11 @@ func handleMCPCommand(args []string) error {
 func handleMCPGateway(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	policyPath := fs.String("policy", "", "path to policy TOML file (seeds DB on first run if DB is empty)")
+	configPath := fs.String("config", "", "path to config TOML file (seeds DB on first run if DB is empty)")
 	auditPath := fs.String("audit", "", "path to audit log file (optional)")
 	telegramToken := fs.String("telegram-token", os.Getenv("TELEGRAM_BOT_TOKEN"), "Telegram bot token")
 	telegramChatIDStr := fs.String("telegram-chat-id", os.Getenv("TELEGRAM_CHAT_ID"), "Telegram chat ID for approvals")
 	fs.Parse(args)
-
-	// Track which flags were explicitly set on the command line so we can
-	// distinguish "user passed --telegram-token X" from "flag has the
-	// default value read from TELEGRAM_BOT_TOKEN env".
-	explicitFlags := make(map[string]bool)
-	fs.Visit(func(f *flag.Flag) {
-		explicitFlags[f.Name] = true
-	})
 
 	// Open the SQLite store.
 	db, err := store.New(*dbPath)
@@ -69,23 +61,23 @@ func handleMCPGateway(args []string) error {
 	}
 	defer db.Close()
 
-	// If --policy is specified and the DB is empty, auto-import the TOML file as seed.
-	if *policyPath != "" {
+	// If --config is specified and the DB is empty, auto-import the TOML file as seed.
+	if *configPath != "" {
 		empty, err := db.IsEmpty()
 		if err != nil {
 			return fmt.Errorf("check store: %w", err)
 		}
 		if empty {
-			data, err := os.ReadFile(*policyPath)
+			data, err := os.ReadFile(*configPath)
 			if err != nil {
-				return fmt.Errorf("read policy seed file: %w", err)
+				return fmt.Errorf("read config seed file: %w", err)
 			}
 			result, err := db.ImportTOML(data)
 			if err != nil {
-				return fmt.Errorf("import policy seed: %w", err)
+				return fmt.Errorf("import config seed: %w", err)
 			}
 			log.Printf("seeded DB from %s: %d rules, %d bindings, %d upstreams, %d config",
-				*policyPath, result.RulesInserted,
+				*configPath, result.RulesInserted,
 				result.BindingsInserted, result.UpstreamsInserted, result.ConfigSet)
 		}
 	}
@@ -93,15 +85,6 @@ func handleMCPGateway(args []string) error {
 	eng, err := policy.LoadFromStore(db)
 	if err != nil {
 		return fmt.Errorf("load policy: %w", err)
-	}
-
-	// Read Telegram env vars directly (hardcoded env var names).
-	// CLI flags take precedence when explicitly provided.
-	if !explicitFlags["telegram-token"] {
-		*telegramToken = os.Getenv("TELEGRAM_BOT_TOKEN")
-	}
-	if !explicitFlags["telegram-chat-id"] {
-		*telegramChatIDStr = os.Getenv("TELEGRAM_CHAT_ID")
 	}
 
 	// Read MCP upstreams from the store.

@@ -11,7 +11,7 @@ services:
     group_add:
       - "${DOCKER_GID:-0}"
     volumes:
-      - ./examples/policy.toml:/etc/sluice/policy.toml:ro
+      - ./examples/config.toml:/etc/sluice/config.toml:ro
       - sluice-vault:/home/sluice/.sluice
       - sluice-audit:/var/log/sluice
       - sluice-ca:/home/sluice/ca
