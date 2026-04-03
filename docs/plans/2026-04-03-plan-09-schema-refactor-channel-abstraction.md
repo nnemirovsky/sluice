@@ -438,13 +438,13 @@ Currently `injectCredentials` in inject.go only replaces phantom tokens for requ
 - Modify: `internal/proxy/inject.go`
 - Modify: `internal/proxy/inject_test.go`
 
-- [ ] In `injectCredentials`, after the binding-specific header injection, add a second pass that replaces ALL known phantom tokens in ALL request headers and body regardless of binding match
-- [ ] Get the list of all credential names from the vault provider (`provider.List()`) and compute phantom tokens for each
-- [ ] For each phantom token, do find-and-replace in headers and body
-- [ ] Keep the binding-specific header injection (sets the configured header). The global replacement is an additional safety net.
-- [ ] Write test: request to a host WITHOUT a binding but containing a phantom token in the body. Verify the phantom is replaced.
-- [ ] Write test: request to a host WITH a binding. Verify both header injection AND body phantom replacement work.
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] In `injectCredentials`, after the binding-specific header injection, add a second pass that replaces ALL known phantom tokens in ALL request headers and body regardless of binding match
+- [x] Get the list of all credential names from the vault provider (`provider.List()`) and compute phantom tokens for each
+- [x] For each phantom token, do find-and-replace in headers and body
+- [x] Keep the binding-specific header injection (sets the configured header). The global replacement is an additional safety net.
+- [x] Write test: request to a host WITHOUT a binding but containing a phantom token in the body. Verify the phantom is replaced.
+- [x] Write test: request to a host WITH a binding. Verify both header injection AND body phantom replacement work.
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 10: Update Telegram commands for unified store
 

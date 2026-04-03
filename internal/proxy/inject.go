@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -116,10 +115,12 @@ func NewInjector(provider vault.Provider, resolver *atomic.Pointer[vault.Binding
 		TLSHandshakeTimeout: 10 * time.Second,
 	}
 
-	// Only MITM connections to hosts that have a credential binding and
-	// include a valid auth token. The token check prevents unauthorized
-	// local processes from using the injector to obtain credentials.
-	// The token is always set in production (generated in server.New).
+	// MITM all authenticated HTTPS connections so phantom tokens can be
+	// replaced in any traffic, not just requests to hosts with bindings.
+	// This prevents phantom token leaks to unexpected destinations.
+	// The auth token check prevents unauthorized local processes from
+	// using the injector. The token is always set in production
+	// (generated in server.New).
 	mitmAction := &goproxy.ConnectAction{
 		Action:    goproxy.ConnectMitm,
 		TLSConfig: goproxy.TLSConfigFromCA(&inj.caCert),
@@ -139,21 +140,7 @@ func NewInjector(provider vault.Provider, resolver *atomic.Pointer[vault.Binding
 			if ctx.Req != nil {
 				ctx.UserData = ctx.Req.Header.Get("X-Sluice-Pin")
 			}
-			h, portStr, err := net.SplitHostPort(host)
-			if err != nil {
-				h = host
-				portStr = "443"
-			}
-			port, _ := strconv.Atoi(portStr)
-			if port == 0 {
-				port = 443
-			}
-			if r := inj.resolver.Load(); r != nil {
-				if _, ok := r.Resolve(h, port); ok {
-					return mitmAction, host
-				}
-			}
-			return goproxy.OkConnect, host
+			return mitmAction, host
 		},
 	))
 
@@ -189,35 +176,68 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 
 	port := portFromRequest(r)
 
-	res := inj.resolver.Load()
-	if res == nil {
-		return r, nil
+	// 1. Binding-specific header injection: set the configured header
+	// with the formatted credential value for hosts with a binding.
+	if res := inj.resolver.Load(); res != nil {
+		if binding, ok := res.Resolve(host, port); ok {
+			secret, err := inj.provider.Get(binding.Credential)
+			if err != nil {
+				log.Printf("[INJECT] credential %q lookup failed: %v", binding.Credential, err)
+			} else {
+				if binding.InjectHeader != "" {
+					r.Header.Set(binding.InjectHeader, binding.FormatValue(secret.String()))
+				}
+				secret.Release()
+				log.Printf("[INJECT] injected credential %q for %s:%d", binding.Credential, host, port)
+			}
+		}
 	}
-	binding, ok := res.Resolve(host, port)
-	if !ok {
+
+	// 2. Global phantom replacement: replace ALL known phantom tokens
+	// in headers and body regardless of binding match. This prevents
+	// phantom tokens from leaking to any upstream.
+	names, err := inj.provider.List()
+	if err != nil || len(names) == 0 {
 		return r, nil
 	}
 
-	secret, err := inj.provider.Get(binding.Credential)
-	if err != nil {
-		log.Printf("[INJECT] credential %q lookup failed: %v", binding.Credential, err)
+	type phantomPair struct {
+		phantom []byte
+		secret  vault.SecureBytes
+	}
+	var pairs []phantomPair
+	for _, name := range names {
+		secret, err := inj.provider.Get(name)
+		if err != nil {
+			continue
+		}
+		pairs = append(pairs, phantomPair{
+			phantom: []byte(PhantomToken(name)),
+			secret:  secret,
+		})
+	}
+	if len(pairs) == 0 {
 		return r, nil
 	}
-	defer secret.Release()
-
-	value := binding.FormatValue(secret.String())
-	phantom := PhantomToken(binding.Credential)
-
-	// Set the configured header if specified.
-	if binding.InjectHeader != "" {
-		r.Header.Set(binding.InjectHeader, value)
-	}
+	defer func() {
+		for i := range pairs {
+			pairs[i].secret.Release()
+		}
+	}()
 
 	// Replace phantom tokens in all request headers.
 	for key, vals := range r.Header {
 		for i, v := range vals {
-			if strings.Contains(v, phantom) {
-				r.Header[key][i] = strings.ReplaceAll(v, phantom, value)
+			vb := []byte(v)
+			changed := false
+			for _, p := range pairs {
+				if bytes.Contains(vb, p.phantom) {
+					vb = bytes.ReplaceAll(vb, p.phantom, p.secret.Bytes())
+					changed = true
+				}
+			}
+			if changed {
+				r.Header[key][i] = string(vb)
 			}
 		}
 	}
@@ -230,14 +250,15 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 			log.Printf("[INJECT] body read error for %s:%d: %v", host, port, readErr)
 			return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusBadGateway, "request body read error")
 		}
-		if bytes.Contains(body, []byte(phantom)) {
-			body = bytes.ReplaceAll(body, []byte(phantom), []byte(value))
+		for _, p := range pairs {
+			if bytes.Contains(body, p.phantom) {
+				body = bytes.ReplaceAll(body, p.phantom, p.secret.Bytes())
+			}
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
 	}
 
-	log.Printf("[INJECT] injected credential %q for %s:%d", binding.Credential, host, port)
 	return r, nil
 }
 

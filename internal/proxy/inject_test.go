@@ -385,3 +385,156 @@ func TestPhantomToken(t *testing.T) {
 		t.Errorf("unexpected phantom token: %s", token)
 	}
 }
+
+func TestGlobalPhantomReplacementWithoutBinding(t *testing.T) {
+	var mu sync.Mutex
+	var receivedBody string
+	var receivedHeaders http.Header
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		receivedBody = string(body)
+		receivedHeaders = r.Header.Clone()
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer backend.Close()
+
+	// No bindings configured. The host has no binding match.
+	inj, store := setupTestInjector(t, nil)
+	if _, err := store.Add("api_key", "sk-real-secret-12345"); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyServer := httptest.NewServer(inj.Proxy)
+	defer proxyServer.Close()
+
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+
+	phantom := PhantomToken("api_key")
+
+	// Send phantom in body.
+	bodyStr := `{"token": "` + phantom + `"}`
+	req, _ := http.NewRequest("POST", backend.URL+"/unbound", strings.NewReader(bodyStr))
+	// Also send phantom in a header.
+	req.Header.Set("X-Custom", "prefix-"+phantom+"-suffix")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if strings.Contains(receivedBody, phantom) {
+		t.Error("phantom token leaked in body to unbound host")
+	}
+	expected := `{"token": "sk-real-secret-12345"}`
+	if receivedBody != expected {
+		t.Errorf("body: expected %q, got %q", expected, receivedBody)
+	}
+
+	customHeader := receivedHeaders.Get("X-Custom")
+	if strings.Contains(customHeader, phantom) {
+		t.Error("phantom token leaked in header to unbound host")
+	}
+	if customHeader != "prefix-sk-real-secret-12345-suffix" {
+		t.Errorf("header: expected %q, got %q", "prefix-sk-real-secret-12345-suffix", customHeader)
+	}
+}
+
+func TestBindingHeaderInjectionAndGlobalPhantomReplacement(t *testing.T) {
+	var mu sync.Mutex
+	var receivedBody string
+	var receivedHeaders http.Header
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		receivedBody = string(body)
+		receivedHeaders = r.Header.Clone()
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	bindings := []vault.Binding{{
+		Destination:  backendURL.Hostname(),
+		Credential:   "api_key",
+		InjectHeader: "X-Api-Key",
+		Template:     "Bearer {value}",
+	}}
+
+	inj, store := setupTestInjector(t, bindings)
+	if _, err := store.Add("api_key", "sk-real-secret-12345"); err != nil {
+		t.Fatal(err)
+	}
+	// Add a second credential that has no binding but may appear in traffic.
+	if _, err := store.Add("other_key", "other-real-value"); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyServer := httptest.NewServer(inj.Proxy)
+	defer proxyServer.Close()
+
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+
+	phantomAPI := PhantomToken("api_key")
+	phantomOther := PhantomToken("other_key")
+
+	// Body contains both phantom tokens.
+	bodyStr := `{"key": "` + phantomAPI + `", "other": "` + phantomOther + `"}`
+	req, _ := http.NewRequest("POST", backend.URL+"/test", strings.NewReader(bodyStr))
+	// Also send a phantom in a custom header.
+	req.Header.Set("X-Ref", phantomOther)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Verify binding-specific header injection.
+	apiKey := receivedHeaders.Get("X-Api-Key")
+	if apiKey != "Bearer sk-real-secret-12345" {
+		t.Errorf("X-Api-Key: expected %q, got %q", "Bearer sk-real-secret-12345", apiKey)
+	}
+
+	// Verify global phantom replacement in body.
+	if strings.Contains(receivedBody, phantomAPI) {
+		t.Error("api_key phantom leaked in body")
+	}
+	if strings.Contains(receivedBody, phantomOther) {
+		t.Error("other_key phantom leaked in body")
+	}
+	expectedBody := `{"key": "sk-real-secret-12345", "other": "other-real-value"}`
+	if receivedBody != expectedBody {
+		t.Errorf("body: expected %q, got %q", expectedBody, receivedBody)
+	}
+
+	// Verify global phantom replacement in header.
+	refHeader := receivedHeaders.Get("X-Ref")
+	if strings.Contains(refHeader, phantomOther) {
+		t.Error("other_key phantom leaked in X-Ref header")
+	}
+	if refHeader != "other-real-value" {
+		t.Errorf("X-Ref: expected %q, got %q", "other-real-value", refHeader)
+	}
+}
