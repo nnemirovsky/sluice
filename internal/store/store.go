@@ -87,57 +87,102 @@ func (s *Store) DB() *sql.DB {
 }
 
 func validVerdict(v string) bool {
-	return v == "allow" || v == "deny" || v == "ask"
+	return v == "allow" || v == "deny" || v == "ask" || v == "redact"
 }
 
 // --- Rule types ---
 
-// NetworkRule represents a network rule row in the unified rules table.
-type NetworkRule struct {
+// Rule represents a row in the unified rules table.
+type Rule struct {
 	ID          int64
-	Verdict     string
-	Destination string
+	Verdict     string   // "allow", "deny", "ask", "redact"
+	Destination string   // network rules
+	Tool        string   // tool rules
+	Pattern     string   // content deny/redact rules
+	Replacement string   // only for verdict="redact"
 	Ports       []int
-	Protocol    string
-	Note        string
+	Protocols   []string
+	Name        string
 	Source      string
 	CreatedAt   string
 }
 
-// RuleOpts holds optional fields for AddRule.
+// RuleOpts holds fields for AddRule.
 type RuleOpts struct {
-	Protocol string
-	Note     string
-	Source   string
+	Destination string
+	Tool        string
+	Pattern     string
+	Replacement string
+	Ports       []int
+	Protocols   []string
+	Name        string
+	Source      string
 }
 
-// AddRule inserts a network rule and returns its ID.
-func (s *Store) AddRule(verdict, destination string, ports []int, opts RuleOpts) (int64, error) {
-	if verdict == "" || destination == "" {
-		return 0, fmt.Errorf("verdict and destination are required")
+// RuleFilter holds optional filters for ListRules.
+type RuleFilter struct {
+	Verdict string // filter by verdict (allow/deny/ask/redact)
+	Type    string // "network", "tool", "pattern" - filter by which field is set
+}
+
+// RuleExistsOpts holds fields for RuleExists dedup check.
+type RuleExistsOpts struct {
+	Destination string
+	Tool        string
+	Pattern     string
+	Ports       []int
+}
+
+// AddRule inserts a rule into the unified rules table and returns its ID.
+// Exactly one of opts.Destination, opts.Tool, or opts.Pattern must be set.
+func (s *Store) AddRule(verdict string, opts RuleOpts) (int64, error) {
+	if verdict == "" {
+		return 0, fmt.Errorf("verdict is required")
 	}
 	if !validVerdict(verdict) {
-		return 0, fmt.Errorf("invalid verdict %q: must be allow, deny, or ask", verdict)
+		return 0, fmt.Errorf("invalid verdict %q: must be allow, deny, ask, or redact", verdict)
+	}
+	set := 0
+	if opts.Destination != "" {
+		set++
+	}
+	if opts.Tool != "" {
+		set++
+	}
+	if opts.Pattern != "" {
+		set++
+	}
+	if set == 0 {
+		return 0, fmt.Errorf("one of destination, tool, or pattern is required")
+	}
+	if set > 1 {
+		return 0, fmt.Errorf("destination, tool, and pattern are mutually exclusive")
 	}
 	source := opts.Source
 	if source == "" {
 		source = "manual"
 	}
 	var portsJSON *string
-	if len(ports) > 0 {
-		b, _ := json.Marshal(ports)
+	if len(opts.Ports) > 0 {
+		b, _ := json.Marshal(opts.Ports)
 		ps := string(b)
 		portsJSON = &ps
 	}
 	var protocolsJSON *string
-	if opts.Protocol != "" {
-		b, _ := json.Marshal([]string{opts.Protocol})
+	if len(opts.Protocols) > 0 {
+		b, _ := json.Marshal(opts.Protocols)
 		ps := string(b)
 		protocolsJSON = &ps
 	}
 	res, err := s.db.Exec(
-		`INSERT INTO rules (verdict, destination, ports, protocols, name, source) VALUES (?, ?, ?, ?, ?, ?)`,
-		verdict, destination, portsJSON, protocolsJSON, nilIfEmpty(opts.Note), source,
+		`INSERT INTO rules (verdict, destination, tool, pattern, replacement, ports, protocols, name, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		verdict,
+		nilIfEmpty(opts.Destination),
+		nilIfEmpty(opts.Tool),
+		nilIfEmpty(opts.Pattern),
+		nilIfEmpty(opts.Replacement),
+		portsJSON, protocolsJSON,
+		nilIfEmpty(opts.Name), source,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("insert rule: %w", err)
@@ -155,13 +200,23 @@ func (s *Store) RemoveRule(id int64) (bool, error) {
 	return n > 0, nil
 }
 
-// ListRules returns network rules (destination IS NOT NULL), optionally filtered by verdict.
-func (s *Store) ListRules(verdict string) ([]NetworkRule, error) {
-	query := "SELECT id, verdict, destination, ports, protocols, name, source, created_at FROM rules WHERE destination IS NOT NULL"
+// ListRules returns rules from the unified table, optionally filtered by
+// verdict and/or type. Type values: "network" (destination set), "tool"
+// (tool set), "pattern" (pattern set). Empty filter returns all rules.
+func (s *Store) ListRules(filter RuleFilter) ([]Rule, error) {
+	query := "SELECT id, verdict, destination, tool, pattern, replacement, ports, protocols, name, source, created_at FROM rules WHERE 1=1"
 	var args []any
-	if verdict != "" {
+	if filter.Verdict != "" {
 		query += " AND verdict = ?"
-		args = append(args, verdict)
+		args = append(args, filter.Verdict)
+	}
+	switch filter.Type {
+	case "network":
+		query += " AND destination IS NOT NULL"
+	case "tool":
+		query += " AND tool IS NOT NULL"
+	case "pattern":
+		query += " AND pattern IS NOT NULL"
 	}
 	query += " ORDER BY id"
 	rows, err := s.db.Query(query, args...)
@@ -169,120 +224,40 @@ func (s *Store) ListRules(verdict string) ([]NetworkRule, error) {
 		return nil, fmt.Errorf("list rules: %w", err)
 	}
 	defer rows.Close()
-
-	var rules []NetworkRule
-	for rows.Next() {
-		var r NetworkRule
-		var portsJSON, protocolsJSON, name sql.NullString
-		if err := rows.Scan(&r.ID, &r.Verdict, &r.Destination, &portsJSON, &protocolsJSON, &name, &r.Source, &r.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan rule: %w", err)
-		}
-		if portsJSON.Valid {
-			if err := json.Unmarshal([]byte(portsJSON.String), &r.Ports); err != nil {
-				return nil, fmt.Errorf("unmarshal ports for rule %d: %w", r.ID, err)
-			}
-		}
-		if protocolsJSON.Valid {
-			var protocols []string
-			if err := json.Unmarshal([]byte(protocolsJSON.String), &protocols); err == nil && len(protocols) > 0 {
-				r.Protocol = protocols[0]
-			}
-		}
-		r.Note = name.String
-		rules = append(rules, r)
-	}
-	return rules, rows.Err()
+	return scanRules(rows)
 }
 
-// --- Tool Rules ---
-
-// ToolRuleRow represents a tool rule row in the unified rules table.
-type ToolRuleRow struct {
-	ID        int64
-	Verdict   string
-	Tool      string
-	Note      string
-	Source    string
-	CreatedAt string
-}
-
-// AddToolRule inserts a tool rule into the unified rules table and returns its ID.
-func (s *Store) AddToolRule(verdict, tool, note, source string) (int64, error) {
-	if verdict == "" || tool == "" {
-		return 0, fmt.Errorf("verdict and tool are required")
-	}
-	if !validVerdict(verdict) {
-		return 0, fmt.Errorf("invalid verdict %q: must be allow, deny, or ask", verdict)
-	}
-	if source == "" {
-		source = "manual"
-	}
-	res, err := s.db.Exec(
-		`INSERT INTO rules (verdict, tool, name, source) VALUES (?, ?, ?, ?)`,
-		verdict, tool, nilIfEmpty(note), source,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("insert tool rule: %w", err)
-	}
-	return res.LastInsertId()
-}
-
-// RemoveToolRule deletes a tool rule by ID. Returns true if a row was deleted.
-func (s *Store) RemoveToolRule(id int64) (bool, error) {
-	res, err := s.db.Exec("DELETE FROM rules WHERE id = ? AND tool IS NOT NULL", id)
-	if err != nil {
-		return false, fmt.Errorf("delete tool rule: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
-}
-
-// ListToolRules returns tool rules (tool IS NOT NULL), optionally filtered by verdict.
-func (s *Store) ListToolRules(verdict string) ([]ToolRuleRow, error) {
-	query := "SELECT id, verdict, tool, name, source, created_at FROM rules WHERE tool IS NOT NULL"
+// RuleExists checks if a rule matching the given verdict and identifying
+// fields already exists. Used for merge/dedup during import.
+func (s *Store) RuleExists(verdict string, opts RuleExistsOpts) (bool, error) {
+	var query string
 	var args []any
-	if verdict != "" {
-		query += " AND verdict = ?"
-		args = append(args, verdict)
-	}
-	query += " ORDER BY id"
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list tool rules: %w", err)
-	}
-	defer rows.Close()
 
-	var rules []ToolRuleRow
-	for rows.Next() {
-		var r ToolRuleRow
-		var note sql.NullString
-		if err := rows.Scan(&r.ID, &r.Verdict, &r.Tool, &note, &r.Source, &r.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan tool rule: %w", err)
+	switch {
+	case opts.Destination != "":
+		portsJSON := portsToJSONPtr(opts.Ports)
+		if portsJSON != nil {
+			query = "SELECT COUNT(*) FROM rules WHERE verdict = ? AND destination = ? AND ports = ?"
+			args = []any{verdict, opts.Destination, *portsJSON}
+		} else {
+			query = "SELECT COUNT(*) FROM rules WHERE verdict = ? AND destination = ? AND ports IS NULL"
+			args = []any{verdict, opts.Destination}
 		}
-		r.Note = note.String
-		rules = append(rules, r)
+	case opts.Tool != "":
+		query = "SELECT COUNT(*) FROM rules WHERE verdict = ? AND tool = ?"
+		args = []any{verdict, opts.Tool}
+	case opts.Pattern != "":
+		query = "SELECT COUNT(*) FROM rules WHERE verdict = ? AND pattern = ?"
+		args = []any{verdict, opts.Pattern}
+	default:
+		return false, fmt.Errorf("one of destination, tool, or pattern is required")
 	}
-	return rules, rows.Err()
-}
 
-// --- Inspect Rules ---
-
-// InspectRuleRow represents an inspect rule row in the unified rules table.
-type InspectRuleRow struct {
-	ID          int64
-	Kind        string
-	Pattern     string
-	Description string
-	Target      string
-	Replacement string
-	CreatedAt   string
-}
-
-// InspectRuleOpts holds optional fields for AddInspectRule.
-type InspectRuleOpts struct {
-	Description string
-	Target      string
-	Replacement string
+	var count int
+	if err := s.db.QueryRow(query, args...).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 // inspectKindToVerdict maps old inspect rule kinds to unified verdicts.
@@ -295,83 +270,6 @@ func inspectKindToVerdict(kind string) (string, error) {
 	default:
 		return "", fmt.Errorf("invalid kind %q: must be block or redact", kind)
 	}
-}
-
-// verdictToInspectKind maps unified verdicts back to inspect rule kinds.
-func verdictToInspectKind(verdict string) string {
-	switch verdict {
-	case "deny":
-		return "block"
-	case "redact":
-		return "redact"
-	default:
-		return verdict
-	}
-}
-
-// AddInspectRule inserts an inspect rule into the unified rules table and returns its ID.
-func (s *Store) AddInspectRule(kind, pattern string, opts InspectRuleOpts) (int64, error) {
-	if kind == "" || pattern == "" {
-		return 0, fmt.Errorf("kind and pattern are required")
-	}
-	verdict, err := inspectKindToVerdict(kind)
-	if err != nil {
-		return 0, err
-	}
-	res, err := s.db.Exec(
-		`INSERT INTO rules (verdict, pattern, name, replacement, source) VALUES (?, ?, ?, ?, 'manual')`,
-		verdict, pattern, nilIfEmpty(opts.Description), nilIfEmpty(opts.Replacement),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("insert inspect rule: %w", err)
-	}
-	return res.LastInsertId()
-}
-
-// RemoveInspectRule deletes an inspect rule by ID. Returns true if a row was deleted.
-func (s *Store) RemoveInspectRule(id int64) (bool, error) {
-	res, err := s.db.Exec("DELETE FROM rules WHERE id = ? AND pattern IS NOT NULL", id)
-	if err != nil {
-		return false, fmt.Errorf("delete inspect rule: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
-}
-
-// ListInspectRules returns inspect rules (pattern IS NOT NULL), optionally filtered by kind.
-func (s *Store) ListInspectRules(kind string) ([]InspectRuleRow, error) {
-	query := "SELECT id, verdict, pattern, name, destination, replacement, created_at FROM rules WHERE pattern IS NOT NULL"
-	var args []any
-	if kind != "" {
-		verdict, err := inspectKindToVerdict(kind)
-		if err != nil {
-			return nil, err
-		}
-		query += " AND verdict = ?"
-		args = append(args, verdict)
-	}
-	query += " ORDER BY id"
-	rows, err := s.db.Query(query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list inspect rules: %w", err)
-	}
-	defer rows.Close()
-
-	var rules []InspectRuleRow
-	for rows.Next() {
-		var r InspectRuleRow
-		var verdict string
-		var desc, target, repl sql.NullString
-		if err := rows.Scan(&r.ID, &verdict, &r.Pattern, &desc, &target, &repl, &r.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan inspect rule: %w", err)
-		}
-		r.Kind = verdictToInspectKind(verdict)
-		r.Description = desc.String
-		r.Target = target.String
-		r.Replacement = repl.String
-		rules = append(rules, r)
-	}
-	return rules, rows.Err()
 }
 
 // --- Config ---
@@ -602,48 +500,7 @@ func (s *Store) ListMCPUpstreams() ([]MCPUpstreamRow, error) {
 	return upstreams, rows.Err()
 }
 
-// --- RuleExists helpers ---
-
-// RuleExists checks if a network rule with the given verdict, destination, and
-// ports already exists. Used for merge/dedup during import.
-func (s *Store) RuleExists(verdict, destination string, ports []int) (bool, error) {
-	var portsJSON *string
-	if len(ports) > 0 {
-		b, _ := json.Marshal(ports)
-		ps := string(b)
-		portsJSON = &ps
-	}
-	var count int
-	var err error
-	if portsJSON != nil {
-		err = s.db.QueryRow(
-			"SELECT COUNT(*) FROM rules WHERE verdict = ? AND destination = ? AND ports = ?",
-			verdict, destination, *portsJSON,
-		).Scan(&count)
-	} else {
-		err = s.db.QueryRow(
-			"SELECT COUNT(*) FROM rules WHERE verdict = ? AND destination = ? AND ports IS NULL",
-			verdict, destination,
-		).Scan(&count)
-	}
-	if err != nil {
-		return false, err
-	}
-	return count > 0, nil
-}
-
-// ToolRuleExists checks if a tool rule with the given verdict and tool already exists.
-func (s *Store) ToolRuleExists(verdict, tool string) (bool, error) {
-	var count int
-	err := s.db.QueryRow(
-		"SELECT COUNT(*) FROM rules WHERE verdict = ? AND tool = ?",
-		verdict, tool,
-	).Scan(&count)
-	if err != nil {
-		return false, err
-	}
-	return count > 0, nil
-}
+// --- Exists helpers ---
 
 // BindingExists checks if a binding with the given destination and credential already exists.
 func (s *Store) BindingExists(destination, credential string) (bool, error) {
@@ -724,7 +581,7 @@ func (s *Store) IsEmpty() (bool, error) {
 // single transaction. If either insert fails, both are rolled back.
 // Returns the rule ID and binding ID.
 func (s *Store) AddRuleAndBinding(
-	verdict, destination string, ports []int, ruleOpts RuleOpts,
+	verdict string, ruleOpts RuleOpts,
 	credential string, bindingOpts BindingOpts,
 ) (ruleID, bindingID int64, err error) {
 	tx, err := s.db.Begin()
@@ -743,20 +600,20 @@ func (s *Store) AddRuleAndBinding(
 		source = "manual"
 	}
 	var portsJSON *string
-	if len(ports) > 0 {
-		b, _ := json.Marshal(ports)
+	if len(ruleOpts.Ports) > 0 {
+		b, _ := json.Marshal(ruleOpts.Ports)
 		ps := string(b)
 		portsJSON = &ps
 	}
 	var protocolsJSON *string
-	if ruleOpts.Protocol != "" {
-		b, _ := json.Marshal([]string{ruleOpts.Protocol})
+	if len(ruleOpts.Protocols) > 0 {
+		b, _ := json.Marshal(ruleOpts.Protocols)
 		ps := string(b)
 		protocolsJSON = &ps
 	}
 	res, err := tx.Exec(
 		`INSERT INTO rules (verdict, destination, ports, protocols, name, source) VALUES (?, ?, ?, ?, ?, ?)`,
-		verdict, destination, portsJSON, protocolsJSON, nilIfEmpty(ruleOpts.Note), source,
+		verdict, ruleOpts.Destination, portsJSON, protocolsJSON, nilIfEmpty(ruleOpts.Name), source,
 	)
 	if err != nil {
 		return 0, 0, fmt.Errorf("insert rule: %w", err)
@@ -778,7 +635,7 @@ func (s *Store) AddRuleAndBinding(
 	}
 	res, err = tx.Exec(
 		`INSERT INTO bindings (destination, ports, credential, header, template, protocols) VALUES (?, ?, ?, ?, ?, ?)`,
-		destination, bPortsJSON, credential,
+		ruleOpts.Destination, bPortsJSON, credential,
 		nilIfEmpty(bindingOpts.InjectHeader), nilIfEmpty(bindingOpts.Template), bProtocolsJSON,
 	)
 	if err != nil {
@@ -799,6 +656,45 @@ func nilIfEmpty(s string) *string {
 	if s == "" {
 		return nil
 	}
+	return &s
+}
+
+// scanRules scans rule rows from a query result.
+func scanRules(rows *sql.Rows) ([]Rule, error) {
+	var rules []Rule
+	for rows.Next() {
+		var r Rule
+		var dest, tool, pattern, replacement, portsJSON, protocolsJSON, name sql.NullString
+		if err := rows.Scan(&r.ID, &r.Verdict, &dest, &tool, &pattern, &replacement, &portsJSON, &protocolsJSON, &name, &r.Source, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan rule: %w", err)
+		}
+		r.Destination = dest.String
+		r.Tool = tool.String
+		r.Pattern = pattern.String
+		r.Replacement = replacement.String
+		r.Name = name.String
+		if portsJSON.Valid {
+			if err := json.Unmarshal([]byte(portsJSON.String), &r.Ports); err != nil {
+				return nil, fmt.Errorf("unmarshal ports for rule %d: %w", r.ID, err)
+			}
+		}
+		if protocolsJSON.Valid {
+			if err := json.Unmarshal([]byte(protocolsJSON.String), &r.Protocols); err != nil {
+				return nil, fmt.Errorf("unmarshal protocols for rule %d: %w", r.ID, err)
+			}
+		}
+		rules = append(rules, r)
+	}
+	return rules, rows.Err()
+}
+
+// portsToJSONPtr converts a port slice to a JSON string pointer.
+func portsToJSONPtr(ports []int) *string {
+	if len(ports) == 0 {
+		return nil
+	}
+	b, _ := json.Marshal(ports)
+	s := string(b)
 	return &s
 }
 

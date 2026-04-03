@@ -183,19 +183,19 @@ type Rule struct {
 }
 ```
 
-- [ ] Remove `NetworkRule`, `ToolRuleRow`, `InspectRuleRow` types and all their CRUD methods
-- [ ] Create unified `Rule` struct with all fields
-- [ ] Implement `AddRule(verdict string, opts RuleOpts) (int64, error)` where RuleOpts has Destination, Tool, Pattern, Replacement, Ports, Protocols, Name, Source. Validate mutual exclusivity of destination/tool/pattern in Go code.
-- [ ] Implement `RemoveRule(id int64) (bool, error)`
-- [ ] Implement `ListRules(filter RuleFilter) ([]Rule, error)` where RuleFilter has optional Verdict, Type (network/tool/pattern) fields
-- [ ] Implement `RuleExists(verdict string, opts RuleExistsOpts) (bool, error)` for dedup during import
-- [ ] Remove `AddToolRule`, `RemoveToolRule`, `ListToolRules`, `ToolRuleExists`
-- [ ] Remove `AddInspectRule`, `RemoveInspectRule`, `ListInspectRules`
-- [ ] Update `RemoveRulesByDestinationAndSource` to work with unified table
-- [ ] Write tests for unified CRUD (network, tool, pattern, redact rules)
-- [ ] Write tests for mutual exclusivity validation (destination+tool = error)
-- [ ] Write tests for ListRules with filters (by verdict, by type)
-- [ ] Run tests: `go test ./internal/store/ -v -timeout 30s`
+- [x] Remove `NetworkRule`, `ToolRuleRow`, `InspectRuleRow` types and all their CRUD methods
+- [x] Create unified `Rule` struct with all fields
+- [x] Implement `AddRule(verdict string, opts RuleOpts) (int64, error)` where RuleOpts has Destination, Tool, Pattern, Replacement, Ports, Protocols, Name, Source. Validate mutual exclusivity of destination/tool/pattern in Go code.
+- [x] Implement `RemoveRule(id int64) (bool, error)`
+- [x] Implement `ListRules(filter RuleFilter) ([]Rule, error)` where RuleFilter has optional Verdict, Type (network/tool/pattern) fields
+- [x] Implement `RuleExists(verdict string, opts RuleExistsOpts) (bool, error)` for dedup during import
+- [x] Remove `AddToolRule`, `RemoveToolRule`, `ListToolRules`, `ToolRuleExists`
+- [x] Remove `AddInspectRule`, `RemoveInspectRule`, `ListInspectRules`
+- [x] Update `RemoveRulesByDestinationAndSource` to work with unified table
+- [x] Write tests for unified CRUD (network, tool, pattern, redact rules)
+- [x] Write tests for mutual exclusivity validation (destination+tool = error)
+- [x] Write tests for ListRules with filters (by verdict, by type)
+- [x] Run tests: `go test ./internal/store/ -v -timeout 30s`
 
 ### Task 3: Rewrite config and bindings CRUD for new schema
 

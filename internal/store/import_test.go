@@ -43,7 +43,7 @@ ports = [443]
 	}
 
 	// Verify rules in DB.
-	rules, err := s.ListRules("")
+	rules, err := s.ListRules(RuleFilter{Type: "network"})
 	if err != nil {
 		t.Fatalf("ListRules: %v", err)
 	}
@@ -98,9 +98,9 @@ tool = "filesystem__write_*"
 		t.Errorf("expected 3 tool rules inserted, got %d", res.ToolRulesInserted)
 	}
 
-	rules, err := s.ListToolRules("")
+	rules, err := s.ListRules(RuleFilter{Type: "tool"})
 	if err != nil {
-		t.Fatalf("ListToolRules: %v", err)
+		t.Fatalf("ListRules(tool): %v", err)
 	}
 	if len(rules) != 3 {
 		t.Fatalf("expected 3 tool rules, got %d", len(rules))
@@ -143,20 +143,21 @@ name = "api_key_in_response"
 		t.Errorf("expected 2 inspect rules inserted, got %d", res.InspectInserted)
 	}
 
-	block, err := s.ListInspectRules("block")
+	// Block rules are stored as verdict="deny" with pattern set.
+	block, err := s.ListRules(RuleFilter{Verdict: "deny", Type: "pattern"})
 	if err != nil {
-		t.Fatalf("ListInspectRules block: %v", err)
+		t.Fatalf("ListRules block: %v", err)
 	}
 	if len(block) != 1 {
 		t.Fatalf("expected 1 block rule, got %d", len(block))
 	}
-	if block[0].Description != "api_key_leak" {
-		t.Errorf("expected description 'api_key_leak', got %q", block[0].Description)
+	if block[0].Name != "api_key_leak" {
+		t.Errorf("expected name 'api_key_leak', got %q", block[0].Name)
 	}
 
-	redact, err := s.ListInspectRules("redact")
+	redact, err := s.ListRules(RuleFilter{Verdict: "redact", Type: "pattern"})
 	if err != nil {
-		t.Fatalf("ListInspectRules redact: %v", err)
+		t.Fatalf("ListRules redact: %v", err)
 	}
 	if len(redact) != 1 {
 		t.Fatalf("expected 1 redact rule, got %d", len(redact))
@@ -374,13 +375,13 @@ name = "Block SSNs"
 	}
 
 	// Verify DB has no duplicates.
-	rules, _ := s.ListRules("")
+	rules, _ := s.ListRules(RuleFilter{Type: "network"})
 	if len(rules) != 1 {
-		t.Errorf("expected 1 rule total, got %d", len(rules))
+		t.Errorf("expected 1 network rule total, got %d", len(rules))
 	}
-	inspectRules, _ := s.ListInspectRules("")
-	if len(inspectRules) != 1 {
-		t.Errorf("expected 1 inspect rule total, got %d", len(inspectRules))
+	patternRules, _ := s.ListRules(RuleFilter{Type: "pattern"})
+	if len(patternRules) != 1 {
+		t.Errorf("expected 1 pattern rule total, got %d", len(patternRules))
 	}
 }
 
@@ -424,7 +425,7 @@ ports = [443]
 	}
 
 	// Original data should still be there.
-	rules, _ := s.ListRules("")
+	rules, _ := s.ListRules(RuleFilter{Type: "network"})
 	if len(rules) != 1 {
 		t.Errorf("expected 1 rule (no partial write), got %d", len(rules))
 	}
@@ -523,15 +524,15 @@ note = "Git SSH access"
 		t.Fatalf("expected 1 rule inserted, got %d", res.RulesInserted)
 	}
 
-	rules, _ := s.ListRules("")
+	rules, _ := s.ListRules(RuleFilter{Type: "network"})
 	if len(rules) != 1 {
 		t.Fatalf("expected 1 rule, got %d", len(rules))
 	}
-	if rules[0].Protocol != "ssh" {
-		t.Errorf("expected protocol 'ssh', got %q", rules[0].Protocol)
+	if len(rules[0].Protocols) != 1 || rules[0].Protocols[0] != "ssh" {
+		t.Errorf("expected protocols [ssh], got %v", rules[0].Protocols)
 	}
-	if rules[0].Note != "Git SSH access" {
-		t.Errorf("expected note 'Git SSH access', got %q", rules[0].Note)
+	if rules[0].Name != "Git SSH access" {
+		t.Errorf("expected name 'Git SSH access', got %q", rules[0].Name)
 	}
 }
 

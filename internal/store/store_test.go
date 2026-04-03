@@ -139,14 +139,16 @@ func TestRulesCheckConstraint(t *testing.T) {
 	}
 }
 
-// --- Rule CRUD ---
+// --- Unified Rule CRUD ---
 
-func TestAddRule(t *testing.T) {
+func TestAddRuleNetwork(t *testing.T) {
 	s := newTestStore(t)
-	id, err := s.AddRule("allow", "api.example.com", []int{443, 80}, RuleOpts{
-		Protocol: "https",
-		Note:     "test rule",
-		Source:   "seed",
+	id, err := s.AddRule("allow", RuleOpts{
+		Destination: "api.example.com",
+		Ports:       []int{443, 80},
+		Protocols:   []string{"https"},
+		Name:        "test rule",
+		Source:      "seed",
 	})
 	if err != nil {
 		t.Fatalf("add rule: %v", err)
@@ -155,7 +157,7 @@ func TestAddRule(t *testing.T) {
 		t.Fatalf("expected positive id, got %d", id)
 	}
 
-	rules, err := s.ListRules("")
+	rules, err := s.ListRules(RuleFilter{Type: "network"})
 	if err != nil {
 		t.Fatalf("list rules: %v", err)
 	}
@@ -175,24 +177,88 @@ func TestAddRule(t *testing.T) {
 	if len(r.Ports) != 2 || r.Ports[0] != 443 || r.Ports[1] != 80 {
 		t.Errorf("ports = %v, want [443 80]", r.Ports)
 	}
-	if r.Protocol != "https" {
-		t.Errorf("protocol = %q", r.Protocol)
+	if len(r.Protocols) != 1 || r.Protocols[0] != "https" {
+		t.Errorf("protocols = %v, want [https]", r.Protocols)
 	}
-	if r.Note != "test rule" {
-		t.Errorf("note = %q", r.Note)
+	if r.Name != "test rule" {
+		t.Errorf("name = %q", r.Name)
 	}
 	if r.Source != "seed" {
 		t.Errorf("source = %q", r.Source)
 	}
 }
 
+func TestAddRuleTool(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.AddRule("allow", RuleOpts{
+		Tool:   "github__list_*",
+		Name:   "read-only GitHub",
+		Source: "seed",
+	})
+	if err != nil {
+		t.Fatalf("add tool rule: %v", err)
+	}
+	if id < 1 {
+		t.Fatal("expected positive id")
+	}
+
+	rules, err := s.ListRules(RuleFilter{Type: "tool"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1, got %d", len(rules))
+	}
+	r := rules[0]
+	if r.Verdict != "allow" || r.Tool != "github__list_*" || r.Name != "read-only GitHub" || r.Source != "seed" {
+		t.Errorf("unexpected values: %+v", r)
+	}
+}
+
+func TestAddRulePattern(t *testing.T) {
+	s := newTestStore(t)
+
+	// Content deny (block) rule.
+	id1, err := s.AddRule("deny", RuleOpts{
+		Pattern: `sk-[a-zA-Z0-9]+`,
+		Name:    "API keys",
+	})
+	if err != nil {
+		t.Fatalf("add deny pattern rule: %v", err)
+	}
+
+	// Content redact rule.
+	id2, err := s.AddRule("redact", RuleOpts{
+		Pattern:     `\d{3}-\d{2}-\d{4}`,
+		Replacement: "[REDACTED]",
+		Name:        "SSNs",
+	})
+	if err != nil {
+		t.Fatalf("add redact rule: %v", err)
+	}
+
+	rules, err := s.ListRules(RuleFilter{Type: "pattern"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rules) != 2 {
+		t.Fatalf("expected 2, got %d", len(rules))
+	}
+	if rules[0].ID != id1 || rules[0].Pattern != `sk-[a-zA-Z0-9]+` || rules[0].Verdict != "deny" {
+		t.Errorf("unexpected rule[0]: %+v", rules[0])
+	}
+	if rules[1].ID != id2 || rules[1].Replacement != "[REDACTED]" || rules[1].Verdict != "redact" {
+		t.Errorf("unexpected rule[1]: %+v", rules[1])
+	}
+}
+
 func TestAddRuleDefaultSource(t *testing.T) {
 	s := newTestStore(t)
-	_, err := s.AddRule("deny", "evil.com", nil, RuleOpts{})
+	_, err := s.AddRule("deny", RuleOpts{Destination: "evil.com"})
 	if err != nil {
 		t.Fatalf("add rule: %v", err)
 	}
-	rules, err := s.ListRules("")
+	rules, err := s.ListRules(RuleFilter{Type: "network"})
 	if err != nil {
 		t.Fatalf("list rules: %v", err)
 	}
@@ -206,25 +272,53 @@ func TestAddRuleDefaultSource(t *testing.T) {
 
 func TestAddRuleValidation(t *testing.T) {
 	s := newTestStore(t)
-	if _, err := s.AddRule("", "example.com", nil, RuleOpts{}); err == nil {
+	if _, err := s.AddRule("", RuleOpts{Destination: "example.com"}); err == nil {
 		t.Error("empty verdict should fail")
 	}
-	if _, err := s.AddRule("allow", "", nil, RuleOpts{}); err == nil {
-		t.Error("empty destination should fail")
+	if _, err := s.AddRule("allow", RuleOpts{}); err == nil {
+		t.Error("no destination/tool/pattern should fail")
 	}
 }
 
 func TestAddRuleInvalidVerdict(t *testing.T) {
 	s := newTestStore(t)
-	_, err := s.AddRule("block", "example.com", nil, RuleOpts{})
+	_, err := s.AddRule("block", RuleOpts{Destination: "example.com"})
 	if err == nil {
 		t.Error("invalid verdict should fail")
 	}
 }
 
+func TestAddRuleMutualExclusivity(t *testing.T) {
+	s := newTestStore(t)
+
+	// Destination + tool.
+	_, err := s.AddRule("allow", RuleOpts{Destination: "example.com", Tool: "github__*"})
+	if err == nil {
+		t.Error("destination + tool should fail mutual exclusivity check")
+	}
+
+	// Destination + pattern.
+	_, err = s.AddRule("deny", RuleOpts{Destination: "example.com", Pattern: "sk-.*"})
+	if err == nil {
+		t.Error("destination + pattern should fail mutual exclusivity check")
+	}
+
+	// Tool + pattern.
+	_, err = s.AddRule("deny", RuleOpts{Tool: "exec__*", Pattern: "sk-.*"})
+	if err == nil {
+		t.Error("tool + pattern should fail mutual exclusivity check")
+	}
+
+	// All three.
+	_, err = s.AddRule("deny", RuleOpts{Destination: "example.com", Tool: "exec__*", Pattern: "sk-.*"})
+	if err == nil {
+		t.Error("all three should fail mutual exclusivity check")
+	}
+}
+
 func TestRemoveRule(t *testing.T) {
 	s := newTestStore(t)
-	id, _ := s.AddRule("allow", "example.com", nil, RuleOpts{})
+	id, _ := s.AddRule("allow", RuleOpts{Destination: "example.com"})
 	ok, err := s.RemoveRule(id)
 	if err != nil {
 		t.Fatalf("remove: %v", err)
@@ -241,155 +335,100 @@ func TestRemoveRule(t *testing.T) {
 	}
 }
 
-func TestListRulesFilter(t *testing.T) {
+func TestRemoveRuleUnified(t *testing.T) {
 	s := newTestStore(t)
-	s.AddRule("allow", "a.com", nil, RuleOpts{})
-	s.AddRule("deny", "b.com", nil, RuleOpts{})
-	s.AddRule("ask", "c.com", nil, RuleOpts{})
-	s.AddRule("allow", "d.com", nil, RuleOpts{})
 
-	allows, _ := s.ListRules("allow")
+	// RemoveRule works on any rule type (network, tool, pattern).
+	id1, _ := s.AddRule("allow", RuleOpts{Destination: "example.com"})
+	id2, _ := s.AddRule("allow", RuleOpts{Tool: "github__list_*"})
+	id3, _ := s.AddRule("deny", RuleOpts{Pattern: `sk-[a-z]+`})
+
+	ok, _ := s.RemoveRule(id2)
+	if !ok {
+		t.Error("remove tool rule should return true")
+	}
+	ok, _ = s.RemoveRule(id3)
+	if !ok {
+		t.Error("remove pattern rule should return true")
+	}
+	ok, _ = s.RemoveRule(id1)
+	if !ok {
+		t.Error("remove network rule should return true")
+	}
+
+	all, _ := s.ListRules(RuleFilter{})
+	if len(all) != 0 {
+		t.Errorf("expected 0 rules after removing all, got %d", len(all))
+	}
+}
+
+func TestListRulesFilterByVerdict(t *testing.T) {
+	s := newTestStore(t)
+	s.AddRule("allow", RuleOpts{Destination: "a.com"})
+	s.AddRule("deny", RuleOpts{Destination: "b.com"})
+	s.AddRule("ask", RuleOpts{Destination: "c.com"})
+	s.AddRule("allow", RuleOpts{Destination: "d.com"})
+
+	allows, _ := s.ListRules(RuleFilter{Verdict: "allow", Type: "network"})
 	if len(allows) != 2 {
 		t.Errorf("expected 2 allow rules, got %d", len(allows))
 	}
-	denies, _ := s.ListRules("deny")
+	denies, _ := s.ListRules(RuleFilter{Verdict: "deny", Type: "network"})
 	if len(denies) != 1 {
 		t.Errorf("expected 1 deny rule, got %d", len(denies))
 	}
-	all, _ := s.ListRules("")
+	all, _ := s.ListRules(RuleFilter{Type: "network"})
 	if len(all) != 4 {
-		t.Errorf("expected 4 total rules, got %d", len(all))
+		t.Errorf("expected 4 total network rules, got %d", len(all))
 	}
 }
 
-func TestListRulesExcludesToolAndPatternRules(t *testing.T) {
+func TestListRulesFilterByType(t *testing.T) {
 	s := newTestStore(t)
-	s.AddRule("allow", "a.com", nil, RuleOpts{})
-	s.AddToolRule("allow", "github__list_*", "", "")
-	s.AddInspectRule("block", `sk-[a-zA-Z0-9]+`, InspectRuleOpts{})
+	s.AddRule("allow", RuleOpts{Destination: "a.com"})
+	s.AddRule("allow", RuleOpts{Tool: "github__list_*"})
+	s.AddRule("deny", RuleOpts{Pattern: `sk-[a-zA-Z0-9]+`})
 
-	// ListRules should only return network rules (destination IS NOT NULL).
-	rules, _ := s.ListRules("")
-	if len(rules) != 1 {
-		t.Errorf("expected 1 network rule, got %d", len(rules))
+	network, _ := s.ListRules(RuleFilter{Type: "network"})
+	if len(network) != 1 {
+		t.Errorf("expected 1 network rule, got %d", len(network))
 	}
-	if rules[0].Destination != "a.com" {
-		t.Errorf("expected a.com, got %q", rules[0].Destination)
-	}
-}
-
-// --- Tool Rule CRUD ---
-
-func TestToolRuleCRUD(t *testing.T) {
-	s := newTestStore(t)
-	id, err := s.AddToolRule("allow", "github__list_*", "read-only GitHub", "seed")
-	if err != nil {
-		t.Fatalf("add tool rule: %v", err)
-	}
-	if id < 1 {
-		t.Fatal("expected positive id")
+	if network[0].Destination != "a.com" {
+		t.Errorf("expected a.com, got %q", network[0].Destination)
 	}
 
-	rules, err := s.ListToolRules("")
-	if err != nil {
-		t.Fatalf("list: %v", err)
+	tool, _ := s.ListRules(RuleFilter{Type: "tool"})
+	if len(tool) != 1 {
+		t.Errorf("expected 1 tool rule, got %d", len(tool))
 	}
-	if len(rules) != 1 {
-		t.Fatalf("expected 1, got %d", len(rules))
-	}
-	r := rules[0]
-	if r.Verdict != "allow" || r.Tool != "github__list_*" || r.Note != "read-only GitHub" || r.Source != "seed" {
-		t.Errorf("unexpected values: %+v", r)
+	if tool[0].Tool != "github__list_*" {
+		t.Errorf("expected github__list_*, got %q", tool[0].Tool)
 	}
 
-	ok, err := s.RemoveToolRule(id)
-	if err != nil {
-		t.Fatalf("remove: %v", err)
+	pattern, _ := s.ListRules(RuleFilter{Type: "pattern"})
+	if len(pattern) != 1 {
+		t.Errorf("expected 1 pattern rule, got %d", len(pattern))
 	}
-	if !ok {
-		t.Error("expected true")
-	}
-	rules, _ = s.ListToolRules("")
-	if len(rules) != 0 {
-		t.Error("expected empty after remove")
-	}
-}
 
-func TestToolRuleValidation(t *testing.T) {
-	s := newTestStore(t)
-	if _, err := s.AddToolRule("", "tool", "", ""); err == nil {
-		t.Error("empty verdict should fail")
-	}
-	if _, err := s.AddToolRule("allow", "", "", ""); err == nil {
-		t.Error("empty tool should fail")
-	}
-}
-
-func TestToolRuleFilterByVerdict(t *testing.T) {
-	s := newTestStore(t)
-	s.AddToolRule("allow", "tool_a", "", "")
-	s.AddToolRule("deny", "tool_b", "", "")
-	s.AddToolRule("ask", "tool_c", "", "")
-
-	allows, _ := s.ListToolRules("allow")
-	if len(allows) != 1 {
-		t.Errorf("expected 1 allow, got %d", len(allows))
-	}
-	all, _ := s.ListToolRules("")
+	all, _ := s.ListRules(RuleFilter{})
 	if len(all) != 3 {
-		t.Errorf("expected 3 total, got %d", len(all))
+		t.Errorf("expected 3 total rules, got %d", len(all))
 	}
 }
 
-// --- Inspect Rule CRUD ---
-
-func TestInspectRuleCRUD(t *testing.T) {
+func TestListRulesFilterVerdictAndType(t *testing.T) {
 	s := newTestStore(t)
-	id, err := s.AddInspectRule("block", `sk-[a-zA-Z0-9]+`, InspectRuleOpts{
-		Description: "API keys",
-	})
-	if err != nil {
-		t.Fatalf("add: %v", err)
-	}
+	s.AddRule("allow", RuleOpts{Tool: "tool_a"})
+	s.AddRule("deny", RuleOpts{Tool: "tool_b"})
+	s.AddRule("ask", RuleOpts{Tool: "tool_c"})
 
-	rules, _ := s.ListInspectRules("")
-	if len(rules) != 1 {
-		t.Fatalf("expected 1, got %d", len(rules))
+	allows, _ := s.ListRules(RuleFilter{Verdict: "allow", Type: "tool"})
+	if len(allows) != 1 {
+		t.Errorf("expected 1 allow tool rule, got %d", len(allows))
 	}
-	if rules[0].Kind != "block" || rules[0].Pattern != `sk-[a-zA-Z0-9]+` || rules[0].Description != "API keys" {
-		t.Errorf("unexpected: %+v", rules[0])
-	}
-
-	// Add redact rule
-	s.AddInspectRule("redact", `\d{3}-\d{2}-\d{4}`, InspectRuleOpts{
-		Replacement: "[REDACTED]",
-	})
-
-	blocks, _ := s.ListInspectRules("block")
-	if len(blocks) != 1 {
-		t.Errorf("expected 1 block rule, got %d", len(blocks))
-	}
-	redacts, _ := s.ListInspectRules("redact")
-	if len(redacts) != 1 {
-		t.Errorf("expected 1 redact rule, got %d", len(redacts))
-	}
-
-	ok, _ := s.RemoveInspectRule(id)
-	if !ok {
-		t.Error("expected true on remove")
-	}
-}
-
-func TestInspectRuleValidation(t *testing.T) {
-	s := newTestStore(t)
-	if _, err := s.AddInspectRule("", "pattern", InspectRuleOpts{}); err == nil {
-		t.Error("empty kind should fail")
-	}
-	if _, err := s.AddInspectRule("block", "", InspectRuleOpts{}); err == nil {
-		t.Error("empty pattern should fail")
-	}
-	if _, err := s.AddInspectRule("invalid", "pattern", InspectRuleOpts{}); err == nil {
-		t.Error("invalid kind should fail")
+	all, _ := s.ListRules(RuleFilter{Type: "tool"})
+	if len(all) != 3 {
+		t.Errorf("expected 3 total tool rules, got %d", len(all))
 	}
 }
 
@@ -588,21 +627,21 @@ func TestMCPUpstreamRemoveNonExistent(t *testing.T) {
 	}
 }
 
-// --- Exists helpers ---
+// --- RuleExists ---
 
-func TestRuleExists(t *testing.T) {
+func TestRuleExistsNetwork(t *testing.T) {
 	s := newTestStore(t)
-	s.AddRule("allow", "example.com", []int{443}, RuleOpts{})
+	s.AddRule("allow", RuleOpts{Destination: "example.com", Ports: []int{443}})
 
-	exists, _ := s.RuleExists("allow", "example.com", []int{443})
+	exists, _ := s.RuleExists("allow", RuleExistsOpts{Destination: "example.com", Ports: []int{443}})
 	if !exists {
 		t.Error("should exist")
 	}
-	exists, _ = s.RuleExists("allow", "example.com", nil)
+	exists, _ = s.RuleExists("allow", RuleExistsOpts{Destination: "example.com"})
 	if exists {
 		t.Error("different ports should not match")
 	}
-	exists, _ = s.RuleExists("deny", "example.com", []int{443})
+	exists, _ = s.RuleExists("deny", RuleExistsOpts{Destination: "example.com", Ports: []int{443}})
 	if exists {
 		t.Error("different verdict should not match")
 	}
@@ -610,29 +649,51 @@ func TestRuleExists(t *testing.T) {
 
 func TestRuleExistsNilPorts(t *testing.T) {
 	s := newTestStore(t)
-	s.AddRule("deny", "evil.com", nil, RuleOpts{})
+	s.AddRule("deny", RuleOpts{Destination: "evil.com"})
 
-	exists, _ := s.RuleExists("deny", "evil.com", nil)
+	exists, _ := s.RuleExists("deny", RuleExistsOpts{Destination: "evil.com"})
 	if !exists {
 		t.Error("nil ports rule should exist")
 	}
-	exists, _ = s.RuleExists("deny", "evil.com", []int{80})
+	exists, _ = s.RuleExists("deny", RuleExistsOpts{Destination: "evil.com", Ports: []int{80}})
 	if exists {
 		t.Error("should not match when stored ports is nil")
 	}
 }
 
-func TestToolRuleExists(t *testing.T) {
+func TestRuleExistsTool(t *testing.T) {
 	s := newTestStore(t)
-	s.AddToolRule("allow", "github__list_*", "", "")
+	s.AddRule("allow", RuleOpts{Tool: "github__list_*"})
 
-	exists, _ := s.ToolRuleExists("allow", "github__list_*")
+	exists, _ := s.RuleExists("allow", RuleExistsOpts{Tool: "github__list_*"})
 	if !exists {
 		t.Error("should exist")
 	}
-	exists, _ = s.ToolRuleExists("deny", "github__list_*")
+	exists, _ = s.RuleExists("deny", RuleExistsOpts{Tool: "github__list_*"})
 	if exists {
 		t.Error("different verdict should not match")
+	}
+}
+
+func TestRuleExistsPattern(t *testing.T) {
+	s := newTestStore(t)
+	s.AddRule("deny", RuleOpts{Pattern: `sk-[a-zA-Z0-9]+`})
+
+	exists, _ := s.RuleExists("deny", RuleExistsOpts{Pattern: `sk-[a-zA-Z0-9]+`})
+	if !exists {
+		t.Error("should exist")
+	}
+	exists, _ = s.RuleExists("deny", RuleExistsOpts{Pattern: `different-pattern`})
+	if exists {
+		t.Error("different pattern should not match")
+	}
+}
+
+func TestRuleExistsRequiresField(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.RuleExists("allow", RuleExistsOpts{})
+	if err == nil {
+		t.Error("empty opts should fail")
 	}
 }
 
@@ -677,7 +738,7 @@ func TestConcurrentAccess(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			dest := fmt.Sprintf("host-%d.example.com", i)
-			_, err := s.AddRule("allow", dest, []int{443}, RuleOpts{Source: "test"})
+			_, err := s.AddRule("allow", RuleOpts{Destination: dest, Ports: []int{443}, Source: "test"})
 			if err != nil {
 				errs <- fmt.Errorf("add rule %d: %w", i, err)
 			}
@@ -689,7 +750,7 @@ func TestConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := s.ListRules("")
+			_, err := s.ListRules(RuleFilter{Type: "network"})
 			if err != nil {
 				errs <- fmt.Errorf("list rules: %w", err)
 			}
@@ -704,7 +765,7 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 
 	// Verify all 20 rules were inserted.
-	rules, _ := s.ListRules("")
+	rules, _ := s.ListRules(RuleFilter{Type: "network"})
 	if len(rules) != 20 {
 		t.Errorf("expected 20 rules, got %d", len(rules))
 	}
@@ -741,15 +802,15 @@ func TestConcurrentConfigAccess(t *testing.T) {
 
 func TestRuleWithNullOptionalFields(t *testing.T) {
 	s := newTestStore(t)
-	s.AddRule("ask", "example.com", nil, RuleOpts{})
+	s.AddRule("ask", RuleOpts{Destination: "example.com"})
 
-	rules, _ := s.ListRules("")
+	rules, _ := s.ListRules(RuleFilter{Type: "network"})
 	r := rules[0]
-	if r.Protocol != "" {
-		t.Errorf("protocol should be empty, got %q", r.Protocol)
+	if r.Protocols != nil {
+		t.Errorf("protocols should be nil, got %v", r.Protocols)
 	}
-	if r.Note != "" {
-		t.Errorf("note should be empty, got %q", r.Note)
+	if r.Name != "" {
+		t.Errorf("name should be empty, got %q", r.Name)
 	}
 }
 
@@ -764,5 +825,59 @@ func TestMCPUpstreamNilArgsEnv(t *testing.T) {
 	}
 	if u.Env != nil {
 		t.Errorf("env should be nil, got %v", u.Env)
+	}
+}
+
+// --- RemoveRulesBySource ---
+
+func TestRemoveRulesBySource(t *testing.T) {
+	s := newTestStore(t)
+	s.AddRule("allow", RuleOpts{Destination: "a.com", Source: "seed"})
+	s.AddRule("deny", RuleOpts{Destination: "b.com", Source: "seed"})
+	s.AddRule("allow", RuleOpts{Tool: "github__list_*", Source: "seed"})
+	s.AddRule("allow", RuleOpts{Destination: "c.com", Source: "manual"})
+
+	n, err := s.RemoveRulesBySource("seed")
+	if err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("expected 3 removed, got %d", n)
+	}
+
+	all, _ := s.ListRules(RuleFilter{})
+	if len(all) != 1 {
+		t.Errorf("expected 1 remaining, got %d", len(all))
+	}
+	if all[0].Destination != "c.com" {
+		t.Errorf("expected c.com remaining, got %q", all[0].Destination)
+	}
+}
+
+// --- Redact verdict ---
+
+func TestRedactVerdict(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.AddRule("redact", RuleOpts{
+		Pattern:     `(?i)(sk-[a-zA-Z0-9]{20,})`,
+		Replacement: "[REDACTED_API_KEY]",
+		Name:        "api key in responses",
+	})
+	if err != nil {
+		t.Fatalf("add redact rule: %v", err)
+	}
+	if id < 1 {
+		t.Fatal("expected positive id")
+	}
+
+	rules, _ := s.ListRules(RuleFilter{Verdict: "redact"})
+	if len(rules) != 1 {
+		t.Fatalf("expected 1, got %d", len(rules))
+	}
+	if rules[0].Verdict != "redact" {
+		t.Errorf("verdict = %q, want redact", rules[0].Verdict)
+	}
+	if rules[0].Replacement != "[REDACTED_API_KEY]" {
+		t.Errorf("replacement = %q", rules[0].Replacement)
 	}
 }
