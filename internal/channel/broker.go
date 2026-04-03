@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -172,6 +173,13 @@ func (b *Broker) Request(dest string, port int, timeout time.Duration) (Response
 	case resp := <-ch:
 		return resp, nil
 	case <-b.done:
+		// CancelAll sends ResponseDeny on ch before closing done.
+		// Drain the buffered channel first to return without error.
+		select {
+		case resp := <-ch:
+			return resp, nil
+		default:
+		}
 		b.mu.Lock()
 		delete(b.waiters, id)
 		b.mu.Unlock()
@@ -209,7 +217,7 @@ func (b *Broker) Request(dest string, port int, timeout time.Duration) (Response
 func (b *Broker) broadcast(req ApprovalRequest) {
 	for _, ch := range b.channels {
 		// Non-blocking send. Channel implementations should not block.
-		_ = ch.RequestApproval(nil, req)
+		_ = ch.RequestApproval(context.Background(), req)
 	}
 }
 

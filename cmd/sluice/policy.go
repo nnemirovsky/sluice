@@ -90,7 +90,7 @@ func handlePolicyList(args []string) {
 
 func handlePolicyAdd(args []string) {
 	if len(args) == 0 {
-		fmt.Println("usage: sluice policy add <allow|deny|ask> <destination> [--ports 443,80] [--note \"reason\"]")
+		fmt.Println("usage: sluice policy add <allow|deny|ask> <destination> [--ports 443,80] [--name \"reason\"]")
 		os.Exit(1)
 	}
 
@@ -103,11 +103,11 @@ func handlePolicyAdd(args []string) {
 	fs := flag.NewFlagSet("policy add", flag.ExitOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
 	portsStr := fs.String("ports", "", "comma-separated port list (e.g. 443,80)")
-	note := fs.String("note", "", "human-readable note")
+	note := fs.String("name", "", "human-readable name")
 	fs.Parse(args[1:])
 
 	if fs.NArg() == 0 {
-		fmt.Println("usage: sluice policy add <allow|deny|ask> <destination> [--ports 443,80] [--note \"reason\"]")
+		fmt.Println("usage: sluice policy add <allow|deny|ask> <destination> [--ports 443,80] [--name \"reason\"]")
 		os.Exit(1)
 	}
 	destination := fs.Arg(0)

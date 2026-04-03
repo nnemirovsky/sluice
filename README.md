@@ -40,10 +40,10 @@ curl -x socks5h://127.0.0.1:1080 https://api.anthropic.com/
 ### Policy management
 
 ```
-sluice policy list [--verdict allow|deny|ask] [--db sluice.db]
-sluice policy add allow <destination> [--ports 443,80] [--note "reason"]
-sluice policy add deny <destination> [--note "reason"]
-sluice policy add ask <destination> [--ports 443] [--note "reason"]
+sluice policy list [--verdict allow|deny|ask|redact] [--db sluice.db]
+sluice policy add allow <destination> [--ports 443,80] [--name "reason"]
+sluice policy add deny <destination> [--name "reason"]
+sluice policy add ask <destination> [--ports 443] [--name "reason"]
 sluice policy remove <id>
 sluice policy import <path.toml>
 sluice policy export
@@ -86,6 +86,11 @@ All runtime policy state is stored in a SQLite database (default: `sluice.db`). 
 default = "deny"       # "allow", "deny", or "ask"
 timeout_sec = 120       # timeout for ask verdicts
 
+[vault]
+provider = "age"
+
+# Network rules (destination field)
+
 [[allow]]
 destination = "api.anthropic.com"
 ports = [443]
@@ -100,7 +105,30 @@ destination = "169.254.169.254" # block metadata endpoint
 [[ask]]
 destination = "*.openai.com"
 ports = [443]
+
+# Tool rules (tool field)
+
+[[allow]]
+tool = "github__list_*"
+name = "read-only github list"
+
+[[deny]]
+tool = "exec__*"
+name = "block all exec"
+
+# Content inspection rules (pattern field)
+
+[[deny]]
+pattern = "(?i)(sk-[a-zA-Z0-9_-]{20,})"
+name = "api key in tool arguments"
+
+[[redact]]
+pattern = "(?i)(sk-[a-zA-Z0-9_-]{20,})"
+replacement = "[REDACTED_API_KEY]"
+name = "api key in responses"
 ```
+
+Rules use a unified format. Each `[[allow]]`, `[[deny]]`, `[[ask]]`, or `[[redact]]` entry carries exactly one of: `destination` (network rule), `tool` (MCP tool rule), or `pattern` (content inspection rule). The section name determines the verdict.
 
 Glob patterns: `*` matches within a single DNS label (not across dots). `**` matches across dots (any depth of subdomains). `?` matches a single non-dot character. Matching is case-insensitive (RFC 4343). An empty ports list matches all ports.
 
@@ -140,7 +168,7 @@ Policy changes via Telegram are persisted to the SQLite store and survive restar
 
 Send SIGHUP to recompile the policy engine from the SQLite store without restarting the proxy. Existing connections are not affected. New connections use the updated policy. SIGHUP also updates the policy engine used by Telegram command handlers.
 
-The Telegram runtime (bot token, chat ID, approval broker) is wired once at startup and cannot be hot-reloaded. If the Telegram config changes in the store, a full restart is required. A warning is logged when config drift is detected.
+Telegram bot credentials are read from environment variables (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) at startup and cannot be hot-reloaded. Changing Telegram credentials requires a full restart.
 
 ```bash
 kill -HUP $(pgrep sluice)

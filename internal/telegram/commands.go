@@ -250,7 +250,7 @@ func (h *CommandHandler) policyShowFromStore() string {
 		dv = "deny"
 	}
 
-	rules, err := h.store.ListRules(store.RuleFilter{Type: "network"})
+	rules, err := h.store.ListRules(store.RuleFilter{})
 	if err != nil {
 		return fmt.Sprintf("Failed to list rules: %v", err)
 	}
@@ -267,6 +267,7 @@ func (h *CommandHandler) policyShowFromStore() string {
 		{"ALLOW", "allow"},
 		{"DENY", "deny"},
 		{"ASK", "ask"},
+		{"REDACT", "redact"},
 	} {
 		var sectionRules []store.Rule
 		for _, r := range rules {
@@ -280,7 +281,13 @@ func (h *CommandHandler) policyShowFromStore() string {
 		b.WriteString(section.label)
 		b.WriteString(":\n")
 		for _, r := range sectionRules {
-			fmt.Fprintf(&b, "  [%d] %s", r.ID, r.Destination)
+			target := r.Destination
+			if r.Tool != "" {
+				target = "tool:" + r.Tool
+			} else if r.Pattern != "" {
+				target = "pattern:" + r.Pattern
+			}
+			fmt.Fprintf(&b, "  [%d] %s", r.ID, target)
 			if len(r.Ports) > 0 {
 				b.WriteString(" ports=")
 				b.WriteString(formatPorts(r.Ports))

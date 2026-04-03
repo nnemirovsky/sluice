@@ -59,7 +59,7 @@ go test ./... -v -timeout 30s
 - `internal/channel/channel.go` - Channel interface, ChannelType enum (Telegram=0, HTTP=1), ApprovalRequest/Response/Command types
 - `internal/channel/broker.go` - Channel-agnostic approval broker with broadcast-and-first-wins, rate limiting, cross-channel cancellation
 - `internal/telegram/approval.go` - TelegramChannel implementing channel.Channel interface
-- `internal/telegram/bot.go` - Telegram bot lifecycle, inline keyboard approval messages
+- `internal/telegram/bot.go` - Telegram message formatting utilities and token sanitization
 - `internal/telegram/commands.go` - Telegram admin commands (/policy, /cred, /status, /audit, /help) backed by SQLite store
 - `internal/docker/manager.go` - Docker container manager for credential hot-reload via shared volume + docker exec, with restart fallback
 - `internal/docker/socket_client.go` - Docker socket HTTP client for container lifecycle and exec operations

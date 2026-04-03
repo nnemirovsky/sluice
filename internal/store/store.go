@@ -771,7 +771,7 @@ func (s *Store) AddRuleAndBinding(
 	}
 	res, err := tx.Exec(
 		`INSERT INTO rules (verdict, destination, ports, protocols, name, source) VALUES (?, ?, ?, ?, ?, ?)`,
-		verdict, ruleOpts.Destination, portsJSON, protocolsJSON, nilIfEmpty(ruleOpts.Name), source,
+		verdict, nilIfEmpty(ruleOpts.Destination), portsJSON, protocolsJSON, nilIfEmpty(ruleOpts.Name), source,
 	)
 	if err != nil {
 		return 0, 0, fmt.Errorf("insert rule: %w", err)

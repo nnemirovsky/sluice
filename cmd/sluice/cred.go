@@ -125,7 +125,7 @@ func handleCredAdd(args []string) {
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
 	destination := fs.String("destination", "", "auto-create allow rule and binding for this destination")
 	portsStr := fs.String("ports", "", "comma-separated port list for the allow rule (e.g. 443,80)")
-	header := fs.String("header", "", "inject_header for the binding (e.g. Authorization)")
+	header := fs.String("header", "", "header for the binding (e.g. Authorization)")
 	template := fs.String("template", "", "template for credential injection (e.g. \"Bearer {value}\")")
 	fs.Parse(args)
 

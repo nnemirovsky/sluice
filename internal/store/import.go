@@ -310,6 +310,9 @@ func insertRedactRuleIfNew(tx *sql.Tx, r importRedactRule) (bool, error) {
 	if r.Pattern == "" {
 		return false, fmt.Errorf("redact rule has empty pattern")
 	}
+	if r.Destination != "" {
+		return false, fmt.Errorf("redact rule: destination and pattern are mutually exclusive")
+	}
 	if _, err := regexp.Compile(r.Pattern); err != nil {
 		return false, fmt.Errorf("redact rule %q: invalid regex: %w", r.Pattern, err)
 	}
@@ -501,11 +504,6 @@ func updateConfigColumn(tx *sql.Tx, column, value string) error {
 	return nil
 }
 
-func portsToJSON(ports []int) *string {
-	if len(ports) == 0 {
-		return nil
-	}
-	b, _ := json.Marshal(ports)
-	s := string(b)
-	return &s
-}
+// portsToJSON is an alias for portsToJSONPtr (defined in store.go) kept for
+// readability in import code.
+var portsToJSON = portsToJSONPtr
