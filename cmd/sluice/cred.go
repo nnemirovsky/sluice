@@ -162,7 +162,14 @@ func handleCredList(args []string) {
 		return
 	}
 
-	// Try to open the store to show binding info. If it fails, just list names.
+	// Try to open the store to show binding info. Skip if DB doesn't exist
+	// to avoid creating files as a side effect of a read-only operation.
+	if _, statErr := os.Stat(*dbPath); statErr != nil {
+		for _, n := range names {
+			fmt.Println(n)
+		}
+		return
+	}
 	db, dbErr := store.New(*dbPath)
 	if dbErr != nil {
 		for _, n := range names {
@@ -214,7 +221,13 @@ func handleCredRemove(args []string) {
 	vs := openVaultStore()
 
 	// Before removing the credential, find and clean up associated bindings and rules.
-	db, dbErr := store.New(*dbPath)
+	// Only open the store if the DB file exists to avoid creating it as a side effect.
+	db, dbErr := func() (*store.Store, error) {
+		if _, statErr := os.Stat(*dbPath); statErr != nil {
+			return nil, statErr
+		}
+		return store.New(*dbPath)
+	}()
 	if dbErr == nil {
 		defer db.Close()
 

@@ -127,6 +127,14 @@ func (c *SocketClient) CreateContainer(ctx context.Context, spec ContainerSpec) 
 	}
 	body.HostConfig.Binds = spec.Binds
 	body.HostConfig.NetworkMode = spec.NetworkMode
+	for _, m := range spec.Mounts {
+		body.HostConfig.Mounts = append(body.HostConfig.Mounts, createMount{
+			Type:     "volume",
+			Source:   m.Source,
+			Target:   m.Destination,
+			ReadOnly: m.ReadOnly,
+		})
+	}
 
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -289,14 +297,23 @@ type inspectResponse struct {
 
 // Docker API JSON types for create request/response.
 
+// createMount matches the Docker API's Mount object format used in HostConfig.Mounts.
+type createMount struct {
+	Type     string `json:"Type"`
+	Source   string `json:"Source"`
+	Target   string `json:"Target"`
+	ReadOnly bool   `json:"ReadOnly"`
+}
+
 type createRequest struct {
 	Image      string   `json:"Image"`
 	Env        []string `json:"Env,omitempty"`
 	Cmd        []string `json:"Cmd,omitempty"`
 	Entrypoint []string `json:"Entrypoint,omitempty"`
 	HostConfig struct {
-		Binds       []string `json:"Binds,omitempty"`
-		NetworkMode string   `json:"NetworkMode,omitempty"`
+		Binds       []string      `json:"Binds,omitempty"`
+		Mounts      []createMount `json:"Mounts,omitempty"`
+		NetworkMode string        `json:"NetworkMode,omitempty"`
 	} `json:"HostConfig"`
 }
 

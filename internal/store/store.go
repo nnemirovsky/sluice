@@ -35,6 +35,13 @@ func New(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("set WAL mode: %w", err)
 	}
+	// Set busy timeout so concurrent writers retry instead of returning
+	// SQLITE_BUSY immediately. 5 seconds covers typical contention windows
+	// between the proxy, CLI, and Telegram bot writing to the same DB.
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("set busy timeout: %w", err)
+	}
 	// Enable foreign keys.
 	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
 		db.Close()

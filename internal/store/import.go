@@ -411,6 +411,13 @@ func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
 // insertUpstreamIfNew inserts an MCP upstream if no matching name exists.
 // Returns true if inserted.
 func insertUpstreamIfNew(tx *sql.Tx, u importMCPUpstream) (bool, error) {
+	if u.Name == "" {
+		return false, fmt.Errorf("MCP upstream has empty name")
+	}
+	if u.Command == "" {
+		return false, fmt.Errorf("MCP upstream %q has empty command", u.Name)
+	}
+
 	var count int
 	err := tx.QueryRow(
 		"SELECT COUNT(*) FROM mcp_upstreams WHERE name = ?",
