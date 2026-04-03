@@ -183,8 +183,9 @@ chat_id_env = "TELEGRAM_CHAT_ID"
 	if err != nil {
 		t.Fatalf("ImportTOML: %v", err)
 	}
-	if res.ConfigSet != 4 {
-		t.Errorf("expected 4 config values set, got %d", res.ConfigSet)
+	// Telegram config keys are silently ignored (hardcoded env var names).
+	if res.ConfigSet != 2 {
+		t.Errorf("expected 2 config values set, got %d", res.ConfigSet)
 	}
 
 	tests := []struct {
@@ -193,8 +194,6 @@ chat_id_env = "TELEGRAM_CHAT_ID"
 	}{
 		{"default_verdict", "ask"},
 		{"timeout_sec", "60"},
-		{"telegram_bot_token_env", "TELEGRAM_BOT_TOKEN"},
-		{"telegram_chat_id_env", "TELEGRAM_CHAT_ID"},
 	}
 	for _, tt := range tests {
 		val, err := s.GetConfig(tt.key)
@@ -204,6 +203,12 @@ chat_id_env = "TELEGRAM_CHAT_ID"
 		if val != tt.want {
 			t.Errorf("GetConfig(%q) = %q, want %q", tt.key, val, tt.want)
 		}
+	}
+
+	// Telegram keys return empty (silently ignored).
+	val, _ := s.GetConfig("telegram_bot_token_env")
+	if val != "" {
+		t.Errorf("telegram_bot_token_env should be empty, got %q", val)
 	}
 }
 
@@ -484,8 +489,9 @@ func TestImportTOMLExamplePolicyFile(t *testing.T) {
 	if res.InspectInserted != 2 {
 		t.Errorf("expected 2 inspect rules, got %d inserted", res.InspectInserted)
 	}
-	if res.ConfigSet < 3 {
-		t.Errorf("expected at least 3 config values, got %d set", res.ConfigSet)
+	// Telegram config keys are silently ignored, so only policy + vault config.
+	if res.ConfigSet < 2 {
+		t.Errorf("expected at least 2 config values, got %d set", res.ConfigSet)
 	}
 
 	// Verify config.

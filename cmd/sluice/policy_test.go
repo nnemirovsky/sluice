@@ -198,8 +198,9 @@ timeout_sec = 60
 	if result.UpstreamsInserted != 1 {
 		t.Errorf("expected 1 upstream inserted, got %d", result.UpstreamsInserted)
 	}
-	if result.ConfigSet < 3 {
-		t.Errorf("expected at least 3 config set, got %d", result.ConfigSet)
+	// Telegram config keys are silently ignored (hardcoded env vars).
+	if result.ConfigSet < 2 {
+		t.Errorf("expected at least 2 config set, got %d", result.ConfigSet)
 	}
 
 	// Second import should skip duplicates.

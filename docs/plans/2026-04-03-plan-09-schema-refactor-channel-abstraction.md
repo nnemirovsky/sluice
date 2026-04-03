@@ -150,14 +150,14 @@ CREATE TABLE channels (
 INSERT OR IGNORE INTO channels (id, type) VALUES (1, 0);
 ```
 
-- [ ] Add `github.com/golang-migrate/migrate/v4` dependency
-- [ ] Create `internal/store/migrations/000001_init.up.sql` with unified schema (5 tables: rules, config, bindings, mcp_upstreams, channels)
-- [ ] Create `internal/store/migrations/000001_init.down.sql` with DROP TABLE statements
-- [ ] Create `internal/store/migrate.go` with `//go:embed migrations/*.sql`, using `source/iofs` driver and `database/sqlite` driver from golang-migrate
-- [ ] Replace inline `schema` const and `migrate()` in store.go with call to `runMigrations(db)`
-- [ ] Write test that creates a fresh DB and verifies all 5 tables exist with correct columns
-- [ ] Write test that migrations are idempotent (run twice, no error)
-- [ ] Run tests: `go test ./internal/store/ -v -timeout 30s`
+- [x] Add `github.com/golang-migrate/migrate/v4` dependency
+- [x] Create `internal/store/migrations/000001_init.up.sql` with unified schema (5 tables: rules, config, bindings, mcp_upstreams, channels)
+- [x] Create `internal/store/migrations/000001_init.down.sql` with DROP TABLE statements
+- [x] Create `internal/store/migrate.go` with `//go:embed migrations/*.sql`, using `source/iofs` driver and `database/sqlite` driver from golang-migrate
+- [x] Replace inline `schema` const and `migrate()` in store.go with call to `runMigrations(db)`
+- [x] Write test that creates a fresh DB and verifies all 5 tables exist with correct columns
+- [x] Write test that migrations are idempotent (run twice, no error)
+- [x] Run tests: `go test ./internal/store/ -v -timeout 30s`
 
 ### Task 2: Rewrite store CRUD for unified rules table
 

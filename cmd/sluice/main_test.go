@@ -106,11 +106,16 @@ func TestReloadPolicyValidation(t *testing.T) {
 	}
 	defer srv.Close()
 
-	// Set an invalid default verdict in the store.
-	db.SetConfig("default_verdict", "invalid_verdict")
+	// Set an invalid default verdict in the store. With typed config, the
+	// CHECK constraint rejects the invalid value at the DB level.
+	setErr := db.SetConfig("default_verdict", "invalid_verdict")
+	if setErr == nil {
+		t.Fatal("expected error setting invalid default verdict (CHECK constraint)")
+	}
+	// LoadFromStore should still succeed with the original valid config.
 	_, loadErr := policy.LoadFromStore(db)
-	if loadErr == nil {
-		t.Fatal("expected error loading policy with invalid default verdict")
+	if loadErr != nil {
+		t.Fatalf("unexpected error loading policy after rejected SetConfig: %v", loadErr)
 	}
 
 	// Engine should still be the original.
@@ -389,8 +394,9 @@ template = "Bearer {value}"
 	if eng.TimeoutSec != 60 {
 		t.Errorf("expected timeout 60, got %d", eng.TimeoutSec)
 	}
-	if eng.Telegram.BotTokenEnv != "MY_BOT_TOKEN" {
-		t.Errorf("expected bot_token_env MY_BOT_TOKEN, got %q", eng.Telegram.BotTokenEnv)
+	// Telegram env var names are now hardcoded, not stored in config.
+	if eng.Telegram.BotTokenEnv != "" {
+		t.Errorf("expected empty bot_token_env (hardcoded), got %q", eng.Telegram.BotTokenEnv)
 	}
 	if v := eng.Evaluate("api.example.com", 443); v != policy.Allow {
 		t.Errorf("expected Allow for api.example.com:443, got %s", v)
@@ -497,13 +503,13 @@ func TestReadVaultConfig(t *testing.T) {
 	}
 	defer db.Close()
 
-	// No vault config set. Should get defaults.
+	// No vault config set explicitly. Typed config has "age" as default.
 	cfg, err := readVaultConfig(db)
 	if err != nil {
-		t.Fatalf("read empty vault config: %v", err)
+		t.Fatalf("read default vault config: %v", err)
 	}
-	if cfg.Provider != "" {
-		t.Errorf("expected empty provider, got %q", cfg.Provider)
+	if cfg.Provider != "age" {
+		t.Errorf("expected default provider 'age', got %q", cfg.Provider)
 	}
 
 	// Set some vault config.
@@ -589,14 +595,15 @@ func TestStoreIsEmpty(t *testing.T) {
 		t.Error("expected empty store")
 	}
 
-	// Adding a config entry makes it non-empty.
-	db.SetConfig("default_verdict", "deny")
+	// Config changes don't affect emptiness (typed singleton always exists).
+	// Adding a rule makes it non-empty.
+	db.AddRule("allow", "example.com", nil, store.RuleOpts{})
 
 	empty, err = db.IsEmpty()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if empty {
-		t.Error("expected non-empty store after adding config")
+		t.Error("expected non-empty store after adding rule")
 	}
 }

@@ -485,11 +485,12 @@ destination = "test[0].example.com"
 
 func TestLoadPolicyWithTelegram(t *testing.T) {
 	eng := loadFromTOMLFile(t, "../../testdata/policy_with_telegram.toml")
-	if eng.Telegram.BotTokenEnv != "TELEGRAM_BOT_TOKEN" {
-		t.Errorf("expected bot_token_env %q, got %q", "TELEGRAM_BOT_TOKEN", eng.Telegram.BotTokenEnv)
+	// Telegram env var names are now hardcoded, not stored in config.
+	if eng.Telegram.BotTokenEnv != "" {
+		t.Errorf("expected empty bot_token_env (hardcoded), got %q", eng.Telegram.BotTokenEnv)
 	}
-	if eng.Telegram.ChatIDEnv != "TELEGRAM_CHAT_ID" {
-		t.Errorf("expected chat_id_env %q, got %q", "TELEGRAM_CHAT_ID", eng.Telegram.ChatIDEnv)
+	if eng.Telegram.ChatIDEnv != "" {
+		t.Errorf("expected empty chat_id_env (hardcoded), got %q", eng.Telegram.ChatIDEnv)
 	}
 	if eng.Default != Ask {
 		t.Errorf("expected default Ask, got %v", eng.Default)
@@ -678,6 +679,7 @@ func TestLoadFromStoreWithTelegram(t *testing.T) {
 	}
 	defer s.Close()
 
+	// Telegram env var names are now hardcoded. SetConfig silently ignores them.
 	s.SetConfig("telegram_bot_token_env", "MY_BOT_TOKEN")
 	s.SetConfig("telegram_chat_id_env", "MY_CHAT_ID")
 
@@ -685,11 +687,12 @@ func TestLoadFromStoreWithTelegram(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load from store: %v", err)
 	}
-	if eng.Telegram.BotTokenEnv != "MY_BOT_TOKEN" {
-		t.Errorf("expected %q, got %q", "MY_BOT_TOKEN", eng.Telegram.BotTokenEnv)
+	// Values are not stored since telegram keys are ignored.
+	if eng.Telegram.BotTokenEnv != "" {
+		t.Errorf("expected empty (hardcoded), got %q", eng.Telegram.BotTokenEnv)
 	}
-	if eng.Telegram.ChatIDEnv != "MY_CHAT_ID" {
-		t.Errorf("expected %q, got %q", "MY_CHAT_ID", eng.Telegram.ChatIDEnv)
+	if eng.Telegram.ChatIDEnv != "" {
+		t.Errorf("expected empty (hardcoded), got %q", eng.Telegram.ChatIDEnv)
 	}
 }
 
@@ -700,10 +703,10 @@ func TestLoadFromStoreInvalidDefaultVerdict(t *testing.T) {
 	}
 	defer s.Close()
 
-	s.SetConfig("default_verdict", "invalid")
-	_, err = LoadFromStore(s)
+	// With typed config, the CHECK constraint rejects invalid values at the DB level.
+	err = s.SetConfig("default_verdict", "invalid")
 	if err == nil {
-		t.Error("expected error for invalid default verdict")
+		t.Error("expected error for invalid default verdict from CHECK constraint")
 	}
 }
 

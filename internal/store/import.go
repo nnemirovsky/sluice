@@ -224,29 +224,19 @@ func (s *Store) ImportTOML(data []byte) (*ImportResult, error) {
 		default:
 			return nil, fmt.Errorf("invalid default verdict %q: must be allow, deny, or ask", f.Policy.Default)
 		}
-		if err := upsertConfig(tx, "default_verdict", f.Policy.Default); err != nil {
+		if err := updateConfigColumn(tx, "default_verdict", f.Policy.Default); err != nil {
 			return nil, err
 		}
 		res.ConfigSet++
 	}
 	if f.Policy.TimeoutSec > 0 {
-		if err := upsertConfig(tx, "timeout_sec", fmt.Sprintf("%d", f.Policy.TimeoutSec)); err != nil {
+		if err := updateConfigColumn(tx, "timeout_sec", fmt.Sprintf("%d", f.Policy.TimeoutSec)); err != nil {
 			return nil, err
 		}
 		res.ConfigSet++
 	}
-	if f.Telegram.BotTokenEnv != "" {
-		if err := upsertConfig(tx, "telegram_bot_token_env", f.Telegram.BotTokenEnv); err != nil {
-			return nil, err
-		}
-		res.ConfigSet++
-	}
-	if f.Telegram.ChatIDEnv != "" {
-		if err := upsertConfig(tx, "telegram_chat_id_env", f.Telegram.ChatIDEnv); err != nil {
-			return nil, err
-		}
-		res.ConfigSet++
-	}
+
+	// Telegram config values are silently ignored (hardcoded env var names).
 
 	// Import vault config.
 	vaultConfigKeys := []struct {
@@ -274,7 +264,7 @@ func (s *Store) ImportTOML(data []byte) (*ImportResult, error) {
 	}
 	for _, kv := range vaultConfigKeys {
 		if kv.value != "" {
-			if err := upsertConfig(tx, kv.key, kv.value); err != nil {
+			if err := updateConfigColumn(tx, kv.key, kv.value); err != nil {
 				return nil, err
 			}
 			res.ConfigSet++
@@ -346,24 +336,30 @@ func insertNetworkRuleIfNew(tx *sql.Tx, verdict string, r importRule) (bool, err
 		return false, nil
 	}
 
+	var protocolsJSON *string
+	if r.Protocol != "" {
+		b, _ := json.Marshal([]string{r.Protocol})
+		ps := string(b)
+		protocolsJSON = &ps
+	}
 	if _, err := tx.Exec(
-		`INSERT INTO rules (verdict, destination, ports, protocol, note, source) VALUES (?, ?, ?, ?, ?, ?)`,
-		verdict, r.Destination, portsJSON, nilIfEmpty(r.Protocol), nilIfEmpty(r.Note), "seed",
+		`INSERT INTO rules (verdict, destination, ports, protocols, name, source) VALUES (?, ?, ?, ?, ?, ?)`,
+		verdict, r.Destination, portsJSON, protocolsJSON, nilIfEmpty(r.Note), "seed",
 	); err != nil {
 		return false, fmt.Errorf("insert %s rule %q: %w", verdict, r.Destination, err)
 	}
 	return true, nil
 }
 
-// insertToolRuleIfNew inserts a tool rule if no matching verdict+tool
-// combination exists. Returns true if inserted.
+// insertToolRuleIfNew inserts a tool rule into the unified rules table if no matching
+// verdict+tool combination exists. Returns true if inserted.
 func insertToolRuleIfNew(tx *sql.Tx, verdict string, r importToolRule) (bool, error) {
 	if r.Tool == "" {
 		return false, fmt.Errorf("tool rule has empty tool pattern")
 	}
 	var count int
 	err := tx.QueryRow(
-		"SELECT COUNT(*) FROM tool_rules WHERE verdict = ? AND tool = ?",
+		"SELECT COUNT(*) FROM rules WHERE verdict = ? AND tool = ?",
 		verdict, r.Tool,
 	).Scan(&count)
 	if err != nil {
@@ -374,7 +370,7 @@ func insertToolRuleIfNew(tx *sql.Tx, verdict string, r importToolRule) (bool, er
 	}
 
 	if _, err := tx.Exec(
-		`INSERT INTO tool_rules (verdict, tool, note, source) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO rules (verdict, tool, name, source) VALUES (?, ?, ?, ?)`,
 		verdict, r.Tool, nilIfEmpty(r.Note), "seed",
 	); err != nil {
 		return false, fmt.Errorf("insert tool_%s rule %q: %w", verdict, r.Tool, err)
@@ -411,10 +407,16 @@ func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
 		return false, nil
 	}
 
+	var protocolsJSON *string
+	if b.Protocol != "" {
+		pb, _ := json.Marshal([]string{b.Protocol})
+		ps := string(pb)
+		protocolsJSON = &ps
+	}
 	if _, err := tx.Exec(
-		`INSERT INTO bindings (destination, ports, credential, inject_header, template, protocol) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO bindings (destination, ports, credential, header, template, protocols) VALUES (?, ?, ?, ?, ?, ?)`,
 		b.Destination, portsJSON, b.Credential,
-		nilIfEmpty(b.InjectHeader), nilIfEmpty(b.Template), nilIfEmpty(b.Protocol),
+		nilIfEmpty(b.InjectHeader), nilIfEmpty(b.Template), protocolsJSON,
 	); err != nil {
 		return false, fmt.Errorf("insert binding %q->%q: %w", b.Destination, b.Credential, err)
 	}
@@ -468,8 +470,8 @@ func insertUpstreamIfNew(tx *sql.Tx, u importMCPUpstream) (bool, error) {
 	return true, nil
 }
 
-// insertInspectRuleIfNew inserts an inspect rule if no matching kind+pattern
-// combination exists. Returns true if inserted.
+// insertInspectRuleIfNew inserts an inspect rule into the unified rules table
+// if no matching verdict+pattern combination exists. Returns true if inserted.
 func insertInspectRuleIfNew(tx *sql.Tx, kind, pattern string, description, replacement *string) (bool, error) {
 	if pattern == "" {
 		return false, fmt.Errorf("inspect rule has empty pattern")
@@ -477,10 +479,16 @@ func insertInspectRuleIfNew(tx *sql.Tx, kind, pattern string, description, repla
 	if _, err := regexp.Compile(pattern); err != nil {
 		return false, fmt.Errorf("inspect rule %q: invalid regex: %w", pattern, err)
 	}
+
+	verdict, err := inspectKindToVerdict(kind)
+	if err != nil {
+		return false, err
+	}
+
 	var count int
-	err := tx.QueryRow(
-		"SELECT COUNT(*) FROM inspect_rules WHERE kind = ? AND pattern = ?",
-		kind, pattern,
+	err = tx.QueryRow(
+		"SELECT COUNT(*) FROM rules WHERE verdict = ? AND pattern = ?",
+		verdict, pattern,
 	).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("check inspect rule exists: %w", err)
@@ -490,21 +498,23 @@ func insertInspectRuleIfNew(tx *sql.Tx, kind, pattern string, description, repla
 	}
 
 	if _, err := tx.Exec(
-		`INSERT INTO inspect_rules (kind, pattern, description, replacement) VALUES (?, ?, ?, ?)`,
-		kind, pattern, description, replacement,
+		`INSERT INTO rules (verdict, pattern, name, replacement, source) VALUES (?, ?, ?, ?, 'seed')`,
+		verdict, pattern, description, replacement,
 	); err != nil {
 		return false, fmt.Errorf("insert %s inspect rule %q: %w", kind, pattern, err)
 	}
 	return true, nil
 }
 
-func upsertConfig(tx *sql.Tx, key, value string) error {
-	_, err := tx.Exec(
-		`INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-		key, value,
-	)
+// updateConfigColumn updates a single column in the typed config singleton row.
+func updateConfigColumn(tx *sql.Tx, column, value string) error {
+	col, ok := configColumns[column]
+	if !ok || col == "" {
+		return nil
+	}
+	_, err := tx.Exec("UPDATE config SET "+col+" = ? WHERE id = 1", value)
 	if err != nil {
-		return fmt.Errorf("set config %q: %w", key, err)
+		return fmt.Errorf("set config %q: %w", column, err)
 	}
 	return nil
 }

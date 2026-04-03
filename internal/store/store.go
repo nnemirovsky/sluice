@@ -69,7 +69,7 @@ func New(path string) (*Store, error) {
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 	s := &Store{db: db}
-	if err := s.migrate(); err != nil {
+	if err := runMigrations(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate schema: %w", err)
 	}
@@ -81,68 +81,10 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-func (s *Store) migrate() error {
-	_, err := s.db.Exec(schema)
-	return err
+// DB returns the underlying *sql.DB for use by the migration runner.
+func (s *Store) DB() *sql.DB {
+	return s.db
 }
-
-const schema = `
-CREATE TABLE IF NOT EXISTS rules (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    verdict TEXT NOT NULL CHECK(verdict IN ('allow', 'deny', 'ask')),
-    destination TEXT NOT NULL,
-    ports TEXT,
-    protocol TEXT,
-    note TEXT,
-    source TEXT NOT NULL DEFAULT 'manual',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS tool_rules (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    verdict TEXT NOT NULL CHECK(verdict IN ('allow', 'deny', 'ask')),
-    tool TEXT NOT NULL,
-    note TEXT,
-    source TEXT NOT NULL DEFAULT 'manual',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS inspect_rules (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind TEXT NOT NULL CHECK(kind IN ('block', 'redact')),
-    pattern TEXT NOT NULL,
-    description TEXT,
-    target TEXT,
-    replacement TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS config (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS bindings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    destination TEXT NOT NULL,
-    ports TEXT,
-    credential TEXT NOT NULL,
-    inject_header TEXT,
-    template TEXT,
-    protocol TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS mcp_upstreams (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    command TEXT NOT NULL,
-    args TEXT,
-    env TEXT,
-    timeout_sec INTEGER DEFAULT 120,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-`
 
 func validVerdict(v string) bool {
 	return v == "allow" || v == "deny" || v == "ask"
@@ -150,7 +92,7 @@ func validVerdict(v string) bool {
 
 // --- Rule types ---
 
-// NetworkRule represents a row in the rules table.
+// NetworkRule represents a network rule row in the unified rules table.
 type NetworkRule struct {
 	ID          int64
 	Verdict     string
@@ -187,9 +129,15 @@ func (s *Store) AddRule(verdict, destination string, ports []int, opts RuleOpts)
 		ps := string(b)
 		portsJSON = &ps
 	}
+	var protocolsJSON *string
+	if opts.Protocol != "" {
+		b, _ := json.Marshal([]string{opts.Protocol})
+		ps := string(b)
+		protocolsJSON = &ps
+	}
 	res, err := s.db.Exec(
-		`INSERT INTO rules (verdict, destination, ports, protocol, note, source) VALUES (?, ?, ?, ?, ?, ?)`,
-		verdict, destination, portsJSON, nilIfEmpty(opts.Protocol), nilIfEmpty(opts.Note), source,
+		`INSERT INTO rules (verdict, destination, ports, protocols, name, source) VALUES (?, ?, ?, ?, ?, ?)`,
+		verdict, destination, portsJSON, protocolsJSON, nilIfEmpty(opts.Note), source,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("insert rule: %w", err)
@@ -207,12 +155,12 @@ func (s *Store) RemoveRule(id int64) (bool, error) {
 	return n > 0, nil
 }
 
-// ListRules returns rules, optionally filtered by verdict (empty string = all).
+// ListRules returns network rules (destination IS NOT NULL), optionally filtered by verdict.
 func (s *Store) ListRules(verdict string) ([]NetworkRule, error) {
-	query := "SELECT id, verdict, destination, ports, protocol, note, source, created_at FROM rules"
+	query := "SELECT id, verdict, destination, ports, protocols, name, source, created_at FROM rules WHERE destination IS NOT NULL"
 	var args []any
 	if verdict != "" {
-		query += " WHERE verdict = ?"
+		query += " AND verdict = ?"
 		args = append(args, verdict)
 	}
 	query += " ORDER BY id"
@@ -225,8 +173,8 @@ func (s *Store) ListRules(verdict string) ([]NetworkRule, error) {
 	var rules []NetworkRule
 	for rows.Next() {
 		var r NetworkRule
-		var portsJSON, protocol, note sql.NullString
-		if err := rows.Scan(&r.ID, &r.Verdict, &r.Destination, &portsJSON, &protocol, &note, &r.Source, &r.CreatedAt); err != nil {
+		var portsJSON, protocolsJSON, name sql.NullString
+		if err := rows.Scan(&r.ID, &r.Verdict, &r.Destination, &portsJSON, &protocolsJSON, &name, &r.Source, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan rule: %w", err)
 		}
 		if portsJSON.Valid {
@@ -234,8 +182,13 @@ func (s *Store) ListRules(verdict string) ([]NetworkRule, error) {
 				return nil, fmt.Errorf("unmarshal ports for rule %d: %w", r.ID, err)
 			}
 		}
-		r.Protocol = protocol.String
-		r.Note = note.String
+		if protocolsJSON.Valid {
+			var protocols []string
+			if err := json.Unmarshal([]byte(protocolsJSON.String), &protocols); err == nil && len(protocols) > 0 {
+				r.Protocol = protocols[0]
+			}
+		}
+		r.Note = name.String
 		rules = append(rules, r)
 	}
 	return rules, rows.Err()
@@ -243,7 +196,7 @@ func (s *Store) ListRules(verdict string) ([]NetworkRule, error) {
 
 // --- Tool Rules ---
 
-// ToolRuleRow represents a row in the tool_rules table.
+// ToolRuleRow represents a tool rule row in the unified rules table.
 type ToolRuleRow struct {
 	ID        int64
 	Verdict   string
@@ -253,7 +206,7 @@ type ToolRuleRow struct {
 	CreatedAt string
 }
 
-// AddToolRule inserts a tool rule and returns its ID.
+// AddToolRule inserts a tool rule into the unified rules table and returns its ID.
 func (s *Store) AddToolRule(verdict, tool, note, source string) (int64, error) {
 	if verdict == "" || tool == "" {
 		return 0, fmt.Errorf("verdict and tool are required")
@@ -265,7 +218,7 @@ func (s *Store) AddToolRule(verdict, tool, note, source string) (int64, error) {
 		source = "manual"
 	}
 	res, err := s.db.Exec(
-		`INSERT INTO tool_rules (verdict, tool, note, source) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO rules (verdict, tool, name, source) VALUES (?, ?, ?, ?)`,
 		verdict, tool, nilIfEmpty(note), source,
 	)
 	if err != nil {
@@ -276,7 +229,7 @@ func (s *Store) AddToolRule(verdict, tool, note, source string) (int64, error) {
 
 // RemoveToolRule deletes a tool rule by ID. Returns true if a row was deleted.
 func (s *Store) RemoveToolRule(id int64) (bool, error) {
-	res, err := s.db.Exec("DELETE FROM tool_rules WHERE id = ?", id)
+	res, err := s.db.Exec("DELETE FROM rules WHERE id = ? AND tool IS NOT NULL", id)
 	if err != nil {
 		return false, fmt.Errorf("delete tool rule: %w", err)
 	}
@@ -284,12 +237,12 @@ func (s *Store) RemoveToolRule(id int64) (bool, error) {
 	return n > 0, nil
 }
 
-// ListToolRules returns tool rules, optionally filtered by verdict.
+// ListToolRules returns tool rules (tool IS NOT NULL), optionally filtered by verdict.
 func (s *Store) ListToolRules(verdict string) ([]ToolRuleRow, error) {
-	query := "SELECT id, verdict, tool, note, source, created_at FROM tool_rules"
+	query := "SELECT id, verdict, tool, name, source, created_at FROM rules WHERE tool IS NOT NULL"
 	var args []any
 	if verdict != "" {
-		query += " WHERE verdict = ?"
+		query += " AND verdict = ?"
 		args = append(args, verdict)
 	}
 	query += " ORDER BY id"
@@ -314,7 +267,7 @@ func (s *Store) ListToolRules(verdict string) ([]ToolRuleRow, error) {
 
 // --- Inspect Rules ---
 
-// InspectRuleRow represents a row in the inspect_rules table.
+// InspectRuleRow represents an inspect rule row in the unified rules table.
 type InspectRuleRow struct {
 	ID          int64
 	Kind        string
@@ -332,14 +285,42 @@ type InspectRuleOpts struct {
 	Replacement string
 }
 
-// AddInspectRule inserts an inspect rule and returns its ID.
+// inspectKindToVerdict maps old inspect rule kinds to unified verdicts.
+func inspectKindToVerdict(kind string) (string, error) {
+	switch kind {
+	case "block":
+		return "deny", nil
+	case "redact":
+		return "redact", nil
+	default:
+		return "", fmt.Errorf("invalid kind %q: must be block or redact", kind)
+	}
+}
+
+// verdictToInspectKind maps unified verdicts back to inspect rule kinds.
+func verdictToInspectKind(verdict string) string {
+	switch verdict {
+	case "deny":
+		return "block"
+	case "redact":
+		return "redact"
+	default:
+		return verdict
+	}
+}
+
+// AddInspectRule inserts an inspect rule into the unified rules table and returns its ID.
 func (s *Store) AddInspectRule(kind, pattern string, opts InspectRuleOpts) (int64, error) {
 	if kind == "" || pattern == "" {
 		return 0, fmt.Errorf("kind and pattern are required")
 	}
+	verdict, err := inspectKindToVerdict(kind)
+	if err != nil {
+		return 0, err
+	}
 	res, err := s.db.Exec(
-		`INSERT INTO inspect_rules (kind, pattern, description, target, replacement) VALUES (?, ?, ?, ?, ?)`,
-		kind, pattern, nilIfEmpty(opts.Description), nilIfEmpty(opts.Target), nilIfEmpty(opts.Replacement),
+		`INSERT INTO rules (verdict, pattern, name, replacement, source) VALUES (?, ?, ?, ?, 'manual')`,
+		verdict, pattern, nilIfEmpty(opts.Description), nilIfEmpty(opts.Replacement),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("insert inspect rule: %w", err)
@@ -349,7 +330,7 @@ func (s *Store) AddInspectRule(kind, pattern string, opts InspectRuleOpts) (int6
 
 // RemoveInspectRule deletes an inspect rule by ID. Returns true if a row was deleted.
 func (s *Store) RemoveInspectRule(id int64) (bool, error) {
-	res, err := s.db.Exec("DELETE FROM inspect_rules WHERE id = ?", id)
+	res, err := s.db.Exec("DELETE FROM rules WHERE id = ? AND pattern IS NOT NULL", id)
 	if err != nil {
 		return false, fmt.Errorf("delete inspect rule: %w", err)
 	}
@@ -357,13 +338,17 @@ func (s *Store) RemoveInspectRule(id int64) (bool, error) {
 	return n > 0, nil
 }
 
-// ListInspectRules returns all inspect rules, optionally filtered by kind.
+// ListInspectRules returns inspect rules (pattern IS NOT NULL), optionally filtered by kind.
 func (s *Store) ListInspectRules(kind string) ([]InspectRuleRow, error) {
-	query := "SELECT id, kind, pattern, description, target, replacement, created_at FROM inspect_rules"
+	query := "SELECT id, verdict, pattern, name, destination, replacement, created_at FROM rules WHERE pattern IS NOT NULL"
 	var args []any
 	if kind != "" {
-		query += " WHERE kind = ?"
-		args = append(args, kind)
+		verdict, err := inspectKindToVerdict(kind)
+		if err != nil {
+			return nil, err
+		}
+		query += " AND verdict = ?"
+		args = append(args, verdict)
 	}
 	query += " ORDER BY id"
 	rows, err := s.db.Query(query, args...)
@@ -375,10 +360,12 @@ func (s *Store) ListInspectRules(kind string) ([]InspectRuleRow, error) {
 	var rules []InspectRuleRow
 	for rows.Next() {
 		var r InspectRuleRow
+		var verdict string
 		var desc, target, repl sql.NullString
-		if err := rows.Scan(&r.ID, &r.Kind, &r.Pattern, &desc, &target, &repl, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &verdict, &r.Pattern, &desc, &target, &repl, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan inspect rule: %w", err)
 		}
+		r.Kind = verdictToInspectKind(verdict)
 		r.Description = desc.String
 		r.Target = target.String
 		r.Replacement = repl.String
@@ -389,29 +376,59 @@ func (s *Store) ListInspectRules(kind string) ([]InspectRuleRow, error) {
 
 // --- Config ---
 
-// GetConfig returns the value for a config key. Returns empty string and no
-// error if the key does not exist.
+// configColumns maps old KV config keys to column names in the typed config table.
+var configColumns = map[string]string{
+	"default_verdict":              "default_verdict",
+	"timeout_sec":                  "timeout_sec",
+	"vault_provider":               "vault_provider",
+	"vault_dir":                    "vault_dir",
+	"vault_providers":              "vault_providers",
+	"vault_hashicorp_addr":         "vault_hashicorp_addr",
+	"vault_hashicorp_mount":        "vault_hashicorp_mount",
+	"vault_hashicorp_prefix":       "vault_hashicorp_prefix",
+	"vault_hashicorp_auth":         "vault_hashicorp_auth",
+	"vault_hashicorp_token":        "vault_hashicorp_token",
+	"vault_hashicorp_role_id":      "vault_hashicorp_role_id",
+	"vault_hashicorp_secret_id":    "vault_hashicorp_secret_id",
+	"vault_hashicorp_role_id_env":  "vault_hashicorp_role_id_env",
+	"vault_hashicorp_secret_id_env": "vault_hashicorp_secret_id_env",
+	// Legacy keys used in old TOML imports.
+	"telegram_bot_token_env": "",
+	"telegram_chat_id_env":   "",
+}
+
+// GetConfig returns the value for a config key from the typed singleton row.
+// Returns empty string and no error if the key does not exist as a column.
 func (s *Store) GetConfig(key string) (string, error) {
-	var value string
-	err := s.db.QueryRow("SELECT value FROM config WHERE key = ?", key).Scan(&value)
+	col, ok := configColumns[key]
+	if !ok || col == "" {
+		return "", nil
+	}
+	var value sql.NullString
+	err := s.db.QueryRow("SELECT " + col + " FROM config WHERE id = 1").Scan(&value)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("get config %q: %w", key, err)
 	}
-	return value, nil
+	if !value.Valid {
+		return "", nil
+	}
+	return value.String, nil
 }
 
-// SetConfig upserts a config key-value pair.
+// SetConfig updates a config value in the typed singleton row.
 func (s *Store) SetConfig(key, value string) error {
 	if key == "" {
 		return fmt.Errorf("config key is required")
 	}
-	_, err := s.db.Exec(
-		`INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-		key, value,
-	)
+	col, ok := configColumns[key]
+	if !ok || col == "" {
+		// Silently ignore unknown or legacy keys.
+		return nil
+	}
+	_, err := s.db.Exec("UPDATE config SET "+col+" = ? WHERE id = 1", value)
 	if err != nil {
 		return fmt.Errorf("set config %q: %w", key, err)
 	}
@@ -451,10 +468,16 @@ func (s *Store) AddBinding(destination, credential string, opts BindingOpts) (in
 		ps := string(b)
 		portsJSON = &ps
 	}
+	var protocolsJSON *string
+	if opts.Protocol != "" {
+		b, _ := json.Marshal([]string{opts.Protocol})
+		ps := string(b)
+		protocolsJSON = &ps
+	}
 	res, err := s.db.Exec(
-		`INSERT INTO bindings (destination, ports, credential, inject_header, template, protocol) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO bindings (destination, ports, credential, header, template, protocols) VALUES (?, ?, ?, ?, ?, ?)`,
 		destination, portsJSON, credential,
-		nilIfEmpty(opts.InjectHeader), nilIfEmpty(opts.Template), nilIfEmpty(opts.Protocol),
+		nilIfEmpty(opts.InjectHeader), nilIfEmpty(opts.Template), protocolsJSON,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("insert binding: %w", err)
@@ -475,31 +498,13 @@ func (s *Store) RemoveBinding(id int64) (bool, error) {
 // ListBindings returns all bindings.
 func (s *Store) ListBindings() ([]BindingRow, error) {
 	rows, err := s.db.Query(
-		"SELECT id, destination, ports, credential, inject_header, template, protocol, created_at FROM bindings ORDER BY id",
+		"SELECT id, destination, ports, credential, header, template, protocols, created_at FROM bindings ORDER BY id",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list bindings: %w", err)
 	}
 	defer rows.Close()
-
-	var bindings []BindingRow
-	for rows.Next() {
-		var b BindingRow
-		var portsJSON, header, tmpl, proto sql.NullString
-		if err := rows.Scan(&b.ID, &b.Destination, &portsJSON, &b.Credential, &header, &tmpl, &proto, &b.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan binding: %w", err)
-		}
-		if portsJSON.Valid {
-			if err := json.Unmarshal([]byte(portsJSON.String), &b.Ports); err != nil {
-				return nil, fmt.Errorf("unmarshal ports for binding %d: %w", b.ID, err)
-			}
-		}
-		b.InjectHeader = header.String
-		b.Template = tmpl.String
-		b.Protocol = proto.String
-		bindings = append(bindings, b)
-	}
-	return bindings, rows.Err()
+	return scanBindings(rows)
 }
 
 // --- MCP Upstreams ---
@@ -631,7 +636,7 @@ func (s *Store) RuleExists(verdict, destination string, ports []int) (bool, erro
 func (s *Store) ToolRuleExists(verdict, tool string) (bool, error) {
 	var count int
 	err := s.db.QueryRow(
-		"SELECT COUNT(*) FROM tool_rules WHERE verdict = ? AND tool = ?",
+		"SELECT COUNT(*) FROM rules WHERE verdict = ? AND tool = ?",
 		verdict, tool,
 	).Scan(&count)
 	if err != nil {
@@ -669,32 +674,14 @@ func (s *Store) MCPUpstreamExists(name string) (bool, error) {
 // ListBindingsByCredential returns all bindings for a given credential name.
 func (s *Store) ListBindingsByCredential(credential string) ([]BindingRow, error) {
 	rows, err := s.db.Query(
-		"SELECT id, destination, ports, credential, inject_header, template, protocol, created_at FROM bindings WHERE credential = ? ORDER BY id",
+		"SELECT id, destination, ports, credential, header, template, protocols, created_at FROM bindings WHERE credential = ? ORDER BY id",
 		credential,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list bindings by credential: %w", err)
 	}
 	defer rows.Close()
-
-	var bindings []BindingRow
-	for rows.Next() {
-		var b BindingRow
-		var portsJSON, header, tmpl, proto sql.NullString
-		if err := rows.Scan(&b.ID, &b.Destination, &portsJSON, &b.Credential, &header, &tmpl, &proto, &b.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan binding: %w", err)
-		}
-		if portsJSON.Valid {
-			if err := json.Unmarshal([]byte(portsJSON.String), &b.Ports); err != nil {
-				return nil, fmt.Errorf("unmarshal ports for binding %d: %w", b.ID, err)
-			}
-		}
-		b.InjectHeader = header.String
-		b.Template = tmpl.String
-		b.Protocol = proto.String
-		bindings = append(bindings, b)
-	}
-	return bindings, rows.Err()
+	return scanBindings(rows)
 }
 
 // RemoveBindingsByCredential deletes all bindings for a credential. Returns the number deleted.
@@ -718,17 +705,13 @@ func (s *Store) RemoveRulesBySource(source string) (int64, error) {
 
 // --- Store queries ---
 
-// IsEmpty returns true if the store has no rules, tool rules, bindings, config
-// entries, inspect rules, or MCP upstreams. Used to detect a fresh database
-// that should be seeded.
+// IsEmpty returns true if the store has no rules, bindings, or MCP upstreams.
+// The config and channels tables always have a default row, so they are excluded.
 func (s *Store) IsEmpty() (bool, error) {
 	var count int
 	err := s.db.QueryRow(
 		`SELECT (SELECT COUNT(*) FROM rules) +
-		        (SELECT COUNT(*) FROM tool_rules) +
-		        (SELECT COUNT(*) FROM config) +
 		        (SELECT COUNT(*) FROM bindings) +
-		        (SELECT COUNT(*) FROM inspect_rules) +
 		        (SELECT COUNT(*) FROM mcp_upstreams)`,
 	).Scan(&count)
 	if err != nil {
@@ -765,9 +748,15 @@ func (s *Store) AddRuleAndBinding(
 		ps := string(b)
 		portsJSON = &ps
 	}
+	var protocolsJSON *string
+	if ruleOpts.Protocol != "" {
+		b, _ := json.Marshal([]string{ruleOpts.Protocol})
+		ps := string(b)
+		protocolsJSON = &ps
+	}
 	res, err := tx.Exec(
-		`INSERT INTO rules (verdict, destination, ports, protocol, note, source) VALUES (?, ?, ?, ?, ?, ?)`,
-		verdict, destination, portsJSON, nilIfEmpty(ruleOpts.Protocol), nilIfEmpty(ruleOpts.Note), source,
+		`INSERT INTO rules (verdict, destination, ports, protocols, name, source) VALUES (?, ?, ?, ?, ?, ?)`,
+		verdict, destination, portsJSON, protocolsJSON, nilIfEmpty(ruleOpts.Note), source,
 	)
 	if err != nil {
 		return 0, 0, fmt.Errorf("insert rule: %w", err)
@@ -781,10 +770,16 @@ func (s *Store) AddRuleAndBinding(
 		ps := string(b)
 		bPortsJSON = &ps
 	}
+	var bProtocolsJSON *string
+	if bindingOpts.Protocol != "" {
+		b, _ := json.Marshal([]string{bindingOpts.Protocol})
+		ps := string(b)
+		bProtocolsJSON = &ps
+	}
 	res, err = tx.Exec(
-		`INSERT INTO bindings (destination, ports, credential, inject_header, template, protocol) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO bindings (destination, ports, credential, header, template, protocols) VALUES (?, ?, ?, ?, ?, ?)`,
 		destination, bPortsJSON, credential,
-		nilIfEmpty(bindingOpts.InjectHeader), nilIfEmpty(bindingOpts.Template), nilIfEmpty(bindingOpts.Protocol),
+		nilIfEmpty(bindingOpts.InjectHeader), nilIfEmpty(bindingOpts.Template), bProtocolsJSON,
 	)
 	if err != nil {
 		return 0, 0, fmt.Errorf("insert binding: %w", err)
@@ -807,3 +802,29 @@ func nilIfEmpty(s string) *string {
 	return &s
 }
 
+// scanBindings scans binding rows from a query result.
+func scanBindings(rows *sql.Rows) ([]BindingRow, error) {
+	var bindings []BindingRow
+	for rows.Next() {
+		var b BindingRow
+		var portsJSON, header, tmpl, protocolsJSON sql.NullString
+		if err := rows.Scan(&b.ID, &b.Destination, &portsJSON, &b.Credential, &header, &tmpl, &protocolsJSON, &b.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan binding: %w", err)
+		}
+		if portsJSON.Valid {
+			if err := json.Unmarshal([]byte(portsJSON.String), &b.Ports); err != nil {
+				return nil, fmt.Errorf("unmarshal ports for binding %d: %w", b.ID, err)
+			}
+		}
+		b.InjectHeader = header.String
+		b.Template = tmpl.String
+		if protocolsJSON.Valid {
+			var protocols []string
+			if err := json.Unmarshal([]byte(protocolsJSON.String), &protocols); err == nil && len(protocols) > 0 {
+				b.Protocol = protocols[0]
+			}
+		}
+		bindings = append(bindings, b)
+	}
+	return bindings, rows.Err()
+}

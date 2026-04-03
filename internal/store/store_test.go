@@ -20,25 +20,122 @@ func newTestStore(t *testing.T) *Store {
 
 func TestNewCreatesSchema(t *testing.T) {
 	s := newTestStore(t)
-	// Verify all tables exist by querying them.
-	tables := []string{"rules", "tool_rules", "inspect_rules", "config", "bindings", "mcp_upstreams"}
+	// Verify all 5 tables exist by querying them.
+	tables := []string{"rules", "config", "bindings", "mcp_upstreams", "channels"}
 	for _, table := range tables {
 		var count int
 		err := s.db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count)
 		if err != nil {
 			t.Fatalf("table %q should exist: %v", table, err)
 		}
-		if count != 0 {
-			t.Fatalf("table %q should be empty, got %d rows", table, count)
-		}
+	}
+
+	// Verify rules table is empty.
+	var ruleCount int
+	s.db.QueryRow("SELECT COUNT(*) FROM rules").Scan(&ruleCount)
+	if ruleCount != 0 {
+		t.Errorf("rules table should be empty, got %d", ruleCount)
+	}
+
+	// Verify config singleton row exists with defaults.
+	var defaultVerdict string
+	var timeoutSec int
+	err := s.db.QueryRow("SELECT default_verdict, timeout_sec FROM config WHERE id = 1").Scan(&defaultVerdict, &timeoutSec)
+	if err != nil {
+		t.Fatalf("config singleton should exist: %v", err)
+	}
+	if defaultVerdict != "deny" {
+		t.Errorf("default verdict = %q, want deny", defaultVerdict)
+	}
+	if timeoutSec != 120 {
+		t.Errorf("timeout_sec = %d, want 120", timeoutSec)
+	}
+
+	// Verify channels default row exists.
+	var channelType, enabled int
+	err = s.db.QueryRow("SELECT type, enabled FROM channels WHERE id = 1").Scan(&channelType, &enabled)
+	if err != nil {
+		t.Fatalf("channels default row should exist: %v", err)
+	}
+	if channelType != 0 {
+		t.Errorf("channel type = %d, want 0 (Telegram)", channelType)
+	}
+	if enabled != 1 {
+		t.Errorf("channel enabled = %d, want 1", enabled)
+	}
+}
+
+func TestNewCreatesSchemaCorrectColumns(t *testing.T) {
+	s := newTestStore(t)
+
+	// Verify rules table columns by inserting a row with all fields.
+	_, err := s.db.Exec(
+		`INSERT INTO rules (verdict, destination, ports, protocols, name, source)
+		 VALUES ('allow', 'test.com', '[443]', '["https"]', 'test', 'manual')`,
+	)
+	if err != nil {
+		t.Fatalf("insert into rules with destination: %v", err)
+	}
+
+	_, err = s.db.Exec(
+		`INSERT INTO rules (verdict, tool, name, source)
+		 VALUES ('allow', 'github__list_*', 'read-only', 'manual')`,
+	)
+	if err != nil {
+		t.Fatalf("insert into rules with tool: %v", err)
+	}
+
+	_, err = s.db.Exec(
+		`INSERT INTO rules (verdict, pattern, replacement, name, source)
+		 VALUES ('redact', 'sk-[a-z]+', '[REDACTED]', 'api keys', 'manual')`,
+	)
+	if err != nil {
+		t.Fatalf("insert into rules with pattern: %v", err)
+	}
+
+	// Verify bindings table has renamed columns.
+	_, err = s.db.Exec(
+		`INSERT INTO bindings (destination, credential, header, template, protocols)
+		 VALUES ('api.test.com', 'my_key', 'Authorization', 'Bearer {value}', '["https"]')`,
+	)
+	if err != nil {
+		t.Fatalf("insert into bindings with new columns: %v", err)
 	}
 }
 
 func TestNewIdempotentMigration(t *testing.T) {
 	s := newTestStore(t)
-	// Run migrate again. Should not fail.
-	if err := s.migrate(); err != nil {
+	// Run migrations again. Should not fail (no change).
+	if err := runMigrations(s.db); err != nil {
 		t.Fatalf("second migration should be idempotent: %v", err)
+	}
+}
+
+func TestRulesCheckConstraint(t *testing.T) {
+	s := newTestStore(t)
+
+	// Setting both destination and tool should violate the CHECK constraint.
+	_, err := s.db.Exec(
+		`INSERT INTO rules (verdict, destination, tool, source) VALUES ('allow', 'test.com', 'github__*', 'manual')`,
+	)
+	if err == nil {
+		t.Error("setting both destination and tool should violate CHECK constraint")
+	}
+
+	// Setting both destination and pattern should violate the CHECK constraint.
+	_, err = s.db.Exec(
+		`INSERT INTO rules (verdict, destination, pattern, source) VALUES ('deny', 'test.com', 'sk-.*', 'manual')`,
+	)
+	if err == nil {
+		t.Error("setting both destination and pattern should violate CHECK constraint")
+	}
+
+	// Setting none of destination/tool/pattern should violate the CHECK constraint.
+	_, err = s.db.Exec(
+		`INSERT INTO rules (verdict, source) VALUES ('allow', 'manual')`,
+	)
+	if err == nil {
+		t.Error("setting none of destination/tool/pattern should violate CHECK constraint")
 	}
 }
 
@@ -121,7 +218,7 @@ func TestAddRuleInvalidVerdict(t *testing.T) {
 	s := newTestStore(t)
 	_, err := s.AddRule("block", "example.com", nil, RuleOpts{})
 	if err == nil {
-		t.Error("invalid verdict should fail due to CHECK constraint")
+		t.Error("invalid verdict should fail")
 	}
 }
 
@@ -162,6 +259,22 @@ func TestListRulesFilter(t *testing.T) {
 	all, _ := s.ListRules("")
 	if len(all) != 4 {
 		t.Errorf("expected 4 total rules, got %d", len(all))
+	}
+}
+
+func TestListRulesExcludesToolAndPatternRules(t *testing.T) {
+	s := newTestStore(t)
+	s.AddRule("allow", "a.com", nil, RuleOpts{})
+	s.AddToolRule("allow", "github__list_*", "", "")
+	s.AddInspectRule("block", `sk-[a-zA-Z0-9]+`, InspectRuleOpts{})
+
+	// ListRules should only return network rules (destination IS NOT NULL).
+	rules, _ := s.ListRules("")
+	if len(rules) != 1 {
+		t.Errorf("expected 1 network rule, got %d", len(rules))
+	}
+	if rules[0].Destination != "a.com" {
+		t.Errorf("expected a.com, got %q", rules[0].Destination)
 	}
 }
 
@@ -276,7 +389,7 @@ func TestInspectRuleValidation(t *testing.T) {
 		t.Error("empty pattern should fail")
 	}
 	if _, err := s.AddInspectRule("invalid", "pattern", InspectRuleOpts{}); err == nil {
-		t.Error("invalid kind should fail due to CHECK constraint")
+		t.Error("invalid kind should fail")
 	}
 }
 
@@ -285,13 +398,13 @@ func TestInspectRuleValidation(t *testing.T) {
 func TestConfigGetSet(t *testing.T) {
 	s := newTestStore(t)
 
-	// Get non-existent key returns empty.
-	val, err := s.GetConfig("missing")
+	// Get default value.
+	val, err := s.GetConfig("default_verdict")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if val != "" {
-		t.Errorf("expected empty, got %q", val)
+	if val != "deny" {
+		t.Errorf("expected deny default, got %q", val)
 	}
 
 	// Set and get.
@@ -303,13 +416,24 @@ func TestConfigGetSet(t *testing.T) {
 		t.Errorf("expected ask, got %q", val)
 	}
 
-	// Upsert.
+	// Update.
 	if err := s.SetConfig("default_verdict", "deny"); err != nil {
-		t.Fatalf("upsert: %v", err)
+		t.Fatalf("update: %v", err)
 	}
 	val, _ = s.GetConfig("default_verdict")
 	if val != "deny" {
-		t.Errorf("expected deny after upsert, got %q", val)
+		t.Errorf("expected deny after update, got %q", val)
+	}
+}
+
+func TestConfigGetUnknownKey(t *testing.T) {
+	s := newTestStore(t)
+	val, err := s.GetConfig("nonexistent_key")
+	if err != nil {
+		t.Fatalf("get unknown key: %v", err)
+	}
+	if val != "" {
+		t.Errorf("expected empty for unknown key, got %q", val)
 	}
 }
 
@@ -595,12 +719,11 @@ func TestConcurrentConfigAccess(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			key := fmt.Sprintf("key_%d", i%5)
 			value := fmt.Sprintf("value_%d", i)
-			if err := s.SetConfig(key, value); err != nil {
+			if err := s.SetConfig("vault_dir", value); err != nil {
 				errs <- err
 			}
-			if _, err := s.GetConfig(key); err != nil {
+			if _, err := s.GetConfig("vault_dir"); err != nil {
 				errs <- err
 			}
 		}(i)
