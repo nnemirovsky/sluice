@@ -58,6 +58,7 @@ func main() {
 	shutdownTimeout := flag.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout for draining in-flight connections")
 	dockerSocket := flag.String("docker-socket", "", "Docker socket path (auto-detects from DOCKER_HOST or /var/run/docker.sock)")
 	dockerContainer := flag.String("docker-container", envDefault("SLUICE_AGENT_CONTAINER", "openclaw"), "Docker container name for auto-restart on credential changes")
+	phantomDir := flag.String("phantom-dir", "", "shared volume path for phantom token files (enables hot-reload)")
 	flag.Parse()
 
 	// Track which flags were explicitly set on the command line so we can
@@ -222,14 +223,15 @@ func main() {
 	if telegramEnabled {
 		var botErr error
 		bot, botErr = telegram.NewBot(telegram.BotConfig{
-			Token:     *telegramToken,
-			ChatID:    telegramChatID,
-			EnginePtr: srv.EnginePtr(),
-			ReloadMu:  srv.ReloadMu(),
-			AuditPath: *auditPath,
-			Vault:     vaultStore,
-			DockerMgr: dockerMgr,
-			Store:     db,
+			Token:      *telegramToken,
+			ChatID:     telegramChatID,
+			EnginePtr:  srv.EnginePtr(),
+			ReloadMu:   srv.ReloadMu(),
+			AuditPath:  *auditPath,
+			Vault:      vaultStore,
+			DockerMgr:  dockerMgr,
+			Store:      db,
+			PhantomDir: *phantomDir,
 		}, broker)
 		if botErr != nil {
 			log.Fatalf("telegram bot: %v", botErr)

@@ -30,6 +30,13 @@ func handleMCPCommand(args []string) error {
 			return handleMCPList(args[1:])
 		case "remove":
 			return handleMCPRemove(args[1:])
+		default:
+			// Only start the gateway for flag-style args (e.g. --db).
+			// Reject unrecognized subcommands to avoid confusing silent
+			// gateway startup on typos like "sluice mcp rmeove".
+			if !strings.HasPrefix(args[0], "-") {
+				return fmt.Errorf("unknown mcp subcommand %q (valid: add, list, remove)", args[0])
+			}
 		}
 	}
 

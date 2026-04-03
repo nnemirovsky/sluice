@@ -30,6 +30,12 @@ func New(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
 	}
+	// SQLite PRAGMAs like foreign_keys and busy_timeout are per-connection
+	// settings. With database/sql's connection pool, new connections would
+	// not inherit them. Limiting to one connection ensures the PRAGMAs
+	// apply to all queries, which is also the standard recommendation for
+	// SQLite since it serializes writes anyway.
+	db.SetMaxOpenConns(1)
 	// Enable WAL mode for better concurrent read performance.
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		db.Close()

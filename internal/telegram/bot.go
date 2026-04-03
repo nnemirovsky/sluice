@@ -55,6 +55,7 @@ type Bot struct {
 	broker   *ApprovalBroker
 	commands *CommandHandler
 	done     chan struct{}
+	stopOnce sync.Once
 }
 
 // FormatApprovalMessage builds the Telegram message text for a connection
@@ -259,6 +260,8 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 }
 
 func (b *Bot) Stop() {
-	close(b.done)
-	b.api.StopReceivingUpdates()
+	b.stopOnce.Do(func() {
+		close(b.done)
+		b.api.StopReceivingUpdates()
+	})
 }

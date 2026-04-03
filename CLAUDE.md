@@ -338,7 +338,7 @@ Mail credential injection: `MailProxy` intercepts IMAP LOGIN and SMTP AUTH PLAIN
 
 Docker integration: Three-container architecture (sluice + tun2proxy + openclaw) with `network_mode: "service:tun2proxy"` routing all openclaw traffic through sluice's SOCKS5 proxy. `docker.Manager` wraps a `ContainerClient` interface with `ExecInContainer` for docker exec and standard container lifecycle methods. On credential mutation via Telegram `/cred` commands or CLI, `credMutationComplete` regenerates phantom environment variables using `GeneratePhantomEnv` and calls `Manager.ReloadSecrets`. Hot reload writes each phantom token as a file in a shared `sluice-phantoms` volume (e.g. `/phantoms/ANTHROPIC_API_KEY`) then runs `docker exec openclaw openclaw secrets reload`. If exec fails (agent image does not support reload), it falls back to `RestartWithEnv` which recreates the container with updated env vars. `BotConfig.Vault` and `BotConfig.DockerMgr` wire the vault and Docker manager into Telegram command handling. The sluice entrypoint generates a CA cert and copies it to a shared volume so openclaw can trust HTTPS MITM certificates via `SSL_CERT_FILE`.
 
-Health check: A minimal HTTP server on `:3000` (configurable via `--health-addr`) serves `/healthz`, returning 200 when the SOCKS5 proxy is listening. The Dockerfile includes a `HEALTHCHECK` directive using `wget` against this endpoint. compose.yml uses `service_healthy` conditions to sequence startup: tun2proxy waits for sluice, openclaw waits for tun2proxy.
+Health check: A minimal HTTP server on `127.0.0.1:3000` (configurable via `--health-addr`) serves `/healthz`, returning 200 when the SOCKS5 proxy is listening. The Dockerfile includes a `HEALTHCHECK` directive using `wget` against this endpoint. compose.yml uses `service_healthy` conditions to sequence startup: tun2proxy waits for sluice, openclaw waits for tun2proxy.
 
 Graceful shutdown: On SIGINT/SIGTERM, the proxy stops accepting new connections and drains in-flight connections up to `--shutdown-timeout` (default 10s). Pending Telegram approval requests are auto-denied with a "shutting down" reason. The audit logger is closed after all connections drain.
 
@@ -364,22 +364,14 @@ chat_id_env = "TELEGRAM_CHAT_ID"
 [[allow]]
 destination = "api.anthropic.com"
 ports = [443]
-inject_header = "x-api-key"
-credential = "anthropic_api_key"
 
 [[allow]]
 destination = "api.openai.com"
 ports = [443]
-inject_header = "Authorization"
-credential = "openai_api_key"
-template = "Bearer {value}"
 
 [[allow]]
 destination = "api.github.com"
 ports = [443]
-inject_header = "Authorization"
-credential = "github_token"
-template = "Bearer {value}"
 
 [[allow]]
 destination = "*.telegram.org"
@@ -390,7 +382,6 @@ note = "Telegram bot API passthrough"
 destination = "github.com"
 ports = [22]
 protocol = "ssh"
-credential = "github_ssh_key"
 note = "Git SSH access"
 
 # -- Denylist --
@@ -405,6 +396,35 @@ note = "Block Alibaba metadata"
 
 [[deny]]
 destination = "*.crypto-mining.example"
+
+# -- Credential bindings --
+# Bindings map destinations to vault credentials for automatic injection.
+# These are separate from allow/deny rules.
+
+[[binding]]
+destination = "api.anthropic.com"
+ports = [443]
+credential = "anthropic_api_key"
+inject_header = "x-api-key"
+
+[[binding]]
+destination = "api.openai.com"
+ports = [443]
+credential = "openai_api_key"
+inject_header = "Authorization"
+template = "Bearer {value}"
+
+[[binding]]
+destination = "api.github.com"
+ports = [443]
+credential = "github_token"
+inject_header = "Authorization"
+template = "Bearer {value}"
+
+[[binding]]
+destination = "github.com"
+ports = [22]
+credential = "github_ssh_key"
 ```
 
 ## Credential Injection: Phantom Token Swap

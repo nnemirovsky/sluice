@@ -29,8 +29,11 @@ curl -x socks5h://127.0.0.1:1080 https://api.anthropic.com/
 | `--audit` | `audit.jsonl` | Path to audit log file |
 | `--telegram-token` | `$TELEGRAM_BOT_TOKEN` | Telegram bot token for approval flow |
 | `--telegram-chat-id` | `$TELEGRAM_CHAT_ID` | Telegram chat ID for approvals |
-| `--health-addr` | `:3000` | Health check HTTP address |
+| `--health-addr` | `127.0.0.1:3000` | Health check HTTP address |
 | `--shutdown-timeout` | `10s` | Graceful shutdown timeout |
+| `--docker-socket` | (auto-detect) | Docker socket path for container management |
+| `--docker-container` | `openclaw` | Agent container name (env: `SLUICE_AGENT_CONTAINER`) |
+| `--phantom-dir` | (none) | Shared volume path for phantom token files (enables hot-reload) |
 
 ## CLI Subcommands
 
@@ -49,7 +52,7 @@ sluice policy export
 ### MCP upstream management
 
 ```
-sluice mcp add <name> --command <cmd> [--args "arg1,arg2"] [--env "KEY=VAL,..."]
+sluice mcp add <name> --command <cmd> [--args "arg1,arg2"] [--env "KEY=VAL,..."] [--timeout 120]
 sluice mcp list
 sluice mcp remove <name>
 sluice mcp                          # start MCP gateway

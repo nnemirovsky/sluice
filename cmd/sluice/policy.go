@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -231,7 +232,11 @@ func handlePolicyExport(args []string) {
 			fmt.Printf("default = %q\n", defaultVerdict)
 		}
 		if timeoutStr != "" {
-			fmt.Printf("timeout_sec = %s\n", timeoutStr)
+			if n, parseErr := strconv.Atoi(timeoutStr); parseErr == nil {
+				fmt.Printf("timeout_sec = %d\n", n)
+			} else {
+				fmt.Printf("timeout_sec = %q\n", timeoutStr)
+			}
 		}
 		fmt.Println()
 	}
@@ -386,9 +391,14 @@ func handlePolicyExport(args []string) {
 			fmt.Printf("timeout_sec = %d\n", u.TimeoutSec)
 		}
 		if len(u.Env) > 0 {
+			keys := make([]string, 0, len(u.Env))
+			for k := range u.Env {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
 			parts := make([]string, 0, len(u.Env))
-			for k, v := range u.Env {
-				parts = append(parts, fmt.Sprintf("%s = %q", k, v))
+			for _, k := range keys {
+				parts = append(parts, fmt.Sprintf("%s = %q", k, u.Env[k]))
 			}
 			fmt.Printf("env = {%s}\n", strings.Join(parts, ", "))
 		}
