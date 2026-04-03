@@ -11,6 +11,7 @@ const (
 	Allow Verdict = iota
 	Deny
 	Ask
+	Redact
 )
 
 func (v Verdict) String() string {
@@ -21,27 +22,30 @@ func (v Verdict) String() string {
 		return "deny"
 	case Ask:
 		return "ask"
+	case Redact:
+		return "redact"
 	default:
 		return "unknown"
 	}
 }
 
-// Rule represents a single policy rule matching a destination pattern and optional port list.
+// Rule represents a single policy rule. For network rules, Destination is set.
+// For tool rules, Tool is set. For content inspect rules, Pattern is set.
+// The fields are mutually exclusive in the unified schema.
 type Rule struct {
-	Destination string `toml:"destination"`
-	Ports       []int  `toml:"ports"`
+	Destination string   `toml:"destination"`
+	Tool        string   `toml:"tool"`
+	Pattern     string   `toml:"pattern"`
+	Replacement string   `toml:"replacement"`
+	Ports       []int    `toml:"ports"`
+	Protocols   []string `toml:"protocols"`
+	Name        string   `toml:"name"`
 }
 
 // PolicyConfig holds top-level policy settings.
 type PolicyConfig struct {
 	Default string `toml:"default"`
 	Timeout int    `toml:"timeout_sec"`
-}
-
-// TelegramConfig holds the Telegram bot settings from the policy file.
-type TelegramConfig struct {
-	BotTokenEnv string `toml:"bot_token_env"`
-	ChatIDEnv   string `toml:"chat_id_env"`
 }
 
 // ToolRule defines a single tool-level policy rule for MCP gateway.
@@ -67,14 +71,9 @@ type InspectRedactRule struct {
 }
 
 type policyFile struct {
-	Policy        PolicyConfig      `toml:"policy"`
-	Telegram      TelegramConfig    `toml:"telegram"`
-	Allow         []Rule            `toml:"allow"`
-	Deny          []Rule            `toml:"deny"`
-	Ask           []Rule            `toml:"ask"`
-	ToolAllow     []ToolRule        `toml:"tool_allow"`
-	ToolDeny      []ToolRule        `toml:"tool_deny"`
-	ToolAsk       []ToolRule        `toml:"tool_ask"`
-	InspectBlock  []InspectBlockRule  `toml:"inspect_block"`
-	InspectRedact []InspectRedactRule `toml:"inspect_redact"`
+	Policy PolicyConfig `toml:"policy"`
+	Allow  []Rule       `toml:"allow"`
+	Deny   []Rule       `toml:"deny"`
+	Ask    []Rule       `toml:"ask"`
+	Redact []Rule       `toml:"redact"`
 }

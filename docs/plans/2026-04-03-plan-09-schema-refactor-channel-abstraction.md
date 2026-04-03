@@ -401,13 +401,13 @@ Rewrite `LoadFromStore` to read from the unified rules table and typed config.
 - Modify: `internal/policy/engine.go`
 - Modify: `internal/policy/engine_test.go`
 
-- [ ] Add `Redact` to the `Verdict` enum in types.go
-- [ ] Update `Rule` struct: rename `Protocol` to `Protocols []string`
-- [ ] Remove `TelegramConfig` from Engine (hardcoded env vars, not in policy anymore)
-- [ ] Rewrite `LoadFromStore`: read all rules from unified table, filter by presence of destination/tool/pattern to populate AllowRules/DenyRules/AskRules/ToolAllowRules/ToolDenyRules/ToolAskRules/InspectBlockRules/InspectRedactRules
-- [ ] Read config via `store.GetConfig()` typed method instead of string keys
-- [ ] Update tests
-- [ ] Run tests: `go test ./internal/policy/ -v -timeout 30s`
+- [x] Add `Redact` to the `Verdict` enum in types.go
+- [x] Update `Rule` struct: rename `Protocol` to `Protocols []string`
+- [x] Remove `TelegramConfig` from Engine (hardcoded env vars, not in policy anymore)
+- [x] Rewrite `LoadFromStore`: read all rules from unified table, filter by presence of destination/tool/pattern to populate AllowRules/DenyRules/AskRules/ToolAllowRules/ToolDenyRules/ToolAskRules/InspectBlockRules/InspectRedactRules
+- [x] Read config via `store.GetConfig()` typed method instead of string keys
+- [x] Update tests
+- [x] Run tests: `go test ./internal/policy/ -v -timeout 30s`
 
 ### Task 8: Hardcode Telegram env vars and wire Channel interface in main.go
 

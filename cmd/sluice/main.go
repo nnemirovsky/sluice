@@ -103,16 +103,12 @@ func main() {
 		len(eng.AllowRules), len(eng.DenyRules), len(eng.AskRules), eng.Default)
 
 	// Read Telegram env vars directly (hardcoded env var names).
-	// CLI flags take precedence over env vars via flag defaults.
-	if eng.Telegram.BotTokenEnv != "" {
-		if envVal := os.Getenv(eng.Telegram.BotTokenEnv); envVal != "" && *telegramToken == "" {
-			*telegramToken = envVal
-		}
+	// CLI flags take precedence over env vars.
+	if envVal := os.Getenv("TELEGRAM_BOT_TOKEN"); envVal != "" && *telegramToken == "" {
+		*telegramToken = envVal
 	}
-	if eng.Telegram.ChatIDEnv != "" {
-		if envVal := os.Getenv(eng.Telegram.ChatIDEnv); envVal != "" && *telegramChatIDStr == "" {
-			*telegramChatIDStr = envVal
-		}
+	if envVal := os.Getenv("TELEGRAM_CHAT_ID"); envVal != "" && *telegramChatIDStr == "" {
+		*telegramChatIDStr = envVal
 	}
 
 	logger, err := audit.NewFileLogger(*auditPath)

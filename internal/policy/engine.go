@@ -33,7 +33,6 @@ type Engine struct {
 	InspectBlockRules  []InspectBlockRule
 	InspectRedactRules []InspectRedactRule
 	TimeoutSec         int
-	Telegram           TelegramConfig
 	compiled           *compiledEngine
 }
 
@@ -64,35 +63,70 @@ func LoadFromBytes(data []byte) (*Engine, error) {
 		timeout = 120
 	}
 
-	// Populate tool rules with verdict derived from TOML section name
-	toolAllow := make([]ToolRule, len(pf.ToolAllow))
-	copy(toolAllow, pf.ToolAllow)
-	for i := range toolAllow {
-		toolAllow[i].Verdict = "allow"
+	// Separate unified rules by type based on which field is set.
+	var allowRules, denyRules, askRules []Rule
+	var toolAllow, toolDeny, toolAsk []ToolRule
+	var inspectBlock []InspectBlockRule
+	var inspectRedact []InspectRedactRule
+
+	dispatchRules := func(rules []Rule, verdict string) {
+		for _, r := range rules {
+			switch {
+			case r.Tool != "":
+				tr := ToolRule{Tool: r.Tool, Verdict: verdict, Note: r.Name}
+				switch verdict {
+				case "allow":
+					toolAllow = append(toolAllow, tr)
+				case "deny":
+					toolDeny = append(toolDeny, tr)
+				case "ask":
+					toolAsk = append(toolAsk, tr)
+				}
+			case r.Pattern != "":
+				if verdict == "deny" {
+					inspectBlock = append(inspectBlock, InspectBlockRule{
+						Pattern: r.Pattern,
+						Name:    r.Name,
+					})
+				}
+			default:
+				// Network rule (destination set or empty for validation).
+				switch verdict {
+				case "allow":
+					allowRules = append(allowRules, r)
+				case "deny":
+					denyRules = append(denyRules, r)
+				case "ask":
+					askRules = append(askRules, r)
+				}
+			}
+		}
 	}
-	toolDeny := make([]ToolRule, len(pf.ToolDeny))
-	copy(toolDeny, pf.ToolDeny)
-	for i := range toolDeny {
-		toolDeny[i].Verdict = "deny"
-	}
-	toolAsk := make([]ToolRule, len(pf.ToolAsk))
-	copy(toolAsk, pf.ToolAsk)
-	for i := range toolAsk {
-		toolAsk[i].Verdict = "ask"
+
+	dispatchRules(pf.Allow, "allow")
+	dispatchRules(pf.Deny, "deny")
+	dispatchRules(pf.Ask, "ask")
+
+	// [[redact]] entries are always pattern-based content redact rules.
+	for _, r := range pf.Redact {
+		inspectRedact = append(inspectRedact, InspectRedactRule{
+			Pattern:     r.Pattern,
+			Replacement: r.Replacement,
+			Name:        r.Name,
+		})
 	}
 
 	eng := &Engine{
 		Default:            defaultVerdict,
-		AllowRules:         pf.Allow,
-		DenyRules:          pf.Deny,
-		AskRules:           pf.Ask,
+		AllowRules:         allowRules,
+		DenyRules:          denyRules,
+		AskRules:           askRules,
 		ToolAllowRules:     toolAllow,
 		ToolDenyRules:      toolDeny,
 		ToolAskRules:       toolAsk,
-		InspectBlockRules:  pf.InspectBlock,
-		InspectRedactRules: pf.InspectRedact,
+		InspectBlockRules:  inspectBlock,
+		InspectRedactRules: inspectRedact,
 		TimeoutSec:         timeout,
-		Telegram:           pf.Telegram,
 	}
 	if err := eng.compile(); err != nil {
 		return nil, fmt.Errorf("compile policy rules: %w", err)

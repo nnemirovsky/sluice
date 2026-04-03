@@ -483,15 +483,8 @@ destination = "test[0].example.com"
 	}
 }
 
-func TestLoadPolicyWithTelegram(t *testing.T) {
+func TestLoadPolicyWithAskDefault(t *testing.T) {
 	eng := loadFromTOMLFile(t, "../../testdata/policy_with_telegram.toml")
-	// Telegram env var names are now hardcoded, not stored in config.
-	if eng.Telegram.BotTokenEnv != "" {
-		t.Errorf("expected empty bot_token_env (hardcoded), got %q", eng.Telegram.BotTokenEnv)
-	}
-	if eng.Telegram.ChatIDEnv != "" {
-		t.Errorf("expected empty chat_id_env (hardcoded), got %q", eng.Telegram.ChatIDEnv)
-	}
 	if eng.Default != Ask {
 		t.Errorf("expected default Ask, got %v", eng.Default)
 	}
@@ -503,16 +496,6 @@ func TestLoadPolicyWithTelegram(t *testing.T) {
 	}
 	if len(eng.AskRules) != 1 {
 		t.Errorf("expected 1 ask rule, got %d", len(eng.AskRules))
-	}
-}
-
-func TestLoadPolicyWithoutTelegram(t *testing.T) {
-	eng := loadFromTOMLFile(t, "../../testdata/policy_mixed.toml")
-	if eng.Telegram.BotTokenEnv != "" {
-		t.Errorf("expected empty bot_token_env, got %q", eng.Telegram.BotTokenEnv)
-	}
-	if eng.Telegram.ChatIDEnv != "" {
-		t.Errorf("expected empty chat_id_env, got %q", eng.Telegram.ChatIDEnv)
 	}
 }
 
@@ -675,26 +658,21 @@ func TestLoadFromStoreWithInspectRules(t *testing.T) {
 	}
 }
 
-func TestLoadFromStoreWithTelegram(t *testing.T) {
+func TestLoadFromStoreNoTelegramConfig(t *testing.T) {
+	// Telegram env var names are hardcoded in main.go. The Engine no longer
+	// carries TelegramConfig. Verify LoadFromStore succeeds on a fresh store.
 	s, err := store.New(":memory:")
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
 	defer s.Close()
 
-	// Telegram env var names are now hardcoded. Config table has no telegram
-	// columns, so there is nothing to set here.
-
 	eng, err := LoadFromStore(s)
 	if err != nil {
 		t.Fatalf("load from store: %v", err)
 	}
-	// Values are not stored since telegram keys are ignored.
-	if eng.Telegram.BotTokenEnv != "" {
-		t.Errorf("expected empty (hardcoded), got %q", eng.Telegram.BotTokenEnv)
-	}
-	if eng.Telegram.ChatIDEnv != "" {
-		t.Errorf("expected empty (hardcoded), got %q", eng.Telegram.ChatIDEnv)
+	if eng.Default != Deny {
+		t.Errorf("expected default Deny, got %v", eng.Default)
 	}
 }
 
@@ -767,6 +745,117 @@ func TestLoadFromStoreRecompile(t *testing.T) {
 	// Original engine should be unchanged (immutable snapshot)
 	if eng1.Evaluate("new.example.com", 443) != Deny {
 		t.Error("original engine should be unchanged after store mutation")
+	}
+}
+
+func TestVerdictString(t *testing.T) {
+	tests := []struct {
+		v    Verdict
+		want string
+	}{
+		{Allow, "allow"},
+		{Deny, "deny"},
+		{Ask, "ask"},
+		{Redact, "redact"},
+		{Verdict(99), "unknown"},
+	}
+	for _, tt := range tests {
+		if got := tt.v.String(); got != tt.want {
+			t.Errorf("Verdict(%d).String() = %q, want %q", tt.v, got, tt.want)
+		}
+	}
+}
+
+func TestLoadFromBytesWithUnifiedFormat(t *testing.T) {
+	// Verify LoadFromBytes correctly dispatches unified TOML entries.
+	input := `
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "api.example.com"
+ports = [443]
+
+[[allow]]
+tool = "github__list_*"
+name = "read-only"
+
+[[deny]]
+destination = "evil.com"
+
+[[deny]]
+tool = "exec__*"
+
+[[deny]]
+pattern = "(?i)(sk-[a-zA-Z0-9]{20,})"
+name = "api_key_leak"
+
+[[ask]]
+tool = "filesystem__write_*"
+
+[[redact]]
+pattern = "(?i)(secret-[a-z]+)"
+replacement = "[REDACTED]"
+name = "secret_in_response"
+`
+	eng, err := LoadFromBytes([]byte(input))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(eng.AllowRules) != 1 {
+		t.Errorf("expected 1 network allow rule, got %d", len(eng.AllowRules))
+	}
+	if len(eng.DenyRules) != 1 {
+		t.Errorf("expected 1 network deny rule, got %d", len(eng.DenyRules))
+	}
+	if len(eng.ToolAllowRules) != 1 {
+		t.Errorf("expected 1 tool allow rule, got %d", len(eng.ToolAllowRules))
+	}
+	if len(eng.ToolDenyRules) != 1 {
+		t.Errorf("expected 1 tool deny rule, got %d", len(eng.ToolDenyRules))
+	}
+	if len(eng.ToolAskRules) != 1 {
+		t.Errorf("expected 1 tool ask rule, got %d", len(eng.ToolAskRules))
+	}
+	if len(eng.InspectBlockRules) != 1 {
+		t.Errorf("expected 1 inspect block rule, got %d", len(eng.InspectBlockRules))
+	}
+	if len(eng.InspectRedactRules) != 1 {
+		t.Errorf("expected 1 inspect redact rule, got %d", len(eng.InspectRedactRules))
+	}
+	if eng.ToolAllowRules[0].Note != "read-only" {
+		t.Errorf("expected tool note %q, got %q", "read-only", eng.ToolAllowRules[0].Note)
+	}
+	if eng.InspectBlockRules[0].Name != "api_key_leak" {
+		t.Errorf("expected block name %q, got %q", "api_key_leak", eng.InspectBlockRules[0].Name)
+	}
+	if eng.InspectRedactRules[0].Replacement != "[REDACTED]" {
+		t.Errorf("expected redact replacement %q, got %q", "[REDACTED]", eng.InspectRedactRules[0].Replacement)
+	}
+}
+
+func TestLoadFromStoreWithProtocols(t *testing.T) {
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer s.Close()
+
+	s.AddRule("allow", store.RuleOpts{
+		Destination: "github.com",
+		Ports:       []int{22},
+		Protocols:   []string{"ssh"},
+	})
+
+	eng, err := LoadFromStore(s)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(eng.AllowRules) != 1 {
+		t.Fatalf("expected 1 allow rule, got %d", len(eng.AllowRules))
+	}
+	if len(eng.AllowRules[0].Protocols) != 1 || eng.AllowRules[0].Protocols[0] != "ssh" {
+		t.Errorf("expected protocols [ssh], got %v", eng.AllowRules[0].Protocols)
 	}
 }
 

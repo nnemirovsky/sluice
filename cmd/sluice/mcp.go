@@ -95,14 +95,13 @@ func handleMCPGateway(args []string) error {
 		return fmt.Errorf("load policy: %w", err)
 	}
 
-	// If the store specifies custom env var names for Telegram, use
-	// those instead of the hardcoded defaults (but only when the flag was
-	// not explicitly provided on the command line).
-	if eng.Telegram.BotTokenEnv != "" && !explicitFlags["telegram-token"] {
-		*telegramToken = os.Getenv(eng.Telegram.BotTokenEnv)
+	// Read Telegram env vars directly (hardcoded env var names).
+	// CLI flags take precedence when explicitly provided.
+	if !explicitFlags["telegram-token"] {
+		*telegramToken = os.Getenv("TELEGRAM_BOT_TOKEN")
 	}
-	if eng.Telegram.ChatIDEnv != "" && !explicitFlags["telegram-chat-id"] {
-		*telegramChatIDStr = os.Getenv(eng.Telegram.ChatIDEnv)
+	if !explicitFlags["telegram-chat-id"] {
+		*telegramChatIDStr = os.Getenv("TELEGRAM_CHAT_ID")
 	}
 
 	// Read MCP upstreams from the store.

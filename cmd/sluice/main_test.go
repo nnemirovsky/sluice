@@ -398,10 +398,6 @@ template = "Bearer {value}"
 	if eng.TimeoutSec != 60 {
 		t.Errorf("expected timeout 60, got %d", eng.TimeoutSec)
 	}
-	// Telegram env var names are now hardcoded, not stored in config.
-	if eng.Telegram.BotTokenEnv != "" {
-		t.Errorf("expected empty bot_token_env (hardcoded), got %q", eng.Telegram.BotTokenEnv)
-	}
 	if v := eng.Evaluate("api.example.com", 443); v != policy.Allow {
 		t.Errorf("expected Allow for api.example.com:443, got %s", v)
 	}
