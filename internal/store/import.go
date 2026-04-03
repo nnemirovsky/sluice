@@ -495,7 +495,7 @@ var configColumns = map[string]string{
 func updateConfigColumn(tx *sql.Tx, column, value string) error {
 	col, ok := configColumns[column]
 	if !ok || col == "" {
-		return nil
+		return fmt.Errorf("unknown config column %q", column)
 	}
 	_, err := tx.Exec("UPDATE config SET "+col+" = ? WHERE id = 1", value)
 	if err != nil {

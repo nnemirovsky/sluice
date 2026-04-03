@@ -3,6 +3,7 @@ package channel
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -216,8 +217,9 @@ func (b *Broker) Request(dest string, port int, timeout time.Duration) (Response
 // receiving the request.
 func (b *Broker) broadcast(req ApprovalRequest) {
 	for _, ch := range b.channels {
-		// Non-blocking send. Channel implementations should not block.
-		_ = ch.RequestApproval(context.Background(), req)
+		if err := ch.RequestApproval(context.Background(), req); err != nil {
+			log.Printf("[WARN] channel failed to send approval request %s: %v", req.ID, err)
+		}
 	}
 }
 
