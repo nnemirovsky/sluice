@@ -238,6 +238,16 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
+	// Delete messages that contain credential values before processing
+	// to minimize exposure in chat history.
+	if cmd.Name == "cred" && len(cmd.Args) >= 1 &&
+		(cmd.Args[0] == "add" || cmd.Args[0] == "rotate") {
+		del := tgbotapi.NewDeleteMessage(msg.Chat.ID, msg.MessageID)
+		if _, err := b.api.Request(del); err != nil {
+			log.Printf("failed to delete credential message: %s", sanitizeError(err))
+		}
+	}
+
 	response := b.commands.Handle(cmd)
 	if response == "" {
 		return

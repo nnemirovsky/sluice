@@ -196,10 +196,10 @@ func handlePolicyImport(args []string) {
 		log.Fatalf("import: %v", err)
 	}
 
-	fmt.Printf("imported: %d rules (%d skipped), %d tool rules (%d skipped), %d inspect rules, %d bindings (%d skipped), %d upstreams (%d skipped), %d config\n",
+	fmt.Printf("imported: %d rules (%d skipped), %d tool rules (%d skipped), %d inspect rules (%d skipped), %d bindings (%d skipped), %d upstreams (%d skipped), %d config\n",
 		result.RulesInserted, result.RulesSkipped,
 		result.ToolRulesInserted, result.ToolRulesSkipped,
-		result.InspectInserted,
+		result.InspectInserted, result.InspectSkipped,
 		result.BindingsInserted, result.BindingsSkipped,
 		result.UpstreamsInserted, result.UpstreamsSkipped,
 		result.ConfigSet,

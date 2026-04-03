@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -300,9 +301,14 @@ func handleMCPList(args []string) error {
 		}
 		envStr := ""
 		if len(u.Env) > 0 {
+			keys := make([]string, 0, len(u.Env))
+			for k := range u.Env {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
 			pairs := make([]string, 0, len(u.Env))
-			for k, v := range u.Env {
-				pairs = append(pairs, k+"="+v)
+			for _, k := range keys {
+				pairs = append(pairs, k+"="+u.Env[k])
 			}
 			envStr = " env=" + strings.Join(pairs, ",")
 		}
