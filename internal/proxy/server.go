@@ -245,23 +245,25 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 					// Hold reloadMu to prevent a concurrent SIGHUP from swapping
 					// the engine between the store write and recompile.
 					r.reloadMu.Lock()
-					if r.store != nil {
-						if _, storeErr := r.store.AddRule("allow", dest, []int{port}, store.RuleOpts{Source: "approval"}); storeErr != nil {
-							log.Printf("[WARN] failed to persist allow rule for %s:%d: %v", dest, port, storeErr)
-						}
-						if newEng, recompErr := policy.LoadFromStore(r.store); recompErr != nil {
-							log.Printf("[WARN] failed to recompile engine after always-allow: %v", recompErr)
-						} else if valErr := newEng.Validate(); valErr != nil {
-							log.Printf("[WARN] engine validation failed after always-allow: %v", valErr)
+					func() {
+						defer r.reloadMu.Unlock()
+						if r.store != nil {
+							if _, storeErr := r.store.AddRule("allow", dest, []int{port}, store.RuleOpts{Source: "approval"}); storeErr != nil {
+								log.Printf("[WARN] failed to persist allow rule for %s:%d: %v", dest, port, storeErr)
+							}
+							if newEng, recompErr := policy.LoadFromStore(r.store); recompErr != nil {
+								log.Printf("[WARN] failed to recompile engine after always-allow: %v", recompErr)
+							} else if valErr := newEng.Validate(); valErr != nil {
+								log.Printf("[WARN] engine validation failed after always-allow: %v", valErr)
+							} else {
+								r.engine.Store(newEng)
+							}
 						} else {
-							r.engine.Store(newEng)
+							if err := r.engine.Load().AddDynamicAllow(dest, port); err != nil {
+								log.Printf("[WARN] failed to add dynamic allow rule for %s:%d: %v", dest, port, err)
+							}
 						}
-					} else {
-						if err := r.engine.Load().AddDynamicAllow(dest, port); err != nil {
-							log.Printf("[WARN] failed to add dynamic allow rule for %s:%d: %v", dest, port, err)
-						}
-					}
-					r.reloadMu.Unlock()
+					}()
 				default:
 					effectiveVerdict = policy.Deny
 					reason = "user denied"
