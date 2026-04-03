@@ -146,7 +146,7 @@ func TestPhantomSwapInBody(t *testing.T) {
 	}
 }
 
-func TestHeaderInjectionViaInjectHeader(t *testing.T) {
+func TestHeaderInjectionViaBindingHeader(t *testing.T) {
 	var mu sync.Mutex
 	var received http.Header
 
@@ -162,7 +162,7 @@ func TestHeaderInjectionViaInjectHeader(t *testing.T) {
 	bindings := []vault.Binding{{
 		Destination:  backendURL.Hostname(),
 		Credential:   "temp_key",
-		InjectHeader: "X-Api-Key",
+		Header: "X-Api-Key",
 	}}
 
 	inj, store := setupTestInjector(t, bindings)
@@ -212,7 +212,7 @@ func TestHeaderInjectionWithTemplate(t *testing.T) {
 	bindings := []vault.Binding{{
 		Destination:  backendURL.Hostname(),
 		Credential:   "github_token",
-		InjectHeader: "Authorization",
+		Header: "Authorization",
 		Template:     "Bearer {value}",
 	}}
 
@@ -306,7 +306,7 @@ func TestMITMHTTPS(t *testing.T) {
 	bindings := []vault.Binding{{
 		Destination:  backendURL.Hostname(),
 		Credential:   "tls_key",
-		InjectHeader: "X-Secret",
+		Header: "X-Secret",
 	}}
 
 	inj, store := setupTestInjector(t, bindings)
@@ -470,7 +470,7 @@ func TestBindingHeaderInjectionAndGlobalPhantomReplacement(t *testing.T) {
 	bindings := []vault.Binding{{
 		Destination:  backendURL.Hostname(),
 		Credential:   "api_key",
-		InjectHeader: "X-Api-Key",
+		Header: "X-Api-Key",
 		Template:     "Bearer {value}",
 	}}
 

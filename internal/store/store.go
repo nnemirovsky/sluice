@@ -745,6 +745,18 @@ func (s *Store) AddRuleAndBinding(
 	verdict string, ruleOpts RuleOpts,
 	credential string, bindingOpts BindingOpts,
 ) (ruleID, bindingID int64, err error) {
+	if verdict == "" {
+		return 0, 0, fmt.Errorf("verdict is required")
+	}
+	if !validVerdict(verdict) {
+		return 0, 0, fmt.Errorf("invalid verdict %q: must be allow, deny, ask, or redact", verdict)
+	}
+	if ruleOpts.Destination == "" {
+		return 0, 0, fmt.Errorf("destination is required for rule+binding")
+	}
+	if credential == "" {
+		return 0, 0, fmt.Errorf("credential name is required")
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, 0, fmt.Errorf("begin transaction: %w", err)

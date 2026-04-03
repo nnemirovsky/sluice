@@ -9,12 +9,12 @@ import (
 
 // Binding maps a destination pattern to a credential and injection strategy.
 type Binding struct {
-	Destination  string
-	Ports        []int
-	Credential   string
-	InjectHeader string
-	Template     string
-	Protocols    []string
+	Destination string
+	Ports       []int
+	Credential  string
+	Header      string
+	Template    string
+	Protocols   []string
 }
 
 type compiledBinding struct {

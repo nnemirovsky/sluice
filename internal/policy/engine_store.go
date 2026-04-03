@@ -103,6 +103,7 @@ func loadNetworkRules(s *store.Store, verdict string) ([]Rule, error) {
 			Destination: r.Destination,
 			Ports:       r.Ports,
 			Protocols:   r.Protocols,
+			Name:        r.Name,
 		}
 	}
 	return rules, nil

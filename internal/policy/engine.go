@@ -90,6 +90,7 @@ func LoadFromBytes(data []byte) (*Engine, error) {
 	var inspectBlock []InspectBlockRule
 	var inspectRedact []InspectRedactRule
 
+	var dispatchErr error
 	dispatchRules := func(rules []Rule, verdict string) {
 		for _, r := range rules {
 			switch {
@@ -109,6 +110,9 @@ func LoadFromBytes(data []byte) (*Engine, error) {
 						Pattern: r.Pattern,
 						Name:    r.Name,
 					})
+				} else {
+					dispatchErr = fmt.Errorf("pattern rules only support deny verdict in [[deny]] sections, got [[%s]] with pattern %q", verdict, r.Pattern)
+					return
 				}
 			default:
 				// Network rule (destination set or empty for validation).
@@ -127,9 +131,18 @@ func LoadFromBytes(data []byte) (*Engine, error) {
 	dispatchRules(pf.Allow, "allow")
 	dispatchRules(pf.Deny, "deny")
 	dispatchRules(pf.Ask, "ask")
+	if dispatchErr != nil {
+		return nil, dispatchErr
+	}
 
 	// [[redact]] entries are always pattern-based content redact rules.
 	for _, r := range pf.Redact {
+		if r.Destination != "" {
+			return nil, fmt.Errorf("[[redact]] rule %q: destination and pattern are mutually exclusive", r.Name)
+		}
+		if r.Tool != "" {
+			return nil, fmt.Errorf("[[redact]] rule %q: tool and pattern are mutually exclusive", r.Name)
+		}
 		inspectRedact = append(inspectRedact, InspectRedactRule{
 			Pattern:     r.Pattern,
 			Replacement: r.Replacement,

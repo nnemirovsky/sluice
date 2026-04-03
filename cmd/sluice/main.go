@@ -387,7 +387,7 @@ func readBindings(db *store.Store) ([]vault.Binding, error) {
 			Destination:  r.Destination,
 			Ports:        r.Ports,
 			Credential:   r.Credential,
-			InjectHeader: r.Header,
+			Header: r.Header,
 			Template:     r.Template,
 			Protocols:    r.Protocols,
 		}

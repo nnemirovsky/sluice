@@ -286,7 +286,7 @@ func insertRuleIfNew(tx *sql.Tx, verdict string, r importRule) (bool, error) {
 		return false, nil
 	}
 
-	portsJSON := portsToJSON(r.Ports)
+	portsJSON := portsToJSONPtr(r.Ports)
 	var protocolsJSON *string
 	if len(r.Protocols) > 0 {
 		b, _ := json.Marshal(r.Protocols)
@@ -317,6 +317,12 @@ func insertRedactRuleIfNew(tx *sql.Tx, r importRedactRule) (bool, error) {
 	if r.Destination != "" {
 		return false, fmt.Errorf("redact rule: destination and pattern are mutually exclusive")
 	}
+	if len(r.Ports) > 0 {
+		return false, fmt.Errorf("redact rule %q: ports not supported on pattern-only rules", r.Pattern)
+	}
+	if len(r.Protocols) > 0 {
+		return false, fmt.Errorf("redact rule %q: protocols not supported on pattern-only rules", r.Pattern)
+	}
 	if _, err := regexp.Compile(r.Pattern); err != nil {
 		return false, fmt.Errorf("redact rule %q: invalid regex: %w", r.Pattern, err)
 	}
@@ -329,21 +335,12 @@ func insertRedactRuleIfNew(tx *sql.Tx, r importRedactRule) (bool, error) {
 		return false, nil
 	}
 
-	portsJSON := portsToJSON(r.Ports)
-	var protocolsJSON *string
-	if len(r.Protocols) > 0 {
-		b, _ := json.Marshal(r.Protocols)
-		ps := string(b)
-		protocolsJSON = &ps
-	}
-
 	if _, err := tx.Exec(
-		`INSERT INTO rules (verdict, destination, pattern, replacement, ports, protocols, name, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO rules (verdict, destination, tool, pattern, replacement, name, source) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		"redact",
-		nilIfEmpty(r.Destination),
+		nil, nil,
 		r.Pattern,
 		nilIfEmpty(r.Replacement),
-		portsJSON, protocolsJSON,
 		nilIfEmpty(r.Name), "seed",
 	); err != nil {
 		return false, fmt.Errorf("insert redact rule %q: %w", r.Pattern, err)
@@ -360,7 +357,7 @@ func ruleExistsTx(tx *sql.Tx, verdict, destination, tool, pattern string, ports 
 
 	switch {
 	case destination != "":
-		portsJSON := portsToJSON(ports)
+		portsJSON := portsToJSONPtr(ports)
 		if portsJSON != nil {
 			query = "SELECT COUNT(*) FROM rules WHERE verdict = ? AND destination = ? AND ports = ?"
 			args = []any{verdict, destination, *portsJSON}
@@ -401,7 +398,7 @@ func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
 			return false, fmt.Errorf("binding %q->%q: invalid port %d (must be 1-65535)", b.Destination, b.Credential, p)
 		}
 	}
-	portsJSON := portsToJSON(b.Ports)
+	portsJSON := portsToJSONPtr(b.Ports)
 	var count int
 	err := tx.QueryRow(
 		"SELECT COUNT(*) FROM bindings WHERE destination = ? AND credential = ? AND ports IS ?",
@@ -477,37 +474,33 @@ func insertUpstreamIfNew(tx *sql.Tx, u importMCPUpstream) (bool, error) {
 	return true, nil
 }
 
-// configColumns maps config key names to column names in the typed config table.
-var configColumns = map[string]string{
-	"default_verdict":               "default_verdict",
-	"timeout_sec":                   "timeout_sec",
-	"vault_provider":                "vault_provider",
-	"vault_dir":                     "vault_dir",
-	"vault_providers":               "vault_providers",
-	"vault_hashicorp_addr":          "vault_hashicorp_addr",
-	"vault_hashicorp_mount":         "vault_hashicorp_mount",
-	"vault_hashicorp_prefix":        "vault_hashicorp_prefix",
-	"vault_hashicorp_auth":          "vault_hashicorp_auth",
-	"vault_hashicorp_token":         "vault_hashicorp_token",
-	"vault_hashicorp_role_id":       "vault_hashicorp_role_id",
-	"vault_hashicorp_secret_id":     "vault_hashicorp_secret_id",
-	"vault_hashicorp_role_id_env":   "vault_hashicorp_role_id_env",
-	"vault_hashicorp_secret_id_env": "vault_hashicorp_secret_id_env",
+// validConfigColumns is the allowlist of columns in the typed config table.
+var validConfigColumns = map[string]bool{
+	"default_verdict":               true,
+	"timeout_sec":                   true,
+	"vault_provider":                true,
+	"vault_dir":                     true,
+	"vault_providers":               true,
+	"vault_hashicorp_addr":          true,
+	"vault_hashicorp_mount":         true,
+	"vault_hashicorp_prefix":        true,
+	"vault_hashicorp_auth":          true,
+	"vault_hashicorp_token":         true,
+	"vault_hashicorp_role_id":       true,
+	"vault_hashicorp_secret_id":     true,
+	"vault_hashicorp_role_id_env":   true,
+	"vault_hashicorp_secret_id_env": true,
 }
 
 // updateConfigColumn updates a single column in the typed config singleton row.
 func updateConfigColumn(tx *sql.Tx, column, value string) error {
-	col, ok := configColumns[column]
-	if !ok || col == "" {
+	if !validConfigColumns[column] {
 		return fmt.Errorf("unknown config column %q", column)
 	}
-	_, err := tx.Exec("UPDATE config SET "+col+" = ? WHERE id = 1", value)
+	_, err := tx.Exec("UPDATE config SET "+column+" = ? WHERE id = 1", value)
 	if err != nil {
 		return fmt.Errorf("set config %q: %w", column, err)
 	}
 	return nil
 }
 
-// portsToJSON is an alias for portsToJSONPtr (defined in store.go) kept for
-// readability in import code.
-var portsToJSON = portsToJSONPtr

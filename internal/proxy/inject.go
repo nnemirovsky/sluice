@@ -192,8 +192,8 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 			if err != nil {
 				log.Printf("[INJECT] credential %q lookup failed: %v", binding.Credential, err)
 			} else {
-				if binding.InjectHeader != "" {
-					r.Header.Set(binding.InjectHeader, binding.FormatValue(secret.String()))
+				if binding.Header != "" {
+					r.Header.Set(binding.Header, binding.FormatValue(secret.String()))
 				}
 				secret.Release()
 				log.Printf("[INJECT] injected credential %q for %s:%d", binding.Credential, host, port)

@@ -4,9 +4,9 @@ import "testing"
 
 func TestResolveBinding(t *testing.T) {
 	bindings := []Binding{
-		{Destination: "api.anthropic.com", Ports: []int{443}, Credential: "anthropic_key", InjectHeader: "x-api-key"},
-		{Destination: "api.github.com", Ports: []int{443}, Credential: "github_token", InjectHeader: "Authorization", Template: "Bearer {value}"},
-		{Destination: "*.openai.com", Ports: []int{443}, Credential: "openai_key", InjectHeader: "Authorization", Template: "Bearer {value}"},
+		{Destination: "api.anthropic.com", Ports: []int{443}, Credential: "anthropic_key", Header: "x-api-key"},
+		{Destination: "api.github.com", Ports: []int{443}, Credential: "github_token", Header: "Authorization", Template: "Bearer {value}"},
+		{Destination: "*.openai.com", Ports: []int{443}, Credential: "openai_key", Header: "Authorization", Template: "Bearer {value}"},
 	}
 
 	resolver, err := NewBindingResolver(bindings)
@@ -38,7 +38,7 @@ func TestResolveBinding(t *testing.T) {
 
 func TestResolveBindingPortMismatch(t *testing.T) {
 	bindings := []Binding{
-		{Destination: "api.anthropic.com", Ports: []int{443}, Credential: "anthropic_key", InjectHeader: "x-api-key"},
+		{Destination: "api.anthropic.com", Ports: []int{443}, Credential: "anthropic_key", Header: "x-api-key"},
 	}
 
 	resolver, err := NewBindingResolver(bindings)
@@ -55,7 +55,7 @@ func TestResolveBindingPortMismatch(t *testing.T) {
 func TestResolveForProtocol(t *testing.T) {
 	bindings := []Binding{
 		{Destination: "example.com", Ports: []int{443}, Credential: "ssh_key", Protocols: []string{"ssh"}},
-		{Destination: "example.com", Ports: []int{443}, Credential: "api_key", InjectHeader: "Authorization", Protocols: []string{"https"}},
+		{Destination: "example.com", Ports: []int{443}, Credential: "api_key", Header: "Authorization", Protocols: []string{"https"}},
 	}
 	resolver, err := NewBindingResolver(bindings)
 	if err != nil {
@@ -101,7 +101,7 @@ func TestResolveForProtocolFallback(t *testing.T) {
 	// as fallback when no protocol-specific binding matches.
 	bindings := []Binding{
 		{Destination: "api.example.com", Ports: []int{443}, Credential: "ssh_key", Protocols: []string{"ssh"}},
-		{Destination: "api.example.com", Ports: []int{443}, Credential: "generic_key", InjectHeader: "Authorization"},
+		{Destination: "api.example.com", Ports: []int{443}, Credential: "generic_key", Header: "Authorization"},
 	}
 	resolver, err := NewBindingResolver(bindings)
 	if err != nil {
@@ -130,7 +130,7 @@ func TestResolveForProtocolFallback(t *testing.T) {
 func TestResolveProtocolHint(t *testing.T) {
 	bindings := []Binding{
 		{Destination: "service.example.com", Ports: []int{8000}, Credential: "generic_key"},
-		{Destination: "service.example.com", Ports: []int{8000}, Credential: "http_key", InjectHeader: "Authorization", Protocols: []string{"http"}},
+		{Destination: "service.example.com", Ports: []int{8000}, Credential: "http_key", Header: "Authorization", Protocols: []string{"http"}},
 	}
 	resolver, err := NewBindingResolver(bindings)
 	if err != nil {
@@ -184,7 +184,7 @@ func TestResolveForProtocolGenericWithMixedBindings(t *testing.T) {
 	// causing the connection to bypass the injector.
 	bindings := []Binding{
 		{Destination: "service.example.com", Ports: []int{8000}, Credential: "generic_key"},
-		{Destination: "service.example.com", Ports: []int{8000}, Credential: "http_key", InjectHeader: "Authorization", Protocols: []string{"http"}},
+		{Destination: "service.example.com", Ports: []int{8000}, Credential: "http_key", Header: "Authorization", Protocols: []string{"http"}},
 	}
 	resolver, err := NewBindingResolver(bindings)
 	if err != nil {
