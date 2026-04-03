@@ -465,18 +465,18 @@ Update all `/policy` commands to use unified rule methods and typed config.
 
 ### Task 11: Verify acceptance criteria
 
-- [ ] Verify unified rules table stores network, tool, pattern, and redact rules correctly
-- [ ] Verify CHECK constraint rejects rules with multiple of destination/tool/pattern set
-- [ ] Verify typed config singleton returns correct defaults and accepts updates
-- [ ] Verify channels table exists with default Telegram row (type=0, enabled=1)
-- [ ] Verify `config.toml` import works with unified format (allow/deny/ask with destination/tool/pattern, [[redact]])
-- [ ] Verify import merge semantics (no duplicates on re-import)
-- [ ] Verify Telegram env var names are hardcoded (no config-based indirection)
-- [ ] Verify phantom tokens are replaced in ALL MITMed traffic (not just bound destinations)
-- [ ] Verify Channel interface is used throughout (no direct telegram.ApprovalBroker references outside telegram package)
-- [ ] Verify golang-migrate runs on fresh DB and creates correct schema
-- [ ] Run full test suite: `go test ./... -v -timeout 60s -race`
-- [ ] Run linter: `go vet ./...`
+- [x] Verify unified rules table stores network, tool, pattern, and redact rules correctly
+- [x] Verify CHECK constraint rejects rules with multiple of destination/tool/pattern set
+- [x] Verify typed config singleton returns correct defaults and accepts updates
+- [x] Verify channels table exists with default Telegram row (type=0, enabled=1)
+- [x] Verify `config.toml` import works with unified format (allow/deny/ask with destination/tool/pattern, [[redact]])
+- [x] Verify import merge semantics (no duplicates on re-import)
+- [x] Verify Telegram env var names are hardcoded (no config-based indirection)
+- [x] Verify phantom tokens are replaced in ALL MITMed traffic (not just bound destinations)
+- [x] Verify Channel interface is used throughout (no direct telegram.ApprovalBroker references outside telegram package)
+- [x] Verify golang-migrate runs on fresh DB and creates correct schema
+- [x] Run full test suite: `go test ./... -v -timeout 60s -race`
+- [x] Run linter: `go vet ./...`
 
 ### Task 12: [Final] Update documentation
 
