@@ -280,19 +280,19 @@ type Broker struct {
 
 The Broker moves from `internal/telegram/approval.go` to `internal/channel/broker.go`. It becomes channel-agnostic. Approval requests are broadcast to all enabled channels. First `Resolve()` call wins. Other channels get `CancelApproval()` for cleanup.
 
-- [ ] Create `internal/channel/channel.go` with `ChannelType` enum (ChannelTelegram = 0, ChannelHTTP = 1) and `String()` method
-- [ ] Define `Channel` interface with non-blocking `RequestApproval`, `CancelApproval`, `Commands`, `Notify`, lifecycle methods
-- [ ] Define `ApprovalRequest`, `Response` (allow/deny/always-allow), and `Command` types in this package
-- [ ] Create `internal/channel/broker.go` with `Broker` struct: holds `[]Channel`, manages waiters, rate limiting, broadcast-and-first-wins logic
-- [ ] Implement `Broker.Request(dest, port, timeout)`: broadcast to all channels, wait for first `Resolve()`, cancel on remaining channels
-- [ ] Implement `Broker.Resolve(id, resp)`: first call wins (idempotent), triggers `CancelApproval` on other channels
-- [ ] Implement `Broker.CancelAll()`: deny all pending, call `CancelApproval` on all channels
-- [ ] Move rate limiting logic (MaxPendingRequests, per-destination limits) from telegram.ApprovalBroker to Broker
-- [ ] Write tests for ChannelType.String()
-- [ ] Write tests for Broker broadcast + first-response-wins logic
-- [ ] Write tests for cross-channel cancellation cleanup
-- [ ] Write tests for race condition (two channels resolve simultaneously)
-- [ ] Run tests: `go test ./internal/channel/ -v -timeout 30s`
+- [x] Create `internal/channel/channel.go` with `ChannelType` enum (ChannelTelegram = 0, ChannelHTTP = 1) and `String()` method
+- [x] Define `Channel` interface with non-blocking `RequestApproval`, `CancelApproval`, `Commands`, `Notify`, lifecycle methods
+- [x] Define `ApprovalRequest`, `Response` (allow/deny/always-allow), and `Command` types in this package
+- [x] Create `internal/channel/broker.go` with `Broker` struct: holds `[]Channel`, manages waiters, rate limiting, broadcast-and-first-wins logic
+- [x] Implement `Broker.Request(dest, port, timeout)`: broadcast to all channels, wait for first `Resolve()`, cancel on remaining channels
+- [x] Implement `Broker.Resolve(id, resp)`: first call wins (idempotent), triggers `CancelApproval` on other channels
+- [x] Implement `Broker.CancelAll()`: deny all pending, call `CancelApproval` on all channels
+- [x] Move rate limiting logic (MaxPendingRequests, per-destination limits) from telegram.ApprovalBroker to Broker
+- [x] Write tests for ChannelType.String()
+- [x] Write tests for Broker broadcast + first-response-wins logic
+- [x] Write tests for cross-channel cancellation cleanup
+- [x] Write tests for race condition (two channels resolve simultaneously)
+- [x] Run tests: `go test ./internal/channel/ -v -timeout 30s`
 
 ### Task 5: Refactor Telegram bot to implement Channel interface
 
