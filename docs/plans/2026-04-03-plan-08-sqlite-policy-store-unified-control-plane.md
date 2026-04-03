@@ -328,12 +328,12 @@ Remove BurntSushi/toml from runtime imports. It stays only in `store/import.go` 
 
 ### Task 12: [Final] Update documentation
 
-- [ ] Update CLAUDE.md: replace TOML-centric architecture description with SQLite store
-- [ ] Update CLAUDE.md: document new CLI subcommands (policy, mcp add/list/remove)
-- [ ] Update CLAUDE.md: document hot credential reload
-- [ ] Update CONTRIBUTING.md if development workflow changed
-- [ ] Update examples/policy.toml header comment explaining it's a seed file
-- [ ] Update compose.yml and compose.dev.yml with phantom volume
+- [x] Update CLAUDE.md: replace TOML-centric architecture description with SQLite store
+- [x] Update CLAUDE.md: document new CLI subcommands (policy, mcp add/list/remove)
+- [x] Update CLAUDE.md: document hot credential reload
+- [x] Update CONTRIBUTING.md if development workflow changed
+- [x] Update examples/policy.toml header comment explaining it's a seed file
+- [x] Update compose.yml and compose.dev.yml with phantom volume (already done in Task 7)
 
 ## Technical Details
 

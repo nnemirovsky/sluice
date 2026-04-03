@@ -1,5 +1,8 @@
-# Example Sluice policy for running OpenClaw behind a transparent proxy.
-# Copy this file and adjust to your needs.
+# Example Sluice TOML seed file for initial database population.
+# Import into the SQLite store with: sluice policy import policy.toml
+# This file is only read once to seed an empty database. At runtime, all
+# policy state lives in the SQLite store. Use "sluice policy add/remove"
+# or Telegram /policy commands to modify rules after seeding.
 
 [policy]
 default = "ask"

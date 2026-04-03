@@ -21,17 +21,21 @@ go test ./... -v -timeout 30s
 ## Project Structure
 
 - `cmd/sluice/main.go` - CLI entrypoint with flag parsing and signal handling
-- `cmd/sluice/cred.go` - CLI subcommand handler for credential management (add/list/remove)
+- `cmd/sluice/cred.go` - CLI subcommand handler for credential management (add/list/remove with optional policy+binding auto-creation)
 - `cmd/sluice/audit.go` - CLI subcommand handler for audit log verification (`audit verify`)
 - `cmd/sluice/cert.go` - CLI subcommand handler for CA certificate generation (`cert generate`)
-- `cmd/sluice/mcp.go` - CLI subcommand handler for MCP gateway mode
+- `cmd/sluice/mcp.go` - CLI subcommand handler for MCP gateway mode and upstream management (add/list/remove)
+- `cmd/sluice/policy.go` - CLI subcommand handler for policy management (list/add/remove/import/export)
+- `internal/store/store.go` - SQLite-backed policy store for all runtime state (rules, tool rules, config, bindings, MCP upstreams)
+- `internal/store/import.go` - TOML import into SQLite store with merge semantics (skip duplicates)
 - `internal/proxy/server.go` - SOCKS5 server wrapping `armon/go-socks5` with policy enforcement
 - `internal/proxy/protocol.go` - Port-based protocol detection (HTTP, HTTPS, SSH, IMAP, SMTP, generic)
 - `internal/proxy/ca.go` - Self-signed CA generation and persistence for HTTPS MITM
 - `internal/proxy/inject.go` - HTTPS MITM credential injector using goproxy with phantom token replacement
 - `internal/proxy/ssh.go` - SSH jump host with vault key injection and bidirectional channel relay
 - `internal/proxy/mail.go` - IMAP/SMTP AUTH command proxy with phantom token replacement (including base64)
-- `internal/policy/engine.go` - Policy loading from TOML, compilation of glob patterns, and evaluation
+- `internal/policy/engine.go` - Policy compilation of glob patterns and evaluation (LoadFromBytes for backward compat)
+- `internal/policy/engine_store.go` - LoadFromStore builds a read-only Engine from SQLite store
 - `internal/policy/glob.go` - Glob pattern to regex compilation (`*` = single label, `**` = across dots)
 - `internal/policy/types.go` - Verdict enum (Allow/Deny/Ask), Rule struct, PolicyConfig, ToolRule, InspectBlockRule, InspectRedactRule
 - `internal/vault/store.go` - Age-encrypted credential storage with X25519 identity key management
@@ -51,15 +55,16 @@ go test ./... -v -timeout 30s
 - `internal/audit/verify.go` - Hash chain verification (walks log file, reports broken links)
 - `internal/telegram/approval.go` - Approval broker with channel-based request/response flow
 - `internal/telegram/bot.go` - Telegram bot lifecycle, inline keyboard approval messages
-- `internal/telegram/commands.go` - Telegram admin commands (/policy, /cred, /status, /audit, /help)
-- `internal/docker/manager.go` - Docker container manager for credential rotation (restart with updated phantom env)
+- `internal/telegram/commands.go` - Telegram admin commands (/policy, /cred, /status, /audit, /help) backed by SQLite store
+- `internal/docker/manager.go` - Docker container manager for credential hot-reload via shared volume + docker exec, with restart fallback
 - `Dockerfile` - Multi-stage build for Sluice container
-- `compose.yml` - Three-container setup (sluice + tun2proxy + openclaw)
+- `compose.yml` - Three-container setup (sluice + tun2proxy + openclaw) with shared phantom volume
+- `compose.dev.yml` - Development compose with build-from-source
 - `scripts/docker-entrypoint.sh` - Container entrypoint with CA cert generation and copy to shared volume
 - `scripts/setup-vault.sh` - Interactive credential and CA setup script
 - `scripts/gen-phantom-env.sh` - Phantom token env file generator for openclaw container
-- `examples/policy.toml` - Example policy for OpenClaw deployment with bindings and MCP tool rules
-- `testdata/` - TOML policy fixtures for tests
+- `examples/policy.toml` - Example TOML seed file for initial DB population via `sluice policy import`
+- `testdata/` - TOML policy fixtures for import tests
 
 ## System Architecture
 
@@ -227,7 +232,7 @@ on_mcp_tool_call(tool_name, arguments, session):
         return error("Denied by user")
 ```
 
-### MCP Tool Policy (extends the main policy file)
+### MCP Tool Policy (TOML seed format, stored in SQLite at runtime)
 
 ```toml
 [[tool_allow]]
@@ -266,15 +271,57 @@ note = "Block all exec by default"
   filesystem__write_file(/etc/passwd, ...)" is more useful than "Agent wants to
   connect to localhost:0".
 
+## CLI Subcommands
+
+### Policy management
+
+```
+sluice policy list [--verdict allow|deny|ask] [--db sluice.db]
+sluice policy add allow <destination> [--ports 443,80] [--note "reason"]
+sluice policy add deny <destination> [--note "reason"]
+sluice policy add ask <destination> [--ports 443] [--note "reason"]
+sluice policy remove <id>
+sluice policy import <path.toml>    # seed DB from TOML (merge semantics, skips duplicates)
+sluice policy export                # dump current rules as TOML to stdout
+```
+
+### MCP upstream management
+
+```
+sluice mcp add <name> --command <cmd> [--args "arg1,arg2"] [--env "KEY=VAL,..."] [--timeout 120]
+sluice mcp list
+sluice mcp remove <name>
+sluice mcp                          # start MCP gateway (reads upstreams from store)
+```
+
+### Credential management
+
+```
+sluice cred add <name> [--destination host] [--ports 443] [--header Authorization] [--template "Bearer {value}"]
+sluice cred list                    # shows credentials with associated bindings from store
+sluice cred remove <name>           # removes credential + associated binding + allow rule
+```
+
+When `--destination` is provided, `sluice cred add` also creates an allow rule and binding in the store.
+
+### Other subcommands
+
+```
+sluice cert generate                # generate CA certificate for HTTPS MITM
+sluice audit verify                 # verify audit log hash chain integrity
+```
+
 ## Implementation Details
 
-Policy engine: `LoadFromFile`/`LoadFromBytes` parses TOML and auto-compiles glob patterns into regexes. `Evaluate(dest, port)` checks deny rules first, then allow, then ask, falling back to default verdict.
+Policy store: `internal/store/store.go` wraps a SQLite database (via `modernc.org/sqlite`, pure Go, no CGO). All runtime state is persisted: network rules, tool rules, inspect rules, config, credential bindings, and MCP upstreams. TOML files are only used for initial seeding via `store.ImportTOML()`. Import uses merge semantics (skip duplicates based on destination+ports+verdict). The store uses WAL mode for concurrent read performance.
+
+Policy engine: `LoadFromStore(s *store.Store)` reads all rules from SQLite and compiles glob patterns into regexes, producing a read-only Engine snapshot. `LoadFromBytes` is kept for backward compatibility (tests, import path). `Evaluate(dest, port)` checks deny rules first, then allow, then ask, falling back to default verdict. Mutations go through the store, then a new Engine is compiled and atomically swapped via `srv.StoreEngine(newEngine)`.
 
 Proxy integration: `policyRuleSet` implements the `socks5.RuleSet` interface. Protocol detection stores results in context for future credential injection.
 
-Telegram approval: `ApprovalBroker` bridges the proxy and Telegram bot via channels. When `policyRuleSet.Allow()` encounters an Ask verdict, it calls `broker.Request()` which blocks until the bot resolves the request or the timeout expires. The bot goroutine reads from `broker.Pending()`, sends an inline keyboard to Telegram, and calls `broker.Resolve()` when the user responds. "Always Allow" calls `Engine.AddDynamicAllow()` to add a runtime allow rule (not persisted to disk). The Engine uses a `sync.RWMutex` to protect concurrent reads (policy evaluation) and writes (dynamic rule addition, command handler mutations). `CouldBeAllowed(dest, includeAsk)` takes an `includeAsk` parameter: when true (broker configured), Ask-matching destinations are resolved via DNS so the approval flow can proceed; when false (no broker), Ask rules are treated as Deny at the DNS stage to prevent leaking queries. Rate limiting prevents approval queue flooding: `MaxPendingRequests` (default 50) caps concurrent pending approvals, and per-destination rate limits (5 requests/minute) prevent a single target from monopolizing the queue. Requests exceeding limits are auto-denied.
+Telegram approval: `ApprovalBroker` bridges the proxy and Telegram bot via channels. When `policyRuleSet.Allow()` encounters an Ask verdict, it calls `broker.Request()` which blocks until the bot resolves the request or the timeout expires. The bot goroutine reads from `broker.Pending()`, sends an inline keyboard to Telegram, and calls `broker.Resolve()` when the user responds. "Always Allow" writes to the SQLite store with source="approval", then recompiles the Engine and atomically swaps it. `CouldBeAllowed(dest, includeAsk)` takes an `includeAsk` parameter: when true (broker configured), Ask-matching destinations are resolved via DNS so the approval flow can proceed; when false (no broker), Ask rules are treated as Deny at the DNS stage to prevent leaking queries. Rate limiting prevents approval queue flooding: `MaxPendingRequests` (default 50) caps concurrent pending approvals, and per-destination rate limits (5 requests/minute) prevent a single target from monopolizing the queue. Requests exceeding limits are auto-denied.
 
-Telegram commands: `CommandHandler` holds an `atomic.Pointer[policy.Engine]` for lock-free reads and is updated via `UpdateEngine()` on SIGHUP. Policy mutations (`/policy allow`, `/policy deny`, `/policy remove`) use `Engine.AddAllowRule()`, `AddDenyRule()`, and `RemoveRule()` which acquire write locks internally. Mutations are in-memory only and not persisted to disk.
+Telegram commands: `CommandHandler` holds an `atomic.Pointer[policy.Engine]` for lock-free reads and is updated via `UpdateEngine()` on SIGHUP. Policy mutations (`/policy allow`, `/policy deny`, `/policy remove`) write to the SQLite store, then recompile the Engine and swap atomically. All changes persist across restarts.
 
 Audit logger is optional. Pass nil in `Config.Audit` and the proxy handles it gracefully. Each JSON line includes a `prev_hash` field containing the blake3 hash of the previous line's raw JSON bytes. The first entry uses blake3("") as the genesis hash. On startup, `NewFileLogger` reads the last line from the existing file (seeking backwards from EOF) to recover the hash chain across restarts. `VerifyChain` walks the log and reports any broken links. The `sluice audit verify` CLI command wraps this for tamper detection.
 
@@ -288,15 +335,19 @@ SSH credential injection: `SSHJumpHost` accepts the agent's SSH connection with 
 
 Mail credential injection: `MailProxy` intercepts IMAP LOGIN and SMTP AUTH PLAIN/LOGIN commands. For base64-encoded auth data, it decodes, replaces phantom tokens, and re-encodes. Non-auth traffic is relayed unchanged.
 
-Docker integration: Three-container architecture (sluice + tun2proxy + openclaw) with `network_mode: "service:tun2proxy"` routing all openclaw traffic through sluice's SOCKS5 proxy. `docker.Manager` wraps a `ContainerClient` interface (production implementation pending, SDK added at deployment time). On credential mutation via Telegram `/cred` commands, `credMutationComplete` regenerates phantom environment variables using `GeneratePhantomEnv` (produces SDK-format-matching phantom tokens based on credential name heuristics) and calls `Manager.RestartWithEnv` to recreate the agent container with updated env. `BotConfig.Vault` and `BotConfig.DockerMgr` wire the vault and Docker manager into Telegram command handling. The sluice entrypoint generates a CA cert and copies it to a shared volume so openclaw can trust HTTPS MITM certificates via `SSL_CERT_FILE`.
+Docker integration: Three-container architecture (sluice + tun2proxy + openclaw) with `network_mode: "service:tun2proxy"` routing all openclaw traffic through sluice's SOCKS5 proxy. `docker.Manager` wraps a `ContainerClient` interface with `ExecInContainer` for docker exec and standard container lifecycle methods. On credential mutation via Telegram `/cred` commands or CLI, `credMutationComplete` regenerates phantom environment variables using `GeneratePhantomEnv` and calls `Manager.ReloadSecrets`. Hot reload writes each phantom token as a file in a shared `sluice-phantoms` volume (e.g. `/phantoms/ANTHROPIC_API_KEY`) then runs `docker exec openclaw openclaw secrets reload`. If exec fails (agent image does not support reload), it falls back to `RestartWithEnv` which recreates the container with updated env vars. `BotConfig.Vault` and `BotConfig.DockerMgr` wire the vault and Docker manager into Telegram command handling. The sluice entrypoint generates a CA cert and copies it to a shared volume so openclaw can trust HTTPS MITM certificates via `SSL_CERT_FILE`.
 
 Health check: A minimal HTTP server on `:3000` (configurable via `--health-addr`) serves `/healthz`, returning 200 when the SOCKS5 proxy is listening. The Dockerfile includes a `HEALTHCHECK` directive using `wget` against this endpoint. compose.yml uses `service_healthy` conditions to sequence startup: tun2proxy waits for sluice, openclaw waits for tun2proxy.
 
 Graceful shutdown: On SIGINT/SIGTERM, the proxy stops accepting new connections and drains in-flight connections up to `--shutdown-timeout` (default 10s). Pending Telegram approval requests are auto-denied with a "shutting down" reason. The audit logger is closed after all connections drain.
 
-MCP gateway: `Gateway` spawns upstream MCP servers as child processes via `StartUpstream`, performs `initialize` handshake and `notifications/initialized`, discovers tools via `tools/list`, and namespaces them with `<upstream>__<tool>`. The agent connects via stdio (`RunStdio`). On `tools/call`, the gateway evaluates `ToolPolicy` (deny/allow/ask priority, same as network policy), optionally requests Telegram approval via the shared `ApprovalBroker`, runs `ContentInspector.InspectArguments` to block arguments matching regex patterns (JSON is parsed before matching to prevent unicode escape bypass), strips the namespace prefix, forwards to the upstream, runs `ContentInspector.RedactResponse` on the result, and adds governance metadata. `ToolPolicy` reuses `policy.CompileGlob` for glob matching. The `mcp` subcommand reads `[[mcp_upstream]]`, `[[tool_allow]]`, `[[tool_deny]]`, `[[tool_ask]]`, `[[inspect_block]]`, and `[[inspect_redact]]` sections from the same TOML policy file. Per-upstream timeouts are configurable via `timeout_sec` in `[[mcp_upstream]]` sections (default 120s). `GatewayConfig.TimeoutSec` sets a global default that individual upstreams can override.
+MCP gateway: `Gateway` spawns upstream MCP servers as child processes via `StartUpstream`, performs `initialize` handshake and `notifications/initialized`, discovers tools via `tools/list`, and namespaces them with `<upstream>__<tool>`. The agent connects via stdio (`RunStdio`). On `tools/call`, the gateway evaluates `ToolPolicy` (deny/allow/ask priority, same as network policy), optionally requests Telegram approval via the shared `ApprovalBroker`, runs `ContentInspector.InspectArguments` to block arguments matching regex patterns (JSON is parsed before matching to prevent unicode escape bypass), strips the namespace prefix, forwards to the upstream, runs `ContentInspector.RedactResponse` on the result, and adds governance metadata. `ToolPolicy` reuses `policy.CompileGlob` for glob matching. The `mcp` subcommand reads upstreams, tool rules, and inspect rules from the SQLite store. Upstreams can be registered at runtime via `sluice mcp add` (persisted in the `mcp_upstreams` table). Per-upstream timeouts are configurable via `timeout_sec` (default 120s). `GatewayConfig.TimeoutSec` sets a global default that individual upstreams can override.
 
-## Policy File
+## Policy Store
+
+All runtime policy state is stored in a SQLite database (default: `sluice.db`). TOML files are used only for initial seeding via `sluice policy import`. The CLI, Telegram commands, and approval buttons all write to the same database.
+
+### TOML Seed File Format
 
 ```toml
 [policy]
@@ -362,11 +413,11 @@ Instead, it uses 1:1 phantom token mapping with byte-level find-and-replace.
 
 ### How it works
 
-1. User adds a credential via Sluice Telegram bot (`/cred add anthropic_api_key`)
-2. User sends the real key in Telegram (Sluice deletes the message after reading)
+1. User adds a credential via CLI (`sluice cred add anthropic_api_key`) or Telegram bot (`/cred add`)
+2. For Telegram: user sends the real key (Sluice deletes the message after reading). For CLI: reads from terminal.
 3. Sluice encrypts and stores the real credential in the vault
 4. Sluice generates a phantom token (random string matching the key format)
-5. Sluice restarts the OpenClaw container via Docker socket with updated env vars
+5. Sluice writes phantom tokens as files in a shared volume (`/phantoms/ANTHROPIC_API_KEY`) and signals OpenClaw to reload via `docker exec openclaw openclaw secrets reload`. Falls back to full container restart if exec fails.
 6. OpenClaw uses phantom tokens normally via SDKs (thinks they're real)
 7. SDKs put them in the correct headers/body (they know how)
 8. Sluice's built-in HTTPS MITM intercepts the request and does byte-level
@@ -374,24 +425,29 @@ Instead, it uses 1:1 phantom token mapping with byte-level find-and-replace.
    memory and cleared immediately after injection.
 9. Sluice never needs to know the API's auth format
 
-### Docker socket for dynamic credential injection
+### Hot credential reload via shared volume
 
-Sluice manages the OpenClaw container's environment via Docker socket.
-When credentials change, Sluice recreates the container with updated env
-vars. No manual `.env` files, no restarts by hand.
+Sluice delivers phantom tokens to the agent container via a shared volume
+and signals a reload, avoiding full container restarts.
 
 ```
-User adds cred via Telegram
+User adds cred via CLI or Telegram
     |
     v
 Sluice vault (stores real + generates phantom)
     |
     v
-Docker socket --> recreate OpenClaw container with new phantom env vars
+Write phantom files to shared volume (/phantoms/ANTHROPIC_API_KEY)
     |
     v
-OpenClaw starts with updated phantom tokens
+docker exec openclaw openclaw secrets reload
+    |
+    v
+OpenClaw hot-reloads phantom tokens from /phantoms/ directory
 ```
+
+If the agent image does not support `secrets reload`, Sluice falls back to
+recreating the container with updated env vars via Docker socket.
 
 Sluice container needs `/var/run/docker.sock` mounted. This is acceptable
 because Sluice already holds all real credentials. It's the most privileged
@@ -425,12 +481,13 @@ Sluice bot commands:
 ```
 /cred add <name>           Add credential (prompts for value, deletes message)
 /cred list                 List credential names (never shows values)
-/cred rotate <name>        Replace credential, regenerate phantom, restart agent
-/cred remove <name>        Remove credential, restart agent
+/cred rotate <name>        Replace credential, regenerate phantom, hot-reload agent
+/cred remove <name>        Remove credential, hot-reload agent
 
-/policy show               Show current policy rules
-/policy allow <dest>       Add allow rule, hot-reload
-/policy deny <dest>        Add deny rule, hot-reload
+/policy show               Show current policy rules (from SQLite store)
+/policy allow <dest>       Add allow rule to store, recompile engine
+/policy deny <dest>        Add deny rule to store, recompile engine
+/policy remove <id>        Remove rule from store by ID
 
 /status                    Proxy stats, pending approvals, agent health
 /audit recent [N]          Show last N connections
@@ -512,12 +569,13 @@ See `compose.yml` in the repo root. Key features:
 - Startup ordering via `condition: service_healthy`
 - `restart: unless-stopped` on all services
 - CA cert trust: openclaw mounts sluice-ca volume and sets `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`
-- Phantom tokens via `env_file: .env.phantom` (generated by `scripts/gen-phantom-env.sh`)
+- Phantom tokens: shared `sluice-phantoms` volume mounted read-write in sluice and read-only in openclaw at `/phantoms/`. Sluice writes phantom token files, openclaw reads them. Fallback `env_file: .env.phantom` for initial bootstrap.
 
 ## Libraries
 
 - `github.com/armon/go-socks5` - SOCKS5 server
-- `github.com/BurntSushi/toml` - Policy file parsing
+- `modernc.org/sqlite` - Pure Go SQLite driver (no CGO, works with CGO_ENABLED=0)
+- `github.com/BurntSushi/toml` - TOML parsing for seed file import only (`store/import.go`)
 - `golang.org/x/net/proxy` - SOCKS5 client (tests only)
 - `github.com/go-telegram-bot-api/telegram-bot-api/v5` - Telegram Bot API client
 - `filippo.io/age` - Age encryption for credential vault
@@ -537,10 +595,11 @@ See `compose.yml` in the repo root. Key features:
 | Credential vault + secure memory | ~300 | age-encrypted, SecureBytes with zeroing |
 | External vault providers | ~200 | HashiCorp Vault, env, provider interface |
 | Telegram bot (approval UX) | ~250 | Inline keyboard, callback handling, shared by both layers |
-| Policy file parser (TOML) | ~150 | Network rules + tool rules |
+| SQLite policy store + TOML import | ~400 | Runtime state persistence, seed import |
+| Policy CLI (list/add/remove/import/export) | ~200 | Unified control plane |
 | Content inspection (tool args + responses) | ~200 | Regex patterns for secrets/PII |
 | Audit logger | ~200 | JSON lines, blake3 hash chains, chain verification CLI |
-| **Total custom code** | **~2450** | Single Go binary |
+| **Total custom code** | **~2950** | Single Go binary |
 | Docker setup + tun2proxy | Config only | compose.yml |
 
 ## Future: Apple Container Support (last-mile, requires research)
