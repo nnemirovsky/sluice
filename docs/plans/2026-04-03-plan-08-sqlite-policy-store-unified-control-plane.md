@@ -315,16 +315,16 @@ Remove BurntSushi/toml from runtime imports. It stays only in `store/import.go` 
 
 ### Task 11: Verify acceptance criteria
 
-- [ ] Verify `sluice policy add allow example.com` persists across restart
-- [ ] Verify Telegram "Always Allow" persists across restart
-- [ ] Verify `sluice policy import policy.toml` seeds an empty DB correctly
-- [ ] Verify `sluice policy import` skips duplicates on second run
-- [ ] Verify `sluice mcp add github --command npx --args "-y,@mcp/server-github"` registers upstream
-- [ ] Verify credential hot-reload works without container restart
-- [ ] Verify `sluice cred add mykey --destination api.example.com --ports 443` creates credential + rule + binding
-- [ ] Verify SIGHUP recompiles Engine from store (not file)
-- [ ] Run full test suite: `go test ./... -v -timeout 60s -race`
-- [ ] Run linter: `go vet ./...`
+- [x] Verify `sluice policy add allow example.com` persists across restart
+- [x] Verify Telegram "Always Allow" persists across restart
+- [x] Verify `sluice policy import policy.toml` seeds an empty DB correctly
+- [x] Verify `sluice policy import` skips duplicates on second run
+- [x] Verify `sluice mcp add github --command npx --args "-y,@mcp/server-github"` registers upstream
+- [x] Verify credential hot-reload works without container restart
+- [x] Verify `sluice cred add mykey --destination api.example.com --ports 443` creates credential + rule + binding
+- [x] Verify SIGHUP recompiles Engine from store (not file)
+- [x] Run full test suite: `go test ./... -v -timeout 60s -race`
+- [x] Run linter: `go vet ./...`
 
 ### Task 12: [Final] Update documentation
 
