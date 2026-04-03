@@ -270,15 +270,15 @@ Allow MCP upstream registration at runtime. Upstreams are stored in SQLite.
 - Modify: `cmd/sluice/mcp.go`
 - Modify: `cmd/sluice/mcp_test.go`
 
-- [ ] Add subcommand routing: `sluice mcp` (no args) starts gateway as before; `sluice mcp add|list|remove` manages upstreams
-- [ ] Implement `sluice mcp add <name> --command <cmd> [--args "arg1,arg2"] [--env "KEY=VAL,..."] [--timeout 120]`
-- [ ] Implement `sluice mcp list` -- shows all registered upstreams from DB
-- [ ] Implement `sluice mcp remove <name>` -- removes upstream from DB
-- [ ] Gateway startup reads upstreams from store instead of TOML
-- [ ] Remove TOML parsing from mcp.go (upstreams come from store)
-- [ ] Write tests for add/list/remove subcommands
-- [ ] Write test for gateway starting with store-backed upstreams
-- [ ] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
+- [x] Add subcommand routing: `sluice mcp` (no args) starts gateway as before; `sluice mcp add|list|remove` manages upstreams
+- [x] Implement `sluice mcp add <name> --command <cmd> [--args "arg1,arg2"] [--env "KEY=VAL,..."] [--timeout 120]`
+- [x] Implement `sluice mcp list` -- shows all registered upstreams from DB
+- [x] Implement `sluice mcp remove <name>` -- removes upstream from DB
+- [x] Gateway startup reads upstreams from store instead of TOML
+- [x] Remove TOML parsing from mcp.go (upstreams come from store)
+- [x] Write tests for add/list/remove subcommands
+- [x] Write test for gateway starting with store-backed upstreams
+- [x] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
 
 ### Task 9: Add `sluice cred` integration with policy rules
 

@@ -7,26 +7,39 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 
-	"github.com/BurntSushi/toml"
-
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/mcp"
 	"github.com/nemirovsky/sluice/internal/policy"
+	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/telegram"
 )
 
-// mcpConfig holds MCP-specific sections parsed from the policy TOML file.
-type mcpConfig struct {
-	MCPUpstreams []mcp.UpstreamConfig `toml:"mcp_upstream"`
+func handleMCPCommand(args []string) error {
+	// Route subcommands: add, list, remove manage upstreams in the store.
+	// No args or flag-style args start the gateway as before.
+	if len(args) > 0 {
+		switch args[0] {
+		case "add":
+			return handleMCPAdd(args[1:])
+		case "list":
+			return handleMCPList(args[1:])
+		case "remove":
+			return handleMCPRemove(args[1:])
+		}
+	}
+
+	return handleMCPGateway(args)
 }
 
-func handleMCPCommand(args []string) error {
+func handleMCPGateway(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
-	policyPath := fs.String("policy", "policy.toml", "path to policy TOML file")
+	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	policyPath := fs.String("policy", "", "path to policy TOML file (seeds DB on first run if DB is empty)")
 	auditPath := fs.String("audit", "", "path to audit log file (optional)")
 	telegramToken := fs.String("telegram-token", os.Getenv("TELEGRAM_BOT_TOKEN"), "Telegram bot token")
 	telegramChatIDStr := fs.String("telegram-chat-id", os.Getenv("TELEGRAM_CHAT_ID"), "Telegram chat ID for approvals")
@@ -40,17 +53,40 @@ func handleMCPCommand(args []string) error {
 		explicitFlags[f.Name] = true
 	})
 
-	policyData, err := os.ReadFile(*policyPath)
+	// Open the SQLite store.
+	db, err := store.New(*dbPath)
 	if err != nil {
-		return fmt.Errorf("read policy file: %w", err)
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer db.Close()
+
+	// If --policy is specified and the DB is empty, auto-import the TOML file as seed.
+	if *policyPath != "" {
+		empty, err := db.IsEmpty()
+		if err != nil {
+			return fmt.Errorf("check store: %w", err)
+		}
+		if empty {
+			data, err := os.ReadFile(*policyPath)
+			if err != nil {
+				return fmt.Errorf("read policy seed file: %w", err)
+			}
+			result, err := db.ImportTOML(data)
+			if err != nil {
+				return fmt.Errorf("import policy seed: %w", err)
+			}
+			log.Printf("seeded DB from %s: %d rules, %d tool rules, %d bindings, %d upstreams, %d config",
+				*policyPath, result.RulesInserted, result.ToolRulesInserted,
+				result.BindingsInserted, result.UpstreamsInserted, result.ConfigSet)
+		}
 	}
 
-	eng, err := policy.LoadFromBytes(policyData)
+	eng, err := policy.LoadFromStore(db)
 	if err != nil {
 		return fmt.Errorf("load policy: %w", err)
 	}
 
-	// If the policy file specifies custom env var names for Telegram, use
+	// If the store specifies custom env var names for Telegram, use
 	// those instead of the hardcoded defaults (but only when the flag was
 	// not explicitly provided on the command line).
 	if eng.Telegram.BotTokenEnv != "" && !explicitFlags["telegram-token"] {
@@ -60,10 +96,20 @@ func handleMCPCommand(args []string) error {
 		*telegramChatIDStr = os.Getenv(eng.Telegram.ChatIDEnv)
 	}
 
-	// Parse MCP upstream config from the already-read TOML bytes.
-	var mcpCfg mcpConfig
-	if err := toml.Unmarshal(policyData, &mcpCfg); err != nil {
-		return fmt.Errorf("parse MCP config: %w", err)
+	// Read MCP upstreams from the store.
+	upstreamRows, err := db.ListMCPUpstreams()
+	if err != nil {
+		return fmt.Errorf("list MCP upstreams: %w", err)
+	}
+	upstreams := make([]mcp.UpstreamConfig, len(upstreamRows))
+	for i, r := range upstreamRows {
+		upstreams[i] = mcp.UpstreamConfig{
+			Name:       r.Name,
+			Command:    r.Command,
+			Args:       r.Args,
+			Env:        r.Env,
+			TimeoutSec: r.TimeoutSec,
+		}
 	}
 
 	// Build tool policy from engine's tool rules.
@@ -102,6 +148,7 @@ func handleMCPCommand(args []string) error {
 				EnginePtr: &enginePtr,
 				ReloadMu:  &reloadMu,
 				AuditPath: *auditPath,
+				Store:     db,
 			}, broker)
 			if botErr != nil {
 				return fmt.Errorf("telegram bot: %w", botErr)
@@ -124,19 +171,20 @@ func handleMCPCommand(args []string) error {
 	}
 
 	gw, err := mcp.NewGateway(mcp.GatewayConfig{
-		Upstreams:  mcpCfg.MCPUpstreams,
+		Upstreams:  upstreams,
 		ToolPolicy: toolPolicy,
 		Inspector:  inspector,
 		Audit:      logger,
 		Broker:     broker,
 		TimeoutSec: eng.TimeoutSec,
+		Store:      db,
 	})
 	if err != nil {
 		return fmt.Errorf("start MCP gateway: %w", err)
 	}
 	defer gw.Stop()
 
-	log.Printf("MCP gateway ready: %d tools from %d upstreams", len(gw.Tools()), len(mcpCfg.MCPUpstreams))
+	log.Printf("MCP gateway ready: %d tools from %d upstreams", len(gw.Tools()), len(upstreams))
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -161,5 +209,130 @@ func handleMCPCommand(args []string) error {
 		}
 		log.Println("MCP gateway stdin closed, exiting")
 	}
+	return nil
+}
+
+func handleMCPAdd(args []string) error {
+	fs := flag.NewFlagSet("mcp add", flag.ExitOnError)
+	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	command := fs.String("command", "", "command to run the MCP server")
+	argsStr := fs.String("args", "", "comma-separated arguments for the command")
+	envStr := fs.String("env", "", "comma-separated KEY=VAL environment variables")
+	timeout := fs.Int("timeout", 120, "upstream timeout in seconds")
+	fs.Parse(args)
+
+	if fs.NArg() == 0 || *command == "" {
+		fmt.Println("usage: sluice mcp add <name> --command <cmd> [--args \"arg1,arg2\"] [--env \"KEY=VAL,...\"] [--timeout 120]")
+		os.Exit(1)
+	}
+	name := fs.Arg(0)
+
+	if err := mcp.ValidateUpstreamName(name); err != nil {
+		return fmt.Errorf("invalid upstream name: %w", err)
+	}
+
+	var cmdArgs []string
+	if *argsStr != "" {
+		cmdArgs = strings.Split(*argsStr, ",")
+	}
+
+	env := make(map[string]string)
+	if *envStr != "" {
+		for _, kv := range strings.Split(*envStr, ",") {
+			parts := strings.SplitN(kv, "=", 2)
+			if len(parts) != 2 {
+				return fmt.Errorf("invalid env format %q (expected KEY=VAL)", kv)
+			}
+			env[parts[0]] = parts[1]
+		}
+	}
+
+	db, err := store.New(*dbPath)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer db.Close()
+
+	id, err := db.AddMCPUpstream(name, *command, store.MCPUpstreamOpts{
+		Args:       cmdArgs,
+		Env:        env,
+		TimeoutSec: *timeout,
+	})
+	if err != nil {
+		return fmt.Errorf("add upstream: %w", err)
+	}
+	fmt.Printf("added MCP upstream %q [%d] (command: %s)\n", name, id, *command)
+	return nil
+}
+
+func handleMCPList(args []string) error {
+	fs := flag.NewFlagSet("mcp list", flag.ExitOnError)
+	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	fs.Parse(args)
+
+	db, err := store.New(*dbPath)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer db.Close()
+
+	upstreams, err := db.ListMCPUpstreams()
+	if err != nil {
+		return fmt.Errorf("list upstreams: %w", err)
+	}
+
+	if len(upstreams) == 0 {
+		fmt.Println("no MCP upstreams registered")
+		return nil
+	}
+
+	for _, u := range upstreams {
+		argsStr := ""
+		if len(u.Args) > 0 {
+			argsStr = " args=" + strings.Join(u.Args, ",")
+		}
+		envStr := ""
+		if len(u.Env) > 0 {
+			pairs := make([]string, 0, len(u.Env))
+			for k, v := range u.Env {
+				pairs = append(pairs, k+"="+v)
+			}
+			envStr = " env=" + strings.Join(pairs, ",")
+		}
+		timeoutStr := ""
+		if u.TimeoutSec != 120 {
+			timeoutStr = fmt.Sprintf(" timeout=%ds", u.TimeoutSec)
+		}
+		fmt.Printf("[%d] %s command=%s%s%s%s\n", u.ID, u.Name, u.Command, argsStr, envStr, timeoutStr)
+	}
+	return nil
+}
+
+func handleMCPRemove(args []string) error {
+	fs := flag.NewFlagSet("mcp remove", flag.ExitOnError)
+	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	fs.Parse(args)
+
+	if fs.NArg() == 0 {
+		fmt.Println("usage: sluice mcp remove <name>")
+		os.Exit(1)
+	}
+	name := fs.Arg(0)
+
+	db, err := store.New(*dbPath)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer db.Close()
+
+	deleted, err := db.RemoveMCPUpstream(name)
+	if err != nil {
+		return fmt.Errorf("remove upstream: %w", err)
+	}
+	if !deleted {
+		fmt.Printf("no upstream named %q\n", name)
+		os.Exit(1)
+	}
+	fmt.Printf("removed MCP upstream %q\n", name)
 	return nil
 }
