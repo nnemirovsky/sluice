@@ -377,19 +377,19 @@ timeout_sec = 60
 # GITHUB_TOKEN = "phantom-token-here"
 ```
 
-- [ ] Update `importFile` struct: remove `ToolAllow`, `ToolDeny`, `ToolAsk`, `InspectBlock`, `InspectRedact` fields. `[[allow]]`/`[[deny]]`/`[[ask]]` entries now carry either `destination`, `tool`, or `pattern`. Add `Redact []importRedactRule` for `[[redact]]` section.
-- [ ] Update `importRule` struct: add `Tool`, `Pattern`, `Protocols []string`, rename `Note` to `Name`
-- [ ] Create `importRedactRule` struct: `Pattern`, `Replacement`, `Name`, `Destination`, `Ports`, `Protocols`
-- [ ] Remove `importToolRule`, `importInspectBlock`, `importInspectRedact` structs
-- [ ] Update `importBinding`: rename `InjectHeader` to `Header`, rename `Protocol` to `Protocols []string`
-- [ ] Remove `importTelegramConfig` struct (hardcoded env var names, no longer in config)
-- [ ] Update `ImportTOML` to write all rules to unified `rules` table using `AddRule`
-- [ ] Update `ImportTOML` to write config as typed `UpdateConfig` call
-- [ ] Update all insert helpers for unified schema
-- [ ] Rename `examples/policy.toml` to `examples/config.toml` with updated format
-- [ ] Update all testdata/*.toml fixtures to new format
-- [ ] Rewrite import tests for unified schema
-- [ ] Run tests: `go test ./internal/store/ -v -timeout 30s`
+- [x] Update `importFile` struct: remove `ToolAllow`, `ToolDeny`, `ToolAsk`, `InspectBlock`, `InspectRedact` fields. `[[allow]]`/`[[deny]]`/`[[ask]]` entries now carry either `destination`, `tool`, or `pattern`. Add `Redact []importRedactRule` for `[[redact]]` section.
+- [x] Update `importRule` struct: add `Tool`, `Pattern`, `Protocols []string`, rename `Note` to `Name`
+- [x] Create `importRedactRule` struct: `Pattern`, `Replacement`, `Name`, `Destination`, `Ports`, `Protocols`
+- [x] Remove `importToolRule`, `importInspectBlock`, `importInspectRedact` structs
+- [x] Update `importBinding`: rename `InjectHeader` to `Header`, rename `Protocol` to `Protocols []string`
+- [x] Remove `importTelegramConfig` struct (hardcoded env var names, no longer in config)
+- [x] Update `ImportTOML` to write all rules to unified `rules` table using `AddRule`
+- [x] Update `ImportTOML` to write config as typed `UpdateConfig` call
+- [x] Update all insert helpers for unified schema
+- [x] Rename `examples/policy.toml` to `examples/config.toml` with updated format
+- [x] Update all testdata/*.toml fixtures to new format
+- [x] Rewrite import tests for unified schema
+- [x] Run tests: `go test ./internal/store/ -v -timeout 30s`
 
 ### Task 7: Update policy engine to read from unified store
 

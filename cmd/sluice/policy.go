@@ -203,10 +203,8 @@ func handlePolicyImport(args []string) {
 		log.Fatalf("import: %v", err)
 	}
 
-	fmt.Printf("imported: %d rules (%d skipped), %d tool rules (%d skipped), %d inspect rules (%d skipped), %d bindings (%d skipped), %d upstreams (%d skipped), %d config\n",
+	fmt.Printf("imported: %d rules (%d skipped), %d bindings (%d skipped), %d upstreams (%d skipped), %d config\n",
 		result.RulesInserted, result.RulesSkipped,
-		result.ToolRulesInserted, result.ToolRulesSkipped,
-		result.InspectInserted, result.InspectSkipped,
 		result.BindingsInserted, result.BindingsSkipped,
 		result.UpstreamsInserted, result.UpstreamsSkipped,
 		result.ConfigSet,
@@ -322,46 +320,51 @@ func handlePolicyExport(args []string) {
 		}
 	}
 
-	// Tool rules.
+	// Tool rules (exported as [[allow]], [[deny]], [[ask]] with tool field).
 	for _, verdict := range []string{"allow", "deny", "ask"} {
 		toolRules, err := db.ListRules(store.RuleFilter{Verdict: verdict, Type: "tool"})
 		if err != nil {
-			log.Fatalf("list tool_%s rules: %v", verdict, err)
+			log.Fatalf("list tool %s rules: %v", verdict, err)
 		}
 		for _, r := range toolRules {
-			fmt.Printf("[[tool_%s]]\n", verdict)
+			fmt.Printf("[[%s]]\n", verdict)
 			fmt.Printf("tool = %q\n", r.Tool)
 			if r.Name != "" {
-				fmt.Printf("note = %q\n", r.Name)
+				fmt.Printf("name = %q\n", r.Name)
 			}
 			fmt.Println()
 		}
 	}
 
-	// Inspect rules (pattern-based: deny=block, redact=redact).
-	patternRules, err := db.ListRules(store.RuleFilter{Type: "pattern"})
+	// Content deny rules (pattern-based, exported as [[deny]] with pattern field).
+	denyPatterns, err := db.ListRules(store.RuleFilter{Verdict: "deny", Type: "pattern"})
 	if err != nil {
-		log.Fatalf("list pattern rules: %v", err)
+		log.Fatalf("list deny pattern rules: %v", err)
 	}
-	for _, r := range patternRules {
-		if r.Verdict == "deny" {
-			fmt.Println("[[inspect_block]]")
-			fmt.Printf("pattern = %q\n", r.Pattern)
-			if r.Name != "" {
-				fmt.Printf("name = %q\n", r.Name)
-			}
-			fmt.Println()
-		} else if r.Verdict == "redact" {
-			fmt.Println("[[inspect_redact]]")
-			fmt.Printf("pattern = %q\n", r.Pattern)
-			if r.Replacement != "" {
-				fmt.Printf("replacement = %q\n", r.Replacement)
-			}
-			if r.Name != "" {
-				fmt.Printf("name = %q\n", r.Name)
-			}
-			fmt.Println()
+	for _, r := range denyPatterns {
+		fmt.Println("[[deny]]")
+		fmt.Printf("pattern = %q\n", r.Pattern)
+		if r.Name != "" {
+			fmt.Printf("name = %q\n", r.Name)
 		}
+		fmt.Println()
+	}
+
+	// Redact rules (exported as [[redact]]).
+	redactRules, err := db.ListRules(store.RuleFilter{Verdict: "redact", Type: "pattern"})
+	if err != nil {
+		log.Fatalf("list redact rules: %v", err)
+	}
+	for _, r := range redactRules {
+		fmt.Println("[[redact]]")
+		fmt.Printf("pattern = %q\n", r.Pattern)
+		if r.Replacement != "" {
+			fmt.Printf("replacement = %q\n", r.Replacement)
+		}
+		if r.Name != "" {
+			fmt.Printf("name = %q\n", r.Name)
+		}
+		fmt.Println()
 	}
 
 	// Bindings.

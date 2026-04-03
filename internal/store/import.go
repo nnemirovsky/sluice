@@ -11,56 +11,45 @@ import (
 
 // ImportResult reports what happened during a TOML import.
 type ImportResult struct {
-	RulesInserted     int
-	RulesSkipped      int
-	ToolRulesInserted int
-	ToolRulesSkipped  int
-	InspectInserted   int
-	InspectSkipped    int
-	BindingsInserted  int
-	BindingsSkipped   int
+	RulesInserted    int
+	RulesSkipped     int
+	BindingsInserted int
+	BindingsSkipped  int
 	UpstreamsInserted int
 	UpstreamsSkipped  int
-	ConfigSet         int
+	ConfigSet        int
 }
 
-// importRule is the TOML representation of a network rule with all optional fields.
+// importRule is the TOML representation of a unified rule. Exactly one of
+// Destination, Tool, or Pattern must be set. The verdict comes from the
+// TOML section name ([[allow]], [[deny]], [[ask]]).
 type importRule struct {
-	Destination string `toml:"destination"`
-	Ports       []int  `toml:"ports"`
-	Protocol    string `toml:"protocol"`
-	Note        string `toml:"note"`
+	Destination string   `toml:"destination"`
+	Tool        string   `toml:"tool"`
+	Pattern     string   `toml:"pattern"`
+	Ports       []int    `toml:"ports"`
+	Protocols   []string `toml:"protocols"`
+	Name        string   `toml:"name"`
 }
 
-// importToolRule is the TOML representation of a tool policy rule.
-type importToolRule struct {
-	Tool string `toml:"tool"`
-	Note string `toml:"note"`
-}
-
-// importInspectBlock is the TOML representation of an inspect_block rule.
-type importInspectBlock struct {
-	Pattern string `toml:"pattern"`
-	Name    string `toml:"name"`
-	Note    string `toml:"note"`
-}
-
-// importInspectRedact is the TOML representation of an inspect_redact rule.
-type importInspectRedact struct {
-	Pattern     string `toml:"pattern"`
-	Replacement string `toml:"replacement"`
-	Name        string `toml:"name"`
-	Note        string `toml:"note"`
+// importRedactRule is the TOML representation of a [[redact]] section entry.
+type importRedactRule struct {
+	Pattern     string   `toml:"pattern"`
+	Replacement string   `toml:"replacement"`
+	Name        string   `toml:"name"`
+	Destination string   `toml:"destination"`
+	Ports       []int    `toml:"ports"`
+	Protocols   []string `toml:"protocols"`
 }
 
 // importBinding is the TOML representation of a credential binding.
 type importBinding struct {
-	Destination  string `toml:"destination"`
-	Ports        []int  `toml:"ports"`
-	Credential   string `toml:"credential"`
-	InjectHeader string `toml:"inject_header"`
-	Template     string `toml:"template"`
-	Protocol     string `toml:"protocol"`
+	Destination string   `toml:"destination"`
+	Ports       []int    `toml:"ports"`
+	Credential  string   `toml:"credential"`
+	Header      string   `toml:"header"`
+	Template    string   `toml:"template"`
+	Protocols   []string `toml:"protocols"`
 }
 
 // importMCPUpstream is the TOML representation of an MCP upstream server.
@@ -75,11 +64,6 @@ type importMCPUpstream struct {
 type importPolicyConfig struct {
 	Default    string `toml:"default"`
 	TimeoutSec int    `toml:"timeout_sec"`
-}
-
-type importTelegramConfig struct {
-	BotTokenEnv string `toml:"bot_token_env"`
-	ChatIDEnv   string `toml:"chat_id_env"`
 }
 
 // importVaultConfig is the TOML representation of the [vault] section.
@@ -103,28 +87,24 @@ type importHashiCorpConfig struct {
 	SecretIDEnv string `toml:"secret_id_env"`
 }
 
-// importFile is the top-level TOML structure for policy import.
+// importFile is the top-level TOML structure for config import.
 type importFile struct {
-	Policy        importPolicyConfig    `toml:"policy"`
-	Telegram      importTelegramConfig  `toml:"telegram"`
-	Vault         importVaultConfig     `toml:"vault"`
-	Allow         []importRule          `toml:"allow"`
-	Deny          []importRule          `toml:"deny"`
-	Ask           []importRule          `toml:"ask"`
-	ToolAllow     []importToolRule      `toml:"tool_allow"`
-	ToolDeny      []importToolRule      `toml:"tool_deny"`
-	ToolAsk       []importToolRule      `toml:"tool_ask"`
-	InspectBlock  []importInspectBlock  `toml:"inspect_block"`
-	InspectRedact []importInspectRedact `toml:"inspect_redact"`
-	Bindings      []importBinding       `toml:"binding"`
-	MCPUpstreams  []importMCPUpstream   `toml:"mcp_upstream"`
+	Policy       importPolicyConfig `toml:"policy"`
+	Vault        importVaultConfig  `toml:"vault"`
+	Allow        []importRule       `toml:"allow"`
+	Deny         []importRule       `toml:"deny"`
+	Ask          []importRule       `toml:"ask"`
+	Redact       []importRedactRule `toml:"redact"`
+	Bindings     []importBinding    `toml:"binding"`
+	MCPUpstreams []importMCPUpstream `toml:"mcp_upstream"`
 }
 
-// ImportTOML parses TOML policy data and inserts rules into the store with
+// ImportTOML parses TOML config data and inserts rules into the store with
 // merge semantics. Duplicate rules (matched by verdict+destination+ports for
-// network rules, verdict+tool for tool rules, destination+credential for
-// bindings, name for upstreams) are skipped. The entire import runs in a
-// single transaction so malformed data causes no partial writes.
+// network rules, verdict+tool for tool rules, verdict+pattern for content
+// rules, destination+credential for bindings, name for upstreams) are
+// skipped. The entire import runs in a single transaction so malformed data
+// causes no partial writes.
 func (s *Store) ImportTOML(data []byte) (*ImportResult, error) {
 	var f importFile
 	if err := toml.Unmarshal(data, &f); err != nil {
@@ -139,7 +119,7 @@ func (s *Store) ImportTOML(data []byte) (*ImportResult, error) {
 
 	res := &ImportResult{}
 
-	// Import network rules.
+	// Import allow/deny/ask rules (unified: destination, tool, or pattern).
 	ruleVerdict := []struct {
 		verdict string
 		rules   []importRule
@@ -150,7 +130,7 @@ func (s *Store) ImportTOML(data []byte) (*ImportResult, error) {
 	}
 	for _, rv := range ruleVerdict {
 		for _, r := range rv.rules {
-			inserted, err := insertNetworkRuleIfNew(tx, rv.verdict, r)
+			inserted, err := insertRuleIfNew(tx, rv.verdict, r)
 			if err != nil {
 				return nil, err
 			}
@@ -162,58 +142,16 @@ func (s *Store) ImportTOML(data []byte) (*ImportResult, error) {
 		}
 	}
 
-	// Import tool rules.
-	toolVerdict := []struct {
-		verdict string
-		rules   []importToolRule
-	}{
-		{"allow", f.ToolAllow},
-		{"deny", f.ToolDeny},
-		{"ask", f.ToolAsk},
-	}
-	for _, tv := range toolVerdict {
-		for _, r := range tv.rules {
-			inserted, err := insertToolRuleIfNew(tx, tv.verdict, r)
-			if err != nil {
-				return nil, err
-			}
-			if inserted {
-				res.ToolRulesInserted++
-			} else {
-				res.ToolRulesSkipped++
-			}
-		}
-	}
-
-	// Import inspect rules.
-	for _, r := range f.InspectBlock {
-		desc := r.Name
-		if desc == "" {
-			desc = r.Note
-		}
-		inserted, err := insertInspectRuleIfNew(tx, "block", r.Pattern, nilIfEmpty(desc), nil)
+	// Import redact rules.
+	for _, r := range f.Redact {
+		inserted, err := insertRedactRuleIfNew(tx, r)
 		if err != nil {
 			return nil, err
 		}
 		if inserted {
-			res.InspectInserted++
+			res.RulesInserted++
 		} else {
-			res.InspectSkipped++
-		}
-	}
-	for _, r := range f.InspectRedact {
-		desc := r.Name
-		if desc == "" {
-			desc = r.Note
-		}
-		inserted, err := insertInspectRuleIfNew(tx, "redact", r.Pattern, nilIfEmpty(desc), nilIfEmpty(r.Replacement))
-		if err != nil {
-			return nil, err
-		}
-		if inserted {
-			res.InspectInserted++
-		} else {
-			res.InspectSkipped++
+			res.RulesSkipped++
 		}
 	}
 
@@ -235,8 +173,6 @@ func (s *Store) ImportTOML(data []byte) (*ImportResult, error) {
 		}
 		res.ConfigSet++
 	}
-
-	// Telegram config values are silently ignored (hardcoded env var names).
 
 	// Import vault config.
 	vaultConfigKeys := []struct {
@@ -303,79 +239,143 @@ func (s *Store) ImportTOML(data []byte) (*ImportResult, error) {
 	return res, nil
 }
 
-// insertNetworkRuleIfNew inserts a network rule if no matching
-// verdict+destination+ports combination exists. Returns true if inserted.
-func insertNetworkRuleIfNew(tx *sql.Tx, verdict string, r importRule) (bool, error) {
-	if r.Destination == "" {
-		return false, fmt.Errorf("network rule has empty destination")
+// insertRuleIfNew inserts a unified rule (network, tool, or content deny)
+// if no matching duplicate exists. Exactly one of r.Destination, r.Tool,
+// or r.Pattern must be set. Returns true if inserted.
+func insertRuleIfNew(tx *sql.Tx, verdict string, r importRule) (bool, error) {
+	set := 0
+	if r.Destination != "" {
+		set++
 	}
+	if r.Tool != "" {
+		set++
+	}
+	if r.Pattern != "" {
+		set++
+	}
+	if set == 0 {
+		return false, fmt.Errorf("%s rule has no destination, tool, or pattern", verdict)
+	}
+	if set > 1 {
+		return false, fmt.Errorf("%s rule: destination, tool, and pattern are mutually exclusive", verdict)
+	}
+
 	for _, p := range r.Ports {
 		if p < 1 || p > 65535 {
-			return false, fmt.Errorf("network rule %q: invalid port %d (must be 1-65535)", r.Destination, p)
+			return false, fmt.Errorf("rule: invalid port %d (must be 1-65535)", p)
 		}
 	}
-	portsJSON := portsToJSON(r.Ports)
 
-	var count int
-	var err error
-	if portsJSON != nil {
-		err = tx.QueryRow(
-			"SELECT COUNT(*) FROM rules WHERE verdict = ? AND destination = ? AND ports = ?",
-			verdict, r.Destination, *portsJSON,
-		).Scan(&count)
-	} else {
-		err = tx.QueryRow(
-			"SELECT COUNT(*) FROM rules WHERE verdict = ? AND destination = ? AND ports IS NULL",
-			verdict, r.Destination,
-		).Scan(&count)
+	// Validate regex for pattern rules.
+	if r.Pattern != "" {
+		if _, err := regexp.Compile(r.Pattern); err != nil {
+			return false, fmt.Errorf("rule pattern %q: invalid regex: %w", r.Pattern, err)
+		}
 	}
+
+	// Check for duplicates.
+	exists, err := ruleExistsTx(tx, verdict, r.Destination, r.Tool, r.Pattern, r.Ports)
 	if err != nil {
-		return false, fmt.Errorf("check rule exists: %w", err)
+		return false, err
 	}
-	if count > 0 {
+	if exists {
 		return false, nil
 	}
 
+	portsJSON := portsToJSON(r.Ports)
 	var protocolsJSON *string
-	if r.Protocol != "" {
-		b, _ := json.Marshal([]string{r.Protocol})
+	if len(r.Protocols) > 0 {
+		b, _ := json.Marshal(r.Protocols)
 		ps := string(b)
 		protocolsJSON = &ps
 	}
+
 	if _, err := tx.Exec(
-		`INSERT INTO rules (verdict, destination, ports, protocols, name, source) VALUES (?, ?, ?, ?, ?, ?)`,
-		verdict, r.Destination, portsJSON, protocolsJSON, nilIfEmpty(r.Note), "seed",
+		`INSERT INTO rules (verdict, destination, tool, pattern, ports, protocols, name, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		verdict,
+		nilIfEmpty(r.Destination),
+		nilIfEmpty(r.Tool),
+		nilIfEmpty(r.Pattern),
+		portsJSON, protocolsJSON,
+		nilIfEmpty(r.Name), "seed",
 	); err != nil {
-		return false, fmt.Errorf("insert %s rule %q: %w", verdict, r.Destination, err)
+		return false, fmt.Errorf("insert %s rule: %w", verdict, err)
 	}
 	return true, nil
 }
 
-// insertToolRuleIfNew inserts a tool rule into the unified rules table if no matching
-// verdict+tool combination exists. Returns true if inserted.
-func insertToolRuleIfNew(tx *sql.Tx, verdict string, r importToolRule) (bool, error) {
-	if r.Tool == "" {
-		return false, fmt.Errorf("tool rule has empty tool pattern")
+// insertRedactRuleIfNew inserts a redact rule if no matching verdict+pattern
+// combination exists. Returns true if inserted.
+func insertRedactRuleIfNew(tx *sql.Tx, r importRedactRule) (bool, error) {
+	if r.Pattern == "" {
+		return false, fmt.Errorf("redact rule has empty pattern")
 	}
-	var count int
-	err := tx.QueryRow(
-		"SELECT COUNT(*) FROM rules WHERE verdict = ? AND tool = ?",
-		verdict, r.Tool,
-	).Scan(&count)
+	if _, err := regexp.Compile(r.Pattern); err != nil {
+		return false, fmt.Errorf("redact rule %q: invalid regex: %w", r.Pattern, err)
+	}
+
+	exists, err := ruleExistsTx(tx, "redact", r.Destination, "", r.Pattern, r.Ports)
 	if err != nil {
-		return false, fmt.Errorf("check tool rule exists: %w", err)
+		return false, err
 	}
-	if count > 0 {
+	if exists {
 		return false, nil
 	}
 
+	portsJSON := portsToJSON(r.Ports)
+	var protocolsJSON *string
+	if len(r.Protocols) > 0 {
+		b, _ := json.Marshal(r.Protocols)
+		ps := string(b)
+		protocolsJSON = &ps
+	}
+
 	if _, err := tx.Exec(
-		`INSERT INTO rules (verdict, tool, name, source) VALUES (?, ?, ?, ?)`,
-		verdict, r.Tool, nilIfEmpty(r.Note), "seed",
+		`INSERT INTO rules (verdict, destination, pattern, replacement, ports, protocols, name, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"redact",
+		nilIfEmpty(r.Destination),
+		r.Pattern,
+		nilIfEmpty(r.Replacement),
+		portsJSON, protocolsJSON,
+		nilIfEmpty(r.Name), "seed",
 	); err != nil {
-		return false, fmt.Errorf("insert tool_%s rule %q: %w", verdict, r.Tool, err)
+		return false, fmt.Errorf("insert redact rule %q: %w", r.Pattern, err)
 	}
 	return true, nil
+}
+
+// ruleExistsTx checks for an existing rule within a transaction. For network
+// rules, dedup is verdict+destination+ports. For tool rules, verdict+tool.
+// For pattern rules, verdict+pattern.
+func ruleExistsTx(tx *sql.Tx, verdict, destination, tool, pattern string, ports []int) (bool, error) {
+	var query string
+	var args []any
+
+	switch {
+	case destination != "":
+		portsJSON := portsToJSON(ports)
+		if portsJSON != nil {
+			query = "SELECT COUNT(*) FROM rules WHERE verdict = ? AND destination = ? AND ports = ?"
+			args = []any{verdict, destination, *portsJSON}
+		} else {
+			query = "SELECT COUNT(*) FROM rules WHERE verdict = ? AND destination = ? AND ports IS NULL"
+			args = []any{verdict, destination}
+		}
+	case tool != "":
+		query = "SELECT COUNT(*) FROM rules WHERE verdict = ? AND tool = ?"
+		args = []any{verdict, tool}
+	case pattern != "":
+		query = "SELECT COUNT(*) FROM rules WHERE verdict = ? AND pattern = ?"
+		args = []any{verdict, pattern}
+	default:
+		return false, nil
+	}
+
+	var count int
+	if err := tx.QueryRow(query, args...).Scan(&count); err != nil {
+		return false, fmt.Errorf("check rule exists: %w", err)
+	}
+	return count > 0, nil
 }
 
 // insertBindingIfNew inserts a binding if no matching destination+credential+ports
@@ -408,15 +408,15 @@ func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
 	}
 
 	var protocolsJSON *string
-	if b.Protocol != "" {
-		pb, _ := json.Marshal([]string{b.Protocol})
+	if len(b.Protocols) > 0 {
+		pb, _ := json.Marshal(b.Protocols)
 		ps := string(pb)
 		protocolsJSON = &ps
 	}
 	if _, err := tx.Exec(
 		`INSERT INTO bindings (destination, ports, credential, header, template, protocols) VALUES (?, ?, ?, ?, ?, ?)`,
 		b.Destination, portsJSON, b.Credential,
-		nilIfEmpty(b.InjectHeader), nilIfEmpty(b.Template), protocolsJSON,
+		nilIfEmpty(b.Header), nilIfEmpty(b.Template), protocolsJSON,
 	); err != nil {
 		return false, fmt.Errorf("insert binding %q->%q: %w", b.Destination, b.Credential, err)
 	}
@@ -470,45 +470,7 @@ func insertUpstreamIfNew(tx *sql.Tx, u importMCPUpstream) (bool, error) {
 	return true, nil
 }
 
-// insertInspectRuleIfNew inserts an inspect rule into the unified rules table
-// if no matching verdict+pattern combination exists. Returns true if inserted.
-func insertInspectRuleIfNew(tx *sql.Tx, kind, pattern string, description, replacement *string) (bool, error) {
-	if pattern == "" {
-		return false, fmt.Errorf("inspect rule has empty pattern")
-	}
-	if _, err := regexp.Compile(pattern); err != nil {
-		return false, fmt.Errorf("inspect rule %q: invalid regex: %w", pattern, err)
-	}
-
-	verdict, err := inspectKindToVerdict(kind)
-	if err != nil {
-		return false, err
-	}
-
-	var count int
-	err = tx.QueryRow(
-		"SELECT COUNT(*) FROM rules WHERE verdict = ? AND pattern = ?",
-		verdict, pattern,
-	).Scan(&count)
-	if err != nil {
-		return false, fmt.Errorf("check inspect rule exists: %w", err)
-	}
-	if count > 0 {
-		return false, nil
-	}
-
-	if _, err := tx.Exec(
-		`INSERT INTO rules (verdict, pattern, name, replacement, source) VALUES (?, ?, ?, ?, 'seed')`,
-		verdict, pattern, description, replacement,
-	); err != nil {
-		return false, fmt.Errorf("insert %s inspect rule %q: %w", kind, pattern, err)
-	}
-	return true, nil
-}
-
 // configColumns maps config key names to column names in the typed config table.
-// Used by the import path only. Legacy keys (telegram_*) map to empty string
-// and are silently ignored.
 var configColumns = map[string]string{
 	"default_verdict":               "default_verdict",
 	"timeout_sec":                   "timeout_sec",
@@ -524,8 +486,6 @@ var configColumns = map[string]string{
 	"vault_hashicorp_secret_id":     "vault_hashicorp_secret_id",
 	"vault_hashicorp_role_id_env":   "vault_hashicorp_role_id_env",
 	"vault_hashicorp_secret_id_env": "vault_hashicorp_secret_id_env",
-	"telegram_bot_token_env":        "",
-	"telegram_chat_id_env":          "",
 }
 
 // updateConfigColumn updates a single column in the typed config singleton row.

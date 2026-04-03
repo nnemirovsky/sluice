@@ -80,13 +80,13 @@ func TestImportTOMLToolRules(t *testing.T) {
 [policy]
 default = "ask"
 
-[[tool_allow]]
+[[allow]]
 tool = "github__list_*"
 
-[[tool_deny]]
+[[deny]]
 tool = "exec__*"
 
-[[tool_ask]]
+[[ask]]
 tool = "filesystem__write_*"
 `)
 
@@ -94,8 +94,8 @@ tool = "filesystem__write_*"
 	if err != nil {
 		t.Fatalf("ImportTOML: %v", err)
 	}
-	if res.ToolRulesInserted != 3 {
-		t.Errorf("expected 3 tool rules inserted, got %d", res.ToolRulesInserted)
+	if res.RulesInserted != 3 {
+		t.Errorf("expected 3 rules inserted, got %d", res.RulesInserted)
 	}
 
 	rules, err := s.ListRules(RuleFilter{Type: "tool"})
@@ -118,18 +118,18 @@ tool = "filesystem__write_*"
 	}
 }
 
-func TestImportTOMLInspectRules(t *testing.T) {
+func TestImportTOMLContentRules(t *testing.T) {
 	s := newTestStore(t)
 
 	data := []byte(`
 [policy]
 default = "ask"
 
-[[inspect_block]]
+[[deny]]
 pattern = "(?i)(sk-[a-zA-Z0-9]{20,})"
 name = "api_key_leak"
 
-[[inspect_redact]]
+[[redact]]
 pattern = "(?i)(sk-[a-zA-Z0-9]{20,})"
 replacement = "[REDACTED_API_KEY]"
 name = "api_key_in_response"
@@ -139,8 +139,8 @@ name = "api_key_in_response"
 	if err != nil {
 		t.Fatalf("ImportTOML: %v", err)
 	}
-	if res.InspectInserted != 2 {
-		t.Errorf("expected 2 inspect rules inserted, got %d", res.InspectInserted)
+	if res.RulesInserted != 2 {
+		t.Errorf("expected 2 rules inserted, got %d", res.RulesInserted)
 	}
 
 	// Block rules are stored as verdict="deny" with pattern set.
@@ -174,17 +174,12 @@ func TestImportTOMLConfig(t *testing.T) {
 [policy]
 default = "ask"
 timeout_sec = 60
-
-[telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-chat_id_env = "TELEGRAM_CHAT_ID"
 `)
 
 	res, err := s.ImportTOML(data)
 	if err != nil {
 		t.Fatalf("ImportTOML: %v", err)
 	}
-	// Telegram config keys are silently ignored (hardcoded env var names).
 	if res.ConfigSet != 2 {
 		t.Errorf("expected 2 config values set, got %d", res.ConfigSet)
 	}
@@ -212,13 +207,13 @@ default = "ask"
 destination = "api.anthropic.com"
 ports = [443]
 credential = "anthropic_api_key"
-inject_header = "x-api-key"
+header = "x-api-key"
 
 [[binding]]
 destination = "api.openai.com"
 ports = [443]
 credential = "openai_api_key"
-inject_header = "Authorization"
+header = "Authorization"
 template = "Bearer {value}"
 `)
 
@@ -298,21 +293,21 @@ default = "deny"
 destination = "api.anthropic.com"
 ports = [443]
 
-[[tool_allow]]
+[[allow]]
 tool = "github__list_*"
 
 [[binding]]
 destination = "api.anthropic.com"
 ports = [443]
 credential = "anthropic_api_key"
-inject_header = "x-api-key"
+header = "x-api-key"
 
 [[mcp_upstream]]
 name = "github"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
 
-[[inspect_block]]
+[[deny]]
 pattern = "\\d{3}-\\d{2}-\\d{4}"
 name = "Block SSNs"
 `)
@@ -322,8 +317,14 @@ name = "Block SSNs"
 	if err != nil {
 		t.Fatalf("first ImportTOML: %v", err)
 	}
-	if res1.RulesInserted != 1 || res1.ToolRulesInserted != 1 || res1.BindingsInserted != 1 || res1.UpstreamsInserted != 1 || res1.InspectInserted != 1 {
-		t.Errorf("first import unexpected: %+v", res1)
+	if res1.RulesInserted != 3 {
+		t.Errorf("first import: expected 3 rules inserted, got %d", res1.RulesInserted)
+	}
+	if res1.BindingsInserted != 1 {
+		t.Errorf("first import: expected 1 binding inserted, got %d", res1.BindingsInserted)
+	}
+	if res1.UpstreamsInserted != 1 {
+		t.Errorf("first import: expected 1 upstream inserted, got %d", res1.UpstreamsInserted)
 	}
 
 	// Second import (same data). Everything should be skipped.
@@ -334,14 +335,8 @@ name = "Block SSNs"
 	if res2.RulesInserted != 0 {
 		t.Errorf("expected 0 rules inserted on second import, got %d", res2.RulesInserted)
 	}
-	if res2.RulesSkipped != 1 {
-		t.Errorf("expected 1 rule skipped on second import, got %d", res2.RulesSkipped)
-	}
-	if res2.ToolRulesInserted != 0 {
-		t.Errorf("expected 0 tool rules inserted on second import, got %d", res2.ToolRulesInserted)
-	}
-	if res2.ToolRulesSkipped != 1 {
-		t.Errorf("expected 1 tool rule skipped on second import, got %d", res2.ToolRulesSkipped)
+	if res2.RulesSkipped != 3 {
+		t.Errorf("expected 3 rules skipped on second import, got %d", res2.RulesSkipped)
 	}
 	if res2.BindingsInserted != 0 {
 		t.Errorf("expected 0 bindings inserted on second import, got %d", res2.BindingsInserted)
@@ -355,17 +350,15 @@ name = "Block SSNs"
 	if res2.UpstreamsSkipped != 1 {
 		t.Errorf("expected 1 upstream skipped on second import, got %d", res2.UpstreamsSkipped)
 	}
-	if res2.InspectInserted != 0 {
-		t.Errorf("expected 0 inspect rules inserted on second import, got %d", res2.InspectInserted)
-	}
-	if res2.InspectSkipped != 1 {
-		t.Errorf("expected 1 inspect rule skipped on second import, got %d", res2.InspectSkipped)
-	}
 
 	// Verify DB has no duplicates.
 	rules, _ := s.ListRules(RuleFilter{Type: "network"})
 	if len(rules) != 1 {
 		t.Errorf("expected 1 network rule total, got %d", len(rules))
+	}
+	toolRules, _ := s.ListRules(RuleFilter{Type: "tool"})
+	if len(toolRules) != 1 {
+		t.Errorf("expected 1 tool rule total, got %d", len(toolRules))
 	}
 	patternRules, _ := s.ListRules(RuleFilter{Type: "pattern"})
 	if len(patternRules) != 1 {
@@ -387,8 +380,7 @@ func TestImportTOMLMalformedReturnsError(t *testing.T) {
 func TestImportTOMLMalformedNoPartialWrites(t *testing.T) {
 	s := newTestStore(t)
 
-	// Valid enough to parse but has a bad verdict value that will fail the
-	// CHECK constraint.
+	// Valid enough to parse but has valid data.
 	data := []byte(`
 [policy]
 default = "deny"
@@ -403,9 +395,7 @@ ports = [443]
 		t.Fatalf("valid import: %v", err)
 	}
 
-	// Now try to import data with a rule that has no destination (will fail on
-	// SQL NOT NULL constraint since we check before insert). Actually, test
-	// malformed TOML that won't parse at all.
+	// Now try to import data that won't parse at all.
 	badData := []byte(`not_a_valid = [toml structure for policy`)
 	_, err = s.ImportTOML(badData)
 	if err == nil {
@@ -446,12 +436,12 @@ func TestImportTOMLWithExistingTestdataFiles(t *testing.T) {
 	}
 }
 
-func TestImportTOMLExamplePolicyFile(t *testing.T) {
+func TestImportTOMLExampleConfigFile(t *testing.T) {
 	s := newTestStore(t)
 
-	data, err := os.ReadFile("../../examples/policy.toml")
+	data, err := os.ReadFile("../../examples/config.toml")
 	if err != nil {
-		t.Skipf("examples/policy.toml not found: %v", err)
+		t.Skipf("examples/config.toml not found: %v", err)
 	}
 
 	res, err := s.ImportTOML(data)
@@ -459,28 +449,24 @@ func TestImportTOMLExamplePolicyFile(t *testing.T) {
 		t.Fatalf("ImportTOML: %v", err)
 	}
 
-	// The example policy has:
-	// - 3 allow rules (anthropic, openai, telegram)
-	// - 2 deny rules (metadata endpoints)
-	// - 2 bindings (anthropic, openai)
-	// - 6 tool rules (2 allow, 3 ask, 1 deny)
-	// - 2 inspect rules (1 block, 1 redact)
-	// - Config: default=ask, timeout=120, telegram config
-	if res.RulesInserted < 5 {
-		t.Errorf("expected at least 5 rules, got %d inserted", res.RulesInserted)
+	// The example config has:
+	// - 3 network allow rules (anthropic, openai, telegram)
+	// - 2 network deny rules (metadata endpoints)
+	// - 2 tool allow rules (github list/get)
+	// - 4 tool ask rules (github create/update/delete, filesystem write)
+	// - 1 tool deny rule (exec)
+	// - 1 content deny rule (api key pattern)
+	// - 1 redact rule (api key in responses)
+	// Total: 14 rules
+	if res.RulesInserted != 14 {
+		t.Errorf("expected 14 rules inserted, got %d", res.RulesInserted)
 	}
 	if res.BindingsInserted != 2 {
 		t.Errorf("expected 2 bindings, got %d inserted", res.BindingsInserted)
 	}
-	if res.ToolRulesInserted < 6 {
-		t.Errorf("expected at least 6 tool rules, got %d inserted", res.ToolRulesInserted)
-	}
-	if res.InspectInserted != 2 {
-		t.Errorf("expected 2 inspect rules, got %d inserted", res.InspectInserted)
-	}
-	// Telegram config keys are silently ignored, so only policy + vault config.
-	if res.ConfigSet < 2 {
-		t.Errorf("expected at least 2 config values, got %d set", res.ConfigSet)
+	// Config: default=ask, timeout=120, vault provider=age
+	if res.ConfigSet < 3 {
+		t.Errorf("expected at least 3 config values, got %d set", res.ConfigSet)
 	}
 
 	// Verify config.
@@ -490,7 +476,7 @@ func TestImportTOMLExamplePolicyFile(t *testing.T) {
 	}
 }
 
-func TestImportTOMLRuleProtocolAndNote(t *testing.T) {
+func TestImportTOMLRuleProtocolsAndName(t *testing.T) {
 	s := newTestStore(t)
 
 	data := []byte(`
@@ -500,8 +486,8 @@ default = "deny"
 [[allow]]
 destination = "github.com"
 ports = [22]
-protocol = "ssh"
-note = "Git SSH access"
+protocols = ["ssh"]
+name = "Git SSH access"
 `)
 
 	res, err := s.ImportTOML(data)
@@ -555,5 +541,111 @@ GITHUB_TOKEN = "phantom-token-abc123"
 	}
 	if ups[0].Env["GITHUB_TOKEN"] != "phantom-token-abc123" {
 		t.Errorf("expected env GITHUB_TOKEN, got %v", ups[0].Env)
+	}
+}
+
+func TestImportTOMLMutualExclusivityRejectsMultipleFields(t *testing.T) {
+	s := newTestStore(t)
+
+	data := []byte(`
+[[allow]]
+destination = "api.example.com"
+tool = "github__list_*"
+`)
+
+	_, err := s.ImportTOML(data)
+	if err == nil {
+		t.Fatal("expected error for rule with both destination and tool")
+	}
+}
+
+func TestImportTOMLRedactWithoutPattern(t *testing.T) {
+	s := newTestStore(t)
+
+	data := []byte(`
+[[redact]]
+replacement = "[REDACTED]"
+name = "missing pattern"
+`)
+
+	_, err := s.ImportTOML(data)
+	if err == nil {
+		t.Fatal("expected error for redact rule without pattern")
+	}
+}
+
+func TestImportTOMLMixedRuleTypes(t *testing.T) {
+	s := newTestStore(t)
+
+	data := []byte(`
+[policy]
+default = "ask"
+
+[[allow]]
+destination = "api.anthropic.com"
+ports = [443]
+
+[[allow]]
+tool = "github__list_*"
+name = "read-only github"
+
+[[deny]]
+pattern = "(?i)(sk-[a-zA-Z0-9]{20,})"
+name = "api key leak"
+
+[[redact]]
+pattern = "(?i)(password)"
+replacement = "[REDACTED]"
+name = "password redact"
+`)
+
+	res, err := s.ImportTOML(data)
+	if err != nil {
+		t.Fatalf("ImportTOML: %v", err)
+	}
+	if res.RulesInserted != 4 {
+		t.Errorf("expected 4 rules inserted, got %d", res.RulesInserted)
+	}
+
+	// Verify each type.
+	network, _ := s.ListRules(RuleFilter{Type: "network"})
+	if len(network) != 1 {
+		t.Errorf("expected 1 network rule, got %d", len(network))
+	}
+	tools, _ := s.ListRules(RuleFilter{Type: "tool"})
+	if len(tools) != 1 {
+		t.Errorf("expected 1 tool rule, got %d", len(tools))
+	}
+	patterns, _ := s.ListRules(RuleFilter{Type: "pattern"})
+	if len(patterns) != 2 {
+		t.Errorf("expected 2 pattern rules, got %d", len(patterns))
+	}
+}
+
+func TestImportTOMLBindingWithProtocols(t *testing.T) {
+	s := newTestStore(t)
+
+	data := []byte(`
+[[binding]]
+destination = "github.com"
+ports = [22]
+credential = "github_ssh_key"
+protocols = ["ssh"]
+`)
+
+	res, err := s.ImportTOML(data)
+	if err != nil {
+		t.Fatalf("ImportTOML: %v", err)
+	}
+	if res.BindingsInserted != 1 {
+		t.Errorf("expected 1 binding inserted, got %d", res.BindingsInserted)
+	}
+
+	bindings, _ := s.ListBindings()
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if len(bindings[0].Protocols) != 1 || bindings[0].Protocols[0] != "ssh" {
+		t.Errorf("expected protocols [ssh], got %v", bindings[0].Protocols)
 	}
 }

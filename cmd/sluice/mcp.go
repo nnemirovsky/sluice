@@ -84,8 +84,8 @@ func handleMCPGateway(args []string) error {
 			if err != nil {
 				return fmt.Errorf("import policy seed: %w", err)
 			}
-			log.Printf("seeded DB from %s: %d rules, %d tool rules, %d bindings, %d upstreams, %d config",
-				*policyPath, result.RulesInserted, result.ToolRulesInserted,
+			log.Printf("seeded DB from %s: %d rules, %d bindings, %d upstreams, %d config",
+				*policyPath, result.RulesInserted,
 				result.BindingsInserted, result.UpstreamsInserted, result.ConfigSet)
 		}
 	}

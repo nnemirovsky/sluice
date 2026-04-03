@@ -339,9 +339,6 @@ func TestStartupWithTOMLSeed(t *testing.T) {
 default = "deny"
 timeout_sec = 60
 
-[telegram]
-bot_token_env = "MY_BOT_TOKEN"
-
 [[allow]]
 destination = "api.example.com"
 ports = [443]
@@ -353,7 +350,7 @@ destination = "evil.example.com"
 destination = "api.example.com"
 ports = [443]
 credential = "example_key"
-inject_header = "Authorization"
+header = "Authorization"
 template = "Bearer {value}"
 `
 	if err := os.WriteFile(tomlPath, []byte(tomlData), 0644); err != nil {

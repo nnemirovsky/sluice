@@ -260,18 +260,6 @@ func (s *Store) RuleExists(verdict string, opts RuleExistsOpts) (bool, error) {
 	return count > 0, nil
 }
 
-// inspectKindToVerdict maps old inspect rule kinds to unified verdicts.
-func inspectKindToVerdict(kind string) (string, error) {
-	switch kind {
-	case "block":
-		return "deny", nil
-	case "redact":
-		return "redact", nil
-	default:
-		return "", fmt.Errorf("invalid kind %q: must be block or redact", kind)
-	}
-}
-
 // --- Config ---
 
 // Config represents the typed singleton row in the config table.

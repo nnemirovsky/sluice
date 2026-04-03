@@ -152,28 +152,25 @@ func TestPolicyImportFromTOML(t *testing.T) {
 default = "deny"
 timeout_sec = 60
 
-[telegram]
-bot_token_env = "MY_TOKEN"
-
 [[allow]]
 destination = "api.example.com"
 ports = [443]
-note = "API"
+name = "API"
 
 [[deny]]
 destination = "evil.example.com"
 
-[[tool_allow]]
+[[allow]]
 tool = "github__list_*"
 
-[[tool_deny]]
+[[deny]]
 tool = "exec__*"
 
 [[binding]]
 destination = "api.example.com"
 ports = [443]
 credential = "my_key"
-inject_header = "Authorization"
+header = "Authorization"
 template = "Bearer {value}"
 
 [[mcp_upstream]]
@@ -186,11 +183,8 @@ timeout_sec = 60
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
-	if result.RulesInserted != 2 {
-		t.Errorf("expected 2 rules inserted, got %d", result.RulesInserted)
-	}
-	if result.ToolRulesInserted != 2 {
-		t.Errorf("expected 2 tool rules inserted, got %d", result.ToolRulesInserted)
+	if result.RulesInserted != 4 {
+		t.Errorf("expected 4 rules inserted, got %d", result.RulesInserted)
 	}
 	if result.BindingsInserted != 1 {
 		t.Errorf("expected 1 binding inserted, got %d", result.BindingsInserted)
@@ -198,7 +192,6 @@ timeout_sec = 60
 	if result.UpstreamsInserted != 1 {
 		t.Errorf("expected 1 upstream inserted, got %d", result.UpstreamsInserted)
 	}
-	// Telegram config keys are silently ignored (hardcoded env vars).
 	if result.ConfigSet < 2 {
 		t.Errorf("expected at least 2 config set, got %d", result.ConfigSet)
 	}
@@ -211,8 +204,8 @@ timeout_sec = 60
 	if result2.RulesInserted != 0 {
 		t.Errorf("expected 0 rules on re-import, got %d", result2.RulesInserted)
 	}
-	if result2.RulesSkipped != 2 {
-		t.Errorf("expected 2 rules skipped, got %d", result2.RulesSkipped)
+	if result2.RulesSkipped != 4 {
+		t.Errorf("expected 4 rules skipped, got %d", result2.RulesSkipped)
 	}
 }
 
@@ -518,11 +511,11 @@ func TestPolicyImportExistingFixtures(t *testing.T) {
 	}
 }
 
-// TestPolicyImportExamplePolicy verifies the examples/policy.toml imports cleanly.
-func TestPolicyImportExamplePolicy(t *testing.T) {
-	data, err := os.ReadFile("../../examples/policy.toml")
+// TestPolicyImportExampleConfig verifies the examples/config.toml imports cleanly.
+func TestPolicyImportExampleConfig(t *testing.T) {
+	data, err := os.ReadFile("../../examples/config.toml")
 	if err != nil {
-		t.Skip("examples/policy.toml not found")
+		t.Skip("examples/config.toml not found")
 	}
 
 	db, err := store.New(":memory:")
@@ -533,15 +526,11 @@ func TestPolicyImportExamplePolicy(t *testing.T) {
 
 	result, err := db.ImportTOML(data)
 	if err != nil {
-		t.Fatalf("import examples/policy.toml: %v", err)
+		t.Fatalf("import examples/config.toml: %v", err)
 	}
 
-	// The example has 3 allow + 2 deny = 5 network rules.
-	if result.RulesInserted < 3 {
-		t.Errorf("expected at least 3 rules from example policy, got %d", result.RulesInserted)
-	}
-	// The example has tool rules.
-	if result.ToolRulesInserted < 1 {
-		t.Errorf("expected at least 1 tool rule from example policy, got %d", result.ToolRulesInserted)
+	// The example has 14 total rules (network + tool + content + redact).
+	if result.RulesInserted < 10 {
+		t.Errorf("expected at least 10 rules from example config, got %d", result.RulesInserted)
 	}
 }

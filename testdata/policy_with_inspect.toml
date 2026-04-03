@@ -5,30 +5,26 @@ default = "ask"
 destination = "api.anthropic.com"
 ports = [443]
 
-[[tool_allow]]
+[[allow]]
 tool = "github__list_*"
 
-[[tool_deny]]
+[[deny]]
 tool = "exec__*"
 
-[[inspect_block]]
+[[deny]]
 pattern = "(?i)(sk-[a-zA-Z0-9]{20,})"
 name = "api_key_leak"
-note = "Block tool args containing API key patterns"
 
-[[inspect_block]]
+[[deny]]
 pattern = "(?i)(password|passwd|secret)\\s*[:=]\\s*\\S+"
 name = "credential_in_args"
-note = "Block tool args containing inline credentials"
 
-[[inspect_redact]]
+[[redact]]
 pattern = "(?i)(sk-[a-zA-Z0-9]{20,})"
 replacement = "[REDACTED_API_KEY]"
 name = "api_key_in_response"
-note = "Redact API keys in tool responses before agent sees them"
 
-[[inspect_redact]]
+[[redact]]
 pattern = "(?i)\\b[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Z|a-z]{2,}\\b"
 replacement = "[REDACTED_EMAIL]"
 name = "email_in_response"
-note = "Redact email addresses in tool responses"

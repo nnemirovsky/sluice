@@ -1,16 +1,16 @@
 # Example Sluice TOML seed file for initial database population.
-# Import into the SQLite store with: sluice policy import policy.toml
+# Import into the SQLite store with: sluice policy import config.toml
 # This file is only read once to seed an empty database. At runtime, all
 # policy state lives in the SQLite store. Use "sluice policy add/remove"
 # or Telegram /policy commands to modify rules after seeding.
+#
+# Rules use a unified format: [[allow]], [[deny]], [[ask]], [[redact]].
+# Each entry carries exactly one of: destination (network), tool (MCP),
+# or pattern (content inspection). The section name determines the verdict.
 
 [policy]
 default = "ask"
 timeout_sec = 120
-
-[telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-chat_id_env = "TELEGRAM_CHAT_ID"
 
 # Vault configuration (age-encrypted credential store)
 # For age-encrypted local vault:
@@ -30,7 +30,7 @@ provider = "age"
 # # role_id_env = "VAULT_ROLE_ID"
 # # secret_id_env = "VAULT_SECRET_ID"
 
-# --- Network policy rules ---
+# --- Network rules (destination field) ---
 
 # AI model APIs
 [[allow]]
@@ -53,6 +53,44 @@ destination = "169.254.169.254"
 [[deny]]
 destination = "100.100.100.200"
 
+# --- Tool rules (tool field) ---
+
+[[allow]]
+tool = "github__list_*"
+name = "read-only github list"
+
+[[allow]]
+tool = "github__get_*"
+name = "read-only github get"
+
+[[ask]]
+tool = "github__create_*"
+
+[[ask]]
+tool = "github__update_*"
+
+[[ask]]
+tool = "github__delete_*"
+
+[[ask]]
+tool = "filesystem__write_*"
+
+[[deny]]
+tool = "exec__*"
+
+# --- Content inspection: deny rules (pattern field) ---
+
+[[deny]]
+pattern = "(?i)(sk-[a-zA-Z0-9_-]{20,})"
+name = "api key in tool arguments"
+
+# --- Content inspection: redact rules ---
+
+[[redact]]
+pattern = "(?i)(sk-[a-zA-Z0-9_-]{20,})"
+replacement = "[REDACTED_API_KEY]"
+name = "api key in responses"
+
 # --- Credential bindings ---
 # These map destinations to vault credentials for automatic injection.
 
@@ -60,13 +98,13 @@ destination = "100.100.100.200"
 destination = "api.anthropic.com"
 ports = [443]
 credential = "anthropic_api_key"
-inject_header = "x-api-key"
+header = "x-api-key"
 
 [[binding]]
 destination = "api.openai.com"
 ports = [443]
 credential = "openai_api_key"
-inject_header = "Authorization"
+header = "Authorization"
 template = "Bearer {value}"
 
 # --- MCP upstream servers ---
@@ -84,39 +122,3 @@ template = "Bearer {value}"
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
 # timeout_sec = 30
-
-# --- MCP tool policies ---
-
-[[tool_allow]]
-tool = "github__list_*"
-
-[[tool_allow]]
-tool = "github__get_*"
-
-[[tool_ask]]
-tool = "github__create_*"
-
-[[tool_ask]]
-tool = "github__update_*"
-
-[[tool_ask]]
-tool = "github__delete_*"
-
-[[tool_ask]]
-tool = "filesystem__write_*"
-
-[[tool_deny]]
-tool = "exec__*"
-
-# --- Content inspection ---
-
-[[inspect_block]]
-pattern = "(?i)(sk-[a-zA-Z0-9_-]{20,})"
-name = "api_key_leak"
-note = "Block tool arguments containing API key patterns (covers both Anthropic sk-ant-* and OpenAI sk-* formats)"
-
-[[inspect_redact]]
-pattern = "(?i)(sk-[a-zA-Z0-9_-]{20,})"
-replacement = "[REDACTED_API_KEY]"
-name = "api_key_in_response"
-note = "Redact API keys in tool responses"

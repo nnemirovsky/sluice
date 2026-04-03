@@ -5,11 +5,11 @@ default = "ask"
 destination = "api.anthropic.com"
 ports = [443]
 
-[[tool_allow]]
+[[allow]]
 tool = "github__list_*"
 
-[[tool_deny]]
+[[deny]]
 tool = "exec__*"
 
-[[tool_ask]]
+[[ask]]
 tool = "filesystem__write_*"
