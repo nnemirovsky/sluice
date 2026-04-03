@@ -1,15 +1,17 @@
 # Sluice
 
-SOCKS5 proxy with policy-based connection filtering and audit logging. Evaluates connection requests against TOML policy rules (allow/deny/ask) and blocks or forwards accordingly.
+Credential-injecting approval proxy for AI agents. Two layers of governance: MCP-level (semantic tool control) and network-level (all-protocol interception). Asks for human approval via Telegram, injects credentials, and forwards.
 
-**Status:** v0.0.1-alpha. Core proxy, policy engine, and Telegram approval flow functional.
+**Status:** v0.0.1-alpha. Core proxy, policy engine, MCP gateway, and Telegram approval flow functional.
 
 ## Quick Start
 
 ```bash
 go build -o sluice ./cmd/sluice/
-./sluice -policy testdata/policy_mixed.toml
+./sluice --db sluice.db --policy examples/policy.toml
 ```
+
+On first run with an empty database, `--policy` seeds the DB from the TOML file. Subsequent runs use the SQLite store directly.
 
 Test with curl:
 
@@ -21,13 +23,60 @@ curl -x socks5h://127.0.0.1:1080 https://api.anthropic.com/
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-listen` | `127.0.0.1:1080` | SOCKS5 listen address |
-| `-policy` | `policy.toml` | Path to policy TOML file |
-| `-audit` | `audit.jsonl` | Path to audit log file |
-| `-telegram-token` | `$TELEGRAM_BOT_TOKEN` | Telegram bot token for approval flow |
-| `-telegram-chat-id` | `$TELEGRAM_CHAT_ID` | Telegram chat ID for approvals |
+| `--listen` | `127.0.0.1:1080` | SOCKS5 listen address |
+| `--db` | `sluice.db` | Path to SQLite policy database |
+| `--policy` | (none) | TOML seed file (imported only when DB is empty) |
+| `--audit` | `audit.jsonl` | Path to audit log file |
+| `--telegram-token` | `$TELEGRAM_BOT_TOKEN` | Telegram bot token for approval flow |
+| `--telegram-chat-id` | `$TELEGRAM_CHAT_ID` | Telegram chat ID for approvals |
+| `--health-addr` | `:3000` | Health check HTTP address |
+| `--shutdown-timeout` | `10s` | Graceful shutdown timeout |
 
-## Policy File Format
+## CLI Subcommands
+
+### Policy management
+
+```
+sluice policy list [--verdict allow|deny|ask] [--db sluice.db]
+sluice policy add allow <destination> [--ports 443,80] [--note "reason"]
+sluice policy add deny <destination> [--note "reason"]
+sluice policy add ask <destination> [--ports 443] [--note "reason"]
+sluice policy remove <id>
+sluice policy import <path.toml>
+sluice policy export
+```
+
+### MCP upstream management
+
+```
+sluice mcp add <name> --command <cmd> [--args "arg1,arg2"] [--env "KEY=VAL,..."]
+sluice mcp list
+sluice mcp remove <name>
+sluice mcp                          # start MCP gateway
+```
+
+### Credential management
+
+```
+sluice cred add <name> [--destination host] [--ports 443] [--header Authorization] [--template "Bearer {value}"]
+sluice cred list
+sluice cred remove <name>
+```
+
+When `--destination` is provided, `sluice cred add` also creates an allow rule and binding in the store.
+
+### Other subcommands
+
+```
+sluice cert generate                # generate CA certificate for HTTPS MITM
+sluice audit verify                 # verify audit log hash chain integrity
+```
+
+## Policy Store
+
+All runtime policy state is stored in a SQLite database (default: `sluice.db`). TOML files are used only for initial seeding via `sluice policy import`. The CLI, Telegram commands, and approval buttons all write to the same database. Changes persist across restarts.
+
+### TOML Seed File Format
 
 ```toml
 [policy]
@@ -54,9 +103,7 @@ Glob patterns: `*` matches within a single DNS label (not across dots). `**` mat
 
 Evaluation order: deny rules first, then allow, then ask, then the default verdict.
 
-### Telegram Config in Policy File
-
-The policy file can optionally specify custom environment variable names for the Telegram bot token and chat ID:
+### Telegram Config in TOML Seed
 
 ```toml
 [telegram]
@@ -64,15 +111,15 @@ bot_token_env = "MY_BOT_TOKEN"   # env var name (default: TELEGRAM_BOT_TOKEN)
 chat_id_env = "MY_CHAT_ID"       # env var name (default: TELEGRAM_CHAT_ID)
 ```
 
-When present, these override the default environment variable names unless the corresponding CLI flag (`-telegram-token`, `-telegram-chat-id`) was explicitly provided. This is useful when running multiple Sluice instances with different bot tokens.
+When present, these override the default environment variable names unless the corresponding CLI flag was explicitly provided.
 
 ## Telegram Approval Bot
 
 When configured, connections matching `ask` policy rules trigger an approval request via Telegram. The bot sends an inline keyboard message to the configured chat with three options: Allow Once, Always Allow, and Deny.
 
-The connection blocks until the user responds or the timeout expires (controlled by `timeout_sec` in the policy file, default 120s). On timeout, the connection is denied.
+The connection blocks until the user responds or the timeout expires (controlled by `timeout_sec`, default 120s). On timeout, the connection is denied.
 
-"Always Allow" adds a dynamic allow rule to the running policy so subsequent connections to the same destination and port are automatically allowed without another prompt. Dynamic rules do not survive a restart.
+"Always Allow" writes a persistent allow rule to the SQLite store with `source="approval"`. The rule survives restarts.
 
 Without Telegram configured, all `ask` verdicts are treated as `deny`.
 
@@ -83,20 +130,24 @@ Commands are only accepted from the configured chat ID.
 | Command | Description |
 |---------|-------------|
 | `/policy show` | List current rules |
-| `/policy allow <dest>` | Add allow rule |
-| `/policy deny <dest>` | Add deny rule |
-| `/policy remove <dest>` | Remove rule |
+| `/policy allow <dest>` | Add allow rule (persisted to SQLite) |
+| `/policy deny <dest>` | Add deny rule (persisted to SQLite) |
+| `/policy remove <id>` | Remove rule by ID |
+| `/cred add <name> <value>` | Add credential |
+| `/cred list` | List credential names |
+| `/cred rotate <name> <value>` | Replace credential |
+| `/cred remove <name>` | Remove credential |
 | `/status` | Show proxy status |
 | `/audit recent [N]` | Show last N audit entries (default 10) |
 | `/help` | Show available commands |
 
-Policy changes made via `/policy allow`, `/policy deny`, and `/policy remove` are applied to the running engine only. They are not persisted to the policy file and will be lost on SIGHUP reload or process restart.
+Policy changes via Telegram are persisted to the SQLite store and survive restarts.
 
 ## Hot Reload
 
-Send SIGHUP to reload the policy file without restarting the proxy. Existing connections are not affected. New connections use the updated policy. SIGHUP also updates the policy engine used by Telegram command handlers.
+Send SIGHUP to recompile the policy engine from the SQLite store without restarting the proxy. Existing connections are not affected. New connections use the updated policy. SIGHUP also updates the policy engine used by Telegram command handlers.
 
-The Telegram runtime (bot token, chat ID, approval broker) is wired once at startup and cannot be hot-reloaded. If the `[telegram]` section of the policy file changes, a full restart is required. A warning is logged when config drift is detected.
+The Telegram runtime (bot token, chat ID, approval broker) is wired once at startup and cannot be hot-reloaded. If the Telegram config changes in the store, a full restart is required. A warning is logged when config drift is detected.
 
 ```bash
 kill -HUP $(pgrep sluice)
@@ -104,13 +155,18 @@ kill -HUP $(pgrep sluice)
 
 ## Audit Log
 
-JSON Lines format written to the audit file path. Each line contains:
+JSON Lines format written to the audit file path. Each line includes a `prev_hash` field with the blake3 hash of the previous line for tamper detection. Verify the chain with:
 
-```json
-{"timestamp":"2026-03-15T10:30:00Z","destination":"api.anthropic.com","port":443,"verdict":"allow"}
+```bash
+sluice audit verify
 ```
+
+## Docker Compose
+
+Three-container architecture: sluice + tun2proxy + openclaw. All agent traffic is routed through sluice's SOCKS5 proxy via TUN device. Phantom tokens are delivered to the agent via a shared volume (`sluice-phantoms`). See `compose.yml` for details.
 
 ## Requirements
 
 - Go 1.22+
 - Telegram bot token (from @BotFather) for the approval flow (optional)
+- Docker (optional, for container deployment)

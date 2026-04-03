@@ -36,19 +36,6 @@ func handlePolicyCommand(args []string) {
 	}
 }
 
-func openPolicyStore(fs *flag.FlagSet) *store.Store {
-	dbPath := fs.Lookup("db")
-	path := "sluice.db"
-	if dbPath != nil && dbPath.Value.String() != "" {
-		path = dbPath.Value.String()
-	}
-	db, err := store.New(path)
-	if err != nil {
-		log.Fatalf("open store: %v", err)
-	}
-	return db
-}
-
 func handlePolicyList(args []string) {
 	fs := flag.NewFlagSet("policy list", flag.ExitOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")

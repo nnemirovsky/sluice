@@ -53,11 +53,6 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// DB returns the underlying *sql.DB for advanced use cases (e.g. transactions).
-func (s *Store) DB() *sql.DB {
-	return s.db
-}
-
 func (s *Store) migrate() error {
 	_, err := s.db.Exec(schema)
 	return err
@@ -200,7 +195,9 @@ func (s *Store) ListRules(verdict string) ([]NetworkRule, error) {
 			return nil, fmt.Errorf("scan rule: %w", err)
 		}
 		if portsJSON.Valid {
-			json.Unmarshal([]byte(portsJSON.String), &r.Ports)
+			if err := json.Unmarshal([]byte(portsJSON.String), &r.Ports); err != nil {
+				return nil, fmt.Errorf("unmarshal ports for rule %d: %w", r.ID, err)
+			}
 		}
 		r.Protocol = protocol.String
 		r.Note = note.String
@@ -455,7 +452,9 @@ func (s *Store) ListBindings() ([]BindingRow, error) {
 			return nil, fmt.Errorf("scan binding: %w", err)
 		}
 		if portsJSON.Valid {
-			json.Unmarshal([]byte(portsJSON.String), &b.Ports)
+			if err := json.Unmarshal([]byte(portsJSON.String), &b.Ports); err != nil {
+				return nil, fmt.Errorf("unmarshal ports for binding %d: %w", b.ID, err)
+			}
 		}
 		b.InjectHeader = header.String
 		b.Template = tmpl.String
@@ -546,10 +545,14 @@ func (s *Store) ListMCPUpstreams() ([]MCPUpstreamRow, error) {
 			return nil, fmt.Errorf("scan upstream: %w", err)
 		}
 		if argsJSON.Valid {
-			json.Unmarshal([]byte(argsJSON.String), &u.Args)
+			if err := json.Unmarshal([]byte(argsJSON.String), &u.Args); err != nil {
+				return nil, fmt.Errorf("unmarshal args for upstream %d: %w", u.ID, err)
+			}
 		}
 		if envJSON.Valid {
-			json.Unmarshal([]byte(envJSON.String), &u.Env)
+			if err := json.Unmarshal([]byte(envJSON.String), &u.Env); err != nil {
+				return nil, fmt.Errorf("unmarshal env for upstream %d: %w", u.ID, err)
+			}
 		}
 		upstreams = append(upstreams, u)
 	}
@@ -644,7 +647,9 @@ func (s *Store) ListBindingsByCredential(credential string) ([]BindingRow, error
 			return nil, fmt.Errorf("scan binding: %w", err)
 		}
 		if portsJSON.Valid {
-			json.Unmarshal([]byte(portsJSON.String), &b.Ports)
+			if err := json.Unmarshal([]byte(portsJSON.String), &b.Ports); err != nil {
+				return nil, fmt.Errorf("unmarshal ports for binding %d: %w", b.ID, err)
+			}
 		}
 		b.InjectHeader = header.String
 		b.Template = tmpl.String

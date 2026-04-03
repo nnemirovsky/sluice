@@ -363,7 +363,9 @@ func readVaultConfig(db *store.Store) (vault.VaultConfig, error) {
 		return cfg, err
 	}
 	if providersJSON != "" {
-		json.Unmarshal([]byte(providersJSON), &cfg.Providers)
+		if err := json.Unmarshal([]byte(providersJSON), &cfg.Providers); err != nil {
+			return cfg, fmt.Errorf("unmarshal vault_providers: %w", err)
+		}
 	}
 
 	// HashiCorp config.

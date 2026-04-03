@@ -317,6 +317,10 @@ inject_header = "x-api-key"
 name = "github"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
+
+[[inspect_block]]
+pattern = "\\d{3}-\\d{2}-\\d{4}"
+name = "Block SSNs"
 `)
 
 	// First import.
@@ -324,7 +328,7 @@ args = ["-y", "@modelcontextprotocol/server-github"]
 	if err != nil {
 		t.Fatalf("first ImportTOML: %v", err)
 	}
-	if res1.RulesInserted != 1 || res1.ToolRulesInserted != 1 || res1.BindingsInserted != 1 || res1.UpstreamsInserted != 1 {
+	if res1.RulesInserted != 1 || res1.ToolRulesInserted != 1 || res1.BindingsInserted != 1 || res1.UpstreamsInserted != 1 || res1.InspectInserted != 1 {
 		t.Errorf("first import unexpected: %+v", res1)
 	}
 
@@ -357,11 +361,21 @@ args = ["-y", "@modelcontextprotocol/server-github"]
 	if res2.UpstreamsSkipped != 1 {
 		t.Errorf("expected 1 upstream skipped on second import, got %d", res2.UpstreamsSkipped)
 	}
+	if res2.InspectInserted != 0 {
+		t.Errorf("expected 0 inspect rules inserted on second import, got %d", res2.InspectInserted)
+	}
+	if res2.InspectSkipped != 1 {
+		t.Errorf("expected 1 inspect rule skipped on second import, got %d", res2.InspectSkipped)
+	}
 
 	// Verify DB has no duplicates.
 	rules, _ := s.ListRules("")
 	if len(rules) != 1 {
 		t.Errorf("expected 1 rule total, got %d", len(rules))
+	}
+	inspectRules, _ := s.ListInspectRules("")
+	if len(inspectRules) != 1 {
+		t.Errorf("expected 1 inspect rule total, got %d", len(inspectRules))
 	}
 }
 

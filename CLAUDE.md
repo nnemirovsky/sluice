@@ -57,6 +57,7 @@ go test ./... -v -timeout 30s
 - `internal/telegram/bot.go` - Telegram bot lifecycle, inline keyboard approval messages
 - `internal/telegram/commands.go` - Telegram admin commands (/policy, /cred, /status, /audit, /help) backed by SQLite store
 - `internal/docker/manager.go` - Docker container manager for credential hot-reload via shared volume + docker exec, with restart fallback
+- `internal/docker/socket_client.go` - Docker socket HTTP client for container lifecycle and exec operations
 - `Dockerfile` - Multi-stage build for Sluice container
 - `compose.yml` - Three-container setup (sluice + tun2proxy + openclaw) with shared phantom volume
 - `compose.dev.yml` - Development compose with build-from-source

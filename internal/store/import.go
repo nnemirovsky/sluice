@@ -15,6 +15,7 @@ type ImportResult struct {
 	ToolRulesInserted int
 	ToolRulesSkipped  int
 	InspectInserted   int
+	InspectSkipped    int
 	BindingsInserted  int
 	BindingsSkipped   int
 	UpstreamsInserted int
@@ -189,26 +190,30 @@ func (s *Store) ImportTOML(data []byte) (*ImportResult, error) {
 		if desc == "" {
 			desc = r.Note
 		}
-		if _, err := tx.Exec(
-			`INSERT INTO inspect_rules (kind, pattern, description) VALUES (?, ?, ?)`,
-			"block", r.Pattern, nilIfEmpty(desc),
-		); err != nil {
-			return nil, fmt.Errorf("insert inspect_block rule: %w", err)
+		inserted, err := insertInspectRuleIfNew(tx, "block", r.Pattern, nilIfEmpty(desc), nil)
+		if err != nil {
+			return nil, err
 		}
-		res.InspectInserted++
+		if inserted {
+			res.InspectInserted++
+		} else {
+			res.InspectSkipped++
+		}
 	}
 	for _, r := range f.InspectRedact {
 		desc := r.Name
 		if desc == "" {
 			desc = r.Note
 		}
-		if _, err := tx.Exec(
-			`INSERT INTO inspect_rules (kind, pattern, description, replacement) VALUES (?, ?, ?, ?)`,
-			"redact", r.Pattern, nilIfEmpty(desc), nilIfEmpty(r.Replacement),
-		); err != nil {
-			return nil, fmt.Errorf("insert inspect_redact rule: %w", err)
+		inserted, err := insertInspectRuleIfNew(tx, "redact", r.Pattern, nilIfEmpty(desc), nilIfEmpty(r.Replacement))
+		if err != nil {
+			return nil, err
 		}
-		res.InspectInserted++
+		if inserted {
+			res.InspectInserted++
+		} else {
+			res.InspectSkipped++
+		}
 	}
 
 	// Import config values.
@@ -422,6 +427,30 @@ func insertUpstreamIfNew(tx *sql.Tx, u importMCPUpstream) (bool, error) {
 		u.Name, u.Command, argsJSON, envJSON, timeoutSec,
 	); err != nil {
 		return false, fmt.Errorf("insert upstream %q: %w", u.Name, err)
+	}
+	return true, nil
+}
+
+// insertInspectRuleIfNew inserts an inspect rule if no matching kind+pattern
+// combination exists. Returns true if inserted.
+func insertInspectRuleIfNew(tx *sql.Tx, kind, pattern string, description, replacement *string) (bool, error) {
+	var count int
+	err := tx.QueryRow(
+		"SELECT COUNT(*) FROM inspect_rules WHERE kind = ? AND pattern = ?",
+		kind, pattern,
+	).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("check inspect rule exists: %w", err)
+	}
+	if count > 0 {
+		return false, nil
+	}
+
+	if _, err := tx.Exec(
+		`INSERT INTO inspect_rules (kind, pattern, description, replacement) VALUES (?, ?, ?, ?)`,
+		kind, pattern, description, replacement,
+	); err != nil {
+		return false, fmt.Errorf("insert %s inspect rule %q: %w", kind, pattern, err)
 	}
 	return true, nil
 }
