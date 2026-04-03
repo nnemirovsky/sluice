@@ -64,12 +64,12 @@ ports = [443]
 	}
 
 	// Verify config.
-	val, err := s.GetConfig("default_verdict")
+	cfg, err := s.GetConfig()
 	if err != nil {
 		t.Fatalf("GetConfig: %v", err)
 	}
-	if val != "deny" {
-		t.Errorf("expected default_verdict 'deny', got %q", val)
+	if cfg.DefaultVerdict != "deny" {
+		t.Errorf("expected default_verdict 'deny', got %q", cfg.DefaultVerdict)
 	}
 }
 
@@ -189,27 +189,15 @@ chat_id_env = "TELEGRAM_CHAT_ID"
 		t.Errorf("expected 2 config values set, got %d", res.ConfigSet)
 	}
 
-	tests := []struct {
-		key  string
-		want string
-	}{
-		{"default_verdict", "ask"},
-		{"timeout_sec", "60"},
+	cfg, err := s.GetConfig()
+	if err != nil {
+		t.Fatalf("GetConfig: %v", err)
 	}
-	for _, tt := range tests {
-		val, err := s.GetConfig(tt.key)
-		if err != nil {
-			t.Fatalf("GetConfig(%q): %v", tt.key, err)
-		}
-		if val != tt.want {
-			t.Errorf("GetConfig(%q) = %q, want %q", tt.key, val, tt.want)
-		}
+	if cfg.DefaultVerdict != "ask" {
+		t.Errorf("default_verdict = %q, want ask", cfg.DefaultVerdict)
 	}
-
-	// Telegram keys return empty (silently ignored).
-	val, _ := s.GetConfig("telegram_bot_token_env")
-	if val != "" {
-		t.Errorf("telegram_bot_token_env should be empty, got %q", val)
+	if cfg.TimeoutSec != 60 {
+		t.Errorf("timeout_sec = %d, want 60", cfg.TimeoutSec)
 	}
 }
 
@@ -249,7 +237,7 @@ template = "Bearer {value}"
 	if len(bindings) != 2 {
 		t.Fatalf("expected 2 bindings, got %d", len(bindings))
 	}
-	if bindings[0].Credential != "anthropic_api_key" || bindings[0].InjectHeader != "x-api-key" {
+	if bindings[0].Credential != "anthropic_api_key" || bindings[0].Header != "x-api-key" {
 		t.Errorf("unexpected binding[0]: %+v", bindings[0])
 	}
 	if bindings[1].Template != "Bearer {value}" {
@@ -496,9 +484,9 @@ func TestImportTOMLExamplePolicyFile(t *testing.T) {
 	}
 
 	// Verify config.
-	val, _ := s.GetConfig("default_verdict")
-	if val != "ask" {
-		t.Errorf("expected default_verdict 'ask', got %q", val)
+	cfg, _ := s.GetConfig()
+	if cfg.DefaultVerdict != "ask" {
+		t.Errorf("expected default_verdict 'ask', got %q", cfg.DefaultVerdict)
 	}
 }
 

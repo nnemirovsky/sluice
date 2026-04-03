@@ -274,61 +274,155 @@ func inspectKindToVerdict(kind string) (string, error) {
 
 // --- Config ---
 
-// configColumns maps old KV config keys to column names in the typed config table.
-var configColumns = map[string]string{
-	"default_verdict":              "default_verdict",
-	"timeout_sec":                  "timeout_sec",
-	"vault_provider":               "vault_provider",
-	"vault_dir":                    "vault_dir",
-	"vault_providers":              "vault_providers",
-	"vault_hashicorp_addr":         "vault_hashicorp_addr",
-	"vault_hashicorp_mount":        "vault_hashicorp_mount",
-	"vault_hashicorp_prefix":       "vault_hashicorp_prefix",
-	"vault_hashicorp_auth":         "vault_hashicorp_auth",
-	"vault_hashicorp_token":        "vault_hashicorp_token",
-	"vault_hashicorp_role_id":      "vault_hashicorp_role_id",
-	"vault_hashicorp_secret_id":    "vault_hashicorp_secret_id",
-	"vault_hashicorp_role_id_env":  "vault_hashicorp_role_id_env",
-	"vault_hashicorp_secret_id_env": "vault_hashicorp_secret_id_env",
-	// Legacy keys used in old TOML imports.
-	"telegram_bot_token_env": "",
-	"telegram_chat_id_env":   "",
+// Config represents the typed singleton row in the config table.
+type Config struct {
+	DefaultVerdict            string
+	TimeoutSec                int
+	VaultProvider             string
+	VaultDir                  string
+	VaultProviders            []string
+	VaultHashicorpAddr        string
+	VaultHashicorpMount       string
+	VaultHashicorpPrefix      string
+	VaultHashicorpAuth        string
+	VaultHashicorpToken       string
+	VaultHashicorpRoleID      string
+	VaultHashicorpSecretID    string
+	VaultHashicorpRoleIDEnv   string
+	VaultHashicorpSecretIDEnv string
 }
 
-// GetConfig returns the value for a config key from the typed singleton row.
-// Returns empty string and no error if the key does not exist as a column.
-func (s *Store) GetConfig(key string) (string, error) {
-	col, ok := configColumns[key]
-	if !ok || col == "" {
-		return "", nil
-	}
-	var value sql.NullString
-	err := s.db.QueryRow("SELECT " + col + " FROM config WHERE id = 1").Scan(&value)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
+// ConfigUpdate holds optional fields for UpdateConfig. Only non-nil fields are written.
+type ConfigUpdate struct {
+	DefaultVerdict            *string
+	TimeoutSec                *int
+	VaultProvider             *string
+	VaultDir                  *string
+	VaultProviders            *[]string
+	VaultHashicorpAddr        *string
+	VaultHashicorpMount       *string
+	VaultHashicorpPrefix      *string
+	VaultHashicorpAuth        *string
+	VaultHashicorpToken       *string
+	VaultHashicorpRoleID      *string
+	VaultHashicorpSecretID    *string
+	VaultHashicorpRoleIDEnv   *string
+	VaultHashicorpSecretIDEnv *string
+}
+
+// GetConfig reads the typed singleton config row.
+func (s *Store) GetConfig() (*Config, error) {
+	var cfg Config
+	var vaultDir, vaultProviders sql.NullString
+	var hcAddr, hcMount, hcPrefix, hcAuth, hcToken sql.NullString
+	var hcRoleID, hcSecretID, hcRoleIDEnv, hcSecretIDEnv sql.NullString
+
+	err := s.db.QueryRow(`SELECT default_verdict, timeout_sec, vault_provider,
+		vault_dir, vault_providers,
+		vault_hashicorp_addr, vault_hashicorp_mount, vault_hashicorp_prefix,
+		vault_hashicorp_auth, vault_hashicorp_token,
+		vault_hashicorp_role_id, vault_hashicorp_secret_id,
+		vault_hashicorp_role_id_env, vault_hashicorp_secret_id_env
+		FROM config WHERE id = 1`).Scan(
+		&cfg.DefaultVerdict, &cfg.TimeoutSec, &cfg.VaultProvider,
+		&vaultDir, &vaultProviders,
+		&hcAddr, &hcMount, &hcPrefix,
+		&hcAuth, &hcToken,
+		&hcRoleID, &hcSecretID,
+		&hcRoleIDEnv, &hcSecretIDEnv,
+	)
 	if err != nil {
-		return "", fmt.Errorf("get config %q: %w", key, err)
+		return nil, fmt.Errorf("get config: %w", err)
 	}
-	if !value.Valid {
-		return "", nil
+	cfg.VaultDir = vaultDir.String
+	if vaultProviders.Valid && vaultProviders.String != "" {
+		_ = json.Unmarshal([]byte(vaultProviders.String), &cfg.VaultProviders)
 	}
-	return value.String, nil
+	cfg.VaultHashicorpAddr = hcAddr.String
+	cfg.VaultHashicorpMount = hcMount.String
+	cfg.VaultHashicorpPrefix = hcPrefix.String
+	cfg.VaultHashicorpAuth = hcAuth.String
+	cfg.VaultHashicorpToken = hcToken.String
+	cfg.VaultHashicorpRoleID = hcRoleID.String
+	cfg.VaultHashicorpSecretID = hcSecretID.String
+	cfg.VaultHashicorpRoleIDEnv = hcRoleIDEnv.String
+	cfg.VaultHashicorpSecretIDEnv = hcSecretIDEnv.String
+	return &cfg, nil
 }
 
-// SetConfig updates a config value in the typed singleton row.
-func (s *Store) SetConfig(key, value string) error {
-	if key == "" {
-		return fmt.Errorf("config key is required")
+// UpdateConfig updates the config singleton row. Only non-nil fields in the
+// update struct are written.
+func (s *Store) UpdateConfig(u ConfigUpdate) error {
+	var setClauses []string
+	var args []any
+
+	if u.DefaultVerdict != nil {
+		setClauses = append(setClauses, "default_verdict = ?")
+		args = append(args, *u.DefaultVerdict)
 	}
-	col, ok := configColumns[key]
-	if !ok || col == "" {
-		// Silently ignore unknown or legacy keys.
+	if u.TimeoutSec != nil {
+		setClauses = append(setClauses, "timeout_sec = ?")
+		args = append(args, *u.TimeoutSec)
+	}
+	if u.VaultProvider != nil {
+		setClauses = append(setClauses, "vault_provider = ?")
+		args = append(args, *u.VaultProvider)
+	}
+	if u.VaultDir != nil {
+		setClauses = append(setClauses, "vault_dir = ?")
+		args = append(args, nilIfEmpty(*u.VaultDir))
+	}
+	if u.VaultProviders != nil {
+		if len(*u.VaultProviders) == 0 {
+			setClauses = append(setClauses, "vault_providers = NULL")
+		} else {
+			b, _ := json.Marshal(*u.VaultProviders)
+			setClauses = append(setClauses, "vault_providers = ?")
+			args = append(args, string(b))
+		}
+	}
+	if u.VaultHashicorpAddr != nil {
+		setClauses = append(setClauses, "vault_hashicorp_addr = ?")
+		args = append(args, nilIfEmpty(*u.VaultHashicorpAddr))
+	}
+	if u.VaultHashicorpMount != nil {
+		setClauses = append(setClauses, "vault_hashicorp_mount = ?")
+		args = append(args, nilIfEmpty(*u.VaultHashicorpMount))
+	}
+	if u.VaultHashicorpPrefix != nil {
+		setClauses = append(setClauses, "vault_hashicorp_prefix = ?")
+		args = append(args, nilIfEmpty(*u.VaultHashicorpPrefix))
+	}
+	if u.VaultHashicorpAuth != nil {
+		setClauses = append(setClauses, "vault_hashicorp_auth = ?")
+		args = append(args, nilIfEmpty(*u.VaultHashicorpAuth))
+	}
+	if u.VaultHashicorpToken != nil {
+		setClauses = append(setClauses, "vault_hashicorp_token = ?")
+		args = append(args, nilIfEmpty(*u.VaultHashicorpToken))
+	}
+	if u.VaultHashicorpRoleID != nil {
+		setClauses = append(setClauses, "vault_hashicorp_role_id = ?")
+		args = append(args, nilIfEmpty(*u.VaultHashicorpRoleID))
+	}
+	if u.VaultHashicorpSecretID != nil {
+		setClauses = append(setClauses, "vault_hashicorp_secret_id = ?")
+		args = append(args, nilIfEmpty(*u.VaultHashicorpSecretID))
+	}
+	if u.VaultHashicorpRoleIDEnv != nil {
+		setClauses = append(setClauses, "vault_hashicorp_role_id_env = ?")
+		args = append(args, nilIfEmpty(*u.VaultHashicorpRoleIDEnv))
+	}
+	if u.VaultHashicorpSecretIDEnv != nil {
+		setClauses = append(setClauses, "vault_hashicorp_secret_id_env = ?")
+		args = append(args, nilIfEmpty(*u.VaultHashicorpSecretIDEnv))
+	}
+	if len(setClauses) == 0 {
 		return nil
 	}
-	_, err := s.db.Exec("UPDATE config SET "+col+" = ? WHERE id = 1", value)
-	if err != nil {
-		return fmt.Errorf("set config %q: %w", key, err)
+	query := "UPDATE config SET " + strings.Join(setClauses, ", ") + " WHERE id = 1"
+	if _, err := s.db.Exec(query, args...); err != nil {
+		return fmt.Errorf("update config: %w", err)
 	}
 	return nil
 }
@@ -337,22 +431,22 @@ func (s *Store) SetConfig(key, value string) error {
 
 // BindingRow represents a row in the bindings table.
 type BindingRow struct {
-	ID           int64
-	Destination  string
-	Ports        []int
-	Credential   string
-	InjectHeader string
-	Template     string
-	Protocol     string
-	CreatedAt    string
+	ID        int64
+	Destination string
+	Ports       []int
+	Credential  string
+	Header      string
+	Template    string
+	Protocols   []string
+	CreatedAt   string
 }
 
 // BindingOpts holds optional fields for AddBinding.
 type BindingOpts struct {
-	Ports        []int
-	InjectHeader string
-	Template     string
-	Protocol     string
+	Ports     []int
+	Header    string
+	Template  string
+	Protocols []string
 }
 
 // AddBinding inserts a binding and returns its ID.
@@ -367,15 +461,15 @@ func (s *Store) AddBinding(destination, credential string, opts BindingOpts) (in
 		portsJSON = &ps
 	}
 	var protocolsJSON *string
-	if opts.Protocol != "" {
-		b, _ := json.Marshal([]string{opts.Protocol})
+	if len(opts.Protocols) > 0 {
+		b, _ := json.Marshal(opts.Protocols)
 		ps := string(b)
 		protocolsJSON = &ps
 	}
 	res, err := s.db.Exec(
 		`INSERT INTO bindings (destination, ports, credential, header, template, protocols) VALUES (?, ?, ?, ?, ?, ?)`,
 		destination, portsJSON, credential,
-		nilIfEmpty(opts.InjectHeader), nilIfEmpty(opts.Template), protocolsJSON,
+		nilIfEmpty(opts.Header), nilIfEmpty(opts.Template), protocolsJSON,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("insert binding: %w", err)
@@ -498,6 +592,82 @@ func (s *Store) ListMCPUpstreams() ([]MCPUpstreamRow, error) {
 		upstreams = append(upstreams, u)
 	}
 	return upstreams, rows.Err()
+}
+
+// --- Channels ---
+
+// Channel represents a row in the channels table.
+type Channel struct {
+	ID        int64
+	Type      int
+	Enabled   bool
+	CreatedAt string
+}
+
+// ChannelUpdate holds optional fields for UpdateChannel. Only non-nil fields are written.
+type ChannelUpdate struct {
+	Enabled *bool
+}
+
+// GetChannel returns a channel by ID.
+func (s *Store) GetChannel(id int64) (*Channel, error) {
+	var ch Channel
+	var enabled int
+	err := s.db.QueryRow(
+		"SELECT id, type, enabled, created_at FROM channels WHERE id = ?", id,
+	).Scan(&ch.ID, &ch.Type, &enabled, &ch.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get channel %d: %w", id, err)
+	}
+	ch.Enabled = enabled == 1
+	return &ch, nil
+}
+
+// UpdateChannel updates a channel row. Only non-nil fields in the update struct are written.
+func (s *Store) UpdateChannel(id int64, u ChannelUpdate) error {
+	var setClauses []string
+	var args []any
+	if u.Enabled != nil {
+		setClauses = append(setClauses, "enabled = ?")
+		if *u.Enabled {
+			args = append(args, 1)
+		} else {
+			args = append(args, 0)
+		}
+	}
+	if len(setClauses) == 0 {
+		return nil
+	}
+	args = append(args, id)
+	query := "UPDATE channels SET " + strings.Join(setClauses, ", ") + " WHERE id = ?"
+	if _, err := s.db.Exec(query, args...); err != nil {
+		return fmt.Errorf("update channel %d: %w", id, err)
+	}
+	return nil
+}
+
+// ListChannels returns all channels.
+func (s *Store) ListChannels() ([]Channel, error) {
+	rows, err := s.db.Query("SELECT id, type, enabled, created_at FROM channels ORDER BY id")
+	if err != nil {
+		return nil, fmt.Errorf("list channels: %w", err)
+	}
+	defer rows.Close()
+
+	var channels []Channel
+	for rows.Next() {
+		var ch Channel
+		var enabled int
+		if err := rows.Scan(&ch.ID, &ch.Type, &enabled, &ch.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan channel: %w", err)
+		}
+		ch.Enabled = enabled == 1
+		channels = append(channels, ch)
+	}
+	return channels, rows.Err()
 }
 
 // --- Exists helpers ---
@@ -628,15 +798,15 @@ func (s *Store) AddRuleAndBinding(
 		bPortsJSON = &ps
 	}
 	var bProtocolsJSON *string
-	if bindingOpts.Protocol != "" {
-		b, _ := json.Marshal([]string{bindingOpts.Protocol})
+	if len(bindingOpts.Protocols) > 0 {
+		b, _ := json.Marshal(bindingOpts.Protocols)
 		ps := string(b)
 		bProtocolsJSON = &ps
 	}
 	res, err = tx.Exec(
 		`INSERT INTO bindings (destination, ports, credential, header, template, protocols) VALUES (?, ?, ?, ?, ?, ?)`,
 		ruleOpts.Destination, bPortsJSON, credential,
-		nilIfEmpty(bindingOpts.InjectHeader), nilIfEmpty(bindingOpts.Template), bProtocolsJSON,
+		nilIfEmpty(bindingOpts.Header), nilIfEmpty(bindingOpts.Template), bProtocolsJSON,
 	)
 	if err != nil {
 		return 0, 0, fmt.Errorf("insert binding: %w", err)
@@ -712,12 +882,11 @@ func scanBindings(rows *sql.Rows) ([]BindingRow, error) {
 				return nil, fmt.Errorf("unmarshal ports for binding %d: %w", b.ID, err)
 			}
 		}
-		b.InjectHeader = header.String
+		b.Header = header.String
 		b.Template = tmpl.String
 		if protocolsJSON.Valid {
-			var protocols []string
-			if err := json.Unmarshal([]byte(protocolsJSON.String), &protocols); err == nil && len(protocols) > 0 {
-				b.Protocol = protocols[0]
+			if err := json.Unmarshal([]byte(protocolsJSON.String), &b.Protocols); err != nil {
+				return nil, fmt.Errorf("unmarshal protocols for binding %d: %w", b.ID, err)
 			}
 		}
 		bindings = append(bindings, b)

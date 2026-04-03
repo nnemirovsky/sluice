@@ -224,17 +224,17 @@ type Config struct {
 }
 ```
 
-- [ ] Remove `GetConfig(key)` and `SetConfig(key, value)` methods
-- [ ] Create `Config` struct with typed fields matching config table columns
-- [ ] Implement `GetConfig() (*Config, error)` that reads the singleton row
-- [ ] Implement `UpdateConfig(updates ConfigUpdate) error` that updates only non-zero fields
-- [ ] Update `BindingRow`: rename `InjectHeader` to `Header`, rename `Protocol string` to `Protocols []string`
-- [ ] Update `AddBinding`, `ListBindings`, `ListBindingsByCredential` for renamed columns and JSON array protocols
-- [ ] Add channels CRUD: `GetChannel(id) (*Channel, error)`, `UpdateChannel(id, updates) error`, `ListChannels() ([]Channel, error)`
-- [ ] Write tests for typed config CRUD (get defaults, update partial, update full)
-- [ ] Write tests for binding CRUD with new field names
-- [ ] Write tests for channels CRUD
-- [ ] Run tests: `go test ./internal/store/ -v -timeout 30s`
+- [x] Remove `GetConfig(key)` and `SetConfig(key, value)` methods
+- [x] Create `Config` struct with typed fields matching config table columns
+- [x] Implement `GetConfig() (*Config, error)` that reads the singleton row
+- [x] Implement `UpdateConfig(updates ConfigUpdate) error` that updates only non-zero fields
+- [x] Update `BindingRow`: rename `InjectHeader` to `Header`, rename `Protocol string` to `Protocols []string`
+- [x] Update `AddBinding`, `ListBindings`, `ListBindingsByCredential` for renamed columns and JSON array protocols
+- [x] Add channels CRUD: `GetChannel(id) (*Channel, error)`, `UpdateChannel(id, updates) error`, `ListChannels() ([]Channel, error)`
+- [x] Write tests for typed config CRUD (get defaults, update partial, update full)
+- [x] Write tests for binding CRUD with new field names
+- [x] Write tests for channels CRUD
+- [x] Run tests: `go test ./internal/store/ -v -timeout 30s`
 
 ### Task 4: Create Channel interface and ChannelType enum
 

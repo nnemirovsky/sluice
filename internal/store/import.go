@@ -506,6 +506,28 @@ func insertInspectRuleIfNew(tx *sql.Tx, kind, pattern string, description, repla
 	return true, nil
 }
 
+// configColumns maps config key names to column names in the typed config table.
+// Used by the import path only. Legacy keys (telegram_*) map to empty string
+// and are silently ignored.
+var configColumns = map[string]string{
+	"default_verdict":               "default_verdict",
+	"timeout_sec":                   "timeout_sec",
+	"vault_provider":                "vault_provider",
+	"vault_dir":                     "vault_dir",
+	"vault_providers":               "vault_providers",
+	"vault_hashicorp_addr":          "vault_hashicorp_addr",
+	"vault_hashicorp_mount":         "vault_hashicorp_mount",
+	"vault_hashicorp_prefix":        "vault_hashicorp_prefix",
+	"vault_hashicorp_auth":          "vault_hashicorp_auth",
+	"vault_hashicorp_token":         "vault_hashicorp_token",
+	"vault_hashicorp_role_id":       "vault_hashicorp_role_id",
+	"vault_hashicorp_secret_id":     "vault_hashicorp_secret_id",
+	"vault_hashicorp_role_id_env":   "vault_hashicorp_role_id_env",
+	"vault_hashicorp_secret_id_env": "vault_hashicorp_secret_id_env",
+	"telegram_bot_token_env":        "",
+	"telegram_chat_id_env":          "",
+}
+
 // updateConfigColumn updates a single column in the typed config singleton row.
 func updateConfigColumn(tx *sql.Tx, column, value string) error {
 	col, ok := configColumns[column]

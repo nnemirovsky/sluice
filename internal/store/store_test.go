@@ -434,52 +434,134 @@ func TestListRulesFilterVerdictAndType(t *testing.T) {
 
 // --- Config ---
 
-func TestConfigGetSet(t *testing.T) {
+func TestConfigGetDefaults(t *testing.T) {
+	s := newTestStore(t)
+	cfg, err := s.GetConfig()
+	if err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	if cfg.DefaultVerdict != "deny" {
+		t.Errorf("default verdict = %q, want deny", cfg.DefaultVerdict)
+	}
+	if cfg.TimeoutSec != 120 {
+		t.Errorf("timeout_sec = %d, want 120", cfg.TimeoutSec)
+	}
+	if cfg.VaultProvider != "age" {
+		t.Errorf("vault_provider = %q, want age", cfg.VaultProvider)
+	}
+	if cfg.VaultDir != "" {
+		t.Errorf("vault_dir = %q, want empty", cfg.VaultDir)
+	}
+	if cfg.VaultProviders != nil {
+		t.Errorf("vault_providers = %v, want nil", cfg.VaultProviders)
+	}
+}
+
+func TestConfigUpdatePartial(t *testing.T) {
 	s := newTestStore(t)
 
-	// Get default value.
-	val, err := s.GetConfig("default_verdict")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if val != "deny" {
-		t.Errorf("expected deny default, got %q", val)
-	}
-
-	// Set and get.
-	if err := s.SetConfig("default_verdict", "ask"); err != nil {
-		t.Fatalf("set: %v", err)
-	}
-	val, _ = s.GetConfig("default_verdict")
-	if val != "ask" {
-		t.Errorf("expected ask, got %q", val)
-	}
-
-	// Update.
-	if err := s.SetConfig("default_verdict", "deny"); err != nil {
+	// Update only default_verdict.
+	verdict := "ask"
+	if err := s.UpdateConfig(ConfigUpdate{DefaultVerdict: &verdict}); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	val, _ = s.GetConfig("default_verdict")
-	if val != "deny" {
-		t.Errorf("expected deny after update, got %q", val)
+	cfg, _ := s.GetConfig()
+	if cfg.DefaultVerdict != "ask" {
+		t.Errorf("default verdict = %q, want ask", cfg.DefaultVerdict)
+	}
+	// Other fields should remain at defaults.
+	if cfg.TimeoutSec != 120 {
+		t.Errorf("timeout_sec = %d, want 120", cfg.TimeoutSec)
 	}
 }
 
-func TestConfigGetUnknownKey(t *testing.T) {
+func TestConfigUpdateFull(t *testing.T) {
 	s := newTestStore(t)
-	val, err := s.GetConfig("nonexistent_key")
+
+	verdict := "allow"
+	timeout := 60
+	provider := "hashicorp"
+	dir := "/tmp/vault"
+	providers := []string{"age", "hashicorp"}
+	addr := "https://vault.example.com:8200"
+	mount := "kv"
+	prefix := "sluice/"
+	auth := "approle"
+	roleID := "my-role"
+	secretID := "my-secret"
+	roleIDEnv := "ROLE_ID"
+	secretIDEnv := "SECRET_ID"
+
+	err := s.UpdateConfig(ConfigUpdate{
+		DefaultVerdict:            &verdict,
+		TimeoutSec:                &timeout,
+		VaultProvider:             &provider,
+		VaultDir:                  &dir,
+		VaultProviders:            &providers,
+		VaultHashicorpAddr:        &addr,
+		VaultHashicorpMount:       &mount,
+		VaultHashicorpPrefix:      &prefix,
+		VaultHashicorpAuth:        &auth,
+		VaultHashicorpRoleID:      &roleID,
+		VaultHashicorpSecretID:    &secretID,
+		VaultHashicorpRoleIDEnv:   &roleIDEnv,
+		VaultHashicorpSecretIDEnv: &secretIDEnv,
+	})
 	if err != nil {
-		t.Fatalf("get unknown key: %v", err)
+		t.Fatalf("update: %v", err)
 	}
-	if val != "" {
-		t.Errorf("expected empty for unknown key, got %q", val)
+
+	cfg, _ := s.GetConfig()
+	if cfg.DefaultVerdict != "allow" {
+		t.Errorf("default verdict = %q", cfg.DefaultVerdict)
+	}
+	if cfg.TimeoutSec != 60 {
+		t.Errorf("timeout = %d", cfg.TimeoutSec)
+	}
+	if cfg.VaultProvider != "hashicorp" {
+		t.Errorf("vault provider = %q", cfg.VaultProvider)
+	}
+	if cfg.VaultDir != "/tmp/vault" {
+		t.Errorf("vault dir = %q", cfg.VaultDir)
+	}
+	if len(cfg.VaultProviders) != 2 || cfg.VaultProviders[0] != "age" {
+		t.Errorf("vault providers = %v", cfg.VaultProviders)
+	}
+	if cfg.VaultHashicorpAddr != addr {
+		t.Errorf("hc addr = %q", cfg.VaultHashicorpAddr)
+	}
+	if cfg.VaultHashicorpMount != mount {
+		t.Errorf("hc mount = %q", cfg.VaultHashicorpMount)
+	}
+	if cfg.VaultHashicorpPrefix != prefix {
+		t.Errorf("hc prefix = %q", cfg.VaultHashicorpPrefix)
+	}
+	if cfg.VaultHashicorpAuth != auth {
+		t.Errorf("hc auth = %q", cfg.VaultHashicorpAuth)
+	}
+	if cfg.VaultHashicorpRoleID != roleID {
+		t.Errorf("hc role_id = %q", cfg.VaultHashicorpRoleID)
+	}
+	if cfg.VaultHashicorpSecretID != secretID {
+		t.Errorf("hc secret_id = %q", cfg.VaultHashicorpSecretID)
+	}
+	if cfg.VaultHashicorpRoleIDEnv != roleIDEnv {
+		t.Errorf("hc role_id_env = %q", cfg.VaultHashicorpRoleIDEnv)
+	}
+	if cfg.VaultHashicorpSecretIDEnv != secretIDEnv {
+		t.Errorf("hc secret_id_env = %q", cfg.VaultHashicorpSecretIDEnv)
 	}
 }
 
-func TestConfigValidation(t *testing.T) {
+func TestConfigUpdateNoOp(t *testing.T) {
 	s := newTestStore(t)
-	if err := s.SetConfig("", "value"); err == nil {
-		t.Error("empty key should fail")
+	// Empty update should be a no-op.
+	if err := s.UpdateConfig(ConfigUpdate{}); err != nil {
+		t.Fatalf("empty update: %v", err)
+	}
+	cfg, _ := s.GetConfig()
+	if cfg.DefaultVerdict != "deny" {
+		t.Errorf("default verdict changed unexpectedly: %q", cfg.DefaultVerdict)
 	}
 }
 
@@ -488,10 +570,10 @@ func TestConfigValidation(t *testing.T) {
 func TestBindingCRUD(t *testing.T) {
 	s := newTestStore(t)
 	id, err := s.AddBinding("api.example.com", "my_api_key", BindingOpts{
-		Ports:        []int{443},
-		InjectHeader: "Authorization",
-		Template:     "Bearer {value}",
-		Protocol:     "https",
+		Ports:     []int{443},
+		Header:    "Authorization",
+		Template:  "Bearer {value}",
+		Protocols: []string{"https"},
 	})
 	if err != nil {
 		t.Fatalf("add: %v", err)
@@ -514,14 +596,14 @@ func TestBindingCRUD(t *testing.T) {
 	if len(b.Ports) != 1 || b.Ports[0] != 443 {
 		t.Errorf("ports = %v", b.Ports)
 	}
-	if b.InjectHeader != "Authorization" {
-		t.Errorf("header = %q", b.InjectHeader)
+	if b.Header != "Authorization" {
+		t.Errorf("header = %q", b.Header)
 	}
 	if b.Template != "Bearer {value}" {
 		t.Errorf("template = %q", b.Template)
 	}
-	if b.Protocol != "https" {
-		t.Errorf("protocol = %q", b.Protocol)
+	if len(b.Protocols) != 1 || b.Protocols[0] != "https" {
+		t.Errorf("protocols = %v", b.Protocols)
 	}
 
 	ok, _ := s.RemoveBinding(id)
@@ -531,6 +613,36 @@ func TestBindingCRUD(t *testing.T) {
 	bindings, _ = s.ListBindings()
 	if len(bindings) != 0 {
 		t.Error("expected empty after remove")
+	}
+}
+
+func TestBindingMultipleProtocols(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.AddBinding("mail.example.com", "mail_cred", BindingOpts{
+		Ports:     []int{993, 587},
+		Protocols: []string{"imap", "smtp"},
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	bindings, _ := s.ListBindings()
+	if len(bindings[0].Protocols) != 2 || bindings[0].Protocols[0] != "imap" || bindings[0].Protocols[1] != "smtp" {
+		t.Errorf("protocols = %v, want [imap smtp]", bindings[0].Protocols)
+	}
+}
+
+func TestBindingNoProtocols(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.AddBinding("api.example.com", "key", BindingOpts{
+		Ports:  []int{443},
+		Header: "Authorization",
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	bindings, _ := s.ListBindings()
+	if bindings[0].Protocols != nil {
+		t.Errorf("protocols should be nil, got %v", bindings[0].Protocols)
 	}
 }
 
@@ -781,10 +893,10 @@ func TestConcurrentConfigAccess(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			value := fmt.Sprintf("value_%d", i)
-			if err := s.SetConfig("vault_dir", value); err != nil {
+			if err := s.UpdateConfig(ConfigUpdate{VaultDir: &value}); err != nil {
 				errs <- err
 			}
-			if _, err := s.GetConfig("vault_dir"); err != nil {
+			if _, err := s.GetConfig(); err != nil {
 				errs <- err
 			}
 		}(i)
@@ -879,5 +991,81 @@ func TestRedactVerdict(t *testing.T) {
 	}
 	if rules[0].Replacement != "[REDACTED_API_KEY]" {
 		t.Errorf("replacement = %q", rules[0].Replacement)
+	}
+}
+
+// --- Channels CRUD ---
+
+func TestChannelGetDefault(t *testing.T) {
+	s := newTestStore(t)
+	ch, err := s.GetChannel(1)
+	if err != nil {
+		t.Fatalf("get channel: %v", err)
+	}
+	if ch == nil {
+		t.Fatal("default channel should exist")
+	}
+	if ch.Type != 0 {
+		t.Errorf("type = %d, want 0 (Telegram)", ch.Type)
+	}
+	if !ch.Enabled {
+		t.Error("default channel should be enabled")
+	}
+}
+
+func TestChannelGetNonExistent(t *testing.T) {
+	s := newTestStore(t)
+	ch, err := s.GetChannel(999)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if ch != nil {
+		t.Error("non-existent channel should return nil")
+	}
+}
+
+func TestChannelUpdate(t *testing.T) {
+	s := newTestStore(t)
+	disabled := false
+	if err := s.UpdateChannel(1, ChannelUpdate{Enabled: &disabled}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	ch, _ := s.GetChannel(1)
+	if ch.Enabled {
+		t.Error("channel should be disabled")
+	}
+
+	enabled := true
+	if err := s.UpdateChannel(1, ChannelUpdate{Enabled: &enabled}); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	ch, _ = s.GetChannel(1)
+	if !ch.Enabled {
+		t.Error("channel should be enabled")
+	}
+}
+
+func TestChannelUpdateNoOp(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.UpdateChannel(1, ChannelUpdate{}); err != nil {
+		t.Fatalf("empty update: %v", err)
+	}
+	ch, _ := s.GetChannel(1)
+	if !ch.Enabled {
+		t.Error("channel should still be enabled after no-op update")
+	}
+}
+
+func TestListChannels(t *testing.T) {
+	s := newTestStore(t)
+	channels, err := s.ListChannels()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(channels) != 1 {
+		t.Fatalf("expected 1 default channel, got %d", len(channels))
+	}
+	if channels[0].ID != 1 || channels[0].Type != 0 || !channels[0].Enabled {
+		t.Errorf("unexpected default channel: %+v", channels[0])
 	}
 }
