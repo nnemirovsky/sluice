@@ -2,6 +2,11 @@
 bin/
 /sluice
 
+# SQLite databases (runtime, not checked in)
+*.db
+*.db-shm
+*.db-wal
+
 # Coverage
 coverage.out
 coverage.html
