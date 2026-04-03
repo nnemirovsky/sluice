@@ -250,26 +250,38 @@ func TestHandleCredUnknownSubcommand(t *testing.T) {
 	t.Fatal("expected non-zero exit code")
 }
 
-// TestHandleCredRemoveNonexistent verifies exit 1 when removing a credential that does not exist.
+// TestHandleCredRemoveNonexistent verifies idempotent behavior when removing
+// a credential that does not exist. This allows retrying after partial failures
+// where the vault entry was deleted but DB cleanup failed.
 func TestHandleCredRemoveNonexistent(t *testing.T) {
-	if os.Getenv("TEST_CRED_SUBPROCESS") == "remove_nonexistent" {
-		dir := os.Getenv("TEST_VAULT_DIR")
-		os.Setenv("SLUICE_VAULT_DIR", dir)
-		handleCredCommand([]string{"remove", "does_not_exist"})
-		return
-	}
 	dir := t.TempDir()
+	t.Setenv("SLUICE_VAULT_DIR", dir)
+
 	// Initialize vault so credentials dir exists.
 	if _, err := vault.NewStore(dir); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=TestHandleCredRemoveNonexistent")
-	cmd.Env = append(os.Environ(), "TEST_CRED_SUBPROCESS=remove_nonexistent", "TEST_VAULT_DIR="+dir)
-	err := cmd.Run()
-	if e, ok := err.(*exec.ExitError); ok && !e.Success() {
-		return
+
+	// Capture stdout.
+	oldStdout := os.Stdout
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Fatal("expected non-zero exit code")
+	os.Stdout = outW
+	defer func() { os.Stdout = oldStdout }()
+
+	handleCredCommand([]string{"remove", "does_not_exist"})
+
+	outW.Close()
+	var buf bytes.Buffer
+	io.Copy(&buf, outR)
+	os.Stdout = oldStdout
+
+	output := buf.String()
+	if !strings.Contains(output, "already removed from vault") {
+		t.Errorf("expected 'already removed from vault' message, got: %s", output)
+	}
 }
 
 // TestHandleCredAddWithDestination tests adding a credential with --destination
@@ -357,8 +369,8 @@ func TestHandleCredAddWithDestination(t *testing.T) {
 	if rules[0].Destination != "api.anthropic.com" {
 		t.Errorf("rule destination = %q, want %q", rules[0].Destination, "api.anthropic.com")
 	}
-	if rules[0].Source != credAddSource {
-		t.Errorf("rule source = %q, want %q", rules[0].Source, credAddSource)
+	if rules[0].Source != credAddSourcePrefix + "anthropic_key" {
+		t.Errorf("rule source = %q, want %q", rules[0].Source, credAddSourcePrefix + "anthropic_key")
 	}
 	if len(rules[0].Ports) != 1 || rules[0].Ports[0] != 443 {
 		t.Errorf("rule ports = %v, want [443]", rules[0].Ports)
@@ -522,7 +534,7 @@ func TestHandleCredRemoveWithBindings(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = db.AddRule("allow", "api.cleanup.com", []int{443}, store.RuleOpts{
-		Source: credAddSource,
+		Source: credAddSourcePrefix + "cleanup_key",
 		Note:   "auto-created for credential \"cleanup_key\"",
 	})
 	if err != nil {

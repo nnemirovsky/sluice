@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/elazarl/goproxy"
@@ -37,7 +38,7 @@ var pinIDCtxKey = pinIDKeyType{}
 type Injector struct {
 	Proxy    *goproxy.ProxyHttpServer
 	provider vault.Provider
-	resolver *vault.BindingResolver
+	resolver *atomic.Pointer[vault.BindingResolver]
 	caCert   tls.Certificate
 	// authToken is a random nonce generated at startup. The SOCKS5 dial
 	// function includes it in CONNECT requests so the injector can verify
@@ -72,7 +73,7 @@ func (inj *Injector) UnpinIPs(pinID string) {
 // requests. The caCert is used to generate per-host TLS certificates for
 // HTTPS interception. The authToken must be included in CONNECT requests
 // to prevent unauthorized local processes from accessing credential injection.
-func NewInjector(provider vault.Provider, resolver *vault.BindingResolver, caCert tls.Certificate, authToken string) *Injector {
+func NewInjector(provider vault.Provider, resolver *atomic.Pointer[vault.BindingResolver], caCert tls.Certificate, authToken string) *Injector {
 	inj := &Injector{
 		provider:  provider,
 		resolver:  resolver,
@@ -147,8 +148,10 @@ func NewInjector(provider vault.Provider, resolver *vault.BindingResolver, caCer
 			if port == 0 {
 				port = 443
 			}
-			if _, ok := inj.resolver.Resolve(h, port); ok {
-				return mitmAction, host
+			if r := inj.resolver.Load(); r != nil {
+				if _, ok := r.Resolve(h, port); ok {
+					return mitmAction, host
+				}
 			}
 			return goproxy.OkConnect, host
 		},
@@ -186,7 +189,11 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 
 	port := portFromRequest(r)
 
-	binding, ok := inj.resolver.Resolve(host, port)
+	res := inj.resolver.Load()
+	if res == nil {
+		return r, nil
+	}
+	binding, ok := res.Resolve(host, port)
 	if !ok {
 		return r, nil
 	}

@@ -60,7 +60,7 @@ type Server struct {
 	injectorLn net.Listener
 	sshJump    *SSHJumpHost
 	mailProxy  *MailProxy
-	resolver   *vault.BindingResolver
+	resolver   atomic.Pointer[vault.BindingResolver]
 	closed     atomic.Bool
 	serving    atomic.Bool
 	activeConns sync.WaitGroup
@@ -339,65 +339,26 @@ func New(cfg Config) (*Server, error) {
 
 	srv := &Server{listener: ln}
 
-	// Initialize credential injection handlers when a vault provider and
-	// binding resolver are both configured.
-	if cfg.Provider != nil && cfg.Resolver != nil {
-		srv.resolver = cfg.Resolver
-
-		// HTTPS MITM injector backed by goproxy.
-		vaultDir := cfg.VaultDir
-		if vaultDir == "" {
-			home, homeErr := os.UserHomeDir()
-			if homeErr != nil {
-				ln.Close()
-				return nil, fmt.Errorf("determine home dir for CA: %w", homeErr)
-			}
-			vaultDir = filepath.Join(home, ".sluice")
-		}
-		caCert, _, caErr := LoadOrCreateCA(vaultDir)
-		if caErr != nil {
-			ln.Close()
-			return nil, fmt.Errorf("load CA: %w", caErr)
-		}
-
-		certPath := filepath.Join(vaultDir, "ca-cert.pem")
-		if expiring, expiryErr := IsCACertExpiring(certPath, 30*24*time.Hour); expiryErr == nil && expiring {
-			log.Printf("WARNING: CA certificate at %s expires within 30 days. Delete and restart to regenerate.", certPath)
-		}
-
-		// Generate a random auth token so only our SOCKS5 dial function
-		// can use the injector listener. Without this, any local process
-		// that discovers the port could bypass policy and audit logging.
-		tokenBytes := make([]byte, 16)
-		if _, tokenErr := rand.Read(tokenBytes); tokenErr != nil {
-			ln.Close()
-			return nil, fmt.Errorf("generate injector auth token: %w", tokenErr)
-		}
-		authToken := hex.EncodeToString(tokenBytes)
-
-		srv.injector = NewInjector(cfg.Provider, cfg.Resolver, caCert, authToken)
-		injLn, injErr := net.Listen("tcp", "127.0.0.1:0")
+	// Initialize credential injection handlers when a vault provider is
+	// configured. The resolver may be nil at startup (no bindings yet) and
+	// set later via StoreResolver after SIGHUP or Telegram mutations.
+	if cfg.Resolver != nil {
+		srv.resolver.Store(cfg.Resolver)
+	}
+	if cfg.Provider != nil {
+		injErr := srv.setupInjection(cfg, ln)
 		if injErr != nil {
-			ln.Close()
-			return nil, fmt.Errorf("injector listener: %w", injErr)
+			// When bindings exist (resolver is set), injection infrastructure
+			// is required. Hard-fail so the operator fixes the issue.
+			if cfg.Resolver != nil {
+				ln.Close()
+				return nil, injErr
+			}
+			// No bindings yet. Degrade to policy-only mode so network
+			// governance still works. Injection can be enabled by fixing
+			// the underlying issue (e.g. CA dir permissions) and restarting.
+			log.Printf("credential injection disabled (no bindings): %v", injErr)
 		}
-		srv.injectorLn = injLn
-		go http.Serve(injLn, srv.injector.Proxy) //nolint:errcheck // best-effort
-
-		// SSH jump host for credential-injected SSH connections.
-		hostKey, hkErr := GenerateSSHHostKey()
-		if hkErr != nil {
-			ln.Close()
-			injLn.Close()
-			return nil, fmt.Errorf("generate SSH host key: %w", hkErr)
-		}
-		srv.sshJump = NewSSHJumpHost(cfg.Provider, hostKey)
-
-		// Mail proxy for IMAP/SMTP credential injection. Pass the CA cert
-		// so implicit TLS ports (993, 465) can be handled via TLS MITM.
-		srv.mailProxy = NewMailProxy(cfg.Provider, &caCert)
-
-		log.Printf("credential injection enabled (%s)", cfg.Provider.Name())
 	}
 
 	enginePtr := new(atomic.Pointer[policy.Engine])
@@ -426,18 +387,75 @@ func New(cfg Config) (*Server, error) {
 	return srv, nil
 }
 
+// setupInjection initializes the credential injection infrastructure (HTTPS
+// MITM, SSH jump host, mail proxy). Returns an error if any component fails.
+// The caller decides whether the error is fatal based on whether bindings exist.
+func (s *Server) setupInjection(cfg Config, mainLn net.Listener) error {
+	vaultDir := cfg.VaultDir
+	if vaultDir == "" {
+		home, homeErr := os.UserHomeDir()
+		if homeErr != nil {
+			return fmt.Errorf("determine home dir for CA: %w", homeErr)
+		}
+		vaultDir = filepath.Join(home, ".sluice")
+	}
+	caCert, _, caErr := LoadOrCreateCA(vaultDir)
+	if caErr != nil {
+		return fmt.Errorf("load CA: %w", caErr)
+	}
+
+	certPath := filepath.Join(vaultDir, "ca-cert.pem")
+	if expiring, expiryErr := IsCACertExpiring(certPath, 30*24*time.Hour); expiryErr == nil && expiring {
+		log.Printf("WARNING: CA certificate at %s expires within 30 days. Delete and restart to regenerate.", certPath)
+	}
+
+	// Generate a random auth token so only our SOCKS5 dial function
+	// can use the injector listener. Without this, any local process
+	// that discovers the port could bypass policy and audit logging.
+	tokenBytes := make([]byte, 16)
+	if _, tokenErr := rand.Read(tokenBytes); tokenErr != nil {
+		return fmt.Errorf("generate injector auth token: %w", tokenErr)
+	}
+	authToken := hex.EncodeToString(tokenBytes)
+
+	s.injector = NewInjector(cfg.Provider, &s.resolver, caCert, authToken)
+	injLn, injErr := net.Listen("tcp", "127.0.0.1:0")
+	if injErr != nil {
+		return fmt.Errorf("injector listener: %w", injErr)
+	}
+	s.injectorLn = injLn
+	go http.Serve(injLn, s.injector.Proxy) //nolint:errcheck // best-effort
+
+	// SSH jump host for credential-injected SSH connections.
+	hostKey, hkErr := GenerateSSHHostKey()
+	if hkErr != nil {
+		injLn.Close()
+		s.injectorLn = nil
+		s.injector = nil
+		return fmt.Errorf("generate SSH host key: %w", hkErr)
+	}
+	s.sshJump = NewSSHJumpHost(cfg.Provider, hostKey)
+
+	// Mail proxy for IMAP/SMTP credential injection. Pass the CA cert
+	// so implicit TLS ports (993, 465) can be handled via TLS MITM.
+	s.mailProxy = NewMailProxy(cfg.Provider, &caCert)
+
+	log.Printf("credential injection enabled (%s)", cfg.Provider.Name())
+	return nil
+}
+
 // dial is the custom dialer for go-socks5. When a credential binding matches
 // the destination, the connection is routed through the appropriate injection
 // handler (HTTPS MITM, SSH jump host, or mail proxy). Otherwise it falls
 // through to a direct TCP connection with DNS fallback support.
 func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, error) {
-	if s.resolver != nil {
+	if r := s.resolver.Load(); r != nil {
 		fqdn, _ := ctx.Value(ctxKeyFQDN).(string)
 		if fqdn != "" {
 			_, portStr, _ := net.SplitHostPort(addr)
 			port, _ := strconv.Atoi(portStr)
 
-			if binding, ok := s.resolver.Resolve(fqdn, port); ok {
+			if binding, ok := r.Resolve(fqdn, port); ok {
 				proto := ProtocolFromContext(ctx)
 				if binding.Protocol != "" {
 					proto = Protocol(binding.Protocol)
@@ -658,11 +676,26 @@ func (s *Server) StoreEngine(eng *policy.Engine) {
 	s.rules.engine.Store(eng)
 }
 
+// StoreResolver atomically stores a new binding resolver. The caller must
+// hold ReloadMu() when concurrent mutations are possible. The injector
+// shares the same atomic pointer so both the dial function and MITM proxy
+// see the updated bindings.
+func (s *Server) StoreResolver(r *vault.BindingResolver) {
+	s.resolver.Store(r)
+}
+
 // EnginePtr returns the shared atomic engine pointer. The Telegram command
 // handler uses this to read and mutate the same engine as the proxy, avoiding
 // split-brain windows during SIGHUP reloads.
 func (s *Server) EnginePtr() *atomic.Pointer[policy.Engine] {
 	return s.rules.engine
+}
+
+// ResolverPtr returns the shared atomic binding resolver pointer. The Telegram
+// command handler uses this to update bindings after credential mutations,
+// keeping the proxy's live binding snapshot in sync with the store.
+func (s *Server) ResolverPtr() *atomic.Pointer[vault.BindingResolver] {
+	return &s.resolver
 }
 
 // ReloadMu returns the shared reload mutex. The Telegram command handler

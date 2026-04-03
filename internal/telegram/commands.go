@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -46,14 +47,15 @@ func ParseCommand(text string) *Command {
 
 // CommandHandler holds the dependencies needed by command handlers.
 type CommandHandler struct {
-	engine     *atomic.Pointer[policy.Engine]
-	reloadMu   *sync.Mutex // shared with proxy; serializes engine swaps and policy mutations
-	broker     *ApprovalBroker
-	auditPath  string
-	vault      *vault.Store
-	dockerMgr  *docker.Manager
-	store      *store.Store
-	phantomDir string // shared volume path for phantom token files
+	engine      *atomic.Pointer[policy.Engine]
+	resolverPtr *atomic.Pointer[vault.BindingResolver] // shared with proxy; nil if not wired
+	reloadMu    *sync.Mutex                            // shared with proxy; serializes engine swaps and policy mutations
+	broker      *ApprovalBroker
+	auditPath   string
+	vault       *vault.Store
+	dockerMgr   *docker.Manager
+	store       *store.Store
+	phantomDir  string // shared volume path for phantom token files
 }
 
 // SetVault enables credential management commands.
@@ -74,6 +76,45 @@ func (h *CommandHandler) SetStore(s *store.Store) {
 // SetPhantomDir sets the shared volume path for phantom token files.
 func (h *CommandHandler) SetPhantomDir(dir string) {
 	h.phantomDir = dir
+}
+
+// SetResolverPtr shares the proxy's binding resolver pointer so credential
+// mutations can update the live binding snapshot without requiring SIGHUP.
+func (h *CommandHandler) SetResolverPtr(ptr *atomic.Pointer[vault.BindingResolver]) {
+	h.resolverPtr = ptr
+}
+
+// rebuildResolver reads bindings from the store, creates a new BindingResolver,
+// and atomically swaps it into the shared pointer. The caller must hold reloadMu.
+func (h *CommandHandler) rebuildResolver() error {
+	if h.resolverPtr == nil || h.store == nil {
+		return nil
+	}
+	rows, err := h.store.ListBindings()
+	if err != nil {
+		return fmt.Errorf("list bindings: %w", err)
+	}
+	if len(rows) == 0 {
+		h.resolverPtr.Store(nil)
+		return nil
+	}
+	bindings := make([]vault.Binding, len(rows))
+	for i, r := range rows {
+		bindings[i] = vault.Binding{
+			Destination:  r.Destination,
+			Ports:        r.Ports,
+			Credential:   r.Credential,
+			InjectHeader: r.InjectHeader,
+			Template:     r.Template,
+			Protocol:     r.Protocol,
+		}
+	}
+	resolver, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		return fmt.Errorf("rebuild resolver: %w", err)
+	}
+	h.resolverPtr.Store(resolver)
+	return nil
 }
 
 // recompileAndSwap rebuilds the policy Engine from the SQLite store and
@@ -402,22 +443,48 @@ func (h *CommandHandler) credRotate(name, value string) string {
 }
 
 func (h *CommandHandler) credRemove(name string) string {
-	// Clean up associated bindings and auto-created rules before removing,
-	// mirroring the CLI cred remove behavior (cmd/sluice/cred.go).
-	if h.store != nil {
-		bindings, err := h.store.ListBindingsByCredential(name)
-		if err == nil {
-			for _, b := range bindings {
-				h.store.RemoveRulesByDestinationAndSource(b.Destination, "cred-add")
-			}
+	// Remove from vault. If already gone (previous partial cleanup),
+	// continue to DB cleanup so stale rules/bindings can be removed.
+	if err := h.vault.Remove(name); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Sprintf("Failed to remove credential: %v", err)
 		}
-		h.store.RemoveBindingsByCredential(name)
+		// Vault entry already gone. Continue to clean up stale DB state.
 	}
 
-	if err := h.vault.Remove(name); err != nil {
-		return fmt.Sprintf("Failed to remove credential: %v", err)
+	// Clean up associated bindings and auto-created rules.
+	var warnings []string
+	if h.store != nil {
+		h.reloadMu.Lock()
+		if _, err := h.store.RemoveRulesBySource("cred-add:" + name); err != nil {
+			log.Printf("[WARN] remove rules for credential %q: %v", name, err)
+			warnings = append(warnings, fmt.Sprintf("failed to remove rules: %v", err))
+		}
+		if _, err := h.store.RemoveBindingsByCredential(name); err != nil {
+			log.Printf("[WARN] remove bindings for credential %q: %v", name, err)
+			warnings = append(warnings, fmt.Sprintf("failed to remove bindings: %v", err))
+		}
+		// Recompile engine so removed allow rules take effect immediately.
+		if err := h.recompileAndSwap(); err != nil {
+			log.Printf("[WARN] recompile after cred remove failed: %v", err)
+			warnings = append(warnings, fmt.Sprintf("policy recompile failed: %v", err))
+		}
+		// Rebuild resolver so the proxy stops matching the deleted binding.
+		if err := h.rebuildResolver(); err != nil {
+			log.Printf("[WARN] rebuild resolver after cred remove failed: %v", err)
+			warnings = append(warnings, fmt.Sprintf("resolver rebuild failed: %v", err))
+		}
+		h.reloadMu.Unlock()
 	}
-	return h.credMutationComplete(fmt.Sprintf("Removed credential: %s", name), name)
+
+	msg := fmt.Sprintf("Removed credential: %s", name)
+	if len(warnings) > 0 {
+		msg += "\n\nWarnings (stale rules/bindings may remain):\n"
+		for _, w := range warnings {
+			msg += "- " + w + "\n"
+		}
+	}
+	return h.credMutationComplete(msg, name)
 }
 
 func (h *CommandHandler) credMutationComplete(msg string, removedCreds ...string) string {

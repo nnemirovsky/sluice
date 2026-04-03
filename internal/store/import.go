@@ -376,8 +376,10 @@ func insertToolRuleIfNew(tx *sql.Tx, verdict string, r importToolRule) (bool, er
 	return true, nil
 }
 
-// insertBindingIfNew inserts a binding if no matching destination+credential
-// combination exists. Returns true if inserted.
+// insertBindingIfNew inserts a binding if no matching destination+credential+ports
+// combination exists. Returns true if inserted. Ports are included in the dedupe
+// check so that distinct bindings for the same credential on different ports
+// (e.g., SMTP vs IMAP) are not collapsed.
 func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
 	if b.Destination == "" {
 		return false, fmt.Errorf("binding has empty destination")
@@ -385,10 +387,11 @@ func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
 	if b.Credential == "" {
 		return false, fmt.Errorf("binding has empty credential")
 	}
+	portsJSON := portsToJSON(b.Ports)
 	var count int
 	err := tx.QueryRow(
-		"SELECT COUNT(*) FROM bindings WHERE destination = ? AND credential = ?",
-		b.Destination, b.Credential,
+		"SELECT COUNT(*) FROM bindings WHERE destination = ? AND credential = ? AND ports IS ?",
+		b.Destination, b.Credential, portsJSON,
 	).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("check binding exists: %w", err)
@@ -397,7 +400,6 @@ func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
 		return false, nil
 	}
 
-	portsJSON := portsToJSON(b.Ports)
 	if _, err := tx.Exec(
 		`INSERT INTO bindings (destination, ports, credential, inject_header, template, protocol) VALUES (?, ?, ?, ?, ?, ?)`,
 		b.Destination, portsJSON, b.Credential,

@@ -36,15 +36,16 @@ const telegramMaxMessage = 4000
 
 // BotConfig holds configuration for creating a Telegram approval bot.
 type BotConfig struct {
-	Token      string
-	ChatID     int64
-	EnginePtr  *atomic.Pointer[policy.Engine]
-	ReloadMu   *sync.Mutex
-	AuditPath  string
-	Vault      *vault.Store
-	DockerMgr  *docker.Manager
-	Store      *store.Store
-	PhantomDir string // shared volume path for phantom token files
+	Token       string
+	ChatID      int64
+	EnginePtr   *atomic.Pointer[policy.Engine]
+	ResolverPtr *atomic.Pointer[vault.BindingResolver] // shared with proxy for binding updates
+	ReloadMu    *sync.Mutex
+	AuditPath   string
+	Vault       *vault.Store
+	DockerMgr   *docker.Manager
+	Store       *store.Store
+	PhantomDir  string // shared volume path for phantom token files
 }
 
 // Bot manages the Telegram bot lifecycle, sending approval requests to
@@ -86,6 +87,9 @@ func NewBot(cfg BotConfig, broker *ApprovalBroker) (*Bot, error) {
 	}
 	if cfg.PhantomDir != "" {
 		cmdHandler.SetPhantomDir(cfg.PhantomDir)
+	}
+	if cfg.ResolverPtr != nil {
+		cmdHandler.SetResolverPtr(cfg.ResolverPtr)
 	}
 
 	return &Bot{api: api, chatID: cfg.ChatID, broker: broker, commands: cmdHandler, done: make(chan struct{})}, nil

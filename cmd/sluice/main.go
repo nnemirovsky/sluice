@@ -155,19 +155,32 @@ func main() {
 		log.Fatalf("read bindings: %v", err)
 	}
 
-	var provider vault.Provider
-	var bindingResolver *vault.BindingResolver
-	if len(bindings) > 0 {
-		provider, err = vault.NewProviderFromConfig(vaultCfg)
-		if err != nil {
+	// Create the vault provider so injection handlers exist even when the
+	// DB starts with zero bindings. Bindings added later via CLI or
+	// Telegram + SIGHUP will work without a full restart. When no bindings
+	// exist and the provider cannot be created (e.g. read-only filesystem),
+	// fall back to policy-only mode so pure network governance still works.
+	provider, err := vault.NewProviderFromConfig(vaultCfg)
+	if err != nil {
+		if len(bindings) > 0 {
 			log.Fatalf("create vault provider: %v", err)
 		}
+		log.Printf("vault provider unavailable (credential injection disabled): %v", err)
+		provider = nil
+	}
+
+	var bindingResolver *vault.BindingResolver
+	if len(bindings) > 0 {
 		bindingResolver, err = vault.NewBindingResolver(bindings)
 		if err != nil {
 			log.Fatalf("create binding resolver: %v", err)
 		}
 		log.Printf("credential injection enabled: %d bindings, provider=%s",
 			len(bindings), provider.Name())
+	} else if provider != nil {
+		log.Printf("vault provider ready (%s), no bindings yet", provider.Name())
+	} else {
+		log.Printf("no bindings and no vault provider; credential injection disabled")
 	}
 
 	// Create the proxy first so the bot can share its engine pointer and
@@ -223,15 +236,16 @@ func main() {
 	if telegramEnabled {
 		var botErr error
 		bot, botErr = telegram.NewBot(telegram.BotConfig{
-			Token:      *telegramToken,
-			ChatID:     telegramChatID,
-			EnginePtr:  srv.EnginePtr(),
-			ReloadMu:   srv.ReloadMu(),
-			AuditPath:  *auditPath,
-			Vault:      vaultStore,
-			DockerMgr:  dockerMgr,
-			Store:      db,
-			PhantomDir: *phantomDir,
+			Token:       *telegramToken,
+			ChatID:      telegramChatID,
+			EnginePtr:   srv.EnginePtr(),
+			ResolverPtr: srv.ResolverPtr(),
+			ReloadMu:    srv.ReloadMu(),
+			AuditPath:   *auditPath,
+			Vault:       vaultStore,
+			DockerMgr:   dockerMgr,
+			Store:       db,
+			PhantomDir:  *phantomDir,
 		}, broker)
 		if botErr != nil {
 			log.Fatalf("telegram bot: %v", botErr)
@@ -278,6 +292,23 @@ func main() {
 			// StoreEngine swaps the engine pointer without acquiring
 			// reloadMu (we already hold it for the entire reload).
 			srv.StoreEngine(newEng)
+
+			// Rebuild binding resolver so credential injection picks up
+			// bindings added via CLI or Telegram since last reload.
+			newBindings, bindErr := readBindings(db)
+			if bindErr != nil {
+				log.Printf("reload bindings failed: %v", bindErr)
+			} else if len(newBindings) > 0 {
+				newResolver, resolveErr := vault.NewBindingResolver(newBindings)
+				if resolveErr != nil {
+					log.Printf("rebuild binding resolver failed: %v", resolveErr)
+				} else {
+					srv.StoreResolver(newResolver)
+					log.Printf("reloaded bindings: %d", len(newBindings))
+				}
+			} else if len(newBindings) == 0 {
+				srv.StoreResolver(nil)
+			}
 
 			// Warn if the reloaded policy's Telegram config changed.
 			// The Telegram runtime (broker, bot, chat ID) is wired once

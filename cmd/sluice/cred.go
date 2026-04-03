@@ -16,8 +16,11 @@ import (
 	"golang.org/x/term"
 )
 
-// credAddSource is the source tag for rules auto-created by "sluice cred add --destination".
-const credAddSource = "cred-add"
+// credAddSourcePrefix is the source tag prefix for rules auto-created by
+// "sluice cred add --destination". The full source is "cred-add:<credential_name>"
+// so that removing one credential does not delete rules belonging to another
+// credential that shares the same destination.
+const credAddSourcePrefix = "cred-add:"
 
 func handleCredCommand(args []string) {
 	if len(args) == 0 {
@@ -128,7 +131,7 @@ func handleCredAdd(args []string) {
 
 		ruleID, err := db.AddRule("allow", *destination, ports, store.RuleOpts{
 			Note:   fmt.Sprintf("auto-created for credential %q", name),
-			Source: credAddSource,
+			Source: credAddSourcePrefix + name,
 		})
 		if err != nil {
 			log.Fatalf("add allow rule: %v", err)
@@ -220,28 +223,41 @@ func handleCredRemove(args []string) {
 
 	vs := openVaultStore()
 
-	// Before removing the credential, find and clean up associated bindings and rules.
+	// Remove from vault. If already gone (previous partial cleanup),
+	// continue to DB cleanup so stale rules/bindings can be removed.
+	if err := vs.Remove(name); err != nil {
+		if !os.IsNotExist(err) {
+			log.Fatalf("remove: %v", err)
+		}
+		fmt.Printf("credential %q already removed from vault, cleaning up database\n", name)
+	} else {
+		fmt.Printf("credential %q removed\n", name)
+	}
+
+	// Clean up associated bindings and auto-created rules.
 	// Only open the store if the DB file exists to avoid creating it as a side effect.
+	dbExists := false
+	if _, statErr := os.Stat(*dbPath); statErr == nil {
+		dbExists = true
+	}
 	db, dbErr := func() (*store.Store, error) {
-		if _, statErr := os.Stat(*dbPath); statErr != nil {
-			return nil, statErr
+		if !dbExists {
+			return nil, fmt.Errorf("database file not found")
 		}
 		return store.New(*dbPath)
 	}()
+	if dbErr != nil && dbExists {
+		log.Printf("warning: could not open database %q for cleanup: %v (stale rules/bindings may remain)", *dbPath, dbErr)
+	}
 	if dbErr == nil {
 		defer db.Close()
 
-		bindings, listErr := db.ListBindingsByCredential(name)
-		if listErr != nil {
-			log.Printf("warning: failed to list bindings for %q: %v", name, listErr)
-		}
-		for _, b := range bindings {
-			n, rmErr := db.RemoveRulesByDestinationAndSource(b.Destination, credAddSource)
-			if rmErr != nil {
-				log.Printf("warning: failed to remove rules for %s: %v", b.Destination, rmErr)
-			} else if n > 0 {
-				fmt.Printf("removed %d auto-created rule(s) for %s\n", n, b.Destination)
-			}
+		credSource := credAddSourcePrefix + name
+		n, rmErr := db.RemoveRulesBySource(credSource)
+		if rmErr != nil {
+			log.Printf("warning: failed to remove rules for credential %q: %v", name, rmErr)
+		} else if n > 0 {
+			fmt.Printf("removed %d auto-created rule(s) for credential %q\n", n, name)
 		}
 		removed, rmBindErr := db.RemoveBindingsByCredential(name)
 		if rmBindErr != nil {
@@ -250,9 +266,4 @@ func handleCredRemove(args []string) {
 			fmt.Printf("removed %d binding(s) for %q\n", removed, name)
 		}
 	}
-
-	if err := vs.Remove(name); err != nil {
-		log.Fatalf("remove: %v", err)
-	}
-	fmt.Printf("credential %q removed\n", name)
 }

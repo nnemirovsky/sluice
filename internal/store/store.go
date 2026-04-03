@@ -691,6 +691,16 @@ func (s *Store) RemoveRulesByDestinationAndSource(destination, source string) (i
 	return res.RowsAffected()
 }
 
+// RemoveRulesBySource deletes all rules matching a source tag.
+// Returns the number deleted.
+func (s *Store) RemoveRulesBySource(source string) (int64, error) {
+	res, err := s.db.Exec("DELETE FROM rules WHERE source = ?", source)
+	if err != nil {
+		return 0, fmt.Errorf("delete rules by source: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // --- Store queries ---
 
 // IsEmpty returns true if the store has no rules, tool rules, bindings, config

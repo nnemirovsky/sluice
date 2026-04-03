@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/nemirovsky/sluice/internal/vault"
@@ -29,7 +30,9 @@ func setupTestInjector(t *testing.T, bindings []vault.Binding) (*Injector, *vaul
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewInjector(store, resolver, caCert, ""), store
+	var resolverPtr atomic.Pointer[vault.BindingResolver]
+	resolverPtr.Store(resolver)
+	return NewInjector(store, &resolverPtr, caCert, ""), store
 }
 
 func TestPhantomSwapInHeaders(t *testing.T) {
