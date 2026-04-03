@@ -26,18 +26,21 @@ go test ./... -v -timeout 30s
 - `cmd/sluice/cert.go` - CLI subcommand handler for CA certificate generation (`cert generate`)
 - `cmd/sluice/mcp.go` - CLI subcommand handler for MCP gateway mode and upstream management (add/list/remove)
 - `cmd/sluice/policy.go` - CLI subcommand handler for policy management (list/add/remove/import/export)
-- `internal/store/store.go` - SQLite-backed policy store for all runtime state (rules, tool rules, config, bindings, MCP upstreams)
+- `internal/store/store.go` - SQLite-backed policy store for all runtime state (unified rules, typed config singleton, bindings, channels, MCP upstreams)
 - `internal/store/import.go` - TOML import into SQLite store with merge semantics (skip duplicates)
+- `internal/store/migrate.go` - golang-migrate integration with embedded SQL files
+- `internal/store/migrations/000001_init.up.sql` - Initial schema migration (rules, config, bindings, mcp_upstreams, channels)
+- `internal/store/migrations/000001_init.down.sql` - Rollback for initial schema
 - `internal/proxy/server.go` - SOCKS5 server wrapping `armon/go-socks5` with policy enforcement
 - `internal/proxy/protocol.go` - Port-based protocol detection (HTTP, HTTPS, SSH, IMAP, SMTP, generic)
 - `internal/proxy/ca.go` - Self-signed CA generation and persistence for HTTPS MITM
-- `internal/proxy/inject.go` - HTTPS MITM credential injector using goproxy with phantom token replacement
+- `internal/proxy/inject.go` - HTTPS MITM credential injector using goproxy with global phantom token replacement in all MITMed traffic
 - `internal/proxy/ssh.go` - SSH jump host with vault key injection and bidirectional channel relay
 - `internal/proxy/mail.go` - IMAP/SMTP AUTH command proxy with phantom token replacement (including base64)
 - `internal/policy/engine.go` - Policy compilation of glob patterns and evaluation (LoadFromBytes for backward compat)
 - `internal/policy/engine_store.go` - LoadFromStore builds a read-only Engine from SQLite store
 - `internal/policy/glob.go` - Glob pattern to regex compilation (`*` = single label, `**` = across dots)
-- `internal/policy/types.go` - Verdict enum (Allow/Deny/Ask), Rule struct, PolicyConfig, ToolRule, InspectBlockRule, InspectRedactRule
+- `internal/policy/types.go` - Verdict enum (Allow/Deny/Ask/Redact), Rule struct with Protocols []string, PolicyConfig
 - `internal/vault/store.go` - Age-encrypted credential storage with X25519 identity key management
 - `internal/vault/secure.go` - SecureBytes type with best-effort zeroizing memory release
 - `internal/vault/binding.go` - Binding resolution mapping destinations to credentials via glob matching
@@ -53,7 +56,9 @@ go test ./... -v -timeout 30s
 - `internal/mcp/upstream.go` - Upstream MCP server process management (spawn, handshake, tool discovery)
 - `internal/audit/logger.go` - Thread-safe append-only JSON lines audit logger with blake3 hash chaining
 - `internal/audit/verify.go` - Hash chain verification (walks log file, reports broken links)
-- `internal/telegram/approval.go` - Approval broker with channel-based request/response flow
+- `internal/channel/channel.go` - Channel interface, ChannelType enum (Telegram=0, HTTP=1), ApprovalRequest/Response/Command types
+- `internal/channel/broker.go` - Channel-agnostic approval broker with broadcast-and-first-wins, rate limiting, cross-channel cancellation
+- `internal/telegram/approval.go` - TelegramChannel implementing channel.Channel interface
 - `internal/telegram/bot.go` - Telegram bot lifecycle, inline keyboard approval messages
 - `internal/telegram/commands.go` - Telegram admin commands (/policy, /cred, /status, /audit, /help) backed by SQLite store
 - `internal/docker/manager.go` - Docker container manager for credential hot-reload via shared volume + docker exec, with restart fallback
@@ -64,7 +69,7 @@ go test ./... -v -timeout 30s
 - `scripts/docker-entrypoint.sh` - Container entrypoint with CA cert generation and copy to shared volume
 - `scripts/setup-vault.sh` - Interactive credential and CA setup script
 - `scripts/gen-phantom-env.sh` - Phantom token env file generator for openclaw container
-- `examples/policy.toml` - Example TOML seed file for initial DB population via `sluice policy import`
+- `examples/config.toml` - Example TOML seed file for initial DB population via `sluice policy import`
 - `testdata/` - TOML policy fixtures for import tests
 
 ## System Architecture
@@ -233,29 +238,33 @@ on_mcp_tool_call(tool_name, arguments, session):
         return error("Denied by user")
 ```
 
-### MCP Tool Policy (TOML seed format, stored in SQLite at runtime)
+### MCP Tool Policy (unified TOML seed format, stored in SQLite at runtime)
+
+Tool rules use the same `[[allow]]`/`[[deny]]`/`[[ask]]` sections as network rules, distinguished by the `tool` field instead of `destination`:
 
 ```toml
-[[tool_allow]]
+[[allow]]
 tool = "github__list_*"
-note = "Read-only GitHub operations"
+name = "Read-only GitHub operations"
 
-[[tool_allow]]
+[[allow]]
 tool = "filesystem__read_file"
-note = "File reads are safe"
+name = "File reads are safe"
 
-[[tool_ask]]
+[[ask]]
 tool = "github__create_*"
+name = "Write operations need approval"
+
+[[ask]]
 tool = "github__delete_*"
-note = "Write operations need approval"
 
-[[tool_ask]]
+[[ask]]
 tool = "filesystem__write_file"
-note = "File writes need approval"
+name = "File writes need approval"
 
-[[tool_deny]]
+[[deny]]
 tool = "exec__*"
-note = "Block all exec by default"
+name = "Block all exec by default"
 ```
 
 ### MCP Gateway Features
@@ -277,10 +286,10 @@ note = "Block all exec by default"
 ### Policy management
 
 ```
-sluice policy list [--verdict allow|deny|ask] [--db sluice.db]
-sluice policy add allow <destination> [--ports 443,80] [--note "reason"]
-sluice policy add deny <destination> [--note "reason"]
-sluice policy add ask <destination> [--ports 443] [--note "reason"]
+sluice policy list [--verdict allow|deny|ask|redact] [--db sluice.db]
+sluice policy add allow <destination> [--ports 443,80] [--name "reason"]
+sluice policy add deny <destination> [--name "reason"]
+sluice policy add ask <destination> [--ports 443] [--name "reason"]
 sluice policy remove <id>
 sluice policy import <path.toml>    # seed DB from TOML (merge semantics, skips duplicates)
 sluice policy export                # dump current rules as TOML to stdout
@@ -314,23 +323,25 @@ sluice audit verify                 # verify audit log hash chain integrity
 
 ## Implementation Details
 
-Policy store: `internal/store/store.go` wraps a SQLite database (via `modernc.org/sqlite`, pure Go, no CGO). All runtime state is persisted: network rules, tool rules, inspect rules, config, credential bindings, and MCP upstreams. TOML files are only used for initial seeding via `store.ImportTOML()`. Import uses merge semantics (skip duplicates based on destination+ports+verdict). The store uses WAL mode for concurrent read performance.
+Policy store: `internal/store/store.go` wraps a SQLite database (via `modernc.org/sqlite`, pure Go, no CGO). Schema is managed by `golang-migrate` with embedded SQL files (`internal/store/migrations/`). All runtime state is persisted in 5 tables: `rules` (unified table for network, tool, and content inspection rules with verdict allow/deny/ask/redact), `config` (typed singleton row), `bindings` (credential-to-destination mapping), `mcp_upstreams`, and `channels` (notification/approval channel configuration). The `rules` table uses a CHECK constraint enforcing mutual exclusivity of destination/tool/pattern columns. TOML files are only used for initial seeding via `store.ImportTOML()`. Import uses merge semantics (skip duplicates based on destination+ports+verdict). The store uses WAL mode for concurrent read performance.
 
 Policy engine: `LoadFromStore(s *store.Store)` reads all rules from SQLite and compiles glob patterns into regexes, producing a read-only Engine snapshot. `LoadFromBytes` is kept for backward compatibility (tests, import path). `Evaluate(dest, port)` checks deny rules first, then allow, then ask, falling back to default verdict. Mutations go through the store, then a new Engine is compiled and atomically swapped via `srv.StoreEngine(newEngine)`. SIGHUP also rebuilds the binding resolver from the store and atomically swaps it via `srv.StoreResolver(newResolver)`, so bindings added via CLI or Telegram take effect without a full restart.
 
 Proxy integration: `policyRuleSet` implements the `socks5.RuleSet` interface. Protocol detection stores results in context for future credential injection. The binding resolver is stored as an `atomic.Pointer[vault.BindingResolver]` so it can be hot-swapped on SIGHUP or after Telegram/CLI credential mutations. `Server.StoreResolver()` and `Server.ResolverPtr()` provide the swap and shared-access interfaces.
 
-Telegram approval: `ApprovalBroker` bridges the proxy and Telegram bot via channels. When `policyRuleSet.Allow()` encounters an Ask verdict, it calls `broker.Request()` which blocks until the bot resolves the request or the timeout expires. The bot goroutine reads from `broker.Pending()`, sends an inline keyboard to Telegram, and calls `broker.Resolve()` when the user responds. "Always Allow" writes to the SQLite store with source="approval", then recompiles the Engine and atomically swaps it. `CouldBeAllowed(dest, includeAsk)` takes an `includeAsk` parameter: when true (broker configured), Ask-matching destinations are resolved via DNS so the approval flow can proceed; when false (no broker), Ask rules are treated as Deny at the DNS stage to prevent leaking queries. Rate limiting prevents approval queue flooding: `MaxPendingRequests` (default 50) caps concurrent pending approvals, and per-destination rate limits (5 requests/minute) prevent a single target from monopolizing the queue. Requests exceeding limits are auto-denied.
+Channel abstraction: `internal/channel/channel.go` defines the `Channel` interface and `ChannelType` enum (ChannelTelegram=0, ChannelHTTP=1). `Channel` has methods for non-blocking `RequestApproval`, `CancelApproval`, `Commands()`, `Notify`, and lifecycle (`Start`/`Stop`). `internal/channel/broker.go` defines the `Broker` which coordinates approval flow across multiple enabled channels. Approval requests are broadcast to all channels and the first `Resolve()` call wins. Other channels get `CancelApproval()` for cleanup. Rate limiting prevents approval queue flooding: `MaxPendingRequests` (default 50) caps concurrent pending approvals, and per-destination rate limits (5 requests/minute) prevent a single target from monopolizing the queue. Requests exceeding limits are auto-denied.
 
-Telegram commands: `CommandHandler` holds an `atomic.Pointer[policy.Engine]` for lock-free reads and is updated via `UpdateEngine()` on SIGHUP. Policy mutations (`/policy allow`, `/policy deny`, `/policy remove`) write to the SQLite store, then recompile the Engine and swap atomically. All changes persist across restarts.
+Telegram channel: `internal/telegram/approval.go` implements `TelegramChannel` satisfying the `channel.Channel` interface. When `policyRuleSet.Allow()` encounters an Ask verdict, it calls `broker.Request()` which blocks until a channel resolves the request or the timeout expires. The Telegram channel sends an inline keyboard message and calls `broker.Resolve()` when the user responds. "Always Allow" writes to the SQLite store with source="approval", then recompiles the Engine and atomically swaps it. `CouldBeAllowed(dest, includeAsk)` takes an `includeAsk` parameter: when true (broker configured), Ask-matching destinations are resolved via DNS so the approval flow can proceed; when false (no broker), Ask rules are treated as Deny at the DNS stage to prevent leaking queries. Telegram env var names are hardcoded: `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (no config-based indirection).
+
+Telegram commands: `CommandHandler` holds an `atomic.Pointer[policy.Engine]` for lock-free reads and is updated via `UpdateEngine()` on SIGHUP. Policy mutations (`/policy allow`, `/policy deny`, `/policy remove`) call `store.AddRule()` and `store.RemoveRule()` on the unified rules table, then recompile the Engine and swap atomically. All changes persist across restarts.
 
 Audit logger is optional. Pass nil in `Config.Audit` and the proxy handles it gracefully. Each JSON line includes a `prev_hash` field containing the blake3 hash of the previous line's raw JSON bytes. The first entry uses blake3("") as the genesis hash. On startup, `NewFileLogger` reads the last line from the existing file (seeking backwards from EOF) to recover the hash chain across restarts. `VerifyChain` walks the log and reports any broken links. The `sluice audit verify` CLI command wraps this for tamper detection.
 
-Credential vault: `Store` manages age-encrypted files in `~/.sluice/credentials/` with an auto-generated X25519 identity. `SecureBytes` wraps decrypted values and zeroes memory on `Release()` (best-effort in Go due to GC and string copies). `Provider` interface abstracts credential sources (age files, env vars, HashiCorp Vault). `NewProviderFromConfig` reads vault configuration from the SQLite store's config table (keys: `vault_provider`, `vault_dir`, `vault_providers`, and HashiCorp-specific keys). TOML `[vault]` and `[vault.hashicorp]` sections are imported into the config table during seed import. `HashiCorpProvider` connects to HashiCorp Vault's KV v2 secrets engine, supporting both token and AppRole authentication. `role_id` and `secret_id` support env var indirection via `role_id_env` and `secret_id_env`. For `addr` and `token`, the Vault SDK reads `VAULT_ADDR` and `VAULT_TOKEN` automatically when not set.
+Credential vault: `Store` manages age-encrypted files in `~/.sluice/credentials/` with an auto-generated X25519 identity. `SecureBytes` wraps decrypted values and zeroes memory on `Release()` (best-effort in Go due to GC and string copies). `Provider` interface abstracts credential sources (age files, env vars, HashiCorp Vault). `NewProviderFromConfig` reads vault configuration from the SQLite store's typed config singleton (fields: VaultProvider, VaultDir, VaultProviders, and HashiCorp-specific fields). TOML `[vault]` and `[vault.hashicorp]` sections are imported into the config table during seed import. `HashiCorpProvider` connects to HashiCorp Vault's KV v2 secrets engine, supporting both token and AppRole authentication. `role_id` and `secret_id` support env var indirection via `role_id_env` and `secret_id_env`. For `addr` and `token`, the Vault SDK reads `VAULT_ADDR` and `VAULT_TOKEN` automatically when not set.
 
-Binding resolution: `BindingResolver` compiles destination glob patterns (reusing `policy.CompileGlob`) and resolves `(host, port)` to a `Binding`. Bindings specify the credential name, injection header, template (`Bearer {value}`), and protocol override.
+Binding resolution: `BindingResolver` compiles destination glob patterns (reusing `policy.CompileGlob`) and resolves `(host, port)` to a `Binding`. Bindings specify the credential name, header, template (`Bearer {value}`), and protocols (JSON array).
 
-HTTPS credential injection: `Injector` wraps `goproxy` as an in-process MITM proxy. `LoadOrCreateCA` generates a self-signed ECDSA P-256 CA persisted to disk. Per-host certificates are generated at interception time. Only hosts with credential bindings are MITMed. Phantom tokens (`SLUICE_PHANTOM:<name>`) in headers and request bodies are replaced with real credential values. `SecureBytes.Release()` zeroes credentials immediately after injection.
+HTTPS credential injection: `Injector` wraps `goproxy` as an in-process MITM proxy. `LoadOrCreateCA` generates a self-signed ECDSA P-256 CA persisted to disk. Per-host certificates are generated at interception time. All authenticated HTTPS connections are MITMed (not just those with bindings) so phantom tokens can never leak to any upstream. Binding-specific header injection handles configured credential headers. A second global pass replaces ALL known phantom tokens (`SLUICE_PHANTOM:<name>`) in ALL request headers and body regardless of binding match, acting as a safety net against leaks to unexpected destinations. `SecureBytes.Release()` zeroes credentials immediately after injection.
 
 SSH credential injection: `SSHJumpHost` accepts the agent's SSH connection with no authentication (`NoClientAuth`), decrypts the SSH private key from the vault, authenticates to the upstream server, and relays SSH channels/requests bidirectionally. `Binding.Template` holds the SSH username (defaults to "root").
 
@@ -340,26 +351,27 @@ Docker integration: Three-container architecture (sluice + tun2proxy + openclaw)
 
 Health check: A minimal HTTP server on `127.0.0.1:3000` (configurable via `--health-addr`) serves `/healthz`, returning 200 when the SOCKS5 proxy is listening. The Dockerfile includes a `HEALTHCHECK` directive using `wget` against this endpoint. compose.yml uses `service_healthy` conditions to sequence startup: tun2proxy waits for sluice, openclaw waits for tun2proxy.
 
-Graceful shutdown: On SIGINT/SIGTERM, the proxy stops accepting new connections and drains in-flight connections up to `--shutdown-timeout` (default 10s). Pending Telegram approval requests are auto-denied with a "shutting down" reason. The audit logger is closed after all connections drain.
+Graceful shutdown: On SIGINT/SIGTERM, the proxy stops accepting new connections and drains in-flight connections up to `--shutdown-timeout` (default 10s). Pending approval requests are auto-denied via `channel.Broker.CancelAll()` with a "shutting down" reason. The audit logger is closed after all connections drain.
 
-MCP gateway: `Gateway` spawns upstream MCP servers as child processes via `StartUpstream`, performs `initialize` handshake and `notifications/initialized`, discovers tools via `tools/list`, and namespaces them with `<upstream>__<tool>`. The agent connects via stdio (`RunStdio`). On `tools/call`, the gateway evaluates `ToolPolicy` (deny/allow/ask priority, same as network policy), optionally requests Telegram approval via the shared `ApprovalBroker`, runs `ContentInspector.InspectArguments` to block arguments matching regex patterns (JSON is parsed before matching to prevent unicode escape bypass), strips the namespace prefix, forwards to the upstream, runs `ContentInspector.RedactResponse` on the result, and adds governance metadata. `ToolPolicy` reuses `policy.CompileGlob` for glob matching. The `mcp` subcommand reads upstreams, tool rules, and inspect rules from the SQLite store. Upstreams can be registered at runtime via `sluice mcp add` (persisted in the `mcp_upstreams` table). Per-upstream timeouts are configurable via `timeout_sec` (default 120s). `GatewayConfig.TimeoutSec` sets a global default that individual upstreams can override.
+MCP gateway: `Gateway` spawns upstream MCP servers as child processes via `StartUpstream`, performs `initialize` handshake and `notifications/initialized`, discovers tools via `tools/list`, and namespaces them with `<upstream>__<tool>`. The agent connects via stdio (`RunStdio`). On `tools/call`, the gateway evaluates `ToolPolicy` (deny/allow/ask priority, same as network policy), optionally requests approval via the shared `channel.Broker`, runs `ContentInspector.InspectArguments` to block arguments matching regex patterns (JSON is parsed before matching to prevent unicode escape bypass), strips the namespace prefix, forwards to the upstream, runs `ContentInspector.RedactResponse` on the result, and adds governance metadata. `ToolPolicy` reuses `policy.CompileGlob` for glob matching. The `mcp` subcommand reads upstreams and rules from the unified SQLite rules table. Upstreams can be registered at runtime via `sluice mcp add` (persisted in the `mcp_upstreams` table). Per-upstream timeouts are configurable via `timeout_sec` (default 120s). `GatewayConfig.TimeoutSec` sets a global default that individual upstreams can override.
 
 ## Policy Store
 
 All runtime policy state is stored in a SQLite database (default: `sluice.db`). TOML files are used only for initial seeding via `sluice policy import`. The CLI, Telegram commands, and approval buttons all write to the same database.
 
-### TOML Seed File Format
+### TOML Seed File Format (config.toml)
+
+Rules use a unified format: `[[allow]]`, `[[deny]]`, `[[ask]]`, `[[redact]]`. Each entry carries exactly one of: `destination` (network), `tool` (MCP), or `pattern` (content inspection). The section name determines the verdict. Telegram env var names (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) are hardcoded and not part of the config file.
 
 ```toml
 [policy]
 default = "ask"     # ask | deny | allow
-timeout_sec = 120   # seconds to wait for Telegram approval
+timeout_sec = 120   # seconds to wait for approval
 
-[telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-chat_id_env = "TELEGRAM_CHAT_ID"
+[vault]
+provider = "age"
 
-# -- Allowlist --
+# -- Network rules (destination field) --
 
 [[allow]]
 destination = "api.anthropic.com"
@@ -367,64 +379,62 @@ ports = [443]
 
 [[allow]]
 destination = "api.openai.com"
-ports = [443]
-
-[[allow]]
-destination = "api.github.com"
 ports = [443]
 
 [[allow]]
 destination = "*.telegram.org"
 ports = [443]
-note = "Telegram bot API passthrough"
+name = "Telegram bot API passthrough"
+
+# -- Tool rules (tool field) --
 
 [[allow]]
-destination = "github.com"
-ports = [22]
-protocol = "ssh"
-note = "Git SSH access"
+tool = "github__list_*"
+name = "read-only github list"
+
+[[ask]]
+tool = "github__create_*"
+
+[[deny]]
+tool = "exec__*"
+
+# -- Content deny rules (pattern field) --
+
+[[deny]]
+pattern = "(?i)(sk-[a-zA-Z0-9_-]{20,})"
+name = "api key in tool arguments"
+
+# -- Content redact rules --
+
+[[redact]]
+pattern = "(?i)(sk-[a-zA-Z0-9_-]{20,})"
+replacement = "[REDACTED_API_KEY]"
+name = "api key in responses"
 
 # -- Denylist --
 
 [[deny]]
 destination = "169.254.169.254"
-note = "Block cloud metadata endpoint"
+name = "Block cloud metadata endpoint"
 
 [[deny]]
 destination = "100.100.100.200"
-note = "Block Alibaba metadata"
-
-[[deny]]
-destination = "*.crypto-mining.example"
+name = "Block Alibaba metadata"
 
 # -- Credential bindings --
-# Bindings map destinations to vault credentials for automatic injection.
-# These are separate from allow/deny rules.
 
 [[binding]]
 destination = "api.anthropic.com"
 ports = [443]
 credential = "anthropic_api_key"
-inject_header = "x-api-key"
+header = "x-api-key"
 
 [[binding]]
 destination = "api.openai.com"
 ports = [443]
 credential = "openai_api_key"
-inject_header = "Authorization"
+header = "Authorization"
 template = "Bearer {value}"
-
-[[binding]]
-destination = "api.github.com"
-ports = [443]
-credential = "github_token"
-inject_header = "Authorization"
-template = "Bearer {value}"
-
-[[binding]]
-destination = "github.com"
-ports = [22]
-credential = "github_ssh_key"
 ```
 
 ## Credential Injection: Phantom Token Swap
@@ -545,34 +555,26 @@ don't reject them.
 ```go
 // internal/proxy/inject.go
 func injectCredentials(req *http.Request, bindings []PhantomBinding) {
+    // 1. Binding-specific header injection
     for _, b := range bindings {
-        // Decrypt real credential into zeroized memory
         real := vault.Get(b.Name) // returns SecureBytes
+        // Set configured header with template formatting
+        real.Release()
+    }
 
-        // Replace in ALL headers
-        for key, values := range req.Header {
-            for i, v := range values {
-                if strings.Contains(v, b.Phantom) {
-                    req.Header[key][i] = strings.Replace(v, b.Phantom, real.String(), 1)
-                }
-            }
-        }
-        // Replace in request body
-        if req.Body != nil {
-            body, _ := io.ReadAll(req.Body)
-            if bytes.Contains(body, []byte(b.Phantom)) {
-                body = bytes.Replace(body, []byte(b.Phantom), real.Bytes(), 1)
-            }
-            req.Body = io.NopCloser(bytes.NewReader(body))
-        }
-
-        real.Release() // zero credential memory immediately
+    // 2. Global phantom replacement (ALL MITMed traffic)
+    names, _ := provider.List()
+    for _, name := range names {
+        phantom := PhantomToken(name)
+        secret, _ := provider.Get(name)
+        // Replace in ALL headers and body regardless of binding match
+        secret.Release() // zero credential memory immediately
     }
 }
 ```
 
-No API knowledge. No header guessing. Just string replacement with
-zeroized memory.
+Two-pass injection: first sets binding-specific headers, then replaces all
+known phantom tokens in all traffic as a safety net. No API knowledge needed.
 
 ### Non-HTTP protocols
 
@@ -605,6 +607,7 @@ See `compose.yml` in the repo root. Key features:
 - `golang.org/x/term` - Terminal password input for `sluice cred add`
 - `lukechampine.com/blake3` - Blake3 hashing for tamper-evident audit chain
 - `github.com/hashicorp/vault/api` - HashiCorp Vault client for external secret management (KV v2, AppRole auth)
+- `github.com/golang-migrate/migrate/v4` - Schema migration framework with embedded SQL files
 
 ## Estimated Scope
 

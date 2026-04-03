@@ -55,7 +55,8 @@ refactor/approval-broker
 - `internal/policy/` -- Policy engine with glob pattern matching (compiled from SQLite store)
 - `internal/vault/` -- Credential storage (age, env vars, HashiCorp Vault)
 - `internal/mcp/` -- MCP gateway with tool policy enforcement
-- `internal/telegram/` -- Telegram approval bot and commands (writes to SQLite store)
+- `internal/channel/` -- Channel interface, ChannelType enum, and approval Broker (channel-agnostic)
+- `internal/telegram/` -- TelegramChannel implementation of channel.Channel interface
 - `internal/audit/` -- Append-only JSON lines logger with blake3 hash chaining
 - `internal/docker/` -- Container lifecycle management with hot credential reload
 - `cmd/sluice/` -- CLI entrypoint and subcommands (policy, mcp, cred, cert, audit)

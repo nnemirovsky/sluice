@@ -480,13 +480,13 @@ Update all `/policy` commands to use unified rule methods and typed config.
 
 ### Task 12: [Final] Update documentation
 
-- [ ] Update CLAUDE.md: new schema description, unified rules table, typed config, channels table
-- [ ] Update CLAUDE.md: remove references to tool_allow/tool_deny/tool_ask and inspect_block/inspect_redact TOML sections
-- [ ] Update CLAUDE.md: document Channel interface and ChannelType enum
-- [ ] Update CLAUDE.md: document phantom token replacement in all MITMed traffic
-- [ ] Update CLAUDE.md: rename policy.toml references to config.toml
-- [ ] Update CONTRIBUTING.md if file structure changed
-- [ ] Update examples/config.toml header comment explaining the seed format
+- [x] Update CLAUDE.md: new schema description, unified rules table, typed config, channels table
+- [x] Update CLAUDE.md: remove references to tool_allow/tool_deny/tool_ask and inspect_block/inspect_redact TOML sections
+- [x] Update CLAUDE.md: document Channel interface and ChannelType enum
+- [x] Update CLAUDE.md: document phantom token replacement in all MITMed traffic
+- [x] Update CLAUDE.md: rename policy.toml references to config.toml
+- [x] Update CONTRIBUTING.md if file structure changed
+- [x] Update examples/config.toml header comment explaining the seed format
 
 ## Technical Details
 

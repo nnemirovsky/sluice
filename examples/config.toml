@@ -1,12 +1,15 @@
 # Example Sluice TOML seed file for initial database population.
 # Import into the SQLite store with: sluice policy import config.toml
 # This file is only read once to seed an empty database. At runtime, all
-# policy state lives in the SQLite store. Use "sluice policy add/remove"
-# or Telegram /policy commands to modify rules after seeding.
+# policy state lives in the SQLite store (unified rules table, typed config
+# singleton, bindings, channels, MCP upstreams). Use "sluice policy
+# add/remove" or Telegram /policy commands to modify rules after seeding.
 #
 # Rules use a unified format: [[allow]], [[deny]], [[ask]], [[redact]].
 # Each entry carries exactly one of: destination (network), tool (MCP),
 # or pattern (content inspection). The section name determines the verdict.
+# Telegram env var names (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) are
+# hardcoded and not part of this config file.
 
 [policy]
 default = "ask"
