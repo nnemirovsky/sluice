@@ -308,18 +308,24 @@ func (tc *TelegramChannel) handleMessage(msg *tgbotapi.Message) {
 	}
 
 	// Forward as channel.Command (non-blocking, drop if full).
-	select {
-	case tc.cmdCh <- channel.Command{
-		Name:        cmd.Name,
-		Args:        strings.Join(cmd.Args, " "),
-		ChannelType: channel.ChannelTelegram,
-		Reply: func(ctx context.Context, text string) error {
-			reply := tgbotapi.NewMessage(tc.chatID, text)
-			_, sendErr := tc.api.Send(reply)
-			return sendErr
-		},
-	}:
-	default:
+	// Skip cred add/rotate commands to avoid forwarding plaintext
+	// credential values through the command channel.
+	isSensitiveCred := cmd.Name == "cred" && len(cmd.Args) >= 1 &&
+		(cmd.Args[0] == "add" || cmd.Args[0] == "rotate")
+	if !isSensitiveCred {
+		select {
+		case tc.cmdCh <- channel.Command{
+			Name:        cmd.Name,
+			Args:        strings.Join(cmd.Args, " "),
+			ChannelType: channel.ChannelTelegram,
+			Reply: func(ctx context.Context, text string) error {
+				reply := tgbotapi.NewMessage(tc.chatID, text)
+				_, sendErr := tc.api.Send(reply)
+				return sendErr
+			},
+		}:
+		default:
+		}
 	}
 
 	// Handle internally via CommandHandler.
