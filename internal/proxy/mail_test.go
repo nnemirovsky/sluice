@@ -152,7 +152,7 @@ func TestIMAPAuthSwap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add("imap_pass", "real-imap-secret"); err != nil {
+	if _, err := store.Add("imap_pass", "real-imap-secret"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -219,7 +219,7 @@ func TestSMTPAuthPlainSwap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add("smtp_pass", "real-smtp-secret"); err != nil {
+	if _, err := store.Add("smtp_pass", "real-smtp-secret"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -388,7 +388,7 @@ func TestSMTPAuthLoginSwap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add("smtp_login_pass", "real-login-secret"); err != nil {
+	if _, err := store.Add("smtp_login_pass", "real-login-secret"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -498,7 +498,7 @@ func TestPhantomNotReplacedInNonAuthCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add("leak_test", "super-secret"); err != nil {
+	if _, err := store.Add("leak_test", "super-secret"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -629,7 +629,7 @@ func TestAuthContinuationRequiresServerPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add("exfil_test", "top-secret-value"); err != nil {
+	if _, err := store.Add("exfil_test", "top-secret-value"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -722,7 +722,7 @@ func TestIMAPVaultIntegrityAfterAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add("imap_zero", "secret-to-zero"); err != nil {
+	if _, err := store.Add("imap_zero", "secret-to-zero"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -779,7 +779,7 @@ func TestIMAPImplicitTLSAuthSwap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add("imaps_pass", "real-imaps-secret"); err != nil {
+	if _, err := store.Add("imaps_pass", "real-imaps-secret"); err != nil {
 		t.Fatal(err)
 	}
 

@@ -39,6 +39,8 @@ type ContainerState struct {
 
 // Mount represents a container volume mount.
 type Mount struct {
+	Type        string
+	Name        string // Volume name (for type=volume). Empty for bind mounts.
 	Source      string
 	Destination string
 	ReadOnly    bool

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
 
 	"github.com/BurntSushi/toml"
 )
@@ -318,6 +319,11 @@ func insertNetworkRuleIfNew(tx *sql.Tx, verdict string, r importRule) (bool, err
 	if r.Destination == "" {
 		return false, fmt.Errorf("network rule has empty destination")
 	}
+	for _, p := range r.Ports {
+		if p < 1 || p > 65535 {
+			return false, fmt.Errorf("network rule %q: invalid port %d (must be 1-65535)", r.Destination, p)
+		}
+	}
 	portsJSON := portsToJSON(r.Ports)
 
 	var count int
@@ -386,6 +392,11 @@ func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
 	}
 	if b.Credential == "" {
 		return false, fmt.Errorf("binding has empty credential")
+	}
+	for _, p := range b.Ports {
+		if p < 1 || p > 65535 {
+			return false, fmt.Errorf("binding %q->%q: invalid port %d (must be 1-65535)", b.Destination, b.Credential, p)
+		}
 	}
 	portsJSON := portsToJSON(b.Ports)
 	var count int
@@ -460,6 +471,12 @@ func insertUpstreamIfNew(tx *sql.Tx, u importMCPUpstream) (bool, error) {
 // insertInspectRuleIfNew inserts an inspect rule if no matching kind+pattern
 // combination exists. Returns true if inserted.
 func insertInspectRuleIfNew(tx *sql.Tx, kind, pattern string, description, replacement *string) (bool, error) {
+	if pattern == "" {
+		return false, fmt.Errorf("inspect rule has empty pattern")
+	}
+	if _, err := regexp.Compile(pattern); err != nil {
+		return false, fmt.Errorf("inspect rule %q: invalid regex: %w", pattern, err)
+	}
 	var count int
 	err := tx.QueryRow(
 		"SELECT COUNT(*) FROM inspect_rules WHERE kind = ? AND pattern = ?",

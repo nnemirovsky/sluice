@@ -712,6 +712,66 @@ func (s *Store) IsEmpty() (bool, error) {
 	return count == 0, nil
 }
 
+// AddRuleAndBinding atomically inserts an allow rule and a binding in a
+// single transaction. If either insert fails, both are rolled back.
+// Returns the rule ID and binding ID.
+func (s *Store) AddRuleAndBinding(
+	verdict, destination string, ports []int, ruleOpts RuleOpts,
+	credential string, bindingOpts BindingOpts,
+) (ruleID, bindingID int64, err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, 0, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Insert rule.
+	source := ruleOpts.Source
+	if source == "" {
+		source = "manual"
+	}
+	var portsJSON *string
+	if len(ports) > 0 {
+		b, _ := json.Marshal(ports)
+		ps := string(b)
+		portsJSON = &ps
+	}
+	res, err := tx.Exec(
+		`INSERT INTO rules (verdict, destination, ports, protocol, note, source) VALUES (?, ?, ?, ?, ?, ?)`,
+		verdict, destination, portsJSON, nilIfEmpty(ruleOpts.Protocol), nilIfEmpty(ruleOpts.Note), source,
+	)
+	if err != nil {
+		return 0, 0, fmt.Errorf("insert rule: %w", err)
+	}
+	ruleID, _ = res.LastInsertId()
+
+	// Insert binding.
+	var bPortsJSON *string
+	if len(bindingOpts.Ports) > 0 {
+		b, _ := json.Marshal(bindingOpts.Ports)
+		ps := string(b)
+		bPortsJSON = &ps
+	}
+	res, err = tx.Exec(
+		`INSERT INTO bindings (destination, ports, credential, inject_header, template, protocol) VALUES (?, ?, ?, ?, ?, ?)`,
+		destination, bPortsJSON, credential,
+		nilIfEmpty(bindingOpts.InjectHeader), nilIfEmpty(bindingOpts.Template), nilIfEmpty(bindingOpts.Protocol),
+	)
+	if err != nil {
+		return 0, 0, fmt.Errorf("insert binding: %w", err)
+	}
+	bindingID, _ = res.LastInsertId()
+
+	if err = tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("commit transaction: %w", err)
+	}
+	return ruleID, bindingID, nil
+}
+
 // --- Helpers ---
 
 // nilIfEmpty returns nil for empty strings, allowing SQLite to store NULL.

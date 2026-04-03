@@ -157,7 +157,7 @@ func TestSSHJumpHostInjectsKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add("ssh_key", string(privPEM)); err != nil {
+	if _, err := store.Add("ssh_key", string(privPEM)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -263,7 +263,7 @@ func TestSSHJumpHostBadKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add("wrong_key", string(wrongPEM)); err != nil {
+	if _, err := store.Add("wrong_key", string(wrongPEM)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -303,7 +303,7 @@ func TestSSHVaultIntegrityAfterHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add("ssh_key_zero", string(privPEM)); err != nil {
+	if _, err := store.Add("ssh_key_zero", string(privPEM)); err != nil {
 		t.Fatal(err)
 	}
 

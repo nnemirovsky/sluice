@@ -75,8 +75,8 @@ func TestRestartWithEnv(t *testing.T) {
 			Image: "openclaw/openclaw:latest",
 			Env:   []string{"EXISTING=value", "ANTHROPIC_API_KEY=old-phantom"},
 			Mounts: []Mount{
-				{Source: "/data", Destination: "/root/.openclaw", ReadOnly: false},
-				{Source: "/certs", Destination: "/usr/local/share/ca-certificates", ReadOnly: true},
+				{Type: "volume", Name: "openclaw-data", Source: "/var/lib/docker/volumes/openclaw-data/_data", Destination: "/root/.openclaw", ReadOnly: false},
+				{Type: "volume", Name: "sluice-ca", Source: "/var/lib/docker/volumes/sluice-ca/_data", Destination: "/usr/local/share/ca-certificates", ReadOnly: true},
 			},
 			Binds:       []string{"openclaw-data:/root/.openclaw", "sluice-ca:/usr/local/share/ca-certificates:ro"},
 			Networks:    []string{"internal"},
@@ -143,8 +143,11 @@ func TestRestartWithEnv(t *testing.T) {
 	if len(mc.createdSpec.Mounts) != 2 {
 		t.Errorf("expected 2 mounts, got %d", len(mc.createdSpec.Mounts))
 	} else {
-		if mc.createdSpec.Mounts[0].Source != "/data" || mc.createdSpec.Mounts[0].Destination != "/root/.openclaw" {
-			t.Errorf("first mount wrong: %+v", mc.createdSpec.Mounts[0])
+		if mc.createdSpec.Mounts[0].Destination != "/root/.openclaw" {
+			t.Errorf("first mount destination wrong: %+v", mc.createdSpec.Mounts[0])
+		}
+		if mc.createdSpec.Mounts[0].Name != "openclaw-data" {
+			t.Errorf("first mount Name wrong: got %q, want openclaw-data", mc.createdSpec.Mounts[0].Name)
 		}
 		if mc.createdSpec.Mounts[1].ReadOnly != true {
 			t.Error("second mount should be read-only")

@@ -65,6 +65,8 @@ func (c *SocketClient) InspectContainer(ctx context.Context, name string) (Conta
 	mounts := make([]Mount, len(ir.Mounts))
 	for i, m := range ir.Mounts {
 		mounts[i] = Mount{
+			Type:        m.Type,
+			Name:        m.Name,
 			Source:      m.Source,
 			Destination: m.Destination,
 			ReadOnly:    !m.RW,
@@ -127,10 +129,35 @@ func (c *SocketClient) CreateContainer(ctx context.Context, spec ContainerSpec) 
 	}
 	body.HostConfig.Binds = spec.Binds
 	body.HostConfig.NetworkMode = spec.NetworkMode
+	// Build a set of destinations already covered by Binds to avoid duplicates.
+	// Docker inspect returns all mounts including those specified via Binds.
+	bindDests := make(map[string]bool, len(spec.Binds))
+	for _, b := range spec.Binds {
+		parts := strings.SplitN(b, ":", 3)
+		if len(parts) >= 2 {
+			bindDests[parts[1]] = true
+		}
+	}
 	for _, m := range spec.Mounts {
+		// Skip mounts that are already specified via Binds to avoid duplicates.
+		if bindDests[m.Destination] {
+			continue
+		}
+		mountType := m.Type
+		if mountType == "" {
+			mountType = "volume"
+		}
+		// For volume mounts, use the volume Name as Source instead of the
+		// host filesystem path. Docker inspect returns the host mountpoint
+		// in Source (e.g. /var/lib/docker/volumes/myvolume/_data) but the
+		// create API expects the volume name in Source.
+		source := m.Source
+		if mountType == "volume" && m.Name != "" {
+			source = m.Name
+		}
 		body.HostConfig.Mounts = append(body.HostConfig.Mounts, createMount{
-			Type:     "volume",
-			Source:   m.Source,
+			Type:     mountType,
+			Source:   source,
 			Target:   m.Destination,
 			ReadOnly: m.ReadOnly,
 		})
@@ -286,6 +313,8 @@ type inspectResponse struct {
 		NetworkMode string   `json:"NetworkMode"`
 	} `json:"HostConfig"`
 	Mounts []struct {
+		Type        string `json:"Type"`
+		Name        string `json:"Name"`
 		Source      string `json:"Source"`
 		Destination string `json:"Destination"`
 		RW          bool   `json:"RW"`

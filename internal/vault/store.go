@@ -108,47 +108,52 @@ func (s *Store) credPath(name string) (string, error) {
 
 // Add encrypts and stores a credential with the given name.
 // Uses temp file + atomic rename so a concurrent Get never sees a
-// partial or truncated ciphertext file.
-func (s *Store) Add(name, value string) error {
+// partial or truncated ciphertext file. Returns the raw ciphertext
+// bytes that were written, so callers needing compare-and-swap
+// semantics can use them without a re-read (which would be racy).
+func (s *Store) Add(name, value string) ([]byte, error) {
 	path, err := s.credPath(name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var buf bytes.Buffer
 	w, err := age.Encrypt(&buf, s.recipient)
 	if err != nil {
-		return fmt.Errorf("encrypt: %w", err)
+		return nil, fmt.Errorf("encrypt: %w", err)
 	}
 	if _, err := io.WriteString(w, value); err != nil {
-		return fmt.Errorf("write: %w", err)
+		return nil, fmt.Errorf("write: %w", err)
 	}
 	if err := w.Close(); err != nil {
-		return fmt.Errorf("close: %w", err)
+		return nil, fmt.Errorf("close: %w", err)
 	}
+
+	ciphertext := make([]byte, buf.Len())
+	copy(ciphertext, buf.Bytes())
 
 	tmpFile, err := os.CreateTemp(filepath.Dir(path), ".cred-*.tmp")
 	if err != nil {
-		return fmt.Errorf("create temp: %w", err)
+		return nil, fmt.Errorf("create temp: %w", err)
 	}
 	tmpPath := tmpFile.Name()
 	if _, err := tmpFile.Write(buf.Bytes()); err != nil {
 		_ = tmpFile.Close()
 		_ = os.Remove(tmpPath)
-		return fmt.Errorf("write temp: %w", err)
+		return nil, fmt.Errorf("write temp: %w", err)
 	}
 	if err := tmpFile.Close(); err != nil {
 		os.Remove(tmpPath)
-		return fmt.Errorf("close temp: %w", err)
+		return nil, fmt.Errorf("close temp: %w", err)
 	}
 	if err := os.Chmod(tmpPath, 0600); err != nil {
 		os.Remove(tmpPath)
-		return fmt.Errorf("chmod temp: %w", err)
+		return nil, fmt.Errorf("chmod temp: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
-		return fmt.Errorf("rename temp: %w", err)
+		return nil, fmt.Errorf("rename temp: %w", err)
 	}
-	return nil
+	return ciphertext, nil
 }
 
 // Get decrypts and returns the credential with the given name.
@@ -197,4 +202,53 @@ func (s *Store) Remove(name string) error {
 		return err
 	}
 	return os.Remove(path)
+}
+
+// ReadRawCredential returns the raw (encrypted) bytes for the named credential.
+// Returns nil, nil if the credential does not exist.
+func (s *Store) ReadRawCredential(name string) ([]byte, error) {
+	path, err := s.credPath(name)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read raw credential %q: %w", name, err)
+	}
+	return data, nil
+}
+
+// WriteRawCredential writes raw (already encrypted) bytes as the named credential,
+// using the same temp file + atomic rename pattern as Add.
+func (s *Store) WriteRawCredential(name string, data []byte) error {
+	path, err := s.credPath(name)
+	if err != nil {
+		return err
+	}
+	tmpFile, err := os.CreateTemp(filepath.Dir(path), ".cred-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("write temp: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close temp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0600); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("chmod temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename temp: %w", err)
+	}
+	return nil
 }

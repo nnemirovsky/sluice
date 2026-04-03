@@ -64,8 +64,8 @@ func TestSocketClientInspect(t *testing.T) {
 				"NetworkMode": "container:tun2proxy123",
 			},
 			"Mounts": []map[string]interface{}{
-				{"Source": "/var/lib/docker/volumes/openclaw-data/_data", "Destination": "/root/.openclaw", "RW": true},
-				{"Source": "/var/lib/docker/volumes/sluice-ca/_data", "Destination": "/certs", "RW": false},
+				{"Type": "volume", "Name": "openclaw-data", "Source": "/var/lib/docker/volumes/openclaw-data/_data", "Destination": "/root/.openclaw", "RW": true},
+				{"Type": "volume", "Name": "sluice-ca", "Source": "/var/lib/docker/volumes/sluice-ca/_data", "Destination": "/certs", "RW": false},
 			},
 			"NetworkSettings": map[string]interface{}{
 				"Networks": map[string]interface{}{
@@ -108,8 +108,14 @@ func TestSocketClientInspect(t *testing.T) {
 	if len(state.Mounts) != 2 {
 		t.Fatalf("Mounts len = %d, want 2", len(state.Mounts))
 	}
+	if state.Mounts[0].Name != "openclaw-data" {
+		t.Errorf("first mount Name = %q, want openclaw-data", state.Mounts[0].Name)
+	}
 	if state.Mounts[0].ReadOnly {
 		t.Error("first mount should not be read-only (RW=true)")
+	}
+	if state.Mounts[1].Name != "sluice-ca" {
+		t.Errorf("second mount Name = %q, want sluice-ca", state.Mounts[1].Name)
 	}
 	if !state.Mounts[1].ReadOnly {
 		t.Error("second mount should be read-only (RW=false)")
@@ -233,6 +239,51 @@ func TestSocketClientCreate(t *testing.T) {
 	}
 	if gotBody.HostConfig.NetworkMode != "container:tun2proxy123" {
 		t.Errorf("NetworkMode = %q, want container:tun2proxy123", gotBody.HostConfig.NetworkMode)
+	}
+}
+
+func TestSocketClientCreateVolumeMountUsesName(t *testing.T) {
+	client, mux, cleanup := newTestServer(t)
+	defer cleanup()
+
+	var gotBody createRequest
+	mux.HandleFunc("/v1.25/containers/create", func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(data, &gotBody)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "vol123"})
+	})
+
+	// Simulate a container with volume mounts that have no corresponding Binds.
+	// This happens when containers are created with --mount type=volume syntax.
+	_, err := client.CreateContainer(context.Background(), ContainerSpec{
+		Name:  "testapp",
+		Image: "app:latest",
+		Mounts: []Mount{
+			{Type: "volume", Name: "mydata", Source: "/var/lib/docker/volumes/mydata/_data", Destination: "/data"},
+			{Type: "bind", Source: "/host/config", Destination: "/config", ReadOnly: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(gotBody.HostConfig.Mounts) != 2 {
+		t.Fatalf("expected 2 mounts, got %d", len(gotBody.HostConfig.Mounts))
+	}
+	// Volume mount should use the volume Name, not the host path.
+	if gotBody.HostConfig.Mounts[0].Source != "mydata" {
+		t.Errorf("volume mount Source = %q, want %q (volume name)", gotBody.HostConfig.Mounts[0].Source, "mydata")
+	}
+	if gotBody.HostConfig.Mounts[0].Type != "volume" {
+		t.Errorf("volume mount Type = %q, want volume", gotBody.HostConfig.Mounts[0].Type)
+	}
+	// Bind mount should keep its original Source path.
+	if gotBody.HostConfig.Mounts[1].Source != "/host/config" {
+		t.Errorf("bind mount Source = %q, want /host/config", gotBody.HostConfig.Mounts[1].Source)
+	}
+	if !gotBody.HostConfig.Mounts[1].ReadOnly {
+		t.Error("bind mount should be read-only")
 	}
 }
 

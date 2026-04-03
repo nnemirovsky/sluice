@@ -13,7 +13,7 @@ func TestAddAndGetCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = store.Add("github_token", "ghp_abc123secrettoken456")
+	_, err = store.Add("github_token", "ghp_abc123secrettoken456")
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
@@ -53,10 +53,10 @@ func TestListCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add("key_a", "val_a"); err != nil {
+	if _, err := store.Add("key_a", "val_a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add("key_b", "val_b"); err != nil {
+	if _, err := store.Add("key_b", "val_b"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -75,7 +75,7 @@ func TestRemoveCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add("key_a", "val_a"); err != nil {
+	if _, err := store.Add("key_a", "val_a"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -105,7 +105,7 @@ func TestPathTraversalPrevented(t *testing.T) {
 		"",
 	}
 	for _, name := range cases {
-		if err := store.Add(name, "val"); err == nil {
+		if _, err := store.Add(name, "val"); err == nil {
 			t.Errorf("expected error for name %q, got nil", name)
 		}
 		if _, err := store.Get(name); err == nil {

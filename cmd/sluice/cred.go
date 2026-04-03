@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -42,8 +44,86 @@ func handleCredCommand(args []string) {
 	}
 }
 
-func openVaultStore() *vault.Store {
-	vaultDir := os.Getenv("SLUICE_VAULT_DIR")
+// openVaultStore opens the age-encrypted vault store for CLI credential
+// management. It reads vault_dir and vault_provider from the SQLite config
+// to ensure the CLI operates on the same backend as the running proxy.
+// If a non-age provider is configured, it returns an error so the caller
+// can report it clearly instead of silently mutating the wrong backend.
+func openVaultStore(dbPath string) *vault.Store {
+	var vaultDir string
+
+	// Read vault_dir and provider from the DB to ensure the CLI uses the
+	// same backend as the running proxy.
+	if dbPath != "" {
+		if _, statErr := os.Stat(dbPath); statErr != nil && !os.IsNotExist(statErr) {
+			log.Fatalf("cannot access database %s: %v", dbPath, statErr)
+		} else if statErr == nil {
+			db, dbErr := store.New(dbPath)
+			if dbErr != nil {
+				log.Fatalf("open store %s: %v", dbPath, dbErr)
+			}
+			dir, dirErr := db.GetConfig("vault_dir")
+			if dirErr != nil {
+				db.Close()
+				log.Fatalf("read vault_dir from store: %v", dirErr)
+			}
+			if dir != "" {
+				vaultDir = dir
+			}
+			prov, provErr := db.GetConfig("vault_provider")
+			if provErr != nil {
+				db.Close()
+				log.Fatalf("read vault_provider from store: %v", provErr)
+			}
+
+			// Also check vault_providers (chain provider config). The proxy
+			// runtime prefers vault_providers over vault_provider when both
+			// are set, so we must check it to avoid silently writing to the
+			// wrong backend.
+			providersJSON, chainErr := db.GetConfig("vault_providers")
+			if chainErr != nil {
+				db.Close()
+				log.Fatalf("read vault_providers from store: %v", chainErr)
+			}
+			db.Close()
+
+			// If a chain provider is configured, verify that the age backend
+			// is part of the chain. If age is not included, the CLI would
+			// write credentials that the proxy never reads.
+			if providersJSON != "" {
+				var providers []string
+				if err := json.Unmarshal([]byte(providersJSON), &providers); err != nil {
+					log.Fatalf("parse vault_providers config: %v", err)
+				}
+				hasAge := false
+				ageFirst := false
+				for i, p := range providers {
+					if p == "age" {
+						hasAge = true
+						if i == 0 {
+							ageFirst = true
+						}
+						break
+					}
+				}
+				if !hasAge {
+					log.Fatalf("vault_providers is configured as %v without the age backend. "+
+						"CLI credential management only supports the age backend. "+
+						"Manage credentials through the configured providers' native tools.", providers)
+				}
+				if !ageFirst {
+					log.Printf("warning: vault_providers is %v. The age backend is not the "+
+						"primary provider. Credentials added via CLI may be shadowed by "+
+						"earlier providers in the chain.", providers)
+				}
+			} else if prov != "" && prov != "age" {
+				// Single provider that is not age.
+				log.Fatalf("vault provider is %q; CLI credential management only supports the age backend. "+
+					"Manage credentials through the %s provider's native tools.", prov, prov)
+			}
+		}
+	}
+
 	if vaultDir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -92,23 +172,17 @@ func handleCredAdd(args []string) {
 		secret = []byte(strings.TrimRight(scanner.Text(), "\r\n"))
 	}
 
-	vs := openVaultStore()
-	addErr := vs.Add(name, string(secret))
-	for i := range secret {
-		secret[i] = 0
-	}
-	if addErr != nil {
-		log.Fatalf("add credential: %v", addErr)
-	}
-	fmt.Printf("credential %q added\n", name)
-
-	// If --destination is provided, also create an allow rule and binding.
+	// Validate --destination inputs and open the DB before persisting
+	// anything to the vault. This prevents orphaned vault credentials
+	// when the glob pattern is invalid, a port is out of range, or the
+	// DB path is unreachable.
+	var ports []int
+	var db *store.Store
 	if *destination != "" {
 		if _, err := policy.CompileGlob(*destination); err != nil {
 			log.Fatalf("invalid destination pattern %q: %v", *destination, err)
 		}
 
-		var ports []int
 		if *portsStr != "" {
 			for _, ps := range strings.Split(*portsStr, ",") {
 				ps = strings.TrimSpace(ps)
@@ -123,30 +197,80 @@ func handleCredAdd(args []string) {
 			}
 		}
 
-		db, err := store.New(*dbPath)
+		var err error
+		db, err = store.New(*dbPath)
 		if err != nil {
 			log.Fatalf("open store: %v", err)
 		}
 		defer db.Close()
+	}
 
-		ruleID, err := db.AddRule("allow", *destination, ports, store.RuleOpts{
-			Note:   fmt.Sprintf("auto-created for credential %q", name),
-			Source: credAddSourcePrefix + name,
-		})
-		if err != nil {
-			log.Fatalf("add allow rule: %v", err)
+	// Inputs validated and DB is open. Now persist the credential.
+	vs := openVaultStore(*dbPath)
+
+	// Back up existing credential ciphertext in case we need to roll back
+	// after a DB failure. This prevents losing a previously working secret
+	// when overwriting it and then hitting a transient DB error.
+	var prevCiphertext []byte
+	if db != nil {
+		var readErr error
+		prevCiphertext, readErr = vs.ReadRawCredential(name)
+		if readErr != nil {
+			log.Fatalf("backup existing credential %q before overwrite: %v", name, readErr)
 		}
+	}
+
+	ourCiphertext, addErr := vs.Add(name, string(secret))
+	for i := range secret {
+		secret[i] = 0
+	}
+	if addErr != nil {
+		log.Fatalf("add credential: %v", addErr)
+	}
+
+	// Create rule and binding atomically. If the DB insert fails, roll back
+	// the vault change: restore the previous ciphertext if overwriting, or
+	// remove the new file if the credential was brand new. Rollback uses
+	// compare-and-swap: only restore/delete if the credential still matches
+	// what we wrote, avoiding clobber of concurrent writes.
+	if db != nil {
+		ruleID, bindingID, err := db.AddRuleAndBinding(
+			"allow", *destination, ports,
+			store.RuleOpts{
+				Note:   fmt.Sprintf("auto-created for credential %q", name),
+				Source: credAddSourcePrefix + name,
+			},
+			name,
+			store.BindingOpts{
+				Ports:        ports,
+				InjectHeader: *header,
+				Template:     *template,
+			},
+		)
+		if err != nil {
+			// Compare-and-swap: only rollback if the credential file still
+			// contains what we wrote. If a concurrent writer changed it,
+			// leave their value in place.
+			currentCiphertext, casErr := vs.ReadRawCredential(name)
+			concurrentWrite := casErr != nil || !bytes.Equal(currentCiphertext, ourCiphertext)
+			if concurrentWrite {
+				log.Printf("warning: credential %q was modified concurrently; skipping vault rollback", name)
+			} else if prevCiphertext != nil {
+				if restoreErr := vs.WriteRawCredential(name, prevCiphertext); restoreErr != nil {
+					log.Printf("warning: failed to restore previous credential %q after DB error: %v", name, restoreErr)
+				}
+			} else {
+				if rmErr := vs.Remove(name); rmErr != nil {
+					log.Printf("warning: failed to clean up vault credential %q after DB error: %v", name, rmErr)
+				}
+			}
+			log.Fatalf("add rule and binding: %v", err)
+		}
+		fmt.Printf("credential %q added\n", name)
 		fmt.Printf("added allow rule [%d] for %s\n", ruleID, *destination)
-
-		bindingID, err := db.AddBinding(*destination, name, store.BindingOpts{
-			Ports:        ports,
-			InjectHeader: *header,
-			Template:     *template,
-		})
-		if err != nil {
-			log.Fatalf("add binding: %v", err)
-		}
 		fmt.Printf("added binding [%d] %s -> %s\n", bindingID, *destination, name)
+	} else {
+		fmt.Printf("credential %q added\n", name)
 	}
 }
 
@@ -155,7 +279,7 @@ func handleCredList(args []string) {
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
 	fs.Parse(args)
 
-	vs := openVaultStore()
+	vs := openVaultStore(*dbPath)
 	names, err := vs.List()
 	if err != nil {
 		log.Fatalf("list: %v", err)
@@ -168,6 +292,9 @@ func handleCredList(args []string) {
 	// Try to open the store to show binding info. Skip if DB doesn't exist
 	// to avoid creating files as a side effect of a read-only operation.
 	if _, statErr := os.Stat(*dbPath); statErr != nil {
+		if !os.IsNotExist(statErr) {
+			fmt.Fprintf(os.Stderr, "warning: cannot access database %s: %v\n", *dbPath, statErr)
+		}
 		for _, n := range names {
 			fmt.Println(n)
 		}
@@ -222,7 +349,7 @@ func handleCredRemove(args []string) {
 	}
 	name := fs.Arg(0)
 
-	vs := openVaultStore()
+	vs := openVaultStore(*dbPath)
 
 	// Remove from vault. If already gone (previous partial cleanup),
 	// continue to DB cleanup so stale rules/bindings can be removed.
@@ -240,13 +367,15 @@ func handleCredRemove(args []string) {
 	dbExists := false
 	if _, statErr := os.Stat(*dbPath); statErr == nil {
 		dbExists = true
+	} else if !os.IsNotExist(statErr) {
+		log.Printf("warning: cannot access database %q for cleanup: %v (stale rules/bindings may remain)", *dbPath, statErr)
 	}
 	var db *store.Store
 	var dbErr error
 	if dbExists {
 		db, dbErr = store.New(*dbPath)
 	} else {
-		dbErr = fmt.Errorf("database file not found")
+		dbErr = fmt.Errorf("database file not found or inaccessible")
 	}
 	if dbErr != nil && dbExists {
 		log.Printf("warning: could not open database %q for cleanup: %v (stale rules/bindings may remain)", *dbPath, dbErr)

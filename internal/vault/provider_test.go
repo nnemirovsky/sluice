@@ -24,7 +24,7 @@ func TestStoreImplementsProvider(t *testing.T) {
 
 	// Use through Provider interface.
 	var p Provider = store
-	if err := store.Add("test_key", "test_value"); err != nil {
+	if _, err := store.Add("test_key", "test_value"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -95,7 +95,7 @@ func TestChainProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add("age_only_key", "from-age"); err != nil {
+	if _, err := store.Add("age_only_key", "from-age"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -137,10 +137,10 @@ func TestChainProviderList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add("key_a", "a"); err != nil {
+	if _, err := store.Add("key_a", "a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add("key_b", "b"); err != nil {
+	if _, err := store.Add("key_b", "b"); err != nil {
 		t.Fatal(err)
 	}
 

@@ -13,10 +13,26 @@ import (
 	"github.com/nemirovsky/sluice/internal/vault"
 )
 
+// setupVaultDB creates a temporary SQLite DB with vault_dir set to the given
+// directory so openVaultStore reads from the DB (matching runtime behavior).
+func setupVaultDB(t *testing.T, dir string) string {
+	t.Helper()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("create test DB: %v", err)
+	}
+	if err := db.SetConfig("vault_dir", dir); err != nil {
+		t.Fatalf("set vault_dir: %v", err)
+	}
+	db.Close()
+	return dbPath
+}
+
 // TestHandleCredAdd tests adding a credential via piped stdin.
 func TestHandleCredAdd(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("SLUICE_VAULT_DIR", dir)
+	dbPath := setupVaultDB(t, dir)
 
 	// Pipe the secret via stdin (non-terminal path).
 	oldStdin := os.Stdin
@@ -40,7 +56,7 @@ func TestHandleCredAdd(t *testing.T) {
 	os.Stdout = outW
 	defer func() { os.Stdout = oldStdout }()
 
-	handleCredCommand([]string{"add", "test_key"})
+	handleCredCommand([]string{"add", "--db", dbPath, "test_key"})
 
 	outW.Close()
 	var buf bytes.Buffer
@@ -70,7 +86,7 @@ func TestHandleCredAdd(t *testing.T) {
 // TestHandleCredList tests listing credentials.
 func TestHandleCredList(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("SLUICE_VAULT_DIR", dir)
+	dbPath := setupVaultDB(t, dir)
 
 	// Pre-populate some credentials.
 	vs, err := vault.NewStore(dir)
@@ -78,7 +94,7 @@ func TestHandleCredList(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"alpha", "beta", "gamma"} {
-		if err := vs.Add(name, "secret-"+name); err != nil {
+		if _, err := vs.Add(name, "secret-"+name); err != nil {
 			t.Fatalf("add %s: %v", name, err)
 		}
 	}
@@ -92,8 +108,6 @@ func TestHandleCredList(t *testing.T) {
 	os.Stdout = outW
 	defer func() { os.Stdout = oldStdout }()
 
-	// Use a nonexistent DB path so it creates an empty store (no bindings).
-	dbPath := filepath.Join(dir, "test.db")
 	handleCredCommand([]string{"list", "--db", dbPath})
 
 	outW.Close()
@@ -112,14 +126,14 @@ func TestHandleCredList(t *testing.T) {
 // TestHandleCredRemove tests removing a credential.
 func TestHandleCredRemove(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("SLUICE_VAULT_DIR", dir)
+	dbPath := setupVaultDB(t, dir)
 
 	// Pre-populate a credential.
 	vs, err := vault.NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := vs.Add("to_remove", "secret"); err != nil {
+	if _, err := vs.Add("to_remove", "secret"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -132,7 +146,6 @@ func TestHandleCredRemove(t *testing.T) {
 	os.Stdout = outW
 	defer func() { os.Stdout = oldStdout }()
 
-	dbPath := filepath.Join(dir, "test.db")
 	handleCredCommand([]string{"remove", "--db", dbPath, "to_remove"})
 
 	outW.Close()
@@ -160,7 +173,7 @@ func TestHandleCredRemove(t *testing.T) {
 // TestHandleCredListEmpty tests listing when no credentials exist.
 func TestHandleCredListEmpty(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("SLUICE_VAULT_DIR", dir)
+	dbPath := setupVaultDB(t, dir)
 
 	// Initialize the vault so the credentials dir exists.
 	_, err := vault.NewStore(dir)
@@ -177,7 +190,7 @@ func TestHandleCredListEmpty(t *testing.T) {
 	os.Stdout = outW
 	defer func() { os.Stdout = oldStdout }()
 
-	handleCredCommand([]string{"list"})
+	handleCredCommand([]string{"list", "--db", dbPath})
 
 	outW.Close()
 	var buf bytes.Buffer
@@ -255,7 +268,7 @@ func TestHandleCredUnknownSubcommand(t *testing.T) {
 // where the vault entry was deleted but DB cleanup failed.
 func TestHandleCredRemoveNonexistent(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("SLUICE_VAULT_DIR", dir)
+	dbPath := setupVaultDB(t, dir)
 
 	// Initialize vault so credentials dir exists.
 	if _, err := vault.NewStore(dir); err != nil {
@@ -271,7 +284,7 @@ func TestHandleCredRemoveNonexistent(t *testing.T) {
 	os.Stdout = outW
 	defer func() { os.Stdout = oldStdout }()
 
-	handleCredCommand([]string{"remove", "does_not_exist"})
+	handleCredCommand([]string{"remove", "--db", dbPath, "does_not_exist"})
 
 	outW.Close()
 	var buf bytes.Buffer
@@ -288,8 +301,7 @@ func TestHandleCredRemoveNonexistent(t *testing.T) {
 // which should auto-create an allow rule and a binding in the store.
 func TestHandleCredAddWithDestination(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("SLUICE_VAULT_DIR", dir)
-	dbPath := filepath.Join(dir, "test.db")
+	dbPath := setupVaultDB(t, dir)
 
 	// Pipe the secret via stdin.
 	oldStdin := os.Stdin
@@ -398,8 +410,7 @@ func TestHandleCredAddWithDestination(t *testing.T) {
 // TestHandleCredAddWithTemplate tests adding a credential with --template.
 func TestHandleCredAddWithTemplate(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("SLUICE_VAULT_DIR", dir)
-	dbPath := filepath.Join(dir, "test.db")
+	dbPath := setupVaultDB(t, dir)
 
 	oldStdin := os.Stdin
 	r, w, err := os.Pipe()
@@ -457,15 +468,14 @@ func TestHandleCredAddWithTemplate(t *testing.T) {
 // TestHandleCredListWithBindings tests that cred list shows binding info.
 func TestHandleCredListWithBindings(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("SLUICE_VAULT_DIR", dir)
-	dbPath := filepath.Join(dir, "test.db")
+	dbPath := setupVaultDB(t, dir)
 
 	// Create a credential in the vault.
 	vs, err := vault.NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := vs.Add("mykey", "secret"); err != nil {
+	if _, err := vs.Add("mykey", "secret"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -516,15 +526,14 @@ func TestHandleCredListWithBindings(t *testing.T) {
 // removes associated bindings and auto-created rules.
 func TestHandleCredRemoveWithBindings(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("SLUICE_VAULT_DIR", dir)
-	dbPath := filepath.Join(dir, "test.db")
+	dbPath := setupVaultDB(t, dir)
 
 	// Create a credential in the vault.
 	vs, err := vault.NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := vs.Add("cleanup_key", "secret"); err != nil {
+	if _, err := vs.Add("cleanup_key", "secret"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -627,8 +636,7 @@ func TestHandleCredRemoveWithBindings(t *testing.T) {
 // then remove workflow to verify everything is created and cleaned up correctly.
 func TestHandleCredAddThenRemoveIntegrated(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("SLUICE_VAULT_DIR", dir)
-	dbPath := filepath.Join(dir, "test.db")
+	dbPath := setupVaultDB(t, dir)
 
 	// Step 1: Add credential with destination.
 	oldStdin := os.Stdin

@@ -54,7 +54,7 @@ func TestPhantomSwapInHeaders(t *testing.T) {
 	}}
 
 	inj, store := setupTestInjector(t, bindings)
-	if err := store.Add("api_key", "sk-real-secret-12345"); err != nil {
+	if _, err := store.Add("api_key", "sk-real-secret-12345"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -110,7 +110,7 @@ func TestPhantomSwapInBody(t *testing.T) {
 	}}
 
 	inj, store := setupTestInjector(t, bindings)
-	if err := store.Add("api_key", "sk-real-secret-12345"); err != nil {
+	if _, err := store.Add("api_key", "sk-real-secret-12345"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -166,7 +166,7 @@ func TestHeaderInjectionViaInjectHeader(t *testing.T) {
 	}}
 
 	inj, store := setupTestInjector(t, bindings)
-	if err := store.Add("temp_key", "secret-that-should-be-zeroed"); err != nil {
+	if _, err := store.Add("temp_key", "secret-that-should-be-zeroed"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -217,7 +217,7 @@ func TestHeaderInjectionWithTemplate(t *testing.T) {
 	}}
 
 	inj, store := setupTestInjector(t, bindings)
-	if err := store.Add("github_token", "ghp_abc123"); err != nil {
+	if _, err := store.Add("github_token", "ghp_abc123"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -310,7 +310,7 @@ func TestMITMHTTPS(t *testing.T) {
 	}}
 
 	inj, store := setupTestInjector(t, bindings)
-	if err := store.Add("tls_key", "tls-injected-value"); err != nil {
+	if _, err := store.Add("tls_key", "tls-injected-value"); err != nil {
 		t.Fatal(err)
 	}
 
