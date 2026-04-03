@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 )
 
@@ -102,6 +103,10 @@ func handlePolicyAdd(args []string) {
 		os.Exit(1)
 	}
 	destination := fs.Arg(0)
+
+	if _, err := policy.CompileGlob(destination); err != nil {
+		log.Fatalf("invalid destination pattern %q: %v", destination, err)
+	}
 
 	var ports []int
 	if *portsStr != "" {

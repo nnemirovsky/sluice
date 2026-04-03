@@ -84,6 +84,9 @@ func (h *CommandHandler) recompileAndSwap() error {
 	if err != nil {
 		return err
 	}
+	if err := newEng.Validate(); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
 	h.engine.Store(newEng)
 	return nil
 }
@@ -249,6 +252,10 @@ func (h *CommandHandler) policyShowFromStore() string {
 const inMemoryWarning = "\n(in-memory only, will be lost on reload/restart)"
 
 func (h *CommandHandler) policyAllow(dest string) string {
+	if _, err := policy.CompileGlob(dest); err != nil {
+		return fmt.Sprintf("Invalid destination pattern: %v", err)
+	}
+
 	h.reloadMu.Lock()
 	defer h.reloadMu.Unlock()
 
@@ -270,6 +277,10 @@ func (h *CommandHandler) policyAllow(dest string) string {
 }
 
 func (h *CommandHandler) policyDeny(dest string) string {
+	if _, err := policy.CompileGlob(dest); err != nil {
+		return fmt.Sprintf("Invalid destination pattern: %v", err)
+	}
+
 	h.reloadMu.Lock()
 	defer h.reloadMu.Unlock()
 
