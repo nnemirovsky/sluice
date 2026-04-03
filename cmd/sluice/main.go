@@ -89,15 +89,21 @@ func main() {
 		if empty {
 			data, err := os.ReadFile(*policyPath)
 			if err != nil {
-				log.Fatalf("read policy seed file: %v", err)
+				if os.IsNotExist(err) {
+					log.Printf("policy seed file %s not found, starting with empty DB", *policyPath)
+				} else {
+					log.Fatalf("read policy seed file: %v", err)
+				}
 			}
-			result, err := db.ImportTOML(data)
-			if err != nil {
-				log.Fatalf("import policy seed: %v", err)
+			if data != nil {
+				result, err := db.ImportTOML(data)
+				if err != nil {
+					log.Fatalf("import policy seed: %v", err)
+				}
+				log.Printf("seeded DB from %s: %d rules, %d tool rules, %d bindings, %d upstreams, %d config",
+					*policyPath, result.RulesInserted, result.ToolRulesInserted,
+					result.BindingsInserted, result.UpstreamsInserted, result.ConfigSet)
 			}
-			log.Printf("seeded DB from %s: %d rules, %d tool rules, %d bindings, %d upstreams, %d config",
-				*policyPath, result.RulesInserted, result.ToolRulesInserted,
-				result.BindingsInserted, result.UpstreamsInserted, result.ConfigSet)
 		}
 	}
 
