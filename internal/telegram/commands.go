@@ -456,7 +456,6 @@ func (h *CommandHandler) credRemove(name string) string {
 	var warnings []string
 	if h.store != nil {
 		h.reloadMu.Lock()
-		defer h.reloadMu.Unlock()
 		if _, err := h.store.RemoveRulesBySource("cred-add:" + name); err != nil {
 			log.Printf("[WARN] remove rules for credential %q: %v", name, err)
 			warnings = append(warnings, fmt.Sprintf("failed to remove rules: %v", err))
@@ -475,6 +474,7 @@ func (h *CommandHandler) credRemove(name string) string {
 			log.Printf("[WARN] rebuild resolver after cred remove failed: %v", err)
 			warnings = append(warnings, fmt.Sprintf("resolver rebuild failed: %v", err))
 		}
+		h.reloadMu.Unlock()
 	}
 
 	msg := fmt.Sprintf("Removed credential: %s", name)

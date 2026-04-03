@@ -3,6 +3,7 @@ package telegram
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -461,11 +462,11 @@ func TestPolicyRemoveThenRecompile(t *testing.T) {
 	}
 
 	// Remove the rule by ID.
-	result := handler.Handle(&Command{Name: "policy", Args: []string{"remove", "1"}})
+	idStr := strconv.FormatInt(id, 10)
+	result := handler.Handle(&Command{Name: "policy", Args: []string{"remove", idStr}})
 	if !strings.Contains(result, "Removed rule ID") {
 		t.Fatalf("expected removal, got: %s", result)
 	}
-	_ = id
 
 	// Engine should be recompiled without the rule.
 	snap = handler.engine.Load().Snapshot()

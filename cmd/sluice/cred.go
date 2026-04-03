@@ -241,12 +241,13 @@ func handleCredRemove(args []string) {
 	if _, statErr := os.Stat(*dbPath); statErr == nil {
 		dbExists = true
 	}
-	db, dbErr := func() (*store.Store, error) {
-		if !dbExists {
-			return nil, fmt.Errorf("database file not found")
-		}
-		return store.New(*dbPath)
-	}()
+	var db *store.Store
+	var dbErr error
+	if dbExists {
+		db, dbErr = store.New(*dbPath)
+	} else {
+		dbErr = fmt.Errorf("database file not found")
+	}
 	if dbErr != nil && dbExists {
 		log.Printf("warning: could not open database %q for cleanup: %v (stale rules/bindings may remain)", *dbPath, dbErr)
 	}

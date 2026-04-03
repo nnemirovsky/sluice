@@ -681,16 +681,6 @@ func (s *Store) RemoveBindingsByCredential(credential string) (int64, error) {
 	return res.RowsAffected()
 }
 
-// RemoveRulesByDestinationAndSource deletes rules matching a destination and source.
-// Returns the number deleted.
-func (s *Store) RemoveRulesByDestinationAndSource(destination, source string) (int64, error) {
-	res, err := s.db.Exec("DELETE FROM rules WHERE destination = ? AND source = ?", destination, source)
-	if err != nil {
-		return 0, fmt.Errorf("delete rules by destination+source: %w", err)
-	}
-	return res.RowsAffected()
-}
-
 // RemoveRulesBySource deletes all rules matching a source tag.
 // Returns the number deleted.
 func (s *Store) RemoveRulesBySource(source string) (int64, error) {
