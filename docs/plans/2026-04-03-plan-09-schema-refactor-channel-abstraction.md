@@ -454,14 +454,14 @@ Update all `/policy` commands to use unified rule methods and typed config.
 - Modify: `internal/telegram/commands.go`
 - Modify: `internal/telegram/commands_test.go`
 
-- [ ] Update `policyShowFromStore()`: use `store.GetConfig()` typed method, `store.ListRules(filter)` unified method
-- [ ] Update `policyAllow()`/`policyDeny()`: call `store.AddRule()` with appropriate RuleOpts (destination or tool)
-- [ ] Update `policyRemove()`: call `store.RemoveRule(id)` (works on unified table)
-- [ ] Update "Always Allow" in proxy (`server.go`): call `store.AddRule()` with source="approval"
-- [ ] Update "Always Allow" in MCP gateway (`gateway.go`): same pattern
-- [ ] Update tests
-- [ ] Run tests: `go test ./internal/telegram/ -v -timeout 30s`
-- [ ] Run tests: `go test ./... -v -timeout 30s`
+- [x] Update `policyShowFromStore()`: use `store.GetConfig()` typed method, `store.ListRules(filter)` unified method
+- [x] Update `policyAllow()`/`policyDeny()`: call `store.AddRule()` with appropriate RuleOpts (destination or tool)
+- [x] Update `policyRemove()`: call `store.RemoveRule(id)` (works on unified table)
+- [x] Update "Always Allow" in proxy (`server.go`): call `store.AddRule()` with source="approval"
+- [x] Update "Always Allow" in MCP gateway (`gateway.go`): same pattern
+- [x] Update tests
+- [x] Run tests: `go test ./internal/telegram/ -v -timeout 30s`
+- [x] Run tests: `go test ./... -v -timeout 30s`
 
 ### Task 11: Verify acceptance criteria
 
