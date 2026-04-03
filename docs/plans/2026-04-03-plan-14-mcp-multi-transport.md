@@ -148,33 +148,35 @@ Allow OpenClaw (or any MCP client) to connect to sluice's gateway via HTTP inste
 
 ### Task 6: Auto-inject sluice as MCP server into OpenClaw
 
-On startup (and after MCP upstream changes), automatically configure OpenClaw to use sluice as its MCP gateway.
+On startup (and after MCP upstream changes), automatically configure OpenClaw to use sluice as its MCP gateway via Streamable HTTP. No Docker socket needed in the OpenClaw container.
+
+**Approach:** Write sluice's MCP config to the shared phantoms volume. OpenClaw reads it on startup or reload. The connection uses Streamable HTTP (`http://sluice:3000/mcp`), which goes through the Docker internal network. The SOCKS5 proxy auto-bypasses connections to sluice's own address so MCP traffic is not double-checked.
 
 **Files:**
-- Modify: `internal/docker/manager.go`
 - Create: `internal/docker/mcp_inject.go`
+- Modify: `internal/docker/manager.go`
 - Modify: `internal/docker/manager_test.go`
-
-**Injection approach:** Write sluice's MCP config to a shared volume file that OpenClaw reads, then trigger OpenClaw to reload.
+- Modify: `internal/proxy/server.go` (add self-bypass for sluice's own address)
 
 ```json
-// /phantoms/mcp-servers.json (shared volume)
+// /phantoms/mcp-servers.json (shared volume, read by OpenClaw)
 {
   "sluice": {
-    "url": "http://localhost:3000/mcp",
+    "url": "http://sluice:3000/mcp",
     "transport": "streamable-http"
   }
 }
 ```
 
-- [ ] Implement `InjectMCPConfig(ctx, phantomDir, sluiceURL string) error` that writes `mcp-servers.json` to the shared phantoms volume
-- [ ] Call `docker exec openclaw openclaw mcp reload` (or equivalent) to trigger OpenClaw to re-read MCP config
-- [ ] If exec fails, fall back to writing config and restarting the container
+- [ ] Implement `InjectMCPConfig(phantomDir, sluiceURL string) error` that writes `mcp-servers.json` to the shared phantoms volume
 - [ ] Call `InjectMCPConfig` on sluice startup (after gateway is ready) and after `sluice mcp add/remove`
+- [ ] Trigger OpenClaw to re-read MCP config via `docker exec openclaw openclaw mcp reload`. If exec fails, OpenClaw picks it up on next restart.
+- [ ] Add SOCKS5 self-bypass: auto-allow connections to sluice's own listener addresses (health/MCP server) without policy evaluation. Hardcoded, not configurable.
 - [ ] Add `--auto-inject-mcp` flag (default true in Docker, false otherwise) to control this behavior
 - [ ] Write tests for config file generation
-- [ ] Write tests for injection flow (mock Docker API)
+- [ ] Write tests for self-bypass (connection to sluice's own address bypasses policy)
 - [ ] Run tests: `go test ./internal/docker/ -v -timeout 30s`
+- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 7: Verify acceptance criteria
 
@@ -183,7 +185,9 @@ On startup (and after MCP upstream changes), automatically configure OpenClaw to
 - [ ] Verify WebSocket upstream connects to a WebSocket MCP server
 - [ ] Verify mixed upstream types in one gateway (stdio + HTTP + WebSocket)
 - [ ] Verify `/mcp` endpoint serves tools to an MCP client over Streamable HTTP
-- [ ] Verify OpenClaw auto-injection writes correct config and OpenClaw picks it up
+- [ ] Verify OpenClaw auto-injection writes mcp-servers.json and OpenClaw connects via Streamable HTTP
+- [ ] Verify SOCKS5 self-bypass: OpenClaw's connection to sluice:3000/mcp is auto-allowed without policy rules
+- [ ] Verify OpenClaw container does NOT have Docker socket mounted
 - [ ] Verify policy enforcement applies equally across all transports
 - [ ] Verify `sluice mcp add <name> --transport http --command https://remote-server/mcp` works
 - [ ] Run full test suite: `go test ./... -v -timeout 60s -race`
@@ -229,14 +233,21 @@ Mcp-Session-Id: <generated>
 ### Auto-injection sequence
 
 ```
-1. Sluice starts, MCP gateway initializes
-2. Gateway discovers tools from all upstreams
-3. Sluice writes /phantoms/mcp-servers.json with its own URL
-4. Sluice runs: docker exec openclaw openclaw mcp reload
-5. OpenClaw reads mcp-servers.json, connects to sluice:3000/mcp
-6. OpenClaw sees all upstream tools (namespaced) through sluice
-7. All tool calls go through sluice's policy engine
+1. Sluice starts, MCP gateway initializes on :3000/mcp
+2. Gateway discovers tools from all upstreams (stdio/HTTP/WS)
+3. Sluice writes /phantoms/mcp-servers.json with {"url": "http://sluice:3000/mcp"}
+4. Sluice runs: docker exec openclaw openclaw mcp reload (best-effort)
+5. OpenClaw reads mcp-servers.json, connects to sluice:3000/mcp via Streamable HTTP
+6. Connection from OpenClaw to sluice:3000 goes through tun2proxy -> SOCKS5
+7. SOCKS5 self-bypass: auto-allows traffic to sluice's own address (no policy check)
+8. OpenClaw sees all upstream tools (namespaced) through sluice
+9. All tool calls go through sluice's policy engine (tool rules, approval, inspect)
+10. Upstream HTTP calls from MCP servers go directly from sluice's container (no proxy loop)
 ```
+
+Note: OpenClaw container does NOT need Docker socket. The shared phantoms volume
+is the only communication channel. Docker exec for reload is called from the sluice
+container (which already has the socket for credential management).
 
 ### TOML config for remote upstreams
 
