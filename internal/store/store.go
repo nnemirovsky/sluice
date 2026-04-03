@@ -81,11 +81,6 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// DB returns the underlying *sql.DB for use by the migration runner.
-func (s *Store) DB() *sql.DB {
-	return s.db
-}
-
 func validVerdict(v string) bool {
 	return v == "allow" || v == "deny" || v == "ask" || v == "redact"
 }

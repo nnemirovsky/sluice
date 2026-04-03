@@ -30,6 +30,8 @@ func runMigrations(db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("create migrator: %w", err)
 	}
+	// Note: m.Close() is not called because the sqlite driver's Close()
+	// closes the underlying *sql.DB, which is shared with the Store.
 	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return fmt.Errorf("run migrations: %w", err)
 	}
