@@ -278,8 +278,15 @@ func handlePolicyExport(args []string) {
 			fmt.Printf("dir = %q\n", vaultDir)
 		}
 		if vaultProviders != "" {
-			// vault_providers is stored as a JSON array; output as TOML array.
-			fmt.Printf("providers = %s\n", vaultProviders)
+			// vault_providers is stored as a JSON array; decode and format as TOML.
+			var providers []string
+			if err := json.Unmarshal([]byte(vaultProviders), &providers); err == nil {
+				quoted := make([]string, len(providers))
+				for i, p := range providers {
+					quoted[i] = fmt.Sprintf("%q", p)
+				}
+				fmt.Printf("providers = [%s]\n", strings.Join(quoted, ", "))
+			}
 		}
 		fmt.Println()
 	}
@@ -379,10 +386,11 @@ func handlePolicyExport(args []string) {
 			fmt.Printf("timeout_sec = %d\n", u.TimeoutSec)
 		}
 		if len(u.Env) > 0 {
-			fmt.Println("[mcp_upstream.env]")
+			parts := make([]string, 0, len(u.Env))
 			for k, v := range u.Env {
-				fmt.Printf("%s = %q\n", k, v)
+				parts = append(parts, fmt.Sprintf("%s = %q", k, v))
 			}
+			fmt.Printf("env = {%s}\n", strings.Join(parts, ", "))
 		}
 		fmt.Println()
 	}

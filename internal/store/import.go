@@ -218,6 +218,11 @@ func (s *Store) ImportTOML(data []byte) (*ImportResult, error) {
 
 	// Import config values.
 	if f.Policy.Default != "" {
+		switch f.Policy.Default {
+		case "allow", "deny", "ask":
+		default:
+			return nil, fmt.Errorf("invalid default verdict %q: must be allow, deny, or ask", f.Policy.Default)
+		}
 		if err := upsertConfig(tx, "default_verdict", f.Policy.Default); err != nil {
 			return nil, err
 		}
@@ -310,6 +315,9 @@ func (s *Store) ImportTOML(data []byte) (*ImportResult, error) {
 // insertNetworkRuleIfNew inserts a network rule if no matching
 // verdict+destination+ports combination exists. Returns true if inserted.
 func insertNetworkRuleIfNew(tx *sql.Tx, verdict string, r importRule) (bool, error) {
+	if r.Destination == "" {
+		return false, fmt.Errorf("network rule has empty destination")
+	}
 	portsJSON := portsToJSON(r.Ports)
 
 	var count int
@@ -344,6 +352,9 @@ func insertNetworkRuleIfNew(tx *sql.Tx, verdict string, r importRule) (bool, err
 // insertToolRuleIfNew inserts a tool rule if no matching verdict+tool
 // combination exists. Returns true if inserted.
 func insertToolRuleIfNew(tx *sql.Tx, verdict string, r importToolRule) (bool, error) {
+	if r.Tool == "" {
+		return false, fmt.Errorf("tool rule has empty tool pattern")
+	}
 	var count int
 	err := tx.QueryRow(
 		"SELECT COUNT(*) FROM tool_rules WHERE verdict = ? AND tool = ?",
@@ -368,6 +379,12 @@ func insertToolRuleIfNew(tx *sql.Tx, verdict string, r importToolRule) (bool, er
 // insertBindingIfNew inserts a binding if no matching destination+credential
 // combination exists. Returns true if inserted.
 func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
+	if b.Destination == "" {
+		return false, fmt.Errorf("binding has empty destination")
+	}
+	if b.Credential == "" {
+		return false, fmt.Errorf("binding has empty credential")
+	}
 	var count int
 	err := tx.QueryRow(
 		"SELECT COUNT(*) FROM bindings WHERE destination = ? AND credential = ?",
