@@ -5,9 +5,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
 )
 
@@ -51,11 +53,11 @@ func TestHandleCredAdd(t *testing.T) {
 	}
 
 	// Verify credential was stored and can be retrieved.
-	store, err := vault.NewStore(dir)
+	vs, err := vault.NewStore(dir)
 	if err != nil {
 		t.Fatalf("open vault: %v", err)
 	}
-	sb, err := store.Get("test_key")
+	sb, err := vs.Get("test_key")
 	if err != nil {
 		t.Fatalf("get credential: %v", err)
 	}
@@ -71,12 +73,12 @@ func TestHandleCredList(t *testing.T) {
 	t.Setenv("SLUICE_VAULT_DIR", dir)
 
 	// Pre-populate some credentials.
-	store, err := vault.NewStore(dir)
+	vs, err := vault.NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"alpha", "beta", "gamma"} {
-		if err := store.Add(name, "secret-"+name); err != nil {
+		if err := vs.Add(name, "secret-"+name); err != nil {
 			t.Fatalf("add %s: %v", name, err)
 		}
 	}
@@ -90,7 +92,9 @@ func TestHandleCredList(t *testing.T) {
 	os.Stdout = outW
 	defer func() { os.Stdout = oldStdout }()
 
-	handleCredCommand([]string{"list"})
+	// Use a nonexistent DB path so it creates an empty store (no bindings).
+	dbPath := filepath.Join(dir, "test.db")
+	handleCredCommand([]string{"list", "--db", dbPath})
 
 	outW.Close()
 	var buf bytes.Buffer
@@ -111,11 +115,11 @@ func TestHandleCredRemove(t *testing.T) {
 	t.Setenv("SLUICE_VAULT_DIR", dir)
 
 	// Pre-populate a credential.
-	store, err := vault.NewStore(dir)
+	vs, err := vault.NewStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Add("to_remove", "secret"); err != nil {
+	if err := vs.Add("to_remove", "secret"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -128,7 +132,8 @@ func TestHandleCredRemove(t *testing.T) {
 	os.Stdout = outW
 	defer func() { os.Stdout = oldStdout }()
 
-	handleCredCommand([]string{"remove", "to_remove"})
+	dbPath := filepath.Join(dir, "test.db")
+	handleCredCommand([]string{"remove", "--db", dbPath, "to_remove"})
 
 	outW.Close()
 	var buf bytes.Buffer
@@ -141,7 +146,7 @@ func TestHandleCredRemove(t *testing.T) {
 	}
 
 	// Verify credential was removed.
-	names, err := store.List()
+	names, err := vs.List()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,4 +270,449 @@ func TestHandleCredRemoveNonexistent(t *testing.T) {
 		return
 	}
 	t.Fatal("expected non-zero exit code")
+}
+
+// TestHandleCredAddWithDestination tests adding a credential with --destination
+// which should auto-create an allow rule and a binding in the store.
+func TestHandleCredAddWithDestination(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SLUICE_VAULT_DIR", dir)
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Pipe the secret via stdin.
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	if _, err := w.Write([]byte("sk-ant-abc123\n")); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	defer func() { os.Stdin = oldStdin }()
+
+	// Capture stdout.
+	oldStdout := os.Stdout
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = outW
+	defer func() { os.Stdout = oldStdout }()
+
+	handleCredCommand([]string{
+		"add",
+		"--db", dbPath,
+		"--destination", "api.anthropic.com",
+		"--ports", "443",
+		"--header", "x-api-key",
+		"anthropic_key",
+	})
+
+	outW.Close()
+	var buf bytes.Buffer
+	io.Copy(&buf, outR)
+	os.Stdout = oldStdout
+
+	output := buf.String()
+	if !strings.Contains(output, `credential "anthropic_key" added`) {
+		t.Errorf("expected credential added message, got: %s", output)
+	}
+	if !strings.Contains(output, "added allow rule") {
+		t.Errorf("expected allow rule message, got: %s", output)
+	}
+	if !strings.Contains(output, "added binding") {
+		t.Errorf("expected binding message, got: %s", output)
+	}
+
+	// Verify the credential is in the vault.
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("open vault: %v", err)
+	}
+	sb, err := vs.Get("anthropic_key")
+	if err != nil {
+		t.Fatalf("get credential: %v", err)
+	}
+	defer sb.Release()
+	if sb.String() != "sk-ant-abc123" {
+		t.Errorf("got %q, want %q", sb.String(), "sk-ant-abc123")
+	}
+
+	// Verify the allow rule was created in the store.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	rules, err := db.ListRules("allow")
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 allow rule, got %d", len(rules))
+	}
+	if rules[0].Destination != "api.anthropic.com" {
+		t.Errorf("rule destination = %q, want %q", rules[0].Destination, "api.anthropic.com")
+	}
+	if rules[0].Source != credAddSource {
+		t.Errorf("rule source = %q, want %q", rules[0].Source, credAddSource)
+	}
+	if len(rules[0].Ports) != 1 || rules[0].Ports[0] != 443 {
+		t.Errorf("rule ports = %v, want [443]", rules[0].Ports)
+	}
+
+	// Verify the binding was created.
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if bindings[0].Destination != "api.anthropic.com" {
+		t.Errorf("binding destination = %q, want %q", bindings[0].Destination, "api.anthropic.com")
+	}
+	if bindings[0].Credential != "anthropic_key" {
+		t.Errorf("binding credential = %q, want %q", bindings[0].Credential, "anthropic_key")
+	}
+	if bindings[0].InjectHeader != "x-api-key" {
+		t.Errorf("binding inject_header = %q, want %q", bindings[0].InjectHeader, "x-api-key")
+	}
+}
+
+// TestHandleCredAddWithTemplate tests adding a credential with --template.
+func TestHandleCredAddWithTemplate(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SLUICE_VAULT_DIR", dir)
+	dbPath := filepath.Join(dir, "test.db")
+
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	if _, err := w.Write([]byte("ghp_abc123\n")); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	defer func() { os.Stdin = oldStdin }()
+
+	oldStdout := os.Stdout
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = outW
+	defer func() { os.Stdout = oldStdout }()
+
+	handleCredCommand([]string{
+		"add",
+		"--db", dbPath,
+		"--destination", "api.github.com",
+		"--ports", "443",
+		"--header", "Authorization",
+		"--template", "Bearer {value}",
+		"github_token",
+	})
+
+	outW.Close()
+	var buf bytes.Buffer
+	io.Copy(&buf, outR)
+	os.Stdout = oldStdout
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if bindings[0].Template != "Bearer {value}" {
+		t.Errorf("binding template = %q, want %q", bindings[0].Template, "Bearer {value}")
+	}
+}
+
+// TestHandleCredListWithBindings tests that cred list shows binding info.
+func TestHandleCredListWithBindings(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SLUICE_VAULT_DIR", dir)
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Create a credential in the vault.
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := vs.Add("mykey", "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a binding in the store.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.AddBinding("api.example.com", "mykey", store.BindingOpts{
+		Ports:        []int{443},
+		InjectHeader: "Authorization",
+		Template:     "Bearer {value}",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	// Capture stdout.
+	oldStdout := os.Stdout
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = outW
+	defer func() { os.Stdout = oldStdout }()
+
+	handleCredCommand([]string{"list", "--db", dbPath})
+
+	outW.Close()
+	var buf bytes.Buffer
+	io.Copy(&buf, outR)
+	os.Stdout = oldStdout
+
+	output := buf.String()
+	if !strings.Contains(output, "mykey") {
+		t.Errorf("expected credential name in output, got: %s", output)
+	}
+	if !strings.Contains(output, "api.example.com") {
+		t.Errorf("expected destination in output, got: %s", output)
+	}
+	if !strings.Contains(output, "header=Authorization") {
+		t.Errorf("expected header in output, got: %s", output)
+	}
+}
+
+// TestHandleCredRemoveWithBindings tests that removing a credential also
+// removes associated bindings and auto-created rules.
+func TestHandleCredRemoveWithBindings(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SLUICE_VAULT_DIR", dir)
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Create a credential in the vault.
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := vs.Add("cleanup_key", "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create an auto-generated rule and binding in the store.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.AddRule("allow", "api.cleanup.com", []int{443}, store.RuleOpts{
+		Source: credAddSource,
+		Note:   "auto-created for credential \"cleanup_key\"",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.AddBinding("api.cleanup.com", "cleanup_key", store.BindingOpts{
+		Ports:        []int{443},
+		InjectHeader: "Authorization",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Also add a manually created rule for the same destination (should NOT be removed).
+	_, err = db.AddRule("allow", "api.cleanup.com", []int{80}, store.RuleOpts{
+		Source: "manual",
+		Note:   "manually added",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	// Capture stdout.
+	oldStdout := os.Stdout
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = outW
+	defer func() { os.Stdout = oldStdout }()
+
+	handleCredCommand([]string{"remove", "--db", dbPath, "cleanup_key"})
+
+	outW.Close()
+	var buf bytes.Buffer
+	io.Copy(&buf, outR)
+	os.Stdout = oldStdout
+
+	output := buf.String()
+	if !strings.Contains(output, `credential "cleanup_key" removed`) {
+		t.Errorf("expected removal message, got: %s", output)
+	}
+	if !strings.Contains(output, "removed 1 auto-created rule") {
+		t.Errorf("expected rule cleanup message, got: %s", output)
+	}
+	if !strings.Contains(output, "removed 1 binding") {
+		t.Errorf("expected binding cleanup message, got: %s", output)
+	}
+
+	// Verify the credential was removed from vault.
+	names, err := vs.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range names {
+		if n == "cleanup_key" {
+			t.Error("credential should have been removed from vault")
+		}
+	}
+
+	// Verify the auto-created rule was removed but the manual one remains.
+	db, err = store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	rules, err := db.ListRules("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 remaining rule, got %d", len(rules))
+	}
+	if rules[0].Source != "manual" {
+		t.Errorf("remaining rule source = %q, want %q", rules[0].Source, "manual")
+	}
+
+	// Verify bindings were removed.
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 bindings, got %d", len(bindings))
+	}
+}
+
+// TestHandleCredAddThenRemoveIntegrated tests the full add-with-destination
+// then remove workflow to verify everything is created and cleaned up correctly.
+func TestHandleCredAddThenRemoveIntegrated(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SLUICE_VAULT_DIR", dir)
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Step 1: Add credential with destination.
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	if _, err := w.Write([]byte("real-secret\n")); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+
+	oldStdout := os.Stdout
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = outW
+
+	handleCredCommand([]string{
+		"add",
+		"--db", dbPath,
+		"--destination", "api.test.com",
+		"--ports", "443,8443",
+		"--header", "X-Custom",
+		"--template", "Token {value}",
+		"integrated_key",
+	})
+
+	outW.Close()
+	var buf bytes.Buffer
+	io.Copy(&buf, outR)
+	os.Stdout = oldStdout
+	os.Stdin = oldStdin
+
+	// Verify store state after add.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	rules, err := db.ListRules("allow")
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule after add, got %d", len(rules))
+	}
+
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding after add, got %d", len(bindings))
+	}
+	if len(bindings[0].Ports) != 2 || bindings[0].Ports[0] != 443 || bindings[0].Ports[1] != 8443 {
+		t.Errorf("binding ports = %v, want [443, 8443]", bindings[0].Ports)
+	}
+	db.Close()
+
+	// Step 2: Remove credential.
+	outR, outW, err = os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = outW
+
+	handleCredCommand([]string{"remove", "--db", dbPath, "integrated_key"})
+
+	outW.Close()
+	buf.Reset()
+	io.Copy(&buf, outR)
+	os.Stdout = oldStdout
+
+	// Verify everything was cleaned up.
+	db, err = store.New(dbPath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer db.Close()
+
+	rules, err = db.ListRules("")
+	if err != nil {
+		t.Fatalf("list rules after remove: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("expected 0 rules after remove, got %d", len(rules))
+	}
+
+	bindings, err = db.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings after remove: %v", err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 bindings after remove, got %d", len(bindings))
+	}
 }

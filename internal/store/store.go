@@ -625,6 +625,54 @@ func (s *Store) MCPUpstreamExists(name string) (bool, error) {
 	return count > 0, nil
 }
 
+// ListBindingsByCredential returns all bindings for a given credential name.
+func (s *Store) ListBindingsByCredential(credential string) ([]BindingRow, error) {
+	rows, err := s.db.Query(
+		"SELECT id, destination, ports, credential, inject_header, template, protocol, created_at FROM bindings WHERE credential = ? ORDER BY id",
+		credential,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list bindings by credential: %w", err)
+	}
+	defer rows.Close()
+
+	var bindings []BindingRow
+	for rows.Next() {
+		var b BindingRow
+		var portsJSON, header, tmpl, proto sql.NullString
+		if err := rows.Scan(&b.ID, &b.Destination, &portsJSON, &b.Credential, &header, &tmpl, &proto, &b.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan binding: %w", err)
+		}
+		if portsJSON.Valid {
+			json.Unmarshal([]byte(portsJSON.String), &b.Ports)
+		}
+		b.InjectHeader = header.String
+		b.Template = tmpl.String
+		b.Protocol = proto.String
+		bindings = append(bindings, b)
+	}
+	return bindings, rows.Err()
+}
+
+// RemoveBindingsByCredential deletes all bindings for a credential. Returns the number deleted.
+func (s *Store) RemoveBindingsByCredential(credential string) (int64, error) {
+	res, err := s.db.Exec("DELETE FROM bindings WHERE credential = ?", credential)
+	if err != nil {
+		return 0, fmt.Errorf("delete bindings by credential: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// RemoveRulesByDestinationAndSource deletes rules matching a destination and source.
+// Returns the number deleted.
+func (s *Store) RemoveRulesByDestinationAndSource(destination, source string) (int64, error) {
+	res, err := s.db.Exec("DELETE FROM rules WHERE destination = ? AND source = ?", destination, source)
+	if err != nil {
+		return 0, fmt.Errorf("delete rules by destination+source: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // --- Store queries ---
 
 // IsEmpty returns true if the store has no rules, tool rules, bindings, or

@@ -2,15 +2,21 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
+	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
 	"golang.org/x/term"
 )
+
+// credAddSource is the source tag for rules auto-created by "sluice cred add --destination".
+const credAddSource = "cred-add"
 
 func handleCredCommand(args []string) {
 	if len(args) == 0 {
@@ -18,6 +24,21 @@ func handleCredCommand(args []string) {
 		os.Exit(1)
 	}
 
+	switch args[0] {
+	case "add":
+		handleCredAdd(args[1:])
+	case "list":
+		handleCredList(args[1:])
+	case "remove":
+		handleCredRemove(args[1:])
+	default:
+		fmt.Printf("unknown cred command: %s\n", args[0])
+		fmt.Println("usage: sluice cred [add|list|remove] ...")
+		os.Exit(1)
+	}
+}
+
+func openVaultStore() *vault.Store {
 	vaultDir := os.Getenv("SLUICE_VAULT_DIR")
 	if vaultDir == "" {
 		home, err := os.UserHomeDir()
@@ -27,64 +48,183 @@ func handleCredCommand(args []string) {
 		vaultDir = filepath.Join(home, ".sluice")
 	}
 
-	store, err := vault.NewStore(vaultDir)
+	vs, err := vault.NewStore(vaultDir)
 	if err != nil {
 		log.Fatalf("open vault: %v", err)
 	}
+	return vs
+}
 
-	switch args[0] {
-	case "add":
-		if len(args) < 2 {
-			fmt.Println("usage: sluice cred add <name>")
-			os.Exit(1)
-		}
-		var secret []byte
-		if term.IsTerminal(int(os.Stdin.Fd())) {
-			fmt.Print("Enter secret: ")
-			s, err := term.ReadPassword(int(os.Stdin.Fd()))
-			fmt.Println()
-			if err != nil {
-				log.Fatalf("read secret: %v", err)
-			}
-			secret = s
-		} else {
-			scanner := bufio.NewScanner(os.Stdin)
-			if !scanner.Scan() {
-				log.Fatalf("read secret from stdin: no input")
-			}
-			secret = []byte(strings.TrimRight(scanner.Text(), "\r\n"))
-		}
-		addErr := store.Add(args[1], string(secret))
-		for i := range secret {
-			secret[i] = 0
-		}
-		if addErr != nil {
-			log.Fatalf("add credential: %v", addErr)
-		}
-		fmt.Printf("credential %q added\n", args[1])
+func handleCredAdd(args []string) {
+	fs := flag.NewFlagSet("cred add", flag.ExitOnError)
+	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	destination := fs.String("destination", "", "auto-create allow rule and binding for this destination")
+	portsStr := fs.String("ports", "", "comma-separated port list for the allow rule (e.g. 443,80)")
+	header := fs.String("header", "", "inject_header for the binding (e.g. Authorization)")
+	template := fs.String("template", "", "template for credential injection (e.g. \"Bearer {value}\")")
+	fs.Parse(args)
 
-	case "list":
-		names, err := store.List()
+	if fs.NArg() == 0 {
+		fmt.Println("usage: sluice cred add <name> [--destination host] [--ports 443] [--header Authorization] [--template \"Bearer {value}\"]")
+		os.Exit(1)
+	}
+	name := fs.Arg(0)
+
+	// Read secret from terminal or stdin.
+	var secret []byte
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Print("Enter secret: ")
+		s, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println()
 		if err != nil {
-			log.Fatalf("list: %v", err)
+			log.Fatalf("read secret: %v", err)
 		}
+		secret = s
+	} else {
+		scanner := bufio.NewScanner(os.Stdin)
+		if !scanner.Scan() {
+			log.Fatalf("read secret from stdin: no input")
+		}
+		secret = []byte(strings.TrimRight(scanner.Text(), "\r\n"))
+	}
+
+	vs := openVaultStore()
+	addErr := vs.Add(name, string(secret))
+	for i := range secret {
+		secret[i] = 0
+	}
+	if addErr != nil {
+		log.Fatalf("add credential: %v", addErr)
+	}
+	fmt.Printf("credential %q added\n", name)
+
+	// If --destination is provided, also create an allow rule and binding.
+	if *destination != "" {
+		var ports []int
+		if *portsStr != "" {
+			for _, ps := range strings.Split(*portsStr, ",") {
+				ps = strings.TrimSpace(ps)
+				p, err := strconv.Atoi(ps)
+				if err != nil {
+					log.Fatalf("invalid port %q: %v", ps, err)
+				}
+				ports = append(ports, p)
+			}
+		}
+
+		db, err := store.New(*dbPath)
+		if err != nil {
+			log.Fatalf("open store: %v", err)
+		}
+		defer db.Close()
+
+		ruleID, err := db.AddRule("allow", *destination, ports, store.RuleOpts{
+			Note:   fmt.Sprintf("auto-created for credential %q", name),
+			Source: credAddSource,
+		})
+		if err != nil {
+			log.Fatalf("add allow rule: %v", err)
+		}
+		fmt.Printf("added allow rule [%d] for %s\n", ruleID, *destination)
+
+		bindingID, err := db.AddBinding(*destination, name, store.BindingOpts{
+			Ports:        ports,
+			InjectHeader: *header,
+			Template:     *template,
+		})
+		if err != nil {
+			log.Fatalf("add binding: %v", err)
+		}
+		fmt.Printf("added binding [%d] %s -> %s\n", bindingID, *destination, name)
+	}
+}
+
+func handleCredList(args []string) {
+	fs := flag.NewFlagSet("cred list", flag.ExitOnError)
+	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	fs.Parse(args)
+
+	vs := openVaultStore()
+	names, err := vs.List()
+	if err != nil {
+		log.Fatalf("list: %v", err)
+	}
+
+	if len(names) == 0 {
+		return
+	}
+
+	// Try to open the store to show binding info. If it fails, just list names.
+	db, dbErr := store.New(*dbPath)
+	if dbErr != nil {
 		for _, n := range names {
 			fmt.Println(n)
 		}
+		return
+	}
+	defer db.Close()
 
-	case "remove":
-		if len(args) < 2 {
-			fmt.Println("usage: sluice cred remove <name>")
-			os.Exit(1)
+	for _, n := range names {
+		bindings, bErr := db.ListBindingsByCredential(n)
+		if bErr != nil || len(bindings) == 0 {
+			fmt.Println(n)
+			continue
 		}
-		if err := store.Remove(args[1]); err != nil {
-			log.Fatalf("remove: %v", err)
+		for _, b := range bindings {
+			ports := ""
+			if len(b.Ports) > 0 {
+				portStrs := make([]string, len(b.Ports))
+				for i, p := range b.Ports {
+					portStrs[i] = strconv.Itoa(p)
+				}
+				ports = ":" + strings.Join(portStrs, ",")
+			}
+			hdr := ""
+			if b.InjectHeader != "" {
+				hdr = " header=" + b.InjectHeader
+			}
+			tmpl := ""
+			if b.Template != "" {
+				tmpl = " template=" + b.Template
+			}
+			fmt.Printf("%s -> %s%s%s%s\n", n, b.Destination, ports, hdr, tmpl)
 		}
-		fmt.Printf("credential %q removed\n", args[1])
+	}
+}
 
-	default:
-		fmt.Printf("unknown cred command: %s\n", args[0])
-		fmt.Println("usage: sluice cred [add|list|remove] ...")
+func handleCredRemove(args []string) {
+	fs := flag.NewFlagSet("cred remove", flag.ExitOnError)
+	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	fs.Parse(args)
+
+	if fs.NArg() == 0 {
+		fmt.Println("usage: sluice cred remove <name>")
 		os.Exit(1)
 	}
+	name := fs.Arg(0)
+
+	vs := openVaultStore()
+
+	// Before removing the credential, find and clean up associated bindings and rules.
+	db, dbErr := store.New(*dbPath)
+	if dbErr == nil {
+		defer db.Close()
+
+		bindings, _ := db.ListBindingsByCredential(name)
+		for _, b := range bindings {
+			n, _ := db.RemoveRulesByDestinationAndSource(b.Destination, credAddSource)
+			if n > 0 {
+				fmt.Printf("removed %d auto-created rule(s) for %s\n", n, b.Destination)
+			}
+		}
+		removed, _ := db.RemoveBindingsByCredential(name)
+		if removed > 0 {
+			fmt.Printf("removed %d binding(s) for %q\n", removed, name)
+		}
+	}
+
+	if err := vs.Remove(name); err != nil {
+		log.Fatalf("remove: %v", err)
+	}
+	fmt.Printf("credential %q removed\n", name)
 }

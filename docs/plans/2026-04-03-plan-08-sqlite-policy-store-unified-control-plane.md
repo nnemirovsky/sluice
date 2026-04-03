@@ -288,12 +288,12 @@ When a credential is added with `--destination`, auto-create the corresponding a
 - Modify: `cmd/sluice/cred.go`
 - Modify: `cmd/sluice/cred_test.go`
 
-- [ ] Extend `sluice cred add <name>` with optional `--destination`, `--ports`, `--header`, `--template` flags
-- [ ] When `--destination` is provided: add credential to vault, create allow rule in store, create binding in store
-- [ ] `sluice cred list` shows credentials with their bindings (joined from store)
-- [ ] `sluice cred remove <name>` removes credential + associated binding + allow rule
-- [ ] Write tests for integrated cred+policy+binding workflow
-- [ ] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
+- [x] Extend `sluice cred add <name>` with optional `--destination`, `--ports`, `--header`, `--template` flags
+- [x] When `--destination` is provided: add credential to vault, create allow rule in store, create binding in store
+- [x] `sluice cred list` shows credentials with their bindings (joined from store)
+- [x] `sluice cred remove <name>` removes credential + associated binding + allow rule
+- [x] Write tests for integrated cred+policy+binding workflow
+- [x] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
 
 ### Task 10: Cleanup and remove TOML runtime dependency
 
