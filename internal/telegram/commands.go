@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nemirovsky/sluice/internal/channel"
+	"github.com/nemirovsky/sluice/internal/container"
 	"github.com/nemirovsky/sluice/internal/docker"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
@@ -48,16 +49,16 @@ func ParseCommand(text string) *Command {
 
 // CommandHandler holds the dependencies needed by command handlers.
 type CommandHandler struct {
-	engine        *atomic.Pointer[policy.Engine]
-	resolverPtr   *atomic.Pointer[vault.BindingResolver] // shared with proxy; nil if not wired
-	reloadMu      *sync.Mutex                            // shared with proxy; serializes engine swaps and policy mutations
-	broker        *channel.Broker
-	auditPath     string
-	vault         *vault.Store
-	dockerMgr     *docker.Manager
-	store         *store.Store
-	phantomDir    string                   // shared volume path for phantom token files
-	onEngineSwap  func(eng *policy.Engine) // called after engine swap to update dependent state
+	engine       *atomic.Pointer[policy.Engine]
+	resolverPtr  *atomic.Pointer[vault.BindingResolver] // shared with proxy; nil if not wired
+	reloadMu     *sync.Mutex                            // shared with proxy; serializes engine swaps and policy mutations
+	broker       *channel.Broker
+	auditPath    string
+	vault        *vault.Store
+	containerMgr container.ContainerManager
+	store        *store.Store
+	phantomDir   string                   // shared volume path for phantom token files
+	onEngineSwap func(eng *policy.Engine) // called after engine swap to update dependent state
 }
 
 // SetVault enables credential management commands.
@@ -65,9 +66,9 @@ func (h *CommandHandler) SetVault(store *vault.Store) {
 	h.vault = store
 }
 
-// SetDockerManager enables automatic container restart on credential changes.
-func (h *CommandHandler) SetDockerManager(mgr *docker.Manager) {
-	h.dockerMgr = mgr
+// SetContainerManager enables automatic container restart on credential changes.
+func (h *CommandHandler) SetContainerManager(mgr container.ContainerManager) {
+	h.containerMgr = mgr
 }
 
 // SetStore enables persistent policy management via SQLite.
@@ -511,7 +512,7 @@ func (h *CommandHandler) credRemove(name string) string {
 }
 
 func (h *CommandHandler) credMutationComplete(msg string, removedCreds ...string) string {
-	if h.dockerMgr == nil {
+	if h.containerMgr == nil {
 		return msg
 	}
 
@@ -534,14 +535,14 @@ func (h *CommandHandler) credMutationComplete(msg string, removedCreds ...string
 
 	// Prefer hot-reload via shared volume when phantomDir is configured.
 	if h.phantomDir != "" {
-		if err := h.dockerMgr.ReloadSecrets(ctx, h.phantomDir, phantomEnv); err != nil {
+		if err := h.containerMgr.ReloadSecrets(ctx, h.phantomDir, phantomEnv); err != nil {
 			return msg + "\nWarning: failed to reload agent secrets: " + err.Error()
 		}
 		return msg + "\nAgent secrets reloaded."
 	}
 
 	// Fallback to full container restart.
-	if err := h.dockerMgr.RestartWithEnv(ctx, phantomEnv); err != nil {
+	if err := h.containerMgr.RestartWithEnv(ctx, phantomEnv); err != nil {
 		return msg + "\nWarning: failed to restart agent container: " + err.Error()
 	}
 	return msg + "\nAgent container restarted with updated credentials."

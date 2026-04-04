@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/nemirovsky/sluice/internal/container"
 )
 
 // mockClient implements ContainerClient for testing.
@@ -66,6 +68,24 @@ func (m *mockClient) ExecInContainer(_ context.Context, name string, cmd []strin
 	m.execName = name
 	m.execCmd = cmd
 	return m.execErr
+}
+
+// Compile-time check that Manager implements container.ContainerManager.
+var _ container.ContainerManager = (*Manager)(nil)
+
+func TestManagerImplementsContainerManager(t *testing.T) {
+	mc := &mockClient{}
+	mgr := NewManager(mc, "test")
+
+	// Verify Runtime() returns Docker.
+	if mgr.Runtime() != container.RuntimeDocker {
+		t.Errorf("Runtime() = %v, want %v", mgr.Runtime(), container.RuntimeDocker)
+	}
+
+	// Verify InjectMCPConfig is a no-op.
+	if err := mgr.InjectMCPConfig("/tmp/phantoms", "http://localhost:3000"); err != nil {
+		t.Errorf("InjectMCPConfig() = %v, want nil", err)
+	}
 }
 
 func TestRestartWithEnv(t *testing.T) {

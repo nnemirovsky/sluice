@@ -27,6 +27,11 @@ make test   # all unit tests
 - **Unit tests** (`make test`) -- runs all tests with `-v -count=1`
 - **Coverage** (`make test-coverage`) -- generates HTML coverage report
 
+### macOS-specific tests
+
+- Apple Container integration tests (`internal/container/`) use mock `CommandRunner` by default and run on all platforms
+- Full integration tests requiring a real Apple Container runtime are manual (see `docs/apple-container-quickstart.md`)
+
 ## Commit Messages
 
 Use scoped [Conventional Commits](https://www.conventionalcommits.org/):
@@ -83,8 +88,9 @@ Do not edit `internal/api/api.gen.go` manually. It is regenerated from the spec.
 - `internal/channel/http/` -- HTTP webhook channel (HMAC-signed delivery, sync/async approval)
 - `internal/telegram/` -- TelegramChannel implementation of channel.Channel interface
 - `internal/audit/` -- Append-only JSON lines logger with blake3 hash chaining
-- `internal/docker/` -- Container lifecycle management with hot credential reload
-- `cmd/sluice/` -- CLI entrypoint and subcommands (policy, mcp, cred, cert, audit, channel)
+- `internal/container/` -- ContainerManager interface, Apple Container backend (CLI wrapper, pf routing, CA cert injection)
+- `internal/docker/` -- Docker container backend implementing ContainerManager with hot credential reload
+- `cmd/sluice/` -- CLI entrypoint and subcommands (policy, mcp, cred, cert, audit, channel) with `--runtime` flag for backend selection
 
 See `CLAUDE.md` for detailed architecture documentation.
 

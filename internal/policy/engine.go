@@ -33,6 +33,8 @@ func portToProtocol(port int) string {
 		return "smtp"
 	case 53:
 		return "dns"
+	case 5223:
+		return "apns"
 	default:
 		return ""
 	}

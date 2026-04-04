@@ -17,7 +17,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/nemirovsky/sluice/internal/channel"
-	"github.com/nemirovsky/sluice/internal/docker"
+	"github.com/nemirovsky/sluice/internal/container"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
@@ -25,17 +25,17 @@ import (
 
 // ChannelConfig holds configuration for creating a TelegramChannel.
 type ChannelConfig struct {
-	Token         string
-	ChatID        int64
-	EnginePtr     *atomic.Pointer[policy.Engine]
-	ResolverPtr   *atomic.Pointer[vault.BindingResolver]
-	ReloadMu      *sync.Mutex
-	AuditPath     string
-	Vault         *vault.Store
-	DockerMgr     *docker.Manager
-	Store         *store.Store
-	PhantomDir    string
-	OnEngineSwap  func(eng *policy.Engine) // called after policy mutations to update dependent state
+	Token        string
+	ChatID       int64
+	EnginePtr    *atomic.Pointer[policy.Engine]
+	ResolverPtr  *atomic.Pointer[vault.BindingResolver]
+	ReloadMu     *sync.Mutex
+	AuditPath    string
+	Vault        *vault.Store
+	ContainerMgr container.ContainerManager
+	Store        *store.Store
+	PhantomDir   string
+	OnEngineSwap func(eng *policy.Engine) // called after policy mutations to update dependent state
 }
 
 // TelegramChannel implements channel.Channel for Telegram bot interaction.
@@ -78,8 +78,8 @@ func NewTelegramChannel(cfg ChannelConfig) (*TelegramChannel, error) {
 	if cfg.Vault != nil {
 		cmdHandler.SetVault(cfg.Vault)
 	}
-	if cfg.DockerMgr != nil {
-		cmdHandler.SetDockerManager(cfg.DockerMgr)
+	if cfg.ContainerMgr != nil {
+		cmdHandler.SetContainerManager(cfg.ContainerMgr)
 	}
 	if cfg.PhantomDir != "" {
 		cmdHandler.SetPhantomDir(cfg.PhantomDir)

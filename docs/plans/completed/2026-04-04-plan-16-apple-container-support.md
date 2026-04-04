@@ -90,12 +90,12 @@ type ContainerManager interface {
 }
 ```
 
-- [ ] Create `internal/container/types.go` with `Runtime` enum, `ContainerManager` interface, and `ContainerStatus` struct
-- [ ] Refactor `internal/docker/manager.go` to implement `container.ContainerManager`
-- [ ] Update `cmd/sluice/main.go` to use `container.ContainerManager` interface instead of `*docker.Manager`
-- [ ] Update all callers (Telegram commands, etc.) to use the interface
-- [ ] Write tests verifying Docker manager satisfies the interface
-- [ ] Run tests: `go test ./... -v -timeout 30s`
+- [x] Create `internal/container/types.go` with `Runtime` enum, `ContainerManager` interface, and `ContainerStatus` struct
+- [x] Refactor `internal/docker/manager.go` to implement `container.ContainerManager`
+- [x] Update `cmd/sluice/main.go` to use `container.ContainerManager` interface instead of `*docker.Manager`
+- [x] Update all callers (Telegram commands, etc.) to use the interface
+- [x] Write tests verifying Docker manager satisfies the interface
+- [x] Run tests: `go test ./... -v -timeout 30s`
 
 ### Task 2: Apple Container CLI wrapper
 
@@ -105,16 +105,16 @@ Wrap the `container` CLI for managing Apple Container micro-VMs.
 - Create: `internal/container/apple.go`
 - Create: `internal/container/apple_test.go`
 
-- [ ] Implement `AppleManager` struct wrapping `container` CLI via `os/exec`
-- [ ] Implement `container run -e KEY=VAL -v /host:/guest <image>` for starting VMs
-- [ ] Implement `container exec <name> <cmd>` for running commands inside VMs
-- [ ] Implement `container stop <name>` and `container rm <name>`
-- [ ] Implement `container inspect <name>` parsing JSON output for status, IP address, mounts
-- [ ] Implement `container ls` for listing running VMs
-- [ ] Check if `container` binary exists on creation (return clear error if not installed)
-- [ ] Write tests with mock exec (capture commands, return canned responses)
-- [ ] Write tests for error cases (binary not found, VM not running, exec failure)
-- [ ] Run tests: `go test ./internal/container/ -v -timeout 30s`
+- [x] Implement `AppleManager` struct wrapping `container` CLI via `os/exec`
+- [x] Implement `container run -e KEY=VAL -v /host:/guest <image>` for starting VMs
+- [x] Implement `container exec <name> <cmd>` for running commands inside VMs
+- [x] Implement `container stop <name>` and `container rm <name>`
+- [x] Implement `container inspect <name>` parsing JSON output for status, IP address, mounts
+- [x] Implement `container ls` for listing running VMs
+- [x] Check if `container` binary exists on creation (return clear error if not installed)
+- [x] Write tests with mock exec (capture commands, return canned responses)
+- [x] Write tests for error cases (binary not found, VM not running, exec failure)
+- [x] Run tests: `go test ./internal/container/ -v -timeout 30s`
 
 ### Task 3: Implement ContainerManager for Apple Container
 
@@ -124,14 +124,14 @@ Wire the CLI wrapper into the ContainerManager interface. Handle credential inje
 - Modify: `internal/container/apple.go`
 - Modify: `internal/container/apple_test.go`
 
-- [ ] Implement `ReloadSecrets`: write phantom token files to shared volume, run `container exec <name> openclaw secrets reload`
-- [ ] Implement `RestartWithEnv`: stop VM, remove, recreate with new env vars (fallback if exec fails)
-- [ ] Implement `InjectMCPConfig`: write mcp-servers.json to shared volume, run `container exec <name> openclaw mcp reload`
-- [ ] Implement `Status`: run `container inspect`, parse running state, IP, health
-- [ ] Implement `Stop`: run `container stop`
-- [ ] Implement `Runtime()`: return `RuntimeApple`
-- [ ] Write tests for each method with mock exec
-- [ ] Run tests: `go test ./internal/container/ -v -timeout 30s`
+- [x] Implement `ReloadSecrets`: write phantom token files to shared volume, run `container exec <name> openclaw secrets reload`
+- [x] Implement `RestartWithEnv`: stop VM, remove, recreate with new env vars (fallback if exec fails)
+- [x] Implement `InjectMCPConfig`: write mcp-servers.json to shared volume, run `container exec <name> openclaw mcp reload`
+- [x] Implement `Status`: run `container inspect`, parse running state, IP, health
+- [x] Implement `Stop`: run `container stop`
+- [x] Implement `Runtime()`: return `RuntimeApple`
+- [x] Write tests for each method with mock exec
+- [x] Run tests: `go test ./internal/container/ -v -timeout 30s`
 
 ### Task 4: Network routing via pf + tun2proxy on host
 
@@ -150,15 +150,15 @@ Create a setup script and Go helper to configure macOS pf rules that redirect Ap
 4. All VM traffic goes: bridge100 -> utun3 -> tun2proxy -> SOCKS5 -> sluice
 ```
 
-- [ ] Implement `SetupNetworkRouting(vmIP, sluiceAddr string) error` that generates and loads pf anchor rules
-- [ ] Implement `TeardownNetworkRouting() error` that removes pf rules
-- [ ] Create `scripts/apple-container-setup.sh` for manual setup (detect bridge interface, start tun2proxy, apply pf rules, enable IP forwarding)
-- [ ] Handle `sudo` requirement for pf rules (script must run as root or with sudo)
-- [ ] Detect the bridge interface dynamically (bridge100, bridge101, etc.) from `container inspect` network info
-- [ ] Add `ProtoAPNS Protocol = "apns"` to protocol enum for Apple Push Notification Service (port 5223). Enables rules like `[[allow]] destination = "*.push.apple.com" ports = [5223] protocols = ["apns"]`
-- [ ] Write tests for pf rule generation (verify correct anchor syntax)
-- [ ] Write test for APNS protocol detection on port 5223
-- [ ] Run tests: `go test ./internal/container/ -v -timeout 30s`
+- [x] Implement `SetupNetworkRouting(vmIP, sluiceAddr string) error` that generates and loads pf anchor rules
+- [x] Implement `TeardownNetworkRouting() error` that removes pf rules
+- [x] Create `scripts/apple-container-setup.sh` for manual setup (detect bridge interface, start tun2proxy, apply pf rules, enable IP forwarding)
+- [x] Handle `sudo` requirement for pf rules (script must run as root or with sudo)
+- [x] Detect the bridge interface dynamically (bridge100, bridge101, etc.) from `container inspect` network info
+- [x] Add `ProtoAPNS Protocol = "apns"` to protocol enum for Apple Push Notification Service (port 5223). Enables rules like `[[allow]] destination = "*.push.apple.com" ports = [5223] protocols = ["apns"]`
+- [x] Write tests for pf rule generation (verify correct anchor syntax)
+- [x] Write test for APNS protocol detection on port 5223
+- [x] Run tests: `go test ./internal/container/ -v -timeout 30s`
 
 ### Task 5: CA certificate injection for Apple Container
 
@@ -167,12 +167,12 @@ Inject sluice's MITM CA cert into the Apple Container VM's trust store. Differen
 **Files:**
 - Modify: `internal/container/apple.go`
 
-- [ ] On VM startup: copy sluice's CA cert to VM via shared volume
-- [ ] Run `container exec <name> update-ca-certificates` (or equivalent for the VM's OS)
-- [ ] Set `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` env vars pointing to the cert
-- [ ] Verify HTTPS connections from within the VM trust sluice's CA
-- [ ] Write tests for cert injection flow
-- [ ] Run tests: `go test ./internal/container/ -v -timeout 30s`
+- [x] On VM startup: copy sluice's CA cert to VM via shared volume
+- [x] Run `container exec <name> update-ca-certificates` (or equivalent for the VM's OS)
+- [x] Set `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` env vars pointing to the cert
+- [x] Verify HTTPS connections from within the VM trust sluice's CA
+- [x] Write tests for cert injection flow
+- [x] Run tests: `go test ./internal/container/ -v -timeout 30s`
 
 ### Task 6: Runtime selection in main.go and CLI
 
@@ -182,13 +182,13 @@ Add `--runtime docker|apple` flag. Auto-detect based on available tools.
 - Modify: `cmd/sluice/main.go`
 - Modify: `cmd/sluice/main_test.go`
 
-- [ ] Add `--runtime` flag with values `docker`, `apple`, `auto` (default: auto)
-- [ ] Auto-detection: check if `container` binary exists (Apple), check if Docker socket exists (Docker). Prefer Apple on macOS if both available.
-- [ ] Pass the selected `ContainerManager` to Telegram commands and MCP auto-injection
-- [ ] Add `--container-name` flag (default: "openclaw") shared by both runtimes
-- [ ] Add `--vm-image` flag for Apple Container (the OCI image to run)
-- [ ] Write tests for auto-detection logic
-- [ ] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
+- [x] Add `--runtime` flag with values `docker`, `apple`, `auto` (default: auto)
+- [x] Auto-detection: check if `container` binary exists (Apple), check if Docker socket exists (Docker). Prefer Apple on macOS if both available.
+- [x] Pass the selected `ContainerManager` to Telegram commands and MCP auto-injection
+- [x] Add `--container-name` flag (default: "openclaw") shared by both runtimes
+- [x] Add `--vm-image` flag for Apple Container (the OCI image to run)
+- [x] Write tests for auto-detection logic
+- [x] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
 
 ### Task 7: Sluice native mode (no container runtime)
 
@@ -197,36 +197,36 @@ Support running sluice as a standalone proxy on macOS without any container runt
 **Files:**
 - Modify: `cmd/sluice/main.go`
 
-- [ ] When `--runtime none`: skip container manager initialization entirely
-- [ ] Sluice runs as SOCKS5 proxy + MCP gateway only
-- [ ] User manually configures `ALL_PROXY=socks5://localhost:1080` in their shell
-- [ ] Credential injection still works (MITM proxy runs, just no automatic container management)
-- [ ] MCP gateway still works (stdio upstreams as child processes)
-- [ ] Write tests for standalone mode startup
-- [ ] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
+- [x] When `--runtime none`: skip container manager initialization entirely
+- [x] Sluice runs as SOCKS5 proxy + MCP gateway only
+- [x] User manually configures `ALL_PROXY=socks5://localhost:1080` in their shell
+- [x] Credential injection still works (MITM proxy runs, just no automatic container management)
+- [x] MCP gateway still works (stdio upstreams as child processes)
+- [x] Write tests for standalone mode startup
+- [x] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
 
 ### Task 8: Verify acceptance criteria
 
-- [ ] Verify Apple Container VM starts with correct env vars and volumes
-- [ ] Verify pf rules redirect VM traffic through tun2proxy to sluice SOCKS5
-- [ ] Verify HTTPS MITM works (CA cert trusted by VM)
-- [ ] Verify credential hot-reload via shared volume + container exec
-- [ ] Verify MCP auto-injection works (mcp-servers.json in shared volume)
-- [ ] Verify APNS protocol detected on port 5223 and rules with `protocols = ["apns"]` match
-- [ ] Verify Apple service traffic (iCloud, iMessage signaling) routes through sluice
-- [ ] Verify Docker backend still works (no regression)
-- [ ] Verify auto-detection picks correct runtime
-- [ ] Verify standalone mode (no container runtime) works
-- [ ] Run full test suite: `go test ./... -v -timeout 60s`
-- [ ] Run linter: `go vet ./...`
+- [x] Verify Apple Container VM starts with correct env vars and volumes
+- [x] Verify pf rules redirect VM traffic through tun2proxy to sluice SOCKS5
+- [x] Verify HTTPS MITM works (CA cert trusted by VM)
+- [x] Verify credential hot-reload via shared volume + container exec
+- [x] Verify MCP auto-injection works (mcp-servers.json in shared volume)
+- [x] Verify APNS protocol detected on port 5223 and rules with `protocols = ["apns"]` match
+- [x] Verify Apple service traffic (iCloud, iMessage signaling) routes through sluice
+- [x] Verify Docker backend still works (no regression)
+- [x] Verify auto-detection picks correct runtime
+- [x] Verify standalone mode (no container runtime) works
+- [x] Run full test suite: `go test ./... -v -timeout 60s`
+- [x] Run linter: `go vet ./...`
 
 ### Task 9: [Final] Update documentation
 
-- [ ] Update CLAUDE.md: document Apple Container support, runtime selection, pf routing
-- [ ] Update CLAUDE.md: document standalone mode
-- [ ] Create `docs/apple-container-quickstart.md` with setup instructions
-- [ ] Update CONTRIBUTING.md: note macOS-specific build tags and testing requirements
-- [ ] Update README.md: mention Apple Container as a deployment option
+- [x] Update CLAUDE.md: document Apple Container support, runtime selection, pf routing
+- [x] Update CLAUDE.md: document standalone mode
+- [x] Create `docs/apple-container-quickstart.md` with setup instructions
+- [x] Update CONTRIBUTING.md: note macOS-specific build tags and testing requirements
+- [x] Update README.md: mention Apple Container as a deployment option
 
 ## Technical Details
 

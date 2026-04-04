@@ -21,6 +21,7 @@ func TestDetectProtocol(t *testing.T) {
 		{25, ProtoSMTP},
 		{587, ProtoSMTP},
 		{465, ProtoSMTP},
+		{5223, ProtoAPNS},
 		{9999, ProtoGeneric},
 		{3306, ProtoGeneric},
 		{5432, ProtoGeneric},

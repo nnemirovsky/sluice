@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/nemirovsky/sluice/internal/container"
 )
 
 // ContainerClient abstracts Docker Engine API operations for testability.
@@ -59,14 +61,8 @@ type ContainerSpec struct {
 	Entrypoint  []string
 }
 
-// ContainerStatus holds container health information.
-type ContainerStatus struct {
-	ID      string
-	Running bool
-	Image   string
-}
-
 // Manager manages Docker container lifecycle for credential rotation.
+// It implements the container.ContainerManager interface.
 type Manager struct {
 	client        ContainerClient
 	containerName string
@@ -152,16 +148,27 @@ func (m *Manager) RestartWithEnv(ctx context.Context, envUpdates map[string]stri
 }
 
 // Status returns container health information.
-func (m *Manager) Status(ctx context.Context) (ContainerStatus, error) {
+func (m *Manager) Status(ctx context.Context) (container.ContainerStatus, error) {
 	info, err := m.client.InspectContainer(ctx, m.containerName)
 	if err != nil {
-		return ContainerStatus{}, err
+		return container.ContainerStatus{}, err
 	}
-	return ContainerStatus{
+	return container.ContainerStatus{
 		ID:      info.ID,
 		Running: info.Running,
 		Image:   info.Image,
 	}, nil
+}
+
+// InjectMCPConfig is a no-op for Docker. MCP configuration is handled via
+// compose volumes and environment variables in the Docker deployment model.
+func (m *Manager) InjectMCPConfig(_, _ string) error {
+	return nil
+}
+
+// Runtime returns container.RuntimeDocker.
+func (m *Manager) Runtime() container.Runtime {
+	return container.RuntimeDocker
 }
 
 // Stop stops the agent container.

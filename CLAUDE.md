@@ -20,7 +20,7 @@ go test ./... -v -timeout 30s
 
 ## Project Structure
 
-- `cmd/sluice/main.go` - CLI entrypoint with flag parsing and signal handling
+- `cmd/sluice/main.go` - CLI entrypoint with flag parsing, runtime selection (--runtime docker|apple|none|auto), and signal handling
 - `cmd/sluice/cred.go` - CLI subcommand handler for credential management (add/list/remove with optional policy+binding auto-creation)
 - `cmd/sluice/audit.go` - CLI subcommand handler for audit log verification (`audit verify`)
 - `cmd/sluice/cert.go` - CLI subcommand handler for CA certificate generation (`cert generate`)
@@ -32,7 +32,7 @@ go test ./... -v -timeout 30s
 - `internal/store/migrations/000001_init.up.sql` - Initial schema migration (rules, config, bindings, mcp_upstreams, channels)
 - `internal/store/migrations/000001_init.down.sql` - Rollback for initial schema
 - `internal/proxy/server.go` - SOCKS5 server wrapping `things-go/go-socks5` with TCP and UDP policy enforcement
-- `internal/proxy/protocol.go` - Protocol detection for HTTP, HTTPS, SSH, IMAP, SMTP, WebSocket (ws/wss), gRPC, DNS, QUIC, and generic
+- `internal/proxy/protocol.go` - Protocol detection for HTTP, HTTPS, SSH, IMAP, SMTP, WebSocket (ws/wss), gRPC, DNS, QUIC, APNS, and generic
 - `internal/proxy/ca.go` - Self-signed CA generation and persistence for HTTPS MITM
 - `internal/proxy/inject.go` - HTTPS MITM credential injector using goproxy with scoped phantom token replacement and unbound token stripping
 - `internal/proxy/ssh.go` - SSH jump host with vault key injection and bidirectional channel relay
@@ -69,12 +69,18 @@ go test ./... -v -timeout 30s
 - `internal/telegram/approval.go` - TelegramChannel implementing channel.Channel interface
 - `internal/telegram/bot.go` - Telegram message formatting utilities and token sanitization
 - `internal/telegram/commands.go` - Telegram admin commands (/policy, /cred, /status, /audit, /help) backed by SQLite store
-- `internal/docker/manager.go` - Docker container manager for credential hot-reload via shared volume + docker exec, with restart fallback
+- `internal/container/types.go` - ContainerManager interface shared by Docker and Apple Container backends, Runtime enum (Docker=0, Apple=1, None=2), ContainerStatus struct
+- `internal/container/apple.go` - Apple Container backend: AppleCLI wrapping `container` CLI via os/exec, AppleManager implementing ContainerManager, CA cert injection
+- `internal/container/apple_test.go` - Tests for AppleCLI, AppleManager, and CA cert injection with mock CommandRunner
+- `internal/container/network.go` - NetworkRouter for macOS pf rules that redirect Apple Container VM traffic through tun2proxy to SOCKS5
+- `internal/container/network_test.go` - Tests for pf rule generation, subnet derivation, and network routing
+- `internal/docker/manager.go` - Docker container manager implementing container.ContainerManager for credential hot-reload via shared volume + docker exec, with restart fallback
 - `internal/docker/socket_client.go` - Docker socket HTTP client for container lifecycle and exec operations
 - `Dockerfile` - Multi-stage build for Sluice container
 - `compose.yml` - Three-container setup (sluice + tun2proxy + openclaw) with shared phantom volume
 - `compose.dev.yml` - Development compose with build-from-source
 - `scripts/docker-entrypoint.sh` - Container entrypoint with CA cert generation and copy to shared volume
+- `scripts/apple-container-setup.sh` - macOS setup script for Apple Container: pf rules, tun2proxy, IP forwarding
 - `scripts/setup-vault.sh` - Interactive credential and CA setup script
 - `scripts/gen-phantom-env.sh` - Phantom token env file generator for openclaw container
 - `examples/config.toml` - Example TOML seed file for initial DB population via `sluice policy import`
@@ -375,7 +381,7 @@ DNS query interception: `internal/proxy/dns.go` implements `DNSInterceptor` that
 
 QUIC/HTTP3 MITM: `internal/proxy/quic.go` implements `QUICProxy` using `quic-go`. QUIC initial packets are detected in the UDP relay by checking the long header format (first byte bits 7-6 = 11, version field at bytes 1-4 for QUIC v1/v2). Detected QUIC traffic on HTTPS ports is routed to QUICProxy, which terminates TLS using per-host certificates generated from the sluice CA (reusing `GenerateCertForHost` from ca.go). SNI is extracted from the TLS ClientHello. HTTP/3 requests are intercepted using `quic-go/http3`: phantom tokens are replaced in headers and body, content deny patterns block requests, and redact patterns modify responses before forwarding to the agent. The upstream connection uses `http3.RoundTripper`.
 
-Docker integration: Three-container architecture (sluice + tun2proxy + openclaw) with `network_mode: "service:tun2proxy"` routing all openclaw traffic through sluice's SOCKS5 proxy. `docker.Manager` wraps a `ContainerClient` interface with `ExecInContainer` for docker exec and standard container lifecycle methods. On credential mutation via Telegram `/cred` commands or CLI, `credMutationComplete` regenerates phantom environment variables using `GeneratePhantomEnv` and calls `Manager.ReloadSecrets`. Hot reload writes each phantom token as a file in a shared `sluice-phantoms` volume (e.g. `/phantoms/ANTHROPIC_API_KEY`) then runs `docker exec openclaw openclaw secrets reload`. If exec fails (agent image does not support reload), it falls back to `RestartWithEnv` which recreates the container with updated env vars. `BotConfig.Vault` and `BotConfig.DockerMgr` wire the vault and Docker manager into Telegram command handling. The sluice entrypoint generates a CA cert and copies it to a shared volume so openclaw can trust HTTPS MITM certificates via `SSL_CERT_FILE`.
+Docker integration: Three-container architecture (sluice + tun2proxy + openclaw) with `network_mode: "service:tun2proxy"` routing all openclaw traffic through sluice's SOCKS5 proxy. `docker.Manager` wraps a `ContainerClient` interface with `ExecInContainer` for docker exec and standard container lifecycle methods. On credential mutation via Telegram `/cred` commands or CLI, `credMutationComplete` regenerates phantom environment variables using `GeneratePhantomEnv` and calls `Manager.ReloadSecrets`. Hot reload writes each phantom token as a file in a shared `sluice-phantoms` volume (e.g. `/phantoms/ANTHROPIC_API_KEY`) then runs `docker exec openclaw openclaw secrets reload`. If exec fails (agent image does not support reload), it falls back to `RestartWithEnv` which recreates the container with updated env vars. `ChannelConfig.Vault` and `ChannelConfig.ContainerMgr` wire the vault and container manager (any `container.ContainerManager` implementation) into Telegram command handling. The sluice entrypoint generates a CA cert and copies it to a shared volume so openclaw can trust HTTPS MITM certificates via `SSL_CERT_FILE`.
 
 Health check: A minimal HTTP server on `127.0.0.1:3000` (configurable via `--health-addr`) serves `/healthz`, returning 200 when the SOCKS5 proxy is listening. The Dockerfile includes a `HEALTHCHECK` directive using `wget` against this endpoint. compose.yml uses `service_healthy` conditions to sequence startup: tun2proxy waits for sluice, openclaw waits for tun2proxy.
 
@@ -633,6 +639,7 @@ their bound destinations, preventing cross-credential exfiltration.
 | **IMAP/SMTP** | TCP | AUTH command proxy, phantom password swap | N/A |
 | **DNS** | UDP | N/A | Domain-level policy (NXDOMAIN for denied) |
 | **QUIC/HTTP3** | UDP | HTTP/3 MITM, phantom swap via quic-go | Full HTTP/3 request/response |
+| **APNS** | TCP | Connection-level allow/deny only (port 5223) | N/A |
 | **Generic TCP** | TCP | Connection-level allow/deny only | None |
 | **Generic UDP** | UDP | Connection-level allow/deny only (default-deny) | None |
 
@@ -684,56 +691,66 @@ See `compose.yml` in the repo root. Key features:
 | **Total custom code** | **~3750** | Single Go binary |
 | Docker setup + tun2proxy | Config only | compose.yml |
 
-## Future: Apple Container Support (last-mile, requires research)
+## Apple Container Support
 
-The primary deployment target is Docker (Linux containers). Apple Container
-(macOS microVMs) is a stretch goal that would give native macOS isolation
-without Docker Desktop.
+Apple Container (macOS Virtualization.framework micro-VMs) is supported as an alternative to Docker. It gives native macOS isolation with access to Apple frameworks (EventKit, Messages, CallKit) that are unavailable in Linux containers.
 
-### Why it's non-trivial
+### Runtime selection
 
-The Docker architecture relies on three features Apple Container doesn't have:
+The `--runtime` flag selects the container backend:
 
-1. **Shared network namespace** (`network_mode: "service:sluice"`) forces all
-   agent traffic through Sluice. Apple Container VMs have their own isolated
-   network stack with no namespace sharing.
+| Flag value | Description |
+|-----------|-------------|
+| `auto` (default) | Auto-detect: checks for `container` CLI (Apple) and Docker socket. Prefers Apple on macOS if both are available. |
+| `docker` | Use Docker backend. Requires Docker socket. |
+| `apple` | Use Apple Container backend. Requires macOS and `container` CLI. |
+| `none` | Standalone mode. No container management. User configures `ALL_PROXY=socks5://localhost:1080` manually. |
 
-2. **tun2proxy** requires `NET_ADMIN` + `/dev/net/tun`. Apple Container's
-   security model may not expose TUN devices to guest VMs.
+### ContainerManager interface
 
-3. **Docker socket** for credential rotation (container restart with new env
-   vars). Apple Container uses a different management API (`container` CLI).
+Both Docker and Apple Container backends implement `container.ContainerManager` (defined in `internal/container/types.go`). Telegram commands, MCP injection, and credential management code works with any backend through this interface.
 
-### Research options (pick one)
+### Apple Container architecture
 
-| Approach | All-protocol? | Complexity | Notes |
-|----------|--------------|------------|-------|
-| **macOS packet filter (pf)** | Yes | Medium | Redirect VM network interface traffic to Sluice SOCKS5 port via pf rules. Requires root on host. Well-documented for macOS firewalling. |
-| **tun2proxy inside Apple Container VM** | Yes | Low (if TUN works) | Identical to Docker approach but running tun2proxy inside the guest VM. Need to verify TUN device availability in Apple Container guests. |
-| **Virtualization.framework custom networking** | Yes | High | Create a virtual network where Sluice is the sole gateway. Most robust. Uses `VZNATNetworkDeviceAttachment` or `VZBridgedNetworkDeviceAttachment` with custom routing. |
-| **`ALL_PROXY` env var only** | HTTP/HTTPS only | Low | Set `ALL_PROXY=socks5://host:1080` in the VM. Covers HTTP/HTTPS but misses SSH, IMAP, raw TCP. Breaks the all-protocol promise. Acceptable as MVP. |
+```
+Apple Container:
+  OpenClaw micro-VM (bridge100) -> pf route-to -> tun2proxy on host -> SOCKS5 -> sluice on host -> internet
+```
 
-### Recommended research order
+Key differences from Docker:
+- `/dev/net/tun` is not supported inside Apple Container guests. tun2proxy runs on the host.
+- macOS pf rules redirect VM bridge traffic through the host TUN device.
+- VM management via `container` CLI (run, exec, stop, rm, inspect, ls) wrapped by `internal/container/apple.go`.
+- VirtioFS volumes (`-v` flag) for shared phantom tokens and CA certificates.
 
-1. Verify if Apple Container guests support `/dev/net/tun`. If yes, tun2proxy
-   inside the VM is the simplest path and reuses the Docker architecture.
-2. If not, prototype pf rules to redirect VM traffic. macOS pf is mature and
-   well-documented.
-3. Virtualization.framework custom networking is the nuclear option. Only if
-   both above fail.
+### Network routing (pf)
 
-### Additional work needed
+`NetworkRouter` in `internal/container/network.go` manages macOS pf anchor rules:
 
-- Replace Docker socket management with `container` CLI calls for credential
-  rotation (restart VM with new phantom env vars).
-- CA cert injection: mount Sluice's MITM CA into the VM's trust store
-  (different path than Docker volume mount).
-- Sluice Telegram bot `/status` command needs to support both Docker and
-  Apple Container backends for agent health checks.
+```
+1. Apple Container VM gets IP on bridge100 (e.g., 192.168.64.2)
+2. tun2proxy runs on host: tun2proxy --proxy socks5://127.0.0.1:1080 --tun utun3
+3. pf anchor "sluice": pass in on bridge100 route-to (utun3 192.168.64.1) from 192.168.64.0/24 to any
+4. All VM traffic: bridge100 -> utun3 -> tun2proxy -> SOCKS5 -> sluice -> internet
+```
 
-### Decision: Defer until after Docker MVP is solid
+Setup requires root for pfctl. Use `scripts/apple-container-setup.sh` for manual setup or `NetworkRouter.SetupNetworkRouting()` for programmatic setup.
 
-Apple Container support is a last-mile feature. The Docker path covers
-Linux servers, CI/CD, and macOS-with-Docker-Desktop. Apple Container adds
-value for developers who want native macOS isolation without Docker, but
-the user base is smaller and the engineering cost is higher.
+### CA cert injection (Apple Container)
+
+`AppleManager.InjectCACert()` copies sluice's MITM CA cert to the shared volume, then tries `update-ca-certificates` (Linux guest) or `security add-trusted-cert` (macOS guest) inside the VM. Environment variables (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`) are set at VM startup as a fallback covering most HTTP libraries.
+
+### APNS protocol detection
+
+Port 5223 is detected as `ProtoAPNS` (Apple Push Notification Service) in `internal/proxy/protocol.go`. This enables policy rules like:
+
+```toml
+[[allow]]
+destination = "*.push.apple.com"
+ports = [5223]
+protocols = ["apns"]
+```
+
+### Standalone mode (--runtime none)
+
+When `--runtime none` is specified, sluice skips container manager initialization and runs as a standalone SOCKS5 proxy + MCP gateway. The user configures `ALL_PROXY=socks5://localhost:1080` in their shell. Credential injection (MITM proxy) and MCP gateway (stdio upstreams) work normally. Only container lifecycle management (hot-reload, restart) is disabled.

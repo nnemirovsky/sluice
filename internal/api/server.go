@@ -19,6 +19,7 @@ import (
 
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/channel"
+	"github.com/nemirovsky/sluice/internal/container"
 	"github.com/nemirovsky/sluice/internal/docker"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
@@ -37,7 +38,7 @@ type Server struct {
 	enginePtr   *atomic.Pointer[policy.Engine]
 	reloadMu    *sync.Mutex
 	resolverPtr *atomic.Pointer[vault.BindingResolver]
-	dockerMgr   *docker.Manager
+	containerMgr container.ContainerManager
 	phantomDir  string
 }
 
@@ -71,10 +72,10 @@ func (s *Server) SetResolverPtr(ptr *atomic.Pointer[vault.BindingResolver]) {
 	s.resolverPtr = ptr
 }
 
-// SetDockerManager enables phantom token regen and container hot-reload
+// SetContainerManager enables phantom token regen and container hot-reload
 // on credential changes.
-func (s *Server) SetDockerManager(mgr *docker.Manager, phantomDir string) {
-	s.dockerMgr = mgr
+func (s *Server) SetContainerManager(mgr container.ContainerManager, phantomDir string) {
+	s.containerMgr = mgr
 	s.phantomDir = phantomDir
 }
 
@@ -132,7 +133,7 @@ func (s *Server) rebuildResolver() error {
 // container after a credential change. removedCreds lists credentials that
 // were deleted and should be cleaned up in the agent environment.
 func (s *Server) credMutationComplete(removedCreds ...string) error {
-	if s.dockerMgr == nil {
+	if s.containerMgr == nil {
 		return nil
 	}
 
@@ -153,9 +154,9 @@ func (s *Server) credMutationComplete(removedCreds ...string) error {
 	defer cancel()
 
 	if s.phantomDir != "" {
-		return s.dockerMgr.ReloadSecrets(ctx, s.phantomDir, phantomEnv)
+		return s.containerMgr.ReloadSecrets(ctx, s.phantomDir, phantomEnv)
 	}
-	return s.dockerMgr.RestartWithEnv(ctx, phantomEnv)
+	return s.containerMgr.RestartWithEnv(ctx, phantomEnv)
 }
 
 // GetHealthz returns 200 when the proxy is listening.
