@@ -143,16 +143,16 @@ Implement the generated server interface for approval and status endpoints. Thes
 - Modify: `internal/api/server.go`
 - Modify: `internal/api/server_test.go`
 
-- [ ] Implement `GetApiCredentials` (list names via vault.Store.List)
-- [ ] Implement `PostApiCredentials` (add to vault, optionally create binding + allow rule, trigger phantom regen + hot reload)
-- [ ] Implement `DeleteApiCredentialsName` (remove credential + associated bindings/rules)
-- [ ] Implement binding CRUD handlers (GetApiBindings, PostApiBindings, DeleteApiBindingsId)
-- [ ] Implement MCP upstream CRUD handlers (GetApiMcpUpstreams, PostApiMcpUpstreams, DeleteApiMcpUpstreamsName)
-- [ ] Implement `GetApiAuditRecent` (read last N lines from audit log, ?limit= param)
-- [ ] Implement `GetApiAuditVerify` (call audit.VerifyChain, return result)
-- [ ] Implement `GetApiChannels` and `PatchApiChannelsId` for channel management
-- [ ] Write tests for all handlers
-- [ ] Run tests: `go test ./internal/api/ -v -timeout 30s`
+- [x] Implement `GetApiCredentials` (list names via vault.Store.List)
+- [x] Implement `PostApiCredentials` (add to vault, optionally create binding + allow rule, trigger phantom regen + hot reload)
+- [x] Implement `DeleteApiCredentialsName` (remove credential + associated bindings/rules)
+- [x] Implement binding CRUD handlers (GetApiBindings, PostApiBindings, DeleteApiBindingsId)
+- [x] Implement MCP upstream CRUD handlers (GetApiMcpUpstreams, PostApiMcpUpstreams, DeleteApiMcpUpstreamsName)
+- [x] Implement `GetApiAuditRecent` (read last N lines from audit log, ?limit= param)
+- [x] Implement `GetApiAuditVerify` (call audit.VerifyChain, return result)
+- [x] Implement `GetApiChannels` and `PatchApiChannelsId` for channel management
+- [x] Write tests for all handlers
+- [x] Run tests: `go test ./internal/api/ -v -timeout 30s`
 
 ### Task 5: Implement HTTP Channel
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -13,10 +14,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
 	"github.com/nemirovsky/sluice/internal/store"
+	"github.com/nemirovsky/sluice/internal/vault"
 )
 
 // Server implements the generated ServerInterface for the sluice REST API.
@@ -25,6 +28,7 @@ type Server struct {
 	store     *store.Store
 	broker    *channel.Broker
 	proxySrv  *proxy.Server
+	vault     *vault.Store
 	auditPath string
 	enginePtr *atomic.Pointer[policy.Engine]
 	reloadMu  *sync.Mutex
@@ -39,6 +43,11 @@ func NewServer(st *store.Store, broker *channel.Broker, proxySrv *proxy.Server, 
 		proxySrv:  proxySrv,
 		auditPath: auditPath,
 	}
+}
+
+// SetVault sets the vault store for credential management handlers.
+func (s *Server) SetVault(v *vault.Store) {
+	s.vault = v
 }
 
 // SetEnginePtr sets the shared engine pointer and reload mutex for rule
@@ -663,6 +672,470 @@ func (s *Server) PatchApiConfig(w http.ResponseWriter, r *http.Request) {
 	s.GetApiConfig(w, r)
 }
 
+// --- Credential handlers ---
+
+// GetApiCredentials lists credential names from the vault.
+func (s *Server) GetApiCredentials(w http.ResponseWriter, r *http.Request) {
+	if s.vault == nil {
+		writeError(w, http.StatusServiceUnavailable, "vault not configured", "")
+		return
+	}
+
+	names, err := s.vault.List()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list credentials", "")
+		return
+	}
+
+	creds := make([]Credential, len(names))
+	for i, n := range names {
+		creds[i] = Credential{Name: n}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(creds)
+}
+
+// PostApiCredentials adds a credential to the vault. If destination is
+// provided, also creates an allow rule and binding.
+func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) {
+	if s.vault == nil {
+		writeError(w, http.StatusServiceUnavailable, "vault not configured", "")
+		return
+	}
+
+	var req CreateCredentialRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", "")
+		return
+	}
+
+	if req.Name == "" || req.Value == "" {
+		writeError(w, http.StatusBadRequest, "name and value are required", "")
+		return
+	}
+
+	// Check if credential already exists.
+	existing, err := s.vault.List()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to check existing credentials", "")
+		return
+	}
+	for _, n := range existing {
+		if n == req.Name {
+			writeError(w, http.StatusConflict, "credential already exists", "")
+			return
+		}
+	}
+
+	if _, err := s.vault.Add(req.Name, req.Value); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to store credential: "+err.Error(), "")
+		return
+	}
+
+	// If destination is provided, create allow rule + binding.
+	if req.Destination != nil && *req.Destination != "" {
+		ruleOpts := store.RuleOpts{
+			Destination: *req.Destination,
+			Name:        "credential: " + req.Name,
+			Source:      "api",
+		}
+		if req.Ports != nil {
+			ruleOpts.Ports = *req.Ports
+		}
+
+		bindingOpts := store.BindingOpts{
+			Header:   ptrStr(req.Header),
+			Template: ptrStr(req.Template),
+		}
+		if req.Ports != nil {
+			bindingOpts.Ports = *req.Ports
+		}
+
+		if s.reloadMu != nil {
+			s.reloadMu.Lock()
+			defer s.reloadMu.Unlock()
+		}
+
+		if _, _, err := s.store.AddRuleAndBinding("allow", ruleOpts, req.Name, bindingOpts); err != nil {
+			writeError(w, http.StatusBadRequest, "credential stored but rule/binding creation failed: "+err.Error(), "")
+			return
+		}
+
+		if err := s.recompileEngine(); err != nil {
+			writeError(w, http.StatusInternalServerError, "credential stored but engine recompile failed: "+err.Error(), "")
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(Credential{Name: req.Name})
+}
+
+// DeleteApiCredentialsName removes a credential and its associated bindings/rules.
+func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request, name string) {
+	if s.vault == nil {
+		writeError(w, http.StatusServiceUnavailable, "vault not configured", "")
+		return
+	}
+
+	// Check if credential exists.
+	existing, err := s.vault.List()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list credentials", "")
+		return
+	}
+	found := false
+	for _, n := range existing {
+		if n == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "credential not found", "")
+		return
+	}
+
+	if s.reloadMu != nil {
+		s.reloadMu.Lock()
+		defer s.reloadMu.Unlock()
+	}
+
+	// Remove associated bindings and rules.
+	if _, err := s.store.RemoveBindingsByCredential(name); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to remove bindings: "+err.Error(), "")
+		return
+	}
+
+	// Remove the credential from the vault.
+	if err := s.vault.Remove(name); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to remove credential: "+err.Error(), "")
+		return
+	}
+
+	if err := s.recompileEngine(); err != nil {
+		writeError(w, http.StatusInternalServerError, "credential removed but engine recompile failed: "+err.Error(), "")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- Binding handlers ---
+
+// GetApiBindings lists all credential bindings.
+func (s *Server) GetApiBindings(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.store.ListBindings()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list bindings", "")
+		return
+	}
+
+	bindings := make([]Binding, len(rows))
+	for i, b := range rows {
+		bindings[i] = storeBindingToAPI(b)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(bindings)
+}
+
+// PostApiBindings adds a new credential binding.
+func (s *Server) PostApiBindings(w http.ResponseWriter, r *http.Request) {
+	var req CreateBindingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", "")
+		return
+	}
+
+	if req.Destination == "" || req.Credential == "" {
+		writeError(w, http.StatusBadRequest, "destination and credential are required", "")
+		return
+	}
+
+	opts := store.BindingOpts{
+		Header:   ptrStr(req.Header),
+		Template: ptrStr(req.Template),
+	}
+	if req.Ports != nil {
+		opts.Ports = *req.Ports
+	}
+	if req.Protocols != nil {
+		opts.Protocols = *req.Protocols
+	}
+
+	id, err := s.store.AddBinding(req.Destination, req.Credential, opts)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "")
+		return
+	}
+
+	// Read back the binding.
+	rows, err := s.store.ListBindings()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read back binding", "")
+		return
+	}
+	for _, b := range rows {
+		if b.ID == id {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(storeBindingToAPI(b))
+			return
+		}
+	}
+
+	// Fallback.
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(Binding{Id: id, Destination: req.Destination, Credential: req.Credential})
+}
+
+// DeleteApiBindingsId removes a credential binding.
+func (s *Server) DeleteApiBindingsId(w http.ResponseWriter, r *http.Request, id int64) {
+	deleted, err := s.store.RemoveBinding(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to remove binding", "")
+		return
+	}
+	if !deleted {
+		writeError(w, http.StatusNotFound, "binding not found", "")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- MCP upstream handlers ---
+
+// GetApiMcpUpstreams lists all MCP upstreams.
+func (s *Server) GetApiMcpUpstreams(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.store.ListMCPUpstreams()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list upstreams", "")
+		return
+	}
+
+	upstreams := make([]MCPUpstream, len(rows))
+	for i, u := range rows {
+		upstreams[i] = storeMCPUpstreamToAPI(u)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(upstreams)
+}
+
+// PostApiMcpUpstreams adds a new MCP upstream.
+func (s *Server) PostApiMcpUpstreams(w http.ResponseWriter, r *http.Request) {
+	var req CreateMCPUpstreamRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", "")
+		return
+	}
+
+	if req.Name == "" || req.Command == "" {
+		writeError(w, http.StatusBadRequest, "name and command are required", "")
+		return
+	}
+
+	opts := store.MCPUpstreamOpts{}
+	if req.Args != nil {
+		opts.Args = *req.Args
+	}
+	if req.Env != nil {
+		opts.Env = *req.Env
+	}
+	if req.TimeoutSec != nil {
+		opts.TimeoutSec = *req.TimeoutSec
+	}
+
+	id, err := s.store.AddMCPUpstream(req.Name, req.Command, opts)
+	if err != nil {
+		if strings.Contains(err.Error(), "already exists") {
+			writeError(w, http.StatusConflict, err.Error(), "")
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error(), "")
+		return
+	}
+
+	// Read back the upstream.
+	rows, err := s.store.ListMCPUpstreams()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read back upstream", "")
+		return
+	}
+	for _, u := range rows {
+		if u.ID == id {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(storeMCPUpstreamToAPI(u))
+			return
+		}
+	}
+
+	// Fallback.
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(MCPUpstream{Id: id, Name: req.Name, Command: req.Command})
+}
+
+// DeleteApiMcpUpstreamsName removes an MCP upstream by name.
+func (s *Server) DeleteApiMcpUpstreamsName(w http.ResponseWriter, r *http.Request, name string) {
+	deleted, err := s.store.RemoveMCPUpstream(name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to remove upstream", "")
+		return
+	}
+	if !deleted {
+		writeError(w, http.StatusNotFound, "upstream not found", "")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- Audit handlers ---
+
+// GetApiAuditRecent returns the last N audit log entries.
+func (s *Server) GetApiAuditRecent(w http.ResponseWriter, r *http.Request, params GetApiAuditRecentParams) {
+	if s.auditPath == "" {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]AuditEntry{})
+		return
+	}
+
+	limit := 50
+	if params.Limit != nil && *params.Limit > 0 {
+		limit = *params.Limit
+		if limit > 1000 {
+			limit = 1000
+		}
+	}
+
+	entries, err := readRecentAuditEntries(s.auditPath, limit)
+	if err != nil {
+		if os.IsNotExist(err) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]AuditEntry{})
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to read audit log: "+err.Error(), "")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(entries)
+}
+
+// GetApiAuditVerify verifies the audit log hash chain.
+func (s *Server) GetApiAuditVerify(w http.ResponseWriter, r *http.Request) {
+	if s.auditPath == "" {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(VerifyResult{
+			TotalLines:  0,
+			ValidLinks:  0,
+			BrokenLinks: []BrokenLink{},
+			LegacyLines: 0,
+		})
+		return
+	}
+
+	result, err := audit.VerifyChain(s.auditPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(VerifyResult{
+				TotalLines:  0,
+				ValidLinks:  0,
+				BrokenLinks: []BrokenLink{},
+				LegacyLines: 0,
+			})
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "verification failed: "+err.Error(), "")
+		return
+	}
+
+	apiLinks := make([]BrokenLink, len(result.BrokenLinks))
+	for i, bl := range result.BrokenLinks {
+		apiLinks[i] = BrokenLink{
+			LineNumber:   bl.LineNumber,
+			ExpectedHash: bl.ExpectedHash,
+			ActualHash:   bl.ActualHash,
+		}
+	}
+	if apiLinks == nil {
+		apiLinks = []BrokenLink{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(VerifyResult{
+		TotalLines:  result.TotalLines,
+		ValidLinks:  result.ValidLinks,
+		BrokenLinks: apiLinks,
+		LegacyLines: result.LegacyLines,
+	})
+}
+
+// --- Channel handlers ---
+
+// GetApiChannels lists all notification channels.
+func (s *Server) GetApiChannels(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.store.ListChannels()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list channels", "")
+		return
+	}
+
+	channels := make([]Channel, len(rows))
+	for i, ch := range rows {
+		channels[i] = storeChannelToAPI(ch)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(channels)
+}
+
+// PatchApiChannelsId updates a notification channel.
+func (s *Server) PatchApiChannelsId(w http.ResponseWriter, r *http.Request, id int64) {
+	var req ChannelUpdate
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", "")
+		return
+	}
+
+	// Check if channel exists.
+	ch, err := s.store.GetChannel(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get channel", "")
+		return
+	}
+	if ch == nil {
+		writeError(w, http.StatusNotFound, "channel not found", "")
+		return
+	}
+
+	update := store.ChannelUpdate{
+		Enabled: req.Enabled,
+	}
+
+	if err := s.store.UpdateChannel(id, update); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update channel: "+err.Error(), "")
+		return
+	}
+
+	// Read back the updated channel.
+	ch, err = s.store.GetChannel(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read back channel", "")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(storeChannelToAPI(*ch))
+}
+
 // --- Helpers ---
 
 // storeRuleToAPI converts a store.Rule to the API Rule type.
@@ -720,4 +1193,147 @@ func writeError(w http.ResponseWriter, status int, msg string, code string) {
 		resp.Code = &code
 	}
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// storeBindingToAPI converts a store.BindingRow to the API Binding type.
+func storeBindingToAPI(b store.BindingRow) Binding {
+	binding := Binding{
+		Id:          b.ID,
+		Destination: b.Destination,
+		Credential:  b.Credential,
+	}
+	if len(b.Ports) > 0 {
+		binding.Ports = &b.Ports
+	}
+	if b.Header != "" {
+		binding.Header = &b.Header
+	}
+	if b.Template != "" {
+		binding.Template = &b.Template
+	}
+	if len(b.Protocols) > 0 {
+		binding.Protocols = &b.Protocols
+	}
+	if b.CreatedAt != "" {
+		if t, err := time.Parse("2006-01-02 15:04:05", b.CreatedAt); err == nil {
+			binding.CreatedAt = &t
+		}
+	}
+	return binding
+}
+
+// storeMCPUpstreamToAPI converts a store.MCPUpstreamRow to the API MCPUpstream type.
+func storeMCPUpstreamToAPI(u store.MCPUpstreamRow) MCPUpstream {
+	upstream := MCPUpstream{
+		Id:      u.ID,
+		Name:    u.Name,
+		Command: u.Command,
+	}
+	if len(u.Args) > 0 {
+		upstream.Args = &u.Args
+	}
+	if len(u.Env) > 0 {
+		upstream.Env = &u.Env
+	}
+	if u.TimeoutSec != 0 {
+		upstream.TimeoutSec = &u.TimeoutSec
+	}
+	if u.CreatedAt != "" {
+		if t, err := time.Parse("2006-01-02 15:04:05", u.CreatedAt); err == nil {
+			upstream.CreatedAt = &t
+		}
+	}
+	return upstream
+}
+
+// storeChannelToAPI converts a store.Channel to the API Channel type.
+func storeChannelToAPI(ch store.Channel) Channel {
+	var chType ChannelType
+	switch ch.Type {
+	case int(channel.ChannelTelegram):
+		chType = ChannelTypeTelegram
+	case int(channel.ChannelHTTP):
+		chType = ChannelTypeHttp
+	}
+	apiCh := Channel{
+		Id:      ch.ID,
+		Type:    chType,
+		Enabled: ch.Enabled,
+	}
+	if ch.CreatedAt != "" {
+		if t, err := time.Parse("2006-01-02 15:04:05", ch.CreatedAt); err == nil {
+			apiCh.CreatedAt = &t
+		}
+	}
+	return apiCh
+}
+
+// readRecentAuditEntries reads the last N entries from the audit log file.
+func readRecentAuditEntries(path string, limit int) ([]AuditEntry, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	// Read all lines, keep last N.
+	var lines [][]byte
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		cp := make([]byte, len(line))
+		copy(cp, line)
+		lines = append(lines, cp)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	// Take last N lines.
+	start := 0
+	if len(lines) > limit {
+		start = len(lines) - limit
+	}
+	recent := lines[start:]
+
+	entries := make([]AuditEntry, 0, len(recent))
+	for _, line := range recent {
+		var evt audit.Event
+		if err := json.Unmarshal(line, &evt); err != nil {
+			continue
+		}
+		entry := AuditEntry{
+			Verdict: evt.Verdict,
+		}
+		if t, err := time.Parse(time.RFC3339, evt.Timestamp); err == nil {
+			entry.Timestamp = t
+		}
+		if evt.PrevHash != "" {
+			entry.PrevHash = &evt.PrevHash
+		}
+		if evt.Destination != "" {
+			entry.Destination = &evt.Destination
+		}
+		if evt.Port != 0 {
+			entry.Port = &evt.Port
+		}
+		if evt.Reason != "" {
+			entry.Reason = &evt.Reason
+		}
+		if evt.Tool != "" {
+			entry.Tool = &evt.Tool
+		}
+		if evt.Action != "" {
+			entry.Action = &evt.Action
+		}
+		if evt.Credential != "" {
+			entry.CredentialUsed = &evt.Credential
+		}
+		entries = append(entries, entry)
+	}
+
+	return entries, nil
 }

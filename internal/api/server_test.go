@@ -8,14 +8,17 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nemirovsky/sluice/internal/api"
+	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/store"
+	"github.com/nemirovsky/sluice/internal/vault"
 )
 
 // newTestStore creates an in-memory store for testing.
@@ -1136,5 +1139,821 @@ func TestPatchApiConfig_PartialUpdate(t *testing.T) {
 	}
 	if cfg.TimeoutSec == nil || *cfg.TimeoutSec != 30 {
 		t.Errorf("expected timeout_sec 30, got %v", cfg.TimeoutSec)
+	}
+}
+
+// --- Credential handler tests ---
+
+func newTestVault(t *testing.T) *vault.Store {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "vault")
+	v, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("new vault: %v", err)
+	}
+	return v
+}
+
+func TestGetApiCredentials_Empty(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("GET", "/api/credentials", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var creds []api.Credential
+	if err := json.NewDecoder(rec.Body).Decode(&creds); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(creds) != 0 {
+		t.Errorf("expected 0 credentials, got %d", len(creds))
+	}
+}
+
+func TestGetApiCredentials_NoVault(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("GET", "/api/credentials", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rec.Code)
+	}
+}
+
+func TestPostApiCredentials_Success(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"name": "my_key", "value": "secret-value-123"}`
+	req := httptest.NewRequest("POST", "/api/credentials", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var cred api.Credential
+	if err := json.NewDecoder(rec.Body).Decode(&cred); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if cred.Name != "my_key" {
+		t.Errorf("expected name my_key, got %q", cred.Name)
+	}
+
+	// Verify it's in the vault.
+	names, err := v.List()
+	if err != nil {
+		t.Fatalf("list vault: %v", err)
+	}
+	if len(names) != 1 || names[0] != "my_key" {
+		t.Errorf("expected vault to contain my_key, got %v", names)
+	}
+}
+
+func TestPostApiCredentials_WithDestination(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"name": "api_key", "value": "secret", "destination": "api.example.com", "ports": [443], "header": "Authorization", "template": "Bearer {value}"}`
+	req := httptest.NewRequest("POST", "/api/credentials", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify rule was created.
+	rules, err := st.ListRules(store.RuleFilter{Verdict: "allow"})
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 allow rule, got %d", len(rules))
+	}
+	if rules[0].Destination != "api.example.com" {
+		t.Errorf("expected destination api.example.com, got %q", rules[0].Destination)
+	}
+
+	// Verify binding was created.
+	bindings, err := st.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if bindings[0].Credential != "api_key" {
+		t.Errorf("expected credential api_key, got %q", bindings[0].Credential)
+	}
+}
+
+func TestPostApiCredentials_Duplicate(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	// Add the credential first.
+	if _, err := v.Add("my_key", "value"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"name": "my_key", "value": "new-value"}`
+	req := httptest.NewRequest("POST", "/api/credentials", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Errorf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteApiCredentials_Success(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	// Add a credential with a binding.
+	if _, err := v.Add("my_key", "value"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if _, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{}); err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("DELETE", "/api/credentials/my_key", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify credential is gone.
+	names, err := v.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("expected 0 credentials, got %v", names)
+	}
+
+	// Verify binding is gone.
+	bindings, err := st.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 bindings, got %d", len(bindings))
+	}
+}
+
+func TestDeleteApiCredentials_NotFound(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("DELETE", "/api/credentials/nonexistent", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rec.Code)
+	}
+}
+
+// --- Binding handler tests ---
+
+func TestGetApiBindings_Empty(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("GET", "/api/bindings", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var bindings []api.Binding
+	if err := json.NewDecoder(rec.Body).Decode(&bindings); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 bindings, got %d", len(bindings))
+	}
+}
+
+func TestPostApiBindings_Success(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"destination": "api.example.com", "credential": "my_key", "ports": [443], "header": "Authorization", "template": "Bearer {value}"}`
+	req := httptest.NewRequest("POST", "/api/bindings", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var binding api.Binding
+	if err := json.NewDecoder(rec.Body).Decode(&binding); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if binding.Destination != "api.example.com" {
+		t.Errorf("expected api.example.com, got %q", binding.Destination)
+	}
+	if binding.Credential != "my_key" {
+		t.Errorf("expected my_key, got %q", binding.Credential)
+	}
+	if binding.Header == nil || *binding.Header != "Authorization" {
+		t.Errorf("expected header Authorization, got %v", binding.Header)
+	}
+}
+
+func TestPostApiBindings_MissingFields(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"destination": "api.example.com"}`
+	req := httptest.NewRequest("POST", "/api/bindings", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteApiBindings_Success(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{})
+	if err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("DELETE", fmt.Sprintf("/api/bindings/%d", id), nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify it's gone.
+	bindings, err := st.ListBindings()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 bindings, got %d", len(bindings))
+	}
+}
+
+func TestDeleteApiBindings_NotFound(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("DELETE", "/api/bindings/999", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rec.Code)
+	}
+}
+
+// --- MCP upstream handler tests ---
+
+func TestGetApiMcpUpstreams_Empty(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("GET", "/api/mcp/upstreams", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var upstreams []api.MCPUpstream
+	if err := json.NewDecoder(rec.Body).Decode(&upstreams); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(upstreams) != 0 {
+		t.Errorf("expected 0 upstreams, got %d", len(upstreams))
+	}
+}
+
+func TestPostApiMcpUpstreams_Success(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"name": "github", "command": "/usr/bin/mcp-server-github", "args": ["--token", "test"], "timeout_sec": 60}`
+	req := httptest.NewRequest("POST", "/api/mcp/upstreams", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var upstream api.MCPUpstream
+	if err := json.NewDecoder(rec.Body).Decode(&upstream); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if upstream.Name != "github" {
+		t.Errorf("expected name github, got %q", upstream.Name)
+	}
+	if upstream.Command != "/usr/bin/mcp-server-github" {
+		t.Errorf("expected command, got %q", upstream.Command)
+	}
+	if upstream.TimeoutSec == nil || *upstream.TimeoutSec != 60 {
+		t.Errorf("expected timeout 60, got %v", upstream.TimeoutSec)
+	}
+}
+
+func TestPostApiMcpUpstreams_Duplicate(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	if _, err := st.AddMCPUpstream("github", "/usr/bin/mcp", store.MCPUpstreamOpts{}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"name": "github", "command": "/usr/bin/mcp"}`
+	req := httptest.NewRequest("POST", "/api/mcp/upstreams", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Errorf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteApiMcpUpstreams_Success(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	if _, err := st.AddMCPUpstream("github", "/usr/bin/mcp", store.MCPUpstreamOpts{}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("DELETE", "/api/mcp/upstreams/github", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify it's gone.
+	upstreams, err := st.ListMCPUpstreams()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(upstreams) != 0 {
+		t.Errorf("expected 0 upstreams, got %d", len(upstreams))
+	}
+}
+
+func TestDeleteApiMcpUpstreams_NotFound(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("DELETE", "/api/mcp/upstreams/nonexistent", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rec.Code)
+	}
+}
+
+// --- Audit handler tests ---
+
+func TestGetApiAuditRecent_NoPath(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("GET", "/api/audit/recent", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var entries []api.AuditEntry
+	if err := json.NewDecoder(rec.Body).Decode(&entries); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries, got %d", len(entries))
+	}
+}
+
+func TestGetApiAuditRecent_WithEntries(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+
+	// Create an audit log with some entries.
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	logger, err := audit.NewFileLogger(logPath)
+	if err != nil {
+		t.Fatalf("new logger: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		if err := logger.Log(audit.Event{
+			Destination: fmt.Sprintf("host%d.com", i),
+			Port:        443,
+			Verdict:     "allow",
+		}); err != nil {
+			t.Fatalf("log: %v", err)
+		}
+	}
+	logger.Close()
+
+	srv := api.NewServer(st, nil, nil, logPath)
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	// Request with limit=3.
+	req := httptest.NewRequest("GET", "/api/audit/recent?limit=3", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var entries []api.AuditEntry
+	if err := json.NewDecoder(rec.Body).Decode(&entries); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(entries))
+	}
+	// Should be the last 3 entries.
+	if entries[0].Destination == nil || *entries[0].Destination != "host2.com" {
+		t.Errorf("expected host2.com, got %v", entries[0].Destination)
+	}
+	if entries[2].Destination == nil || *entries[2].Destination != "host4.com" {
+		t.Errorf("expected host4.com, got %v", entries[2].Destination)
+	}
+}
+
+func TestGetApiAuditRecent_MissingFile(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "/tmp/nonexistent-audit-file.jsonl")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("GET", "/api/audit/recent", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 (empty array), got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetApiAuditVerify_NoPath(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("GET", "/api/audit/verify", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var result api.VerifyResult
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.TotalLines != 0 {
+		t.Errorf("expected 0 total lines, got %d", result.TotalLines)
+	}
+}
+
+func TestGetApiAuditVerify_ValidChain(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	logger, err := audit.NewFileLogger(logPath)
+	if err != nil {
+		t.Fatalf("new logger: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := logger.Log(audit.Event{
+			Destination: "example.com",
+			Verdict:     "allow",
+		}); err != nil {
+			t.Fatalf("log: %v", err)
+		}
+	}
+	logger.Close()
+
+	srv := api.NewServer(st, nil, nil, logPath)
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("GET", "/api/audit/verify", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var result api.VerifyResult
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.TotalLines != 3 {
+		t.Errorf("expected 3 total lines, got %d", result.TotalLines)
+	}
+	if result.ValidLinks != 3 {
+		t.Errorf("expected 3 valid links, got %d", result.ValidLinks)
+	}
+	if len(result.BrokenLinks) != 0 {
+		t.Errorf("expected 0 broken links, got %d", len(result.BrokenLinks))
+	}
+}
+
+func TestGetApiAuditVerify_BrokenChain(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+
+	// Write a log file with a tampered line.
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	logger, err := audit.NewFileLogger(logPath)
+	if err != nil {
+		t.Fatalf("new logger: %v", err)
+	}
+	if err := logger.Log(audit.Event{Destination: "a.com", Verdict: "allow"}); err != nil {
+		t.Fatalf("log: %v", err)
+	}
+	logger.Close()
+
+	// Append a line with a wrong prev_hash.
+	f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	f.WriteString(`{"timestamp":"2026-01-01T00:00:00Z","prev_hash":"badhash","destination":"b.com","verdict":"deny"}` + "\n")
+	f.Close()
+
+	srv := api.NewServer(st, nil, nil, logPath)
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("GET", "/api/audit/verify", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var result api.VerifyResult
+	if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.BrokenLinks) != 1 {
+		t.Errorf("expected 1 broken link, got %d", len(result.BrokenLinks))
+	}
+}
+
+// --- Channel handler tests ---
+
+func TestGetApiChannels(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("GET", "/api/channels", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var channels []api.Channel
+	if err := json.NewDecoder(rec.Body).Decode(&channels); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Should have at least the HTTP channel we added.
+	found := false
+	for _, ch := range channels {
+		if ch.Type == api.ChannelTypeHttp && ch.Enabled {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected to find enabled HTTP channel, got %v", channels)
+	}
+}
+
+func TestPatchApiChannels_Disable(t *testing.T) {
+	st := newTestStore(t)
+	chID, err := st.AddChannel(int(channel.ChannelHTTP), true)
+	if err != nil {
+		t.Fatalf("add channel: %v", err)
+	}
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"enabled": false}`
+	req := httptest.NewRequest("PATCH", fmt.Sprintf("/api/channels/%d", chID), strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var ch api.Channel
+	if err := json.NewDecoder(rec.Body).Decode(&ch); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if ch.Enabled {
+		t.Error("expected channel to be disabled")
+	}
+
+	// Verify in store.
+	stored, err := st.GetChannel(chID)
+	if err != nil {
+		t.Fatalf("get channel: %v", err)
+	}
+	if stored.Enabled {
+		t.Error("expected stored channel to be disabled")
+	}
+}
+
+func TestPatchApiChannels_NotFound(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"enabled": true}`
+	req := httptest.NewRequest("PATCH", "/api/channels/999", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rec.Code)
 	}
 }
