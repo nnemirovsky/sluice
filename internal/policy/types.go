@@ -66,7 +66,6 @@ type InspectRedactRule struct {
 	Pattern     string `toml:"pattern"`
 	Replacement string `toml:"replacement"`
 	Name        string `toml:"name"`
-	Note        string `toml:"note"`
 }
 
 type policyFile struct {
