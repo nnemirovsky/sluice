@@ -216,7 +216,7 @@ func TestHealthzEndpoint(t *testing.T) {
 	}
 
 	apiSrv := api.NewServer(db, nil, srv, "")
-	healthLn, healthSrv := startAPIServer("127.0.0.1:0", apiSrv, db)
+	healthLn, healthSrv := startAPIServer("127.0.0.1:0", apiSrv, db, nil)
 	if healthLn == nil {
 		t.Fatal("health server listener is nil")
 	}
@@ -761,7 +761,7 @@ func TestStandaloneModeStartup(t *testing.T) {
 	// Health endpoint should work without a container manager.
 	apiSrv := api.NewServer(db, nil, srv, "")
 	apiSrv.SetEnginePtr(srv.EnginePtr(), srv.ReloadMu())
-	healthLn, healthSrv := startAPIServer("127.0.0.1:0", apiSrv, db)
+	healthLn, healthSrv := startAPIServer("127.0.0.1:0", apiSrv, db, nil)
 	if healthLn == nil {
 		t.Fatal("health server listener is nil")
 	}

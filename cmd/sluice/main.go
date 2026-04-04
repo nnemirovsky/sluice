@@ -21,6 +21,7 @@ import (
 	"github.com/nemirovsky/sluice/internal/channel"
 	httpchannel "github.com/nemirovsky/sluice/internal/channel/http"
 	"github.com/nemirovsky/sluice/internal/container"
+	"github.com/nemirovsky/sluice/internal/mcp"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
 	"github.com/nemirovsky/sluice/internal/store"
@@ -378,6 +379,71 @@ func main() {
 		log.Printf("no approval channels configured (ask rules will auto-deny)")
 	}
 
+	// MCP gateway: if upstreams are configured, start the gateway and
+	// serve it via HTTP on /mcp alongside the API.
+	var mcpHandler http.Handler
+	upstreamRows, mcpListErr := db.ListMCPUpstreams()
+	if mcpListErr != nil {
+		log.Printf("WARNING: failed to list MCP upstreams: %v", mcpListErr)
+	} else if len(upstreamRows) > 0 {
+		mcpUpstreams := make([]mcp.UpstreamConfig, len(upstreamRows))
+		for i, r := range upstreamRows {
+			mcpUpstreams[i] = mcp.UpstreamConfig{
+				Name:       r.Name,
+				Command:    r.Command,
+				Args:       r.Args,
+				Env:        r.Env,
+				TimeoutSec: r.TimeoutSec,
+				Transport:  r.Transport,
+			}
+		}
+
+		toolRules := eng.ToolRules()
+		toolPolicy, tpErr := mcp.NewToolPolicy(toolRules, eng.Default)
+		if tpErr != nil {
+			log.Fatalf("compile MCP tool policy: %v", tpErr)
+		}
+
+		var mcpInspector *mcp.ContentInspector
+		if len(eng.InspectBlockRules) > 0 || len(eng.InspectRedactRules) > 0 {
+			mcpInspector, err = mcp.NewContentInspector(eng.InspectBlockRules, eng.InspectRedactRules)
+			if err != nil {
+				log.Fatalf("create MCP content inspector: %v", err)
+			}
+		}
+
+		var credResolver mcp.CredentialResolver
+		if provider != nil {
+			credResolver = func(name string) (string, error) {
+				sb, getErr := provider.Get(name)
+				if getErr != nil {
+					return "", getErr
+				}
+				val := sb.String()
+				sb.Release()
+				return val, nil
+			}
+		}
+
+		mcpGW, gwErr := mcp.NewGateway(mcp.GatewayConfig{
+			Upstreams:          mcpUpstreams,
+			ToolPolicy:         toolPolicy,
+			Inspector:          mcpInspector,
+			Audit:              logger,
+			Broker:             broker,
+			TimeoutSec:         eng.TimeoutSec,
+			Store:              db,
+			CredentialResolver: credResolver,
+		})
+		if gwErr != nil {
+			log.Fatalf("start MCP gateway: %v", gwErr)
+		}
+		defer mcpGW.Stop()
+
+		mcpHandler = mcp.NewMCPHTTPHandler(mcpGW)
+		log.Printf("MCP gateway on /mcp: %d tools from %d upstreams", len(mcpGW.Tools()), len(mcpUpstreams))
+	}
+
 	// Start HTTP server with health check and REST API on :3000 (or --health-addr).
 	apiServer := api.NewServer(db, broker, srv, *auditPath)
 	apiServer.SetEnginePtr(srv.EnginePtr(), srv.ReloadMu())
@@ -388,7 +454,7 @@ func main() {
 	if containerMgr != nil {
 		apiServer.SetContainerManager(containerMgr, *phantomDir)
 	}
-	healthLn, healthSrv := startAPIServer(*healthAddr, apiServer, db)
+	healthLn, healthSrv := startAPIServer(*healthAddr, apiServer, db, mcpHandler)
 	if healthLn != nil {
 		defer func() { _ = healthSrv.Close() }()
 		log.Printf("HTTP API server listening on %s", healthLn.Addr())
@@ -620,8 +686,9 @@ func isAppleCLIAvailable() bool {
 }
 
 // startAPIServer starts the HTTP server with the generated chi router.
-// It serves both /healthz (no auth) and /api/* (bearer auth + channel gate).
-func startAPIServer(addr string, apiSrv *api.Server, st *store.Store) (net.Listener, *http.Server) {
+// It serves /healthz (no auth), /api/* (bearer auth + channel gate), and
+// optionally /mcp (MCP Streamable HTTP, no auth) when mcpHandler is non-nil.
+func startAPIServer(addr string, apiSrv *api.Server, st *store.Store, mcpHandler http.Handler) (net.Listener, *http.Server) {
 	if addr == "" {
 		return nil, nil
 	}
@@ -634,12 +701,23 @@ func startAPIServer(addr string, apiSrv *api.Server, st *store.Store) (net.Liste
 	// becomes the outermost layer. List channel gate first, then auth, so
 	// the request hits auth before the channel gate. This ensures bad tokens
 	// get 401 before the channel gate reveals whether HTTP channel is enabled.
-	handler := api.HandlerWithOptions(apiSrv, api.ChiServerOptions{
+	apiHandler := api.HandlerWithOptions(apiSrv, api.ChiServerOptions{
 		Middlewares: []api.MiddlewareFunc{
 			api.ChannelGateMiddleware(st),
 			api.BearerAuthMiddleware,
 		},
 	})
+
+	var handler http.Handler
+	if mcpHandler != nil {
+		mux := http.NewServeMux()
+		mux.Handle("/mcp", mcpHandler)
+		mux.Handle("/", apiHandler)
+		handler = mux
+	} else {
+		handler = apiHandler
+	}
+
 	httpSrv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,

@@ -178,14 +178,14 @@ Allow OpenClaw (or any MCP client) to connect to sluice's gateway via HTTP inste
 - Create: `internal/mcp/server_http_test.go`
 - Modify: `cmd/sluice/main.go` (mount MCP HTTP handler)
 
-- [ ] Implement `MCPHTTPHandler` that serves `POST /mcp` endpoint following the Streamable HTTP spec
-- [ ] Generate `Mcp-Session-Id` on `initialize` request, track sessions
-- [ ] Route `tools/list` and `tools/call` through the existing `Gateway.HandleToolCall` (same policy enforcement, audit, approval flow)
-- [ ] Support SSE streaming for long-running tool calls
-- [ ] Support `DELETE /mcp` to close session
-- [ ] Mount on the HTTP server at `/mcp` (only when MCP gateway mode is active)
-- [ ] Write tests with httptest verifying full MCP handshake + tool call
-- [ ] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
+- [x] Implement `MCPHTTPHandler` that serves `POST /mcp` endpoint following the Streamable HTTP spec
+- [x] Generate `Mcp-Session-Id` on `initialize` request, track sessions
+- [x] Route `tools/list` and `tools/call` through the existing `Gateway.HandleToolCall` (same policy enforcement, audit, approval flow)
+- [x] Support SSE streaming for long-running tool calls
+- [x] Support `DELETE /mcp` to close session
+- [x] Mount on the HTTP server at `/mcp` (only when MCP gateway mode is active)
+- [x] Write tests with httptest verifying full MCP handshake + tool call
+- [x] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
 
 ### Task 7: Auto-inject sluice as MCP server into OpenClaw
 
