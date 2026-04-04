@@ -260,6 +260,265 @@ func TestResolveProtocolHintConsistentSingleProtocol(t *testing.T) {
 	}
 }
 
+func TestProtoMatchesBinding(t *testing.T) {
+	tests := []struct {
+		binding string
+		caller  string
+		want    bool
+	}{
+		// Exact matches.
+		{"https", "https", true},
+		{"ssh", "ssh", true},
+		{"dns", "dns", true},
+
+		// TCP meta-protocol matches TCP-based protocols.
+		{"tcp", "http", true},
+		{"tcp", "https", true},
+		{"tcp", "ssh", true},
+		{"tcp", "imap", true},
+		{"tcp", "smtp", true},
+		{"tcp", "ws", true},
+		{"tcp", "wss", true},
+		{"tcp", "grpc", true},
+		{"tcp", "apns", true},
+		{"tcp", "generic", true},
+		{"tcp", "tcp", true},
+
+		// TCP meta-protocol must NOT match UDP-family protocols.
+		{"tcp", "udp", false},
+		{"tcp", "dns", false},
+		{"tcp", "quic", false},
+		// TCP meta-protocol must not match empty caller.
+		{"tcp", "", false},
+
+		// UDP meta-protocol matches UDP-family protocols.
+		{"udp", "udp", true},
+		{"udp", "dns", true},
+		{"udp", "quic", true},
+
+		// UDP meta-protocol must NOT match TCP-based protocols.
+		{"udp", "http", false},
+		{"udp", "https", false},
+		{"udp", "ssh", false},
+
+		// Non-meta mismatches.
+		{"https", "http", false},
+		{"ssh", "https", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.binding+"_"+tt.caller, func(t *testing.T) {
+			if got := protoMatchesBinding(tt.binding, tt.caller); got != tt.want {
+				t.Errorf("protoMatchesBinding(%q, %q) = %v, want %v",
+					tt.binding, tt.caller, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveForProtocolTCPMeta(t *testing.T) {
+	bindings := []Binding{
+		{Destination: "api.example.com", Ports: []int{443}, Credential: "tcp_key", Header: "Authorization", Protocols: []string{"tcp"}},
+	}
+	resolver, err := NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// TCP meta-protocol binding should match HTTPS.
+	b, ok := resolver.ResolveForProtocol("api.example.com", 443, "https")
+	if !ok {
+		t.Fatal("expected tcp binding to match https protocol")
+	}
+	if b.Credential != "tcp_key" {
+		t.Errorf("expected tcp_key, got %q", b.Credential)
+	}
+
+	// TCP meta-protocol binding should NOT match DNS.
+	_, ok = resolver.ResolveForProtocol("api.example.com", 443, "dns")
+	if ok {
+		t.Error("expected tcp binding to NOT match dns protocol")
+	}
+}
+
+func TestResolveForProtocolExactBeforeMeta(t *testing.T) {
+	// An exact protocol binding must win over a meta-protocol (tcp) binding
+	// for the same host:port, regardless of ordering.
+	bindings := []Binding{
+		{Destination: "api.example.com", Ports: []int{443}, Credential: "tcp_key", Header: "X-Generic", Protocols: []string{"tcp"}},
+		{Destination: "api.example.com", Ports: []int{443}, Credential: "https_key", Header: "Authorization", Protocols: []string{"https"}},
+	}
+	resolver, err := NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// HTTPS should pick the exact "https" binding, not the earlier "tcp" one.
+	b, ok := resolver.ResolveForProtocol("api.example.com", 443, "https")
+	if !ok {
+		t.Fatal("expected match for https")
+	}
+	if b.Credential != "https_key" {
+		t.Errorf("expected https_key (exact match), got %q", b.Credential)
+	}
+
+	// SSH has no exact binding but matches tcp meta-protocol.
+	b, ok = resolver.ResolveForProtocol("api.example.com", 443, "ssh")
+	if !ok {
+		t.Fatal("expected tcp meta-match for ssh")
+	}
+	if b.Credential != "tcp_key" {
+		t.Errorf("expected tcp_key (meta match), got %q", b.Credential)
+	}
+
+	// DNS should not match either binding.
+	_, ok = resolver.ResolveForProtocol("api.example.com", 443, "dns")
+	if ok {
+		t.Error("expected no match for dns (UDP-family)")
+	}
+}
+
+func TestCredentialsForDestinationTCPMeta(t *testing.T) {
+	bindings := []Binding{
+		{Destination: "api.example.com", Ports: []int{443}, Credential: "tcp_key", Header: "Authorization", Protocols: []string{"tcp"}},
+	}
+	resolver, err := NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should include tcp_key when caller protocol is https (TCP-based).
+	creds := resolver.CredentialsForDestination("api.example.com", 443, "https")
+	if len(creds) != 1 || creds[0] != "tcp_key" {
+		t.Errorf("expected [tcp_key] for https, got %v", creds)
+	}
+
+	// Should NOT include tcp_key when caller protocol is dns (UDP-based).
+	creds = resolver.CredentialsForDestination("api.example.com", 443, "dns")
+	if len(creds) != 0 {
+		t.Errorf("expected empty for dns, got %v", creds)
+	}
+}
+
+func TestResolveForProtocolTCPMetaShadowsSpecific(t *testing.T) {
+	// Reproduces the Codex-reported issue: on a non-standard port, the
+	// initial ResolveForProtocol call uses "generic" (protocol unknown).
+	// A protocols=["tcp"] binding matches via meta-protocol, shadowing a
+	// more specific protocols=["ssh"] binding. After byte detection reveals
+	// SSH, a second ResolveForProtocol with "ssh" must return the specific
+	// binding, not the tcp meta-match.
+	bindings := []Binding{
+		{Destination: "git.example.com", Ports: []int{2222}, Credential: "tcp_key", Header: "X-Generic", Protocols: []string{"tcp"}},
+		{Destination: "git.example.com", Ports: []int{2222}, Credential: "ssh_key", Protocols: []string{"ssh"}},
+	}
+	resolver, err := NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Step 1: initial resolution with "generic" picks the tcp meta-match.
+	b, ok := resolver.ResolveForProtocol("git.example.com", 2222, "generic")
+	if !ok {
+		t.Fatal("expected meta-match for generic")
+	}
+	if b.Credential != "tcp_key" {
+		t.Errorf("step 1: expected tcp_key (meta-match), got %q", b.Credential)
+	}
+
+	// Step 2: re-resolution with "ssh" (after byte detection) picks the
+	// exact ssh binding, not the tcp meta-match.
+	b, ok = resolver.ResolveForProtocol("git.example.com", 2222, "ssh")
+	if !ok {
+		t.Fatal("expected exact match for ssh")
+	}
+	if b.Credential != "ssh_key" {
+		t.Errorf("step 2: expected ssh_key (exact match), got %q", b.Credential)
+	}
+
+	// Same pattern for SMTP on a non-standard port.
+	smtpBindings := []Binding{
+		{Destination: "mail.example.com", Ports: []int{9025}, Credential: "tcp_key", Protocols: []string{"tcp"}},
+		{Destination: "mail.example.com", Ports: []int{9025}, Credential: "smtp_key", Protocols: []string{"smtp"}},
+	}
+	smtpResolver, err := NewBindingResolver(smtpBindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b, ok = smtpResolver.ResolveForProtocol("mail.example.com", 9025, "generic")
+	if !ok {
+		t.Fatal("expected meta-match for generic")
+	}
+	if b.Credential != "tcp_key" {
+		t.Errorf("smtp step 1: expected tcp_key, got %q", b.Credential)
+	}
+
+	b, ok = smtpResolver.ResolveForProtocol("mail.example.com", 9025, "smtp")
+	if !ok {
+		t.Fatal("expected exact match for smtp")
+	}
+	if b.Credential != "smtp_key" {
+		t.Errorf("smtp step 2: expected smtp_key (exact), got %q", b.Credential)
+	}
+}
+
+func TestResolveProtocolHintSkipsMetaProtocol(t *testing.T) {
+	// When a TCP meta-binding and a specific SSH binding exist for the same
+	// dest+port, ResolveProtocolHint should skip the meta-binding and return
+	// the specific protocol. This lets the dial() fast path resolve the
+	// exact binding without falling back to timeout-sensitive byte detection.
+	bindings := []Binding{
+		{Destination: "git.example.com", Ports: []int{2222}, Credential: "tcp_key", Protocols: []string{"tcp"}},
+		{Destination: "git.example.com", Ports: []int{2222}, Credential: "ssh_key", Protocols: []string{"ssh"}},
+	}
+	resolver, err := NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hint, ok := resolver.ResolveProtocolHint("git.example.com", 2222)
+	if !ok {
+		t.Fatal("expected hint: tcp meta-binding should be skipped, leaving ssh as unambiguous")
+	}
+	if hint != "ssh" {
+		t.Errorf("expected ssh hint, got %q", hint)
+	}
+}
+
+func TestResolveProtocolHintMetaOnly(t *testing.T) {
+	// When the only binding is a meta-protocol (tcp), ResolveProtocolHint
+	// should return false because no specific protocol can be determined.
+	bindings := []Binding{
+		{Destination: "host.example.com", Ports: []int{8000}, Credential: "tcp_key", Protocols: []string{"tcp"}},
+	}
+	resolver, err := NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, ok := resolver.ResolveProtocolHint("host.example.com", 8000)
+	if ok {
+		t.Error("expected no hint when only meta-protocol bindings exist")
+	}
+}
+
+func TestIsMetaProtocol(t *testing.T) {
+	if !IsMetaProtocol("tcp") {
+		t.Error("expected tcp to be meta-protocol")
+	}
+	if !IsMetaProtocol("udp") {
+		t.Error("expected udp to be meta-protocol")
+	}
+	if IsMetaProtocol("ssh") {
+		t.Error("expected ssh to NOT be meta-protocol")
+	}
+	if IsMetaProtocol("https") {
+		t.Error("expected https to NOT be meta-protocol")
+	}
+	if IsMetaProtocol("") {
+		t.Error("expected empty string to NOT be meta-protocol")
+	}
+}
+
 func TestFormatValue(t *testing.T) {
 	b := Binding{Template: "Bearer {value}"}
 	got := b.FormatValue("my-token")

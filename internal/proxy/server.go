@@ -511,6 +511,22 @@ func (s *Server) setupInjection(cfg Config, mainLn net.Listener) error {
 	return nil
 }
 
+// bindingIsMetaOnly returns true when all protocols in the binding are
+// meta-protocols (tcp/udp). A meta-protocol binding matches a family of
+// specific protocols rather than identifying one, so the ResolveProtocolHint
+// fast path should still be attempted to find a more specific binding.
+func bindingIsMetaOnly(b vault.Binding) bool {
+	if len(b.Protocols) == 0 {
+		return false
+	}
+	for _, p := range b.Protocols {
+		if !vault.IsMetaProtocol(p) {
+			return false
+		}
+	}
+	return true
+}
+
 // dial is the custom dialer for go-socks5. When a credential binding matches
 // the destination, the connection is routed through the appropriate injection
 // handler (HTTPS MITM, SSH jump host, or mail proxy). Otherwise it falls
@@ -544,12 +560,13 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 				}
 			}
 			// When protocol is still generic (non-standard port) and
-			// resolution returned a protocol-agnostic binding, check
-			// if a single-protocol binding exists for this dest+port.
-			// Without this, the agnostic fallback from ResolveForProtocol
-			// masks protocol-specific bindings and the connection falls
-			// through to direct dial, bypassing the injector.
-			if ok && proto == ProtoGeneric && len(binding.Protocols) == 0 {
+			// resolution returned a protocol-agnostic or meta-protocol
+			// binding, check if a specific-protocol binding exists for
+			// this dest+port. Without this, the agnostic/meta fallback
+			// from ResolveForProtocol masks protocol-specific bindings
+			// and the connection falls through to the timeout-sensitive
+			// byte-detection path instead of using the fast hint path.
+			if ok && proto == ProtoGeneric && (len(binding.Protocols) == 0 || bindingIsMetaOnly(binding)) {
 				if hint, hok := r.ResolveProtocolHint(fqdn, port); hok {
 					if parsed, perr := ParseProtocol(hint); perr == nil {
 						proto = parsed
@@ -616,9 +633,10 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 				}
 				// Non-standard port with binding: use byte-level detection
 				// to determine the correct injection handler. Port-based
-				// detection returned ProtoGeneric, so peek the client's
-				// first bytes to identify the actual protocol.
-				if proto == ProtoGeneric {
+				// detection returned ProtoGeneric (or ProtoTCP from a
+				// binding hint), so peek the client's first bytes to
+				// identify the actual protocol.
+				if proto == ProtoGeneric || proto == ProtoTCP {
 					bnd := binding // capture for closure
 					return dialWithHandler(func(agentConn net.Conn, ready chan<- error) {
 						s.handleWithDetection(agentConn, ready, &bnd, fqdn, port, hostAddr, dialAddrs)
@@ -746,6 +764,19 @@ func (s *Server) handleWithDetection(
 		log.Printf("[DETECT] %s byte detection -> %s", hostAddr, proto)
 	}
 
+	// Re-resolve binding with detected protocol: the initial resolution in
+	// dial() used "generic" (non-standard port), so a meta-protocol binding
+	// (e.g. protocols=["tcp"]) may have been selected over a more specific
+	// one (e.g. protocols=["ssh"]). Now that byte detection revealed the
+	// actual protocol, re-resolve to pick the most specific binding.
+	if proto != ProtoGeneric && binding != nil {
+		if r := s.resolver.Load(); r != nil {
+			if specific, ok := r.ResolveForProtocol(fqdn, port, proto.String()); ok {
+				binding = &specific
+			}
+		}
+	}
+
 	switch proto {
 	case ProtoHTTPS, ProtoHTTP:
 		if s.injector != nil {
@@ -849,6 +880,20 @@ func (s *Server) handleServerFirstDetection(
 
 	if serverProto != ProtoGeneric {
 		log.Printf("[DETECT] %s server byte detection -> %s", hostAddr, serverProto)
+	}
+
+	// Re-resolve binding with detected server protocol (same rationale as
+	// the client-byte re-resolution in handleWithDetection).
+	if serverProto != ProtoGeneric && binding != nil {
+		if r := s.resolver.Load(); r != nil {
+			if host, portStr, err := net.SplitHostPort(hostAddr); err == nil {
+				if p, err := strconv.Atoi(portStr); err == nil {
+					if specific, ok := r.ResolveForProtocol(host, p, serverProto.String()); ok {
+						binding = &specific
+					}
+				}
+			}
+		}
 	}
 
 	if (serverProto == ProtoIMAP || serverProto == ProtoSMTP) && s.mailProxy != nil && binding != nil {

@@ -826,27 +826,61 @@ vault = "sluice-creds"
 }
 
 func TestValidProtocolNamesSync(t *testing.T) {
-	// Verify validProtocolNames stays in sync with the proxy package's
-	// Protocol enum. Each name here (except "udp", a transport-level label)
-	// must correspond to a proxy.Protocol value via proxy.ParseProtocol.
-	// If this test fails, a protocol was added to one map but not the other.
-	expectedAppProtos := []string{
+	// Verify validProtocolNames contains the canonical set of protocol
+	// names. This list must match proxy.protocolNames in the proxy package.
+	// Because store cannot import proxy (proxy imports policy which would
+	// create a cycle via proxy -> policy, store -> proxy), we maintain a
+	// hardcoded expected list here. If a protocol is added to proxy, update
+	// both validProtocolNames and this list.
+	expectedProtos := []string{
 		"generic", "http", "https", "ssh", "imap", "smtp",
 		"ws", "wss", "grpc", "dns", "quic", "apns",
+		"tcp", "udp",
 	}
-	for _, name := range expectedAppProtos {
+	for _, name := range expectedProtos {
 		if !validProtocolNames[name] {
 			t.Errorf("validProtocolNames missing %q (present in proxy.protocolNames)", name)
 		}
 	}
-	// "udp" is a transport label, not in the proxy Protocol enum.
-	if !validProtocolNames["udp"] {
-		t.Error("validProtocolNames missing \"udp\" transport label")
+	if len(validProtocolNames) != len(expectedProtos) {
+		t.Errorf("validProtocolNames has %d entries, expected %d", len(validProtocolNames), len(expectedProtos))
 	}
-	// Check no extra entries exist beyond expected + "udp".
-	expected := len(expectedAppProtos) + 1 // +1 for "udp"
-	if len(validProtocolNames) != expected {
-		t.Errorf("validProtocolNames has %d entries, expected %d", len(validProtocolNames), expected)
+}
+
+func TestImportTOMLRuleWithTCPProtocol(t *testing.T) {
+	s := newTestStore(t)
+
+	data := []byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "api.example.com"
+ports = [443, 80]
+protocols = ["tcp"]
+name = "Allow TCP to example"
+`)
+
+	res, err := s.ImportTOML(data)
+	if err != nil {
+		t.Fatalf("ImportTOML: %v", err)
+	}
+	if res.RulesInserted != 1 {
+		t.Fatalf("expected 1 rule inserted, got %d", res.RulesInserted)
+	}
+
+	rules, err := s.ListRules(RuleFilter{Type: "network"})
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rules))
+	}
+	if len(rules[0].Protocols) != 1 || rules[0].Protocols[0] != "tcp" {
+		t.Errorf("expected protocols [tcp], got %v", rules[0].Protocols)
+	}
+	if rules[0].Name != "Allow TCP to example" {
+		t.Errorf("expected name 'Allow TCP to example', got %q", rules[0].Name)
 	}
 }
 

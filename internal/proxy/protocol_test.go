@@ -24,6 +24,8 @@ func TestProtocolStringRoundTrip(t *testing.T) {
 		{ProtoDNS, "dns"},
 		{ProtoQUIC, "quic"},
 		{ProtoAPNS, "apns"},
+		{ProtoTCP, "tcp"},
+		{ProtoUDP, "udp"},
 	}
 
 	for _, tt := range allProtocols {
@@ -100,6 +102,8 @@ func TestProtocolIntegerValues(t *testing.T) {
 		{ProtoDNS, 9},
 		{ProtoQUIC, 10},
 		{ProtoAPNS, 11},
+		{ProtoTCP, 12},
+		{ProtoUDP, 13},
 	}
 	for _, tt := range tests {
 		if int(tt.proto) != tt.value {
@@ -579,6 +583,8 @@ func TestIsServerFirstProtocol(t *testing.T) {
 		{ProtoDNS, false},
 		{ProtoQUIC, false},
 		{ProtoAPNS, false},
+		{ProtoTCP, false},
+		{ProtoUDP, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.proto.String(), func(t *testing.T) {

@@ -10,6 +10,22 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// Protocol name constants matching proxy.Protocol.String() values.
+// Defined here to avoid a circular import (proxy imports policy).
+const (
+	protoNameTCP  = "tcp"
+	protoNameUDP  = "udp"
+	protoNameQUIC = "quic"
+	protoNameDNS  = "dns"
+)
+
+// isUDPFamilyProto reports whether a protocol name represents a UDP-based
+// protocol. Used to prevent "tcp" meta-protocol rules from matching
+// UDP-family traffic in matchRulesWithProto.
+func isUDPFamilyProto(proto string) bool {
+	return proto == protoNameUDP || proto == protoNameQUIC || proto == protoNameDNS
+}
+
 type compiledRule struct {
 	glob      *Glob
 	ports     map[int]bool
@@ -316,6 +332,10 @@ func matchRulesStrictProto(rules []compiledRule, dest string, port int, proto st
 // optional explicit protocol. When proto is non-empty it takes precedence over
 // the port-based heuristic, allowing header-detected protocols (ws, wss, grpc)
 // and packet-detected protocols (quic) to match protocol-scoped rules.
+//
+// This function is only called from the TCP evaluation path (Evaluate /
+// EvaluateWithProtocol), so "tcp" acts as a meta-protocol that matches any
+// TCP-based connection, mirroring how EvaluateUDP/EvaluateQUIC treat "udp".
 func matchRulesWithProto(rules []compiledRule, dest string, port int, proto string) bool {
 	for _, r := range rules {
 		if !r.glob.Match(dest) {
@@ -329,8 +349,19 @@ func matchRulesWithProto(rules []compiledRule, dest string, port int, proto stri
 			if effective == "" {
 				effective = portToProtocol(port)
 			}
-			if effective == "" || !r.protocols[effective] {
-				continue
+			// "tcp" is a transport-level meta-protocol that matches any
+			// TCP-based connection regardless of application protocol.
+			// When proto is explicitly provided and is UDP-family (e.g.
+			// DNS interceptor passes "dns"), TCP rules must not match.
+			// When proto is empty the effective protocol came from
+			// portToProtocol which is transport-ambiguous, but this
+			// function is only reachable from TCP evaluation paths so
+			// TCP rules should match unconditionally.
+			matched := r.protocols[protoNameTCP] && (proto == "" || !isUDPFamilyProto(proto))
+			if !matched {
+				if effective == "" || !r.protocols[effective] {
+					continue
+				}
 			}
 		}
 		return true
@@ -621,10 +652,10 @@ func (e *Engine) EvaluateUDP(dest string, port int) Verdict {
 	if e.compiled == nil {
 		return Deny
 	}
-	if matchRulesStrictProto(e.compiled.denyRules, dest, port, "udp") {
+	if matchRulesStrictProto(e.compiled.denyRules, dest, port, protoNameUDP) {
 		return Deny
 	}
-	if matchRulesStrictProto(e.compiled.allowRules, dest, port, "udp") {
+	if matchRulesStrictProto(e.compiled.allowRules, dest, port, protoNameUDP) {
 		return Allow
 	}
 	return Deny
@@ -643,18 +674,18 @@ func (e *Engine) EvaluateQUIC(dest string, port int) Verdict {
 		return Deny
 	}
 	// Check QUIC-specific deny rules first.
-	if matchRulesStrictProto(e.compiled.denyRules, dest, port, "quic") {
+	if matchRulesStrictProto(e.compiled.denyRules, dest, port, protoNameQUIC) {
 		return Deny
 	}
 	// Check QUIC-specific allow rules.
-	if matchRulesStrictProto(e.compiled.allowRules, dest, port, "quic") {
+	if matchRulesStrictProto(e.compiled.allowRules, dest, port, protoNameQUIC) {
 		return Allow
 	}
 	// No QUIC-specific rule matched. Fall back to UDP evaluation.
-	if matchRulesStrictProto(e.compiled.denyRules, dest, port, "udp") {
+	if matchRulesStrictProto(e.compiled.denyRules, dest, port, protoNameUDP) {
 		return Deny
 	}
-	if matchRulesStrictProto(e.compiled.allowRules, dest, port, "udp") {
+	if matchRulesStrictProto(e.compiled.allowRules, dest, port, protoNameUDP) {
 		return Allow
 	}
 	return Deny

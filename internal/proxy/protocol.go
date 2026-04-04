@@ -41,6 +41,13 @@ const (
 	ProtoQUIC Protocol = 10
 	// ProtoAPNS indicates Apple Push Notification Service traffic (port 5223).
 	ProtoAPNS Protocol = 11
+	// ProtoTCP indicates generic TCP transport (used in policy protocol filters).
+	// Acts as a transport-level meta-protocol: rules with protocols=["tcp"]
+	// match any TCP-based connection in Evaluate/EvaluateWithProtocol,
+	// regardless of the application-level protocol detected (http, ssh, etc.).
+	ProtoTCP Protocol = 12
+	// ProtoUDP indicates generic UDP transport (used in policy protocol filters).
+	ProtoUDP Protocol = 13
 )
 
 // String returns the display name for the protocol (e.g. "http", "https").
@@ -68,6 +75,10 @@ func (p Protocol) String() string {
 		return "quic"
 	case ProtoAPNS:
 		return "apns"
+	case ProtoTCP:
+		return "tcp"
+	case ProtoUDP:
+		return "udp"
 	case ProtoGeneric:
 		return "generic"
 	default:
@@ -91,6 +102,8 @@ var protocolNames = map[string]Protocol{
 	"dns":     ProtoDNS,
 	"quic":    ProtoQUIC,
 	"apns":    ProtoAPNS,
+	"tcp":     ProtoTCP,
+	"udp":     ProtoUDP,
 }
 
 // ParseProtocol converts a string protocol name to a Protocol value.

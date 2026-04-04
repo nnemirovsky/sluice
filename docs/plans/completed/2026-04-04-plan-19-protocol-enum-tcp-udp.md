@@ -32,22 +32,22 @@ Add `ProtoTCP` and `ProtoUDP` to the Protocol integer enum and replace hardcoded
 - Modify: `internal/proxy/protocol.go`
 - Modify: `internal/proxy/protocol_test.go`
 
-- [ ] Add `ProtoTCP Protocol = 12` and `ProtoUDP Protocol = 13` to the Protocol enum
-- [ ] Add `"tcp"` and `"udp"` cases to `String()` method
-- [ ] Add `"tcp"` and `"udp"` entries to `protocolNames` map for `ParseProtocol()`
-- [ ] Write tests for `ParseProtocol("tcp")` and `ParseProtocol("udp")` round-trips
-- [ ] Write tests for `ProtoTCP.String() == "tcp"` and `ProtoUDP.String() == "udp"`
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] Add `ProtoTCP Protocol = 12` and `ProtoUDP Protocol = 13` to the Protocol enum
+- [x] Add `"tcp"` and `"udp"` cases to `String()` method
+- [x] Add `"tcp"` and `"udp"` entries to `protocolNames` map for `ParseProtocol()`
+- [x] Write tests for `ParseProtocol("tcp")` and `ParseProtocol("udp")` round-trips
+- [x] Write tests for `ProtoTCP.String() == "tcp"` and `ProtoUDP.String() == "udp"`
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 2: Replace hardcoded strings in policy engine
 
 **Files:**
 - Modify: `internal/policy/engine.go`
 
-- [ ] Replace `"udp"` in `matchRulesStrictProto` calls with `proxy.ProtoUDP.String()` or use integer comparison if the compiled rules store Protocol values as integers
-- [ ] If the compiled rules store protocols as strings, convert to integers. If too invasive, use `proxy.ProtoUDP.String()` for now.
-- [ ] Verify `EvaluateUDP` and `EvaluateQUIC` still work correctly
-- [ ] Run tests: `go test ./internal/policy/ -v -timeout 30s`
+- [x] Replace `"udp"` in `matchRulesStrictProto` calls with `proxy.ProtoUDP.String()` or use integer comparison if the compiled rules store Protocol values as integers
+- [x] If the compiled rules store protocols as strings, convert to integers. If too invasive, use `proxy.ProtoUDP.String()` for now.
+- [x] Verify `EvaluateUDP` and `EvaluateQUIC` still work correctly
+- [x] Run tests: `go test ./internal/policy/ -v -timeout 30s`
 
 ### Task 3: Update store validation
 
@@ -55,24 +55,24 @@ Add `ProtoTCP` and `ProtoUDP` to the Protocol integer enum and replace hardcoded
 - Modify: `internal/store/import.go`
 - Modify: `internal/store/store.go` (if protocol validation exists)
 
-- [ ] Replace hardcoded `"udp": true` in `validProtocolNames` with reference to `proxy.protocolNames` or add `"tcp"` alongside `"udp"`
-- [ ] Ensure `"tcp"` is also valid in the store (not just `"udp"`)
-- [ ] Write test: import a TOML config with `protocols = ["tcp"]` rule, verify it's accepted
-- [ ] Run tests: `go test ./internal/store/ -v -timeout 30s`
+- [x] Replace hardcoded `"udp": true` in `validProtocolNames` with reference to `proxy.protocolNames` or add `"tcp"` alongside `"udp"`
+- [x] Ensure `"tcp"` is also valid in the store (not just `"udp"`)
+- [x] Write test: import a TOML config with `protocols = ["tcp"]` rule, verify it's accepted
+- [x] Run tests: `go test ./internal/store/ -v -timeout 30s`
 
 ### Task 4: Verify acceptance criteria
 
-- [ ] Verify `protocols = ["udp"]` still works in policy rules
-- [ ] Verify `protocols = ["tcp"]` works in policy rules
-- [ ] Verify no hardcoded `"udp"` or `"tcp"` strings remain in policy engine or store (grep check)
-- [ ] Verify `ParseProtocol("tcp")` and `ParseProtocol("udp")` return correct enum values
-- [ ] Run full test suite: `go test ./... -v -timeout 60s -race`
-- [ ] Run linter: `go vet ./...`
+- [x] Verify `protocols = ["udp"]` still works in policy rules
+- [x] Verify `protocols = ["tcp"]` works in policy rules
+- [x] Verify no hardcoded `"udp"` or `"tcp"` strings remain in policy engine or store (grep check)
+- [x] Verify `ParseProtocol("tcp")` and `ParseProtocol("udp")` return correct enum values
+- [x] Run full test suite: `go test ./... -v -timeout 60s -race`
+- [x] Run linter: `go vet ./...`
 
 ### Task 5: [Final] Update documentation
 
-- [ ] Update CLAUDE.md protocol table: add TCP and UDP transport-level protocol values
-- [ ] Update examples/config.toml: ensure UDP deny-all example uses the documented protocol name
+- [x] Update CLAUDE.md protocol table: add TCP and UDP transport-level protocol values
+- [x] Update examples/config.toml: ensure UDP deny-all example uses the documented protocol name
 
 ## Technical Details
 
