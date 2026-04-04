@@ -158,11 +158,13 @@ func (h *HTTPChannel) deliverApproval(req channel.ApprovalRequest) {
 		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		if readErr != nil {
 			log.Printf("[WARN] http channel: failed to read sync response for %s: %v", req.ID, readErr)
+			h.resolveDenyOnSingleChannel(req.ID)
 			h.pending.Delete(req.ID)
 			return
 		}
 		if err := json.Unmarshal(respBody, &wr); err != nil {
 			log.Printf("[WARN] http channel: invalid sync response for %s: %v", req.ID, err)
+			h.resolveDenyOnSingleChannel(req.ID)
 			h.pending.Delete(req.ID)
 			return
 		}

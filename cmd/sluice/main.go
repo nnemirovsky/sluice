@@ -317,8 +317,12 @@ func main() {
 	// Start HTTP server with health check and REST API on :3000 (or --health-addr).
 	apiServer := api.NewServer(db, broker, srv, *auditPath)
 	apiServer.SetEnginePtr(srv.EnginePtr(), srv.ReloadMu())
+	apiServer.SetResolverPtr(srv.ResolverPtr())
 	if vaultStore != nil {
 		apiServer.SetVault(vaultStore)
+	}
+	if dockerMgr != nil {
+		apiServer.SetDockerManager(dockerMgr, *phantomDir)
 	}
 	healthLn, healthSrv := startAPIServer(*healthAddr, apiServer, db)
 	if healthLn != nil {

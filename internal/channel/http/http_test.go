@@ -275,7 +275,13 @@ func TestRequestApproval_AllRetriesFail(t *testing.T) {
 	var attempts atomic.Int32
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts.Add(1)
+		// Only count approval delivery attempts, not cancel notifications.
+		body, _ := io.ReadAll(r.Body)
+		var payload struct{ Type string }
+		_ = json.Unmarshal(body, &payload)
+		if payload.Type != "cancel" {
+			attempts.Add(1)
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()

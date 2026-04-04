@@ -3,10 +3,12 @@ package api
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"sort"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/channel"
+	"github.com/nemirovsky/sluice/internal/docker"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
 	"github.com/nemirovsky/sluice/internal/store"
@@ -26,13 +29,16 @@ import (
 // Server implements the generated ServerInterface for the sluice REST API.
 type Server struct {
 	Unimplemented
-	store     *store.Store
-	broker    *channel.Broker
-	proxySrv  *proxy.Server
-	vault     *vault.Store
-	auditPath string
-	enginePtr *atomic.Pointer[policy.Engine]
-	reloadMu  *sync.Mutex
+	store       *store.Store
+	broker      *channel.Broker
+	proxySrv    *proxy.Server
+	vault       *vault.Store
+	auditPath   string
+	enginePtr   *atomic.Pointer[policy.Engine]
+	reloadMu    *sync.Mutex
+	resolverPtr *atomic.Pointer[vault.BindingResolver]
+	dockerMgr   *docker.Manager
+	phantomDir  string
 }
 
 // NewServer creates a new API server. enginePtr and reloadMu are optional
@@ -59,6 +65,19 @@ func (s *Server) SetEnginePtr(ptr *atomic.Pointer[policy.Engine], mu *sync.Mutex
 	s.reloadMu = mu
 }
 
+// SetResolverPtr shares the proxy's binding resolver pointer so credential
+// mutations can update the live binding snapshot without requiring SIGHUP.
+func (s *Server) SetResolverPtr(ptr *atomic.Pointer[vault.BindingResolver]) {
+	s.resolverPtr = ptr
+}
+
+// SetDockerManager enables phantom token regen and container hot-reload
+// on credential changes.
+func (s *Server) SetDockerManager(mgr *docker.Manager, phantomDir string) {
+	s.dockerMgr = mgr
+	s.phantomDir = phantomDir
+}
+
 // recompileEngine rebuilds the policy engine from the store and atomically
 // swaps it. Returns an error if recompilation fails.
 func (s *Server) recompileEngine() error {
@@ -74,6 +93,69 @@ func (s *Server) recompileEngine() error {
 	}
 	s.enginePtr.Store(newEng)
 	return nil
+}
+
+// rebuildResolver reads bindings from the store, creates a new BindingResolver,
+// and atomically swaps it into the shared pointer. The caller must hold reloadMu.
+func (s *Server) rebuildResolver() error {
+	if s.resolverPtr == nil || s.store == nil {
+		return nil
+	}
+	rows, err := s.store.ListBindings()
+	if err != nil {
+		return fmt.Errorf("list bindings: %w", err)
+	}
+	if len(rows) == 0 {
+		s.resolverPtr.Store(nil)
+		return nil
+	}
+	bindings := make([]vault.Binding, len(rows))
+	for i, r := range rows {
+		bindings[i] = vault.Binding{
+			Destination: r.Destination,
+			Ports:       r.Ports,
+			Credential:  r.Credential,
+			Header:      r.Header,
+			Template:    r.Template,
+			Protocols:   r.Protocols,
+		}
+	}
+	resolver, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		return fmt.Errorf("compile bindings: %w", err)
+	}
+	s.resolverPtr.Store(resolver)
+	return nil
+}
+
+// credMutationComplete regenerates phantom tokens and hot-reloads the agent
+// container after a credential change. removedCreds lists credentials that
+// were deleted and should be cleaned up in the agent environment.
+func (s *Server) credMutationComplete(removedCreds ...string) error {
+	if s.dockerMgr == nil {
+		return nil
+	}
+
+	names, err := s.vault.List()
+	if err != nil {
+		return fmt.Errorf("list credentials for container update: %w", err)
+	}
+
+	phantomEnv := docker.GeneratePhantomEnv(names)
+	for _, removed := range removedCreds {
+		envVar := docker.CredNameToEnvVar(removed)
+		if _, exists := phantomEnv[envVar]; !exists {
+			phantomEnv[envVar] = ""
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if s.phantomDir != "" {
+		return s.dockerMgr.ReloadSecrets(ctx, s.phantomDir, phantomEnv)
+	}
+	return s.dockerMgr.RestartWithEnv(ctx, phantomEnv)
 }
 
 // GetHealthz returns 200 when the proxy is listening.
@@ -767,6 +849,14 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "credential stored but engine recompile failed: "+err.Error(), "")
 			return
 		}
+
+		if err := s.rebuildResolver(); err != nil {
+			log.Printf("[WARN] rebuild resolver after cred add failed: %v", err)
+		}
+	}
+
+	if err := s.credMutationComplete(); err != nil {
+		log.Printf("[WARN] phantom regen/hot-reload after cred add failed: %v", err)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -823,6 +913,14 @@ func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request
 	if err := s.recompileEngine(); err != nil {
 		writeError(w, http.StatusInternalServerError, "credential removed but engine recompile failed: "+err.Error(), "")
 		return
+	}
+
+	if err := s.rebuildResolver(); err != nil {
+		log.Printf("[WARN] rebuild resolver after cred remove failed: %v", err)
+	}
+
+	if err := s.credMutationComplete(name); err != nil {
+		log.Printf("[WARN] phantom regen/hot-reload after cred remove failed: %v", err)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -1069,9 +1167,6 @@ func (s *Server) GetApiAuditVerify(w http.ResponseWriter, r *http.Request) {
 			ExpectedHash: bl.ExpectedHash,
 			ActualHash:   bl.ActualHash,
 		}
-	}
-	if apiLinks == nil {
-		apiLinks = []BrokenLink{}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
