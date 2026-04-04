@@ -9,6 +9,7 @@ require (
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/hashicorp/vault/api v1.23.0
+	github.com/quic-go/quic-go v0.59.0
 	github.com/things-go/go-socks5 v0.1.1
 	golang.org/x/crypto v0.49.0
 	golang.org/x/net v0.52.0

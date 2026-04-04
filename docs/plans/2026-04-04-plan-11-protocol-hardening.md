@@ -211,17 +211,17 @@ Detect QUIC initial packets in the UDP relay. Terminate QUIC with sluice's CA ce
 - Create: `internal/proxy/quic.go`
 - Create: `internal/proxy/quic_test.go`
 
-- [ ] Add `github.com/quic-go/quic-go` dependency
-- [ ] In UDP relay: when a packet to port 443 (or other HTTPS ports) is detected as QUIC, route to QUIC handler
-- [ ] Implement `QUICProxy` struct holding CA certificate, vault Provider, BindingResolver
-- [ ] QUIC listener accepts agent connections using `quic.ListenAddr` with TLS config signed by CA
-- [ ] Generate per-host QUIC TLS certificates using existing `GenerateCertForHost` from ca.go
-- [ ] Extract SNI from TLS ClientHello for per-host cert generation
-- [ ] If no QUIC handler configured, fall back to connection-level allow/deny (existing behavior)
-- [ ] Write test: QUIC client connects to proxy with trusted CA, handshake succeeds
-- [ ] Write test: SNI extraction returns correct hostname
-- [ ] Write test: QUIC packet detection (valid QUIC, non-QUIC UDP)
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] Add `github.com/quic-go/quic-go` dependency
+- [x] In UDP relay: when a packet to port 443 (or other HTTPS ports) is detected as QUIC, route to QUIC handler
+- [x] Implement `QUICProxy` struct holding CA certificate, vault Provider, BindingResolver
+- [x] QUIC listener accepts agent connections using `quic.ListenAddr` with TLS config signed by CA
+- [x] Generate per-host QUIC TLS certificates using existing `GenerateCertForHost` from ca.go
+- [x] Extract SNI from TLS ClientHello for per-host cert generation
+- [x] If no QUIC handler configured, fall back to connection-level allow/deny (existing behavior)
+- [x] Write test: QUIC client connects to proxy with trusted CA, handshake succeeds
+- [x] Write test: SNI extraction returns correct hostname
+- [x] Write test: QUIC packet detection (valid QUIC, non-QUIC UDP)
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 10: HTTP/3 request interception and credential injection
 
