@@ -99,18 +99,18 @@ Bidirectional WebSocket relay that sits between agent and upstream after HTTP up
 - Modify: `internal/proxy/ws.go`
 - Modify: `internal/proxy/ws_test.go`
 
-- [ ] Implement `WSProxy` struct holding vault Provider and content inspection rules
-- [ ] Implement `WSProxy.Relay(agentConn, upstreamConn net.Conn)` for bidirectional frame forwarding
-- [ ] Text frames (opcode 0x1): unmask, scan for phantom tokens, replace with real credentials, re-mask, forward. Release credential memory immediately.
-- [ ] Binary frames (opcode 0x2): pass through by default
-- [ ] Control frames (ping/pong/close): forward unchanged
-- [ ] Content deny rules with `protocols = ["ws", "wss"]` and `pattern` field: check text frame content, send close frame if matched
-- [ ] Content redact rules: replace matched patterns in text frames before forwarding to agent
-- [ ] Write tests for phantom token replacement in text frames
-- [ ] Write tests for binary frame passthrough
-- [ ] Write tests for content deny (pattern match closes connection)
-- [ ] Write tests for content redact in response frames
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] Implement `WSProxy` struct holding vault Provider and content inspection rules
+- [x] Implement `WSProxy.Relay(agentConn, upstreamConn net.Conn)` for bidirectional frame forwarding
+- [x] Text frames (opcode 0x1): unmask, scan for phantom tokens, replace with real credentials, re-mask, forward. Release credential memory immediately.
+- [x] Binary frames (opcode 0x2): pass through by default
+- [x] Control frames (ping/pong/close): forward unchanged
+- [x] Content deny rules with `protocols = ["ws", "wss"]` and `pattern` field: check text frame content, send close frame if matched
+- [x] Content redact rules: replace matched patterns in text frames before forwarding to agent
+- [x] Write tests for phantom token replacement in text frames
+- [x] Write tests for binary frame passthrough
+- [x] Write tests for content deny (pattern match closes connection)
+- [x] Write tests for content redact in response frames
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 4: Wire WebSocket proxy into MITM pipeline
 

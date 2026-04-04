@@ -3,8 +3,13 @@ package proxy
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
+	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/nemirovsky/sluice/internal/vault"
 )
 
 // helper: build a raw WebSocket frame from components for testing ReadFrame.
@@ -501,4 +506,390 @@ func TestWriteFrame_MultipleFrames(t *testing.T) {
 	if got2.Opcode != OpcodeBinary || !bytes.Equal(got2.Payload, []byte{0x01, 0x02}) {
 		t.Errorf("f2 mismatch: opcode=%d, payload=%v", got2.Opcode, got2.Payload)
 	}
+}
+
+// --- WSProxy tests ---
+
+// testProvider is a minimal vault.Provider for testing phantom token replacement.
+type testProvider struct {
+	creds map[string]string
+}
+
+func (p *testProvider) Get(name string) (vault.SecureBytes, error) {
+	if v, ok := p.creds[name]; ok {
+		return vault.NewSecureBytes(v), nil
+	}
+	return vault.SecureBytes{}, fmt.Errorf("credential %q not found", name)
+}
+
+func (p *testProvider) List() ([]string, error) {
+	names := make([]string, 0, len(p.creds))
+	for k := range p.creds {
+		names = append(names, k)
+	}
+	return names, nil
+}
+
+func (p *testProvider) Name() string { return "test" }
+
+// setupWSProxy creates a WSProxy with the given credentials, bindings, and rules.
+func setupWSProxy(
+	t *testing.T,
+	creds map[string]string,
+	bindings []vault.Binding,
+	blockRules []WSBlockRuleConfig,
+	redactRules []WSRedactRuleConfig,
+) *WSProxy {
+	t.Helper()
+	provider := &testProvider{creds: creds}
+	resolver, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resolverPtr atomic.Pointer[vault.BindingResolver]
+	resolverPtr.Store(resolver)
+	wp, err := NewWSProxy(provider, &resolverPtr, blockRules, redactRules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wp
+}
+
+// writeFrameToConn writes a single WebSocket frame to a connection.
+func writeFrameToConn(t *testing.T, conn net.Conn, f *Frame) {
+	t.Helper()
+	if err := WriteFrame(conn, f); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+}
+
+// readFrameFromConn reads a single WebSocket frame from a connection.
+func readFrameFromConn(t *testing.T, conn net.Conn) *Frame {
+	t.Helper()
+	f, err := ReadFrame(conn)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	return f
+}
+
+func TestWSProxy_PhantomTokenReplacement(t *testing.T) {
+	wp := setupWSProxy(t,
+		map[string]string{"api_key": "sk-real-secret-12345"},
+		[]vault.Binding{{
+			Destination: "api.example.com",
+			Credential:  "api_key",
+		}},
+		nil, nil,
+	)
+
+	// Create piped connections for agent<->proxy and proxy<->upstream.
+	agentClient, agentProxy := net.Pipe()
+	upstreamProxy, upstreamServer := net.Pipe()
+
+	relayErr := make(chan error, 1)
+	go func() {
+		relayErr <- wp.Relay(agentProxy, upstreamProxy, "api.example.com", 443, "wss")
+	}()
+
+	// Agent sends a text frame containing a phantom token.
+	phantom := PhantomToken("api_key")
+	msg := `{"authorization": "` + phantom + `"}`
+	sendFrame := &Frame{FIN: true, Opcode: OpcodeText}
+	sendFrame.SetPayload([]byte(msg))
+	writeFrameToConn(t, agentClient, sendFrame)
+
+	// Read from upstream side: phantom should be replaced.
+	received := readFrameFromConn(t, upstreamServer)
+	if received.Opcode != OpcodeText {
+		t.Errorf("expected text frame, got opcode %d", received.Opcode)
+	}
+	payload := string(received.UnmaskedPayload())
+	if strings.Contains(payload, "SLUICE_PHANTOM") {
+		t.Error("phantom token was not replaced in text frame")
+	}
+	expected := `{"authorization": "sk-real-secret-12345"}`
+	if payload != expected {
+		t.Errorf("payload mismatch: got %q, want %q", payload, expected)
+	}
+
+	// Clean up: close connections.
+	agentClient.Close()
+	upstreamServer.Close()
+	<-relayErr
+}
+
+func TestWSProxy_UnboundPhantomStripped(t *testing.T) {
+	// Credential exists but no binding for this destination.
+	wp := setupWSProxy(t,
+		map[string]string{"api_key": "sk-real-secret-12345"},
+		nil, // no bindings
+		nil, nil,
+	)
+
+	agentClient, agentProxy := net.Pipe()
+	upstreamProxy, upstreamServer := net.Pipe()
+
+	relayErr := make(chan error, 1)
+	go func() {
+		relayErr <- wp.Relay(agentProxy, upstreamProxy, "unbound.example.com", 443, "wss")
+	}()
+
+	phantom := PhantomToken("api_key")
+	msg := `{"token": "` + phantom + `"}`
+	sendFrame := &Frame{FIN: true, Opcode: OpcodeText}
+	sendFrame.SetPayload([]byte(msg))
+	writeFrameToConn(t, agentClient, sendFrame)
+
+	received := readFrameFromConn(t, upstreamServer)
+	payload := string(received.UnmaskedPayload())
+	if strings.Contains(payload, "SLUICE_PHANTOM") {
+		t.Error("unbound phantom token leaked in text frame")
+	}
+	// Unbound phantoms are stripped (replaced with empty), not replaced with real value.
+	expected := `{"token": ""}`
+	if payload != expected {
+		t.Errorf("payload: got %q, want %q", payload, expected)
+	}
+
+	agentClient.Close()
+	upstreamServer.Close()
+	<-relayErr
+}
+
+func TestWSProxy_BinaryFramePassthrough(t *testing.T) {
+	wp := setupWSProxy(t,
+		map[string]string{"api_key": "sk-real-secret-12345"},
+		[]vault.Binding{{
+			Destination: "api.example.com",
+			Credential:  "api_key",
+		}},
+		nil, nil,
+	)
+
+	agentClient, agentProxy := net.Pipe()
+	upstreamProxy, upstreamServer := net.Pipe()
+
+	relayErr := make(chan error, 1)
+	go func() {
+		relayErr <- wp.Relay(agentProxy, upstreamProxy, "api.example.com", 443, "wss")
+	}()
+
+	// Send binary frame with data that happens to contain the phantom prefix.
+	// Binary frames should NOT be modified.
+	binaryData := []byte{0x00, 0xFF, 0x01, 0xFE}
+	copy(binaryData, []byte{0x00, 0xFF})
+	sendFrame := &Frame{FIN: true, Opcode: OpcodeBinary}
+	sendFrame.SetPayload(binaryData)
+	writeFrameToConn(t, agentClient, sendFrame)
+
+	received := readFrameFromConn(t, upstreamServer)
+	if received.Opcode != OpcodeBinary {
+		t.Errorf("expected binary frame, got opcode %d", received.Opcode)
+	}
+	if !bytes.Equal(received.UnmaskedPayload(), binaryData) {
+		t.Errorf("binary payload modified: got %v, want %v", received.UnmaskedPayload(), binaryData)
+	}
+
+	agentClient.Close()
+	upstreamServer.Close()
+	<-relayErr
+}
+
+func TestWSProxy_ControlFramePassthrough(t *testing.T) {
+	wp := setupWSProxy(t, nil, nil, nil, nil)
+
+	agentClient, agentProxy := net.Pipe()
+	upstreamProxy, upstreamServer := net.Pipe()
+
+	relayErr := make(chan error, 1)
+	go func() {
+		relayErr <- wp.Relay(agentProxy, upstreamProxy, "example.com", 443, "wss")
+	}()
+
+	// Send ping from agent.
+	pingFrame := &Frame{FIN: true, Opcode: OpcodePing, Payload: []byte("ping")}
+	writeFrameToConn(t, agentClient, pingFrame)
+
+	// Upstream should receive the ping unchanged.
+	received := readFrameFromConn(t, upstreamServer)
+	if received.Opcode != OpcodePing {
+		t.Errorf("expected ping, got opcode %d", received.Opcode)
+	}
+	if !bytes.Equal(received.Payload, []byte("ping")) {
+		t.Errorf("ping payload mismatch")
+	}
+
+	agentClient.Close()
+	upstreamServer.Close()
+	<-relayErr
+}
+
+func TestWSProxy_ContentDenyClosesConnection(t *testing.T) {
+	wp := setupWSProxy(t,
+		nil, nil,
+		[]WSBlockRuleConfig{{
+			Pattern: `(?i)password\s*[:=]\s*\S+`,
+			Name:    "password in frame",
+		}},
+		nil,
+	)
+
+	agentClient, agentProxy := net.Pipe()
+	upstreamProxy, upstreamServer := net.Pipe()
+
+	relayErr := make(chan error, 1)
+	go func() {
+		relayErr <- wp.Relay(agentProxy, upstreamProxy, "example.com", 443, "wss")
+	}()
+
+	// Send text frame matching the block pattern.
+	msg := `password: supersecret123`
+	sendFrame := &Frame{FIN: true, Opcode: OpcodeText}
+	sendFrame.SetPayload([]byte(msg))
+	writeFrameToConn(t, agentClient, sendFrame)
+
+	// Upstream should receive a close frame (1008 Policy Violation).
+	received := readFrameFromConn(t, upstreamServer)
+	if received.Opcode != OpcodeClose {
+		t.Errorf("expected close frame, got opcode %d", received.Opcode)
+	}
+	if len(received.Payload) >= 2 {
+		statusCode := binary.BigEndian.Uint16(received.Payload[:2])
+		if statusCode != 1008 {
+			t.Errorf("expected status 1008, got %d", statusCode)
+		}
+	}
+
+	// Relay should return an error.
+	err := <-relayErr
+	if err == nil {
+		t.Error("expected error from relay after block")
+	}
+	if !strings.Contains(err.Error(), "blocked by ws content deny rule") {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	agentClient.Close()
+	upstreamServer.Close()
+}
+
+func TestWSProxy_ContentRedactInResponse(t *testing.T) {
+	wp := setupWSProxy(t,
+		nil, nil, nil,
+		[]WSRedactRuleConfig{{
+			Pattern:     `sk-[a-zA-Z0-9_-]{20,}`,
+			Replacement: "[REDACTED_API_KEY]",
+			Name:        "api key in response",
+		}},
+	)
+
+	agentClient, agentProxy := net.Pipe()
+	upstreamProxy, upstreamServer := net.Pipe()
+
+	relayErr := make(chan error, 1)
+	go func() {
+		relayErr <- wp.Relay(agentProxy, upstreamProxy, "example.com", 443, "wss")
+	}()
+
+	// Upstream sends a text frame containing a sensitive API key.
+	msg := `{"api_key": "sk-abcdefghijklmnopqrstuvwxyz12345"}`
+	sendFrame := &Frame{FIN: true, Opcode: OpcodeText}
+	sendFrame.SetPayload([]byte(msg))
+	writeFrameToConn(t, upstreamServer, sendFrame)
+
+	// Agent should receive the redacted version.
+	received := readFrameFromConn(t, agentClient)
+	if received.Opcode != OpcodeText {
+		t.Errorf("expected text frame, got opcode %d", received.Opcode)
+	}
+	payload := string(received.UnmaskedPayload())
+	if strings.Contains(payload, "sk-abcdefghijklmnopqrstuvwxyz12345") {
+		t.Error("API key was not redacted in response frame")
+	}
+	expected := `{"api_key": "[REDACTED_API_KEY]"}`
+	if payload != expected {
+		t.Errorf("payload: got %q, want %q", payload, expected)
+	}
+
+	agentClient.Close()
+	upstreamServer.Close()
+	<-relayErr
+}
+
+func TestWSProxy_ContentDenyDoesNotBlockNonMatching(t *testing.T) {
+	wp := setupWSProxy(t,
+		nil, nil,
+		[]WSBlockRuleConfig{{
+			Pattern: `(?i)password\s*[:=]\s*\S+`,
+			Name:    "password in frame",
+		}},
+		nil,
+	)
+
+	agentClient, agentProxy := net.Pipe()
+	upstreamProxy, upstreamServer := net.Pipe()
+
+	relayErr := make(chan error, 1)
+	go func() {
+		relayErr <- wp.Relay(agentProxy, upstreamProxy, "example.com", 443, "wss")
+	}()
+
+	// Send innocuous text frame that should pass through.
+	msg := `{"action": "list_users"}`
+	sendFrame := &Frame{FIN: true, Opcode: OpcodeText}
+	sendFrame.SetPayload([]byte(msg))
+	writeFrameToConn(t, agentClient, sendFrame)
+
+	// Upstream should receive the frame.
+	received := readFrameFromConn(t, upstreamServer)
+	if received.Opcode != OpcodeText {
+		t.Errorf("expected text frame, got opcode %d", received.Opcode)
+	}
+	payload := string(received.UnmaskedPayload())
+	if payload != msg {
+		t.Errorf("payload: got %q, want %q", payload, msg)
+	}
+
+	agentClient.Close()
+	upstreamServer.Close()
+	<-relayErr
+}
+
+func TestWSProxy_RedactDoesNotModifyBinary(t *testing.T) {
+	wp := setupWSProxy(t,
+		nil, nil, nil,
+		[]WSRedactRuleConfig{{
+			Pattern:     `secret`,
+			Replacement: "[REDACTED]",
+			Name:        "redact secret",
+		}},
+	)
+
+	agentClient, agentProxy := net.Pipe()
+	upstreamProxy, upstreamServer := net.Pipe()
+
+	relayErr := make(chan error, 1)
+	go func() {
+		relayErr <- wp.Relay(agentProxy, upstreamProxy, "example.com", 443, "wss")
+	}()
+
+	// Upstream sends binary frame. Even though the bytes spell "secret",
+	// binary frames should not be redacted.
+	binaryData := []byte("secret binary data")
+	sendFrame := &Frame{FIN: true, Opcode: OpcodeBinary}
+	sendFrame.SetPayload(binaryData)
+	writeFrameToConn(t, upstreamServer, sendFrame)
+
+	received := readFrameFromConn(t, agentClient)
+	if received.Opcode != OpcodeBinary {
+		t.Errorf("expected binary frame, got opcode %d", received.Opcode)
+	}
+	if !bytes.Equal(received.UnmaskedPayload(), binaryData) {
+		t.Errorf("binary payload was modified by redact rule")
+	}
+
+	agentClient.Close()
+	upstreamServer.Close()
+	<-relayErr
 }
