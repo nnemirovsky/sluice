@@ -825,6 +825,31 @@ vault = "sluice-creds"
 	}
 }
 
+func TestValidProtocolNamesSync(t *testing.T) {
+	// Verify validProtocolNames stays in sync with the proxy package's
+	// Protocol enum. Each name here (except "udp", a transport-level label)
+	// must correspond to a proxy.Protocol value via proxy.ParseProtocol.
+	// If this test fails, a protocol was added to one map but not the other.
+	expectedAppProtos := []string{
+		"generic", "http", "https", "ssh", "imap", "smtp",
+		"ws", "wss", "grpc", "dns", "quic", "apns",
+	}
+	for _, name := range expectedAppProtos {
+		if !validProtocolNames[name] {
+			t.Errorf("validProtocolNames missing %q (present in proxy.protocolNames)", name)
+		}
+	}
+	// "udp" is a transport label, not in the proxy Protocol enum.
+	if !validProtocolNames["udp"] {
+		t.Error("validProtocolNames missing \"udp\" transport label")
+	}
+	// Check no extra entries exist beyond expected + "udp".
+	expected := len(expectedAppProtos) + 1 // +1 for "udp"
+	if len(validProtocolNames) != expected {
+		t.Errorf("validProtocolNames has %d entries, expected %d", len(validProtocolNames), expected)
+	}
+}
+
 func TestImportTOMLBindingWithProtocols(t *testing.T) {
 	s := newTestStore(t)
 

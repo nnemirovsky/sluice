@@ -76,6 +76,8 @@ func (p Protocol) String() string {
 }
 
 // protocolNames maps string names to Protocol values for parsing.
+// Keep in sync with store.validProtocolNames; TestValidProtocolNamesSync
+// in internal/store verifies this.
 var protocolNames = map[string]Protocol{
 	"generic": ProtoGeneric,
 	"http":    ProtoHTTP,

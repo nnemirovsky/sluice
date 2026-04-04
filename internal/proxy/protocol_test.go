@@ -56,9 +56,22 @@ func TestParseProtocolCaseInsensitive(t *testing.T) {
 }
 
 func TestParseProtocolUnknown(t *testing.T) {
-	_, err := ParseProtocol("ftp")
+	p, err := ParseProtocol("ftp")
 	if err == nil {
 		t.Error("ParseProtocol(\"ftp\") should return error for unknown protocol")
+	}
+	if p != ProtoGeneric {
+		t.Errorf("ParseProtocol(\"ftp\") = %d, want %d (ProtoGeneric)", int(p), int(ProtoGeneric))
+	}
+}
+
+func TestParseProtocolEmpty(t *testing.T) {
+	p, err := ParseProtocol("")
+	if err == nil {
+		t.Error("ParseProtocol(\"\") should return error for empty string")
+	}
+	if p != ProtoGeneric {
+		t.Errorf("ParseProtocol(\"\") = %d, want %d (ProtoGeneric)", int(p), int(ProtoGeneric))
 	}
 }
 
@@ -347,6 +360,11 @@ func TestDetectFromClientBytes(t *testing.T) {
 			want: ProtoGeneric,
 		},
 		{
+			name: "tls_above_range",
+			data: []byte{0x16, 0x03, 0x04, 0x00, 0x05},
+			want: ProtoGeneric,
+		},
+		{
 			name: "short_ssh",
 			data: []byte("SSH"),
 			want: ProtoGeneric,
@@ -410,6 +428,18 @@ func TestTwoPhaseDetection(t *testing.T) {
 			port:      22,
 			data:      []byte("SSH-2.0-OpenSSH_8.9\r\n"),
 			wantFinal: ProtoSSH,
+		},
+		{
+			name:      "ssh_on_https_port_byte_overrides_port",
+			port:      443,
+			data:      []byte("SSH-2.0-OpenSSH_8.9\r\n"),
+			wantFinal: ProtoSSH,
+		},
+		{
+			name:      "http_on_ssh_port_byte_overrides_port",
+			port:      22,
+			data:      []byte("GET / HTTP/1.1\r\n"),
+			wantFinal: ProtoHTTP,
 		},
 		{
 			name:      "unknown_data_on_non_standard_port",
@@ -510,6 +540,11 @@ func TestDetectFromServerBytes(t *testing.T) {
 		{
 			name: "short_data",
 			data: []byte("220"),
+			want: ProtoGeneric,
+		},
+		{
+			name: "smtp_220_no_delimiter",
+			data: []byte("220x not really smtp"),
 			want: ProtoGeneric,
 		},
 		{

@@ -728,15 +728,14 @@ func (s *Server) handleWithDetection(
 			}
 			pinID := generatePinID()
 			s.injector.PinIPs(pinID, ips)
+			defer s.injector.UnpinIPs(pinID)
 			injConn, err := dialThroughInjector(s.injectorLn.Addr().String(), fqdn, port, s.injector.authToken, pinID)
 			if err != nil {
-				s.injector.UnpinIPs(pinID)
 				log.Printf("[DETECT] injector failed for %s: %v", hostAddr, err)
 				relayDirect(peekConn, dialAddrs)
 				return
 			}
 			bidirectionalRelay(peekConn, injConn)
-			s.injector.UnpinIPs(pinID)
 			return
 		}
 	case ProtoSSH:
@@ -759,8 +758,11 @@ func (s *Server) handleWithDetection(
 
 	// Server-first detection: when no client bytes arrived (timeout),
 	// the remote might be a server-first protocol (SMTP, IMAP). Connect
-	// upstream and peek the server's first bytes to find out.
-	if n == 0 {
+	// upstream and peek the server's first bytes to find out. Only attempt
+	// this when a binding and mail proxy exist, since server-first detection
+	// can only route through the mail proxy and the upstream probe is wasted
+	// without a binding to inject.
+	if n == 0 && binding != nil && s.mailProxy != nil {
 		s.handleServerFirstDetection(peekConn, binding, hostAddr, dialAddrs)
 		return
 	}
