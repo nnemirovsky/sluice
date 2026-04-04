@@ -1023,6 +1023,10 @@ protocols = ["quic"]
 destination = "blocked.example.com"
 ports = [443]
 protocols = ["udp"]
+
+[[deny]]
+destination = "*"
+protocols = ["udp"]
 `))
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -1034,10 +1038,10 @@ protocols = ["udp"]
 		port int
 		want Verdict
 	}{
-		// protocols = ["quic"] matches via EvaluateQUIC
+		// protocols = ["quic"] matches via EvaluateQUIC even with blanket UDP deny
 		{"quic_protocol_match", "quic-only.example.com", 443, Allow},
-		// protocols = ["udp"] also matches via EvaluateQUIC (fallback)
-		{"udp_protocol_match", "udp-only.example.com", 443, Allow},
+		// protocols = ["udp"] is now blocked by blanket UDP deny
+		{"udp_blanket_deny", "udp-only.example.com", 443, Deny},
 		// quic deny takes priority even with udp allow
 		{"quic_deny_priority", "blocked.example.com", 443, Deny},
 		// unknown host is denied by default
@@ -1051,5 +1055,26 @@ protocols = ["udp"]
 					tt.dest, tt.port, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestEvaluateQUIC_UDPFallback(t *testing.T) {
+	// Without a blanket UDP deny, UDP allow rules still work as fallback.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "udp-allowed.example.com"
+ports = [443]
+protocols = ["udp"]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	got := eng.EvaluateQUIC("udp-allowed.example.com", 443)
+	if got != Allow {
+		t.Errorf("EvaluateQUIC with UDP allow fallback = %v, want Allow", got)
 	}
 }

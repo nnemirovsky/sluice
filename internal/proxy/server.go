@@ -713,6 +713,11 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 	var mu sync.Mutex
 	sessions := make(map[string]*udpSession)
 
+	// Ensure bindLn is closed exactly once regardless of which goroutine
+	// exits first (dispatch loop vs TCP control connection reader).
+	var closeBindOnce sync.Once
+	closeBind := func() { closeBindOnce.Do(func() { bindLn.Close() }) }
+
 	// Start the datagram dispatch loop in a goroutine.
 	go func() {
 		defer func() {
@@ -721,7 +726,7 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 				sess.upstream.Close()
 			}
 			mu.Unlock()
-			bindLn.Close()
+			closeBind()
 		}()
 
 		buf := make([]byte, 65535)
@@ -939,13 +944,13 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 		}
 	}()
 
-	// Block on the TCP control connection. When it closes, the deferred
-	// cleanup in the goroutine above will run (bindLn.Close causes the
-	// ReadFrom to return an error, exiting the loop).
+	// Block on the TCP control connection. When it closes, closeBind
+	// causes the dispatch goroutine's ReadFrom to return an error,
+	// exiting the loop and running its deferred cleanup.
 	tcpBuf := make([]byte, 1)
 	for {
 		if _, err := request.Reader.Read(tcpBuf); err != nil {
-			bindLn.Close()
+			closeBind()
 			return nil
 		}
 	}

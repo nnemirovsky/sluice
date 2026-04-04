@@ -607,8 +607,9 @@ func (e *Engine) EvaluateUDP(dest string, port int) Verdict {
 
 // EvaluateQUIC checks a destination and port with QUIC-specific semantics.
 // Uses the same default-deny strategy as EvaluateUDP (ask is treated as deny).
-// Matches rules with protocol "quic" first, then falls back to "udp" rules,
-// so both protocols = ["quic"] and protocols = ["udp"] can allow QUIC traffic.
+// QUIC-specific rules are evaluated first (deny then allow). If no QUIC rule
+// matches, falls back to EvaluateUDP. This ensures a QUIC allow rule can
+// override a blanket UDP deny (e.g. deny * protocols=["udp"]).
 func (e *Engine) EvaluateQUIC(dest string, port int) Verdict {
 	dest = normalizeDestination(dest)
 	e.mu.RLock()
@@ -616,14 +617,19 @@ func (e *Engine) EvaluateQUIC(dest string, port int) Verdict {
 	if e.compiled == nil {
 		return Deny
 	}
-	// Deny if either quic or udp deny rules match.
-	if matchRulesWithProto(e.compiled.denyRules, dest, port, "quic") ||
-		matchRulesWithProto(e.compiled.denyRules, dest, port, "udp") {
+	// Check QUIC-specific deny rules first.
+	if matchRulesWithProto(e.compiled.denyRules, dest, port, "quic") {
 		return Deny
 	}
-	// Allow if either quic or udp allow rules match.
-	if matchRulesWithProto(e.compiled.allowRules, dest, port, "quic") ||
-		matchRulesWithProto(e.compiled.allowRules, dest, port, "udp") {
+	// Check QUIC-specific allow rules.
+	if matchRulesWithProto(e.compiled.allowRules, dest, port, "quic") {
+		return Allow
+	}
+	// No QUIC-specific rule matched. Fall back to UDP evaluation.
+	if matchRulesWithProto(e.compiled.denyRules, dest, port, "udp") {
+		return Deny
+	}
+	if matchRulesWithProto(e.compiled.allowRules, dest, port, "udp") {
 		return Allow
 	}
 	return Deny
