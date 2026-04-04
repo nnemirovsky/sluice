@@ -7,7 +7,7 @@ Credential-injecting approval proxy for AI agents. Two layers of governance: MCP
 No existing tool combines:
 1. Credential/secret isolation from the AI agent
 2. Per-request human approval/deny via Telegram
-3. All-protocol interception (HTTP, HTTPS, SSH, IMAP, SMTP, etc.)
+3. All-protocol interception (HTTP, HTTPS, WebSocket, gRPC, SSH, IMAP, SMTP, DNS, QUIC/HTTP3)
 4. MCP-level governance (tool names, arguments, per-action policy)
 5. Audit logging of every connection and tool call
 
@@ -31,12 +31,16 @@ go test ./... -v -timeout 30s
 - `internal/store/migrate.go` - golang-migrate integration with embedded SQL files
 - `internal/store/migrations/000001_init.up.sql` - Initial schema migration (rules, config, bindings, mcp_upstreams, channels)
 - `internal/store/migrations/000001_init.down.sql` - Rollback for initial schema
-- `internal/proxy/server.go` - SOCKS5 server wrapping `armon/go-socks5` with policy enforcement
-- `internal/proxy/protocol.go` - Port-based protocol detection (HTTP, HTTPS, SSH, IMAP, SMTP, generic)
+- `internal/proxy/server.go` - SOCKS5 server wrapping `things-go/go-socks5` with TCP and UDP policy enforcement
+- `internal/proxy/protocol.go` - Protocol detection for HTTP, HTTPS, SSH, IMAP, SMTP, WebSocket (ws/wss), gRPC, DNS, QUIC, and generic
 - `internal/proxy/ca.go` - Self-signed CA generation and persistence for HTTPS MITM
 - `internal/proxy/inject.go` - HTTPS MITM credential injector using goproxy with scoped phantom token replacement and unbound token stripping
 - `internal/proxy/ssh.go` - SSH jump host with vault key injection and bidirectional channel relay
 - `internal/proxy/mail.go` - IMAP/SMTP AUTH command proxy with phantom token replacement (including base64)
+- `internal/proxy/ws.go` - WebSocket frame parser (RFC 6455) and bidirectional relay with phantom token replacement in text frames and content inspection
+- `internal/proxy/udp.go` - UDP relay for SOCKS5 UDP ASSOCIATE with per-datagram policy enforcement and default-deny
+- `internal/proxy/dns.go` - DNS query interceptor with domain-level policy evaluation and NXDOMAIN for denied domains
+- `internal/proxy/quic.go` - QUIC/HTTP/3 MITM proxy with TLS termination, phantom token replacement, and content inspection
 - `internal/policy/engine.go` - Policy compilation of glob patterns and evaluation (LoadFromBytes for backward compat)
 - `internal/policy/engine_store.go` - LoadFromStore builds a read-only Engine from SQLite store
 - `internal/policy/glob.go` - Glob pattern to regex compilation (`*` = single label, `**` = across dots)
@@ -85,10 +89,10 @@ the network.
 
 ### Layer 2: SOCKS5 Proxy (network-level governance)
 
-Sits between the container and the internet. Sees every TCP connection. Can
-approve/deny any protocol (HTTP, SSH, IMAP, SMTP). Injects credentials at the
-network level. Catches anything that bypasses MCP (direct HTTP calls, raw
-sockets, etc.).
+Sits between the container and the internet. Sees every TCP and UDP connection.
+Can approve/deny any protocol (HTTP, HTTPS, WebSocket, gRPC, SSH, IMAP, SMTP,
+DNS, QUIC/HTTP3). Injects credentials at the network level. Catches anything
+that bypasses MCP (direct HTTP calls, raw sockets, etc.).
 
 ```
 +---------------------------------------------------------------+
@@ -101,7 +105,7 @@ sockets, etc.).
 |  |  +-------------+    +---------------------+               | |
 |  |  |  OpenClaw    |    |  tun2proxy          |               | |
 |  |  |  (agent)     |    |  (TUN -> SOCKS5)    |               | |
-|  |  |              |    |  Routes ALL TCP     |               | |
+|  |  |              |    |  Routes ALL TCP+UDP |               | |
 |  |  |  No real     |    |  to Sluice proxy    |               | |
 |  |  |  credentials |    +---------+-----------+               | |
 |  |  |              |              |                           | |
@@ -115,12 +119,12 @@ sockets, etc.).
 |  +-------------+-----+ +--------+---------------------------+ |
 |  | Sluice MCP Gateway | | Sluice SOCKS5 Proxy               | |
 |  |                     | |                                    | |
-|  | - Tool-level policy | | - Connection-level policy          | |
-|  | - Argument inspect  | | - Allowlist/denylist/ask           | |
-|  | - Per-action control| | - Built-in HTTPS MITM              | |
-|  | - Response redact   | | - Credential injection (in-process)|
-|  | - Local tool govnce | | - Telegram approval (inline btns)  | |
-|  | - Telegram approval | | - Audit log (every connection)     | |
+|  | - Tool-level policy | | - TCP + UDP policy                 | |
+|  | - Argument inspect  | | - HTTPS + QUIC/HTTP3 MITM          | |
+|  | - Per-action control| | - WebSocket frame inspection       | |
+|  | - Response redact   | | - DNS query-level policy           | |
+|  | - Local tool govnce | | - Credential injection (in-process)| |
+|  | - Telegram approval | | - Telegram approval + audit log    | |
 |  +---------------------+ +--------+--------------------------+ |
 |                                    |                           |
 |                  +-----------------+--------+                  |
@@ -150,8 +154,8 @@ sockets, etc.).
 | Component | Role | Implementation |
 |-----------|------|----------------|
 | **OpenClaw** | AI agent, no real credentials | Existing Docker image |
-| **tun2proxy** | Routes ALL TCP through TUN to SOCKS5 | Existing `ghcr.io/tun2proxy/tun2proxy` |
-| **Sluice SOCKS5 Proxy** | Network-level policy + HTTPS MITM + credential injection | Custom Go, single binary |
+| **tun2proxy** | Routes ALL TCP + UDP through TUN to SOCKS5 | Existing `ghcr.io/tun2proxy/tun2proxy` |
+| **Sluice SOCKS5 Proxy** | Network-level policy + HTTPS/QUIC MITM + WebSocket inspection + DNS interception + credential injection | Custom Go, single binary |
 | **Sluice MCP Gateway** | Semantic tool governance (stdio + HTTP) | Custom Go, same binary |
 | **Sluice Telegram Bot** | Approval UX + credential/config management | Same binary |
 | **Vault** | Encrypted credential storage + phantom token mapping | age-encrypted files (default), pluggable providers |
@@ -327,7 +331,7 @@ Policy store: `internal/store/store.go` wraps a SQLite database (via `modernc.or
 
 Policy engine: `LoadFromStore(s *store.Store)` reads all rules from SQLite and compiles glob patterns into regexes, producing a read-only Engine snapshot. `LoadFromBytes` is kept for backward compatibility (tests, import path). `Evaluate(dest, port)` checks deny rules first, then allow, then ask, falling back to default verdict. Mutations go through the store, then a new Engine is compiled and atomically swapped via `srv.StoreEngine(newEngine)`. SIGHUP also rebuilds the binding resolver from the store and atomically swaps it via `srv.StoreResolver(newResolver)`, so bindings added via CLI or Telegram take effect without a full restart.
 
-Proxy integration: `policyRuleSet` implements the `socks5.RuleSet` interface. Protocol detection stores results in context for future credential injection. The binding resolver is stored as an `atomic.Pointer[vault.BindingResolver]` so it can be hot-swapped on SIGHUP or after Telegram/CLI credential mutations. `Server.StoreResolver()` and `Server.ResolverPtr()` provide the swap and shared-access interfaces.
+Proxy integration: `policyRuleSet` implements the `socks5.RuleSet` interface for TCP CONNECT. UDP ASSOCIATE sessions are handled by `UDPRelay` with per-datagram policy, `DNSInterceptor` for port 53, and `QUICProxy` for QUIC packets on HTTPS ports. Protocol detection stores results in context for future credential injection. The binding resolver is stored as an `atomic.Pointer[vault.BindingResolver]` so it can be hot-swapped on SIGHUP or after Telegram/CLI credential mutations. `Server.StoreResolver()` and `Server.ResolverPtr()` provide the swap and shared-access interfaces.
 
 Channel abstraction: `internal/channel/channel.go` defines the `Channel` interface and `ChannelType` enum (ChannelTelegram=0, ChannelHTTP=1). `Channel` has methods for non-blocking `RequestApproval`, `CancelApproval`, `Commands()`, `Notify`, and lifecycle (`Start`/`Stop`). `internal/channel/broker.go` defines the `Broker` which coordinates approval flow across multiple enabled channels. Approval requests are broadcast to all channels and the first `Resolve()` call wins. Other channels get `CancelApproval()` for cleanup. Rate limiting prevents approval queue flooding: `MaxPendingRequests` (default 50) caps concurrent pending approvals, and per-destination rate limits (5 requests/minute) prevent a single target from monopolizing the queue. Requests exceeding limits are auto-denied.
 
@@ -346,6 +350,16 @@ HTTPS credential injection: `Injector` wraps `goproxy` as an in-process MITM pro
 SSH credential injection: `SSHJumpHost` accepts the agent's SSH connection with no authentication (`NoClientAuth`), decrypts the SSH private key from the vault, authenticates to the upstream server, and relays SSH channels/requests bidirectionally. `Binding.Template` holds the SSH username (defaults to "root").
 
 Mail credential injection: `MailProxy` intercepts IMAP LOGIN and SMTP AUTH PLAIN/LOGIN commands. For base64-encoded auth data, it decodes, replaces phantom tokens, and re-encodes. Non-auth traffic is relayed unchanged.
+
+WebSocket frame inspection: `internal/proxy/ws.go` implements RFC 6455 frame parsing (`ReadFrame`/`WriteFrame`) and a bidirectional `WSProxy.Relay()`. When the MITM detects a `101 Switching Protocols` response with `Upgrade: websocket`, it hijacks both connections and hands them to the WebSocket relay. Text frames (opcode 0x1) are unmasked, scanned for phantom tokens (replaced with real credentials), checked against content deny rules (connection closed on match), and redact rules applied. Binary frames pass through unmodified. Control frames (ping/pong/close) are forwarded unchanged. Continuation frames are reassembled for inspection and forwarded individually. Protocol is tagged as `ws` (plaintext) or `wss` (over TLS).
+
+gRPC detection: Requests with `Content-Type: application/grpc` are tagged as `grpc` protocol in the MITM handler. This enables protocol-specific policy rules (e.g., `protocols = ["grpc"]`). gRPC credential injection uses the same HTTPS MITM phantom swap.
+
+UDP relay and default-deny: `internal/proxy/udp.go` implements `UDPRelay` handling SOCKS5 UDP ASSOCIATE sessions. Each datagram's destination is evaluated against the policy engine. Default verdict for UDP is deny (safe default since legitimate API traffic uses TCP). Ask verdicts are treated as deny (Telegram approval for individual UDP packets is not practical). The relay maps client addresses to sessions and cleans up on TCP control connection close.
+
+DNS query interception: `internal/proxy/dns.go` implements `DNSInterceptor` that parses DNS query packets (Question section only, extracting domain name from length-prefixed labels). Domains are evaluated against the policy engine using the same glob matching as network rules. Allowed queries are forwarded to the upstream resolver (configurable via `--dns-resolver`, default system resolver). Denied domains get an NXDOMAIN response. All DNS queries are logged to audit with protocol="dns".
+
+QUIC/HTTP3 MITM: `internal/proxy/quic.go` implements `QUICProxy` using `quic-go`. QUIC initial packets are detected in the UDP relay by checking the long header format (first byte bits 7-6 = 11, version field at bytes 1-4 for QUIC v1/v2). Detected QUIC traffic on HTTPS ports is routed to QUICProxy, which terminates TLS using per-host certificates generated from the sluice CA (reusing `GenerateCertForHost` from ca.go). SNI is extracted from the TLS ClientHello. HTTP/3 requests are intercepted using `quic-go/http3`: phantom tokens are replaced in headers and body, content deny patterns block requests, and redact patterns modify responses before forwarding to the agent. The upstream connection uses `http3.RoundTripper`.
 
 Docker integration: Three-container architecture (sluice + tun2proxy + openclaw) with `network_mode: "service:tun2proxy"` routing all openclaw traffic through sluice's SOCKS5 proxy. `docker.Manager` wraps a `ContainerClient` interface with `ExecInContainer` for docker exec and standard container lifecycle methods. On credential mutation via Telegram `/cred` commands or CLI, `credMutationComplete` regenerates phantom environment variables using `GeneratePhantomEnv` and calls `Manager.ReloadSecrets`. Hot reload writes each phantom token as a file in a shared `sluice-phantoms` volume (e.g. `/phantoms/ANTHROPIC_API_KEY`) then runs `docker exec openclaw openclaw secrets reload`. If exec fails (agent image does not support reload), it falls back to `RestartWithEnv` which recreates the container with updated env vars. `BotConfig.Vault` and `BotConfig.DockerMgr` wire the vault and Docker manager into Telegram command handling. The sluice entrypoint generates a CA cert and copies it to a shared volume so openclaw can trust HTTPS MITM certificates via `SSL_CERT_FILE`.
 
@@ -410,6 +424,19 @@ name = "api key in tool arguments"
 pattern = "(?i)(sk-[a-zA-Z0-9_-]{20,})"
 replacement = "[REDACTED_API_KEY]"
 name = "api key in responses"
+
+# -- UDP rules --
+
+[[deny]]
+destination = "*"
+protocols = ["udp"]
+name = "block all UDP by default"
+
+[[allow]]
+destination = "dns.google"
+ports = [53]
+protocols = ["udp", "dns"]
+name = "allow Google DNS"
 
 # -- Denylist --
 
@@ -581,14 +608,19 @@ bound phantom tokens with real values, then strips any remaining unbound
 phantom tokens. Credentials are only injected into traffic destined for
 their bound destinations, preventing cross-credential exfiltration.
 
-### Non-HTTP protocols
+### Protocol-specific credential injection and inspection
 
-| Protocol | How credentials are injected |
-|----------|-------------------------------|
-| **HTTP/HTTPS** | Built-in MITM, byte-level phantom swap (handles any auth scheme) |
-| **SSH** | Sluice acts as SSH jump host, injects key from vault |
-| **IMAP/SMTP** | Sluice proxies AUTH command, swaps phantom password for real |
-| **Generic TCP** | Connection-level allow/deny only (no credential injection) |
+| Protocol | Transport | Credential injection | Content inspection |
+|----------|-----------|---------------------|-------------------|
+| **HTTP/HTTPS** | TCP | Built-in MITM, byte-level phantom swap | Full request/response |
+| **gRPC** | TCP | Header phantom swap (detected via Content-Type: application/grpc) | Request/response metadata |
+| **WebSocket (ws/wss)** | TCP | Handshake headers + text frame phantom swap | Text frame content (deny + redact rules) |
+| **SSH** | TCP | Jump host, key from vault | N/A |
+| **IMAP/SMTP** | TCP | AUTH command proxy, phantom password swap | N/A |
+| **DNS** | UDP | N/A | Domain-level policy (NXDOMAIN for denied) |
+| **QUIC/HTTP3** | UDP | HTTP/3 MITM, phantom swap via quic-go | Full HTTP/3 request/response |
+| **Generic TCP** | TCP | Connection-level allow/deny only | None |
+| **Generic UDP** | UDP | Connection-level allow/deny only (default-deny) | None |
 
 ## Docker Compose
 
@@ -596,12 +628,13 @@ See `compose.yml` in the repo root. Key features:
 - Health checks: sluice exposes `/healthz` on `:3000`, tun2proxy checks TUN device
 - Startup ordering via `condition: service_healthy`
 - `restart: unless-stopped` on all services
+- TCP + UDP routing: tun2proxy routes all TCP and UDP traffic through sluice's SOCKS5 proxy (UDP via SOCKS5 UDP ASSOCIATE)
 - CA cert trust: openclaw mounts sluice-ca volume and sets `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`
 - Phantom tokens: shared `sluice-phantoms` volume mounted read-write in sluice and read-only in openclaw at `/phantoms/`. Sluice writes phantom token files, openclaw reads them. Fallback `env_file: .env.phantom` for initial bootstrap.
 
 ## Libraries
 
-- `github.com/armon/go-socks5` - SOCKS5 server
+- `github.com/things-go/go-socks5` - SOCKS5 server with UDP ASSOCIATE support (replaces armon/go-socks5)
 - `modernc.org/sqlite` - Pure Go SQLite driver (no CGO, works with CGO_ENABLED=0)
 - `github.com/BurntSushi/toml` - TOML parsing for seed file import only (`store/import.go`)
 - `golang.org/x/net/proxy` - SOCKS5 client (tests only)
@@ -613,6 +646,7 @@ See `compose.yml` in the repo root. Key features:
 - `lukechampine.com/blake3` - Blake3 hashing for tamper-evident audit chain
 - `github.com/hashicorp/vault/api` - HashiCorp Vault client for external secret management (KV v2, AppRole auth)
 - `github.com/golang-migrate/migrate/v4` - Schema migration framework with embedded SQL files
+- `github.com/quic-go/quic-go` - QUIC/HTTP3 implementation for QUIC MITM proxy
 
 ## Estimated Scope
 
@@ -620,6 +654,9 @@ See `compose.yml` in the repo root. Key features:
 |-----------|------------|-------|
 | SOCKS5 proxy with policy engine | ~400 | Core connection handling |
 | HTTPS MITM + credential injection | ~300 | goproxy handlers, phantom swap, CA cert gen |
+| WebSocket frame inspection | ~250 | Frame parser, relay, phantom swap, content rules |
+| UDP relay + DNS interception | ~300 | UDP ASSOCIATE, per-datagram policy, DNS parsing |
+| QUIC/HTTP3 MITM | ~250 | quic-go TLS termination, HTTP/3 phantom swap |
 | MCP gateway (stdio + HTTP) | ~500 | Tool interception, upstream management |
 | Credential vault + secure memory | ~300 | age-encrypted, SecureBytes with zeroing |
 | External vault providers | ~200 | HashiCorp Vault, env, provider interface |
@@ -628,7 +665,7 @@ See `compose.yml` in the repo root. Key features:
 | Policy CLI (list/add/remove/import/export) | ~200 | Unified control plane |
 | Content inspection (tool args + responses) | ~200 | Regex patterns for secrets/PII |
 | Audit logger | ~200 | JSON lines, blake3 hash chains, chain verification CLI |
-| **Total custom code** | **~2950** | Single Go binary |
+| **Total custom code** | **~3750** | Single Go binary |
 | Docker setup + tun2proxy | Config only | compose.yml |
 
 ## Future: Apple Container Support (last-mile, requires research)

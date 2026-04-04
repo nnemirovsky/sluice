@@ -281,14 +281,14 @@ Connect QUIC handler to UDP relay. Update Docker compose for UDP routing.
 
 ### Task 13: [Final] Update documentation
 
-- [ ] Update CLAUDE.md: document all new protocol values (ws, wss, grpc, dns, quic)
-- [ ] Update CLAUDE.md: document WebSocket frame inspection
-- [ ] Update CLAUDE.md: document UDP interception and default-deny
-- [ ] Update CLAUDE.md: document DNS query-level policy
-- [ ] Update CLAUDE.md: document QUIC MITM
-- [ ] Update CLAUDE.md: document SOCKS5 library change (things-go/go-socks5)
-- [ ] Update CLAUDE.md: update complete protocol support table
-- [ ] Update examples/config.toml: add WebSocket, UDP, DNS, QUIC rule examples
+- [x] Update CLAUDE.md: document all new protocol values (ws, wss, grpc, dns, quic)
+- [x] Update CLAUDE.md: document WebSocket frame inspection
+- [x] Update CLAUDE.md: document UDP interception and default-deny
+- [x] Update CLAUDE.md: document DNS query-level policy
+- [x] Update CLAUDE.md: document QUIC MITM
+- [x] Update CLAUDE.md: document SOCKS5 library change (things-go/go-socks5)
+- [x] Update CLAUDE.md: update complete protocol support table
+- [x] Update examples/config.toml: add WebSocket, UDP, DNS, QUIC rule examples
 
 ## Technical Details
 

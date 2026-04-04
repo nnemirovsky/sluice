@@ -96,6 +96,9 @@ tool = "filesystem__write_*"
 tool = "exec__*"
 
 # --- Content inspection: deny rules (pattern field) ---
+# Content rules apply across all protocols (HTTP, WebSocket, QUIC, etc.).
+# In WebSocket frames, deny patterns close the connection. In HTTP/QUIC
+# responses, redact patterns replace matched content before forwarding.
 
 [[deny]]
 pattern = "(?i)(sk-[a-zA-Z0-9_-]{20,})"
