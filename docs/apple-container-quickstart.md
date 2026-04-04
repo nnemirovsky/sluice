@@ -42,34 +42,25 @@ Follow the prompt to enter the real API key. Sluice encrypts it and generates a 
 ## 5. Start sluice with Apple Container runtime
 
 ```bash
-sudo ./sluice \
+./sluice \
   --runtime apple \
   --container-name openclaw \
-  --vm-image openclaw/openclaw:latest \
   --listen 127.0.0.1:1080 \
   --db sluice.db \
   --phantom-dir ~/.sluice/phantoms
 ```
 
-Sluice will:
-1. Start the SOCKS5 proxy on :1080 and MCP gateway
-2. Start tun2proxy on the host, creating a TUN device
-3. Apply pf rules to redirect VM bridge traffic through tun2proxy to sluice
-4. Start the Apple Container VM with phantom tokens and CA cert mounted
-5. Inject MCP configuration into the VM
+Sluice will start the SOCKS5 proxy on :1080 and create an AppleManager for credential hot-reload via `container exec`. You still need to set up pf routing and start the VM separately. See the next section.
 
-## 6. Manual setup (alternative)
+## 6. Set up networking and start the VM
 
-If you prefer to set up networking manually, use the setup script:
+Use the setup script to configure pf routing and tun2proxy:
 
 ```bash
-# Start sluice without container management
-./sluice --runtime none --listen 127.0.0.1:1080
-
-# In another terminal, set up pf routing
+# Set up pf routing (requires root)
 sudo scripts/apple-container-setup.sh
 
-# Start the VM manually
+# Start the VM with CA cert and phantom tokens mounted
 container run --name openclaw \
   -e SSL_CERT_FILE=/certs/sluice-ca.crt \
   -e REQUESTS_CA_BUNDLE=/certs/sluice-ca.crt \
@@ -78,6 +69,8 @@ container run --name openclaw \
   -v ~/.sluice/phantoms:/phantoms:ro \
   openclaw/openclaw:latest
 ```
+
+Alternatively, use `--runtime none` and set `ALL_PROXY=socks5://127.0.0.1:1080` in the VM manually.
 
 ## Runtime comparison
 

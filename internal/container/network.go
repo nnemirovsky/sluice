@@ -81,8 +81,17 @@ func (r *NetworkRouter) SetupNetworkRouting(ctx context.Context, vmIP, bridgeIfa
 
 	// Ensure the main pf config references our anchor. Without this, the
 	// anchor rules load silently but are never evaluated by pf.
-	if err := r.ensureAnchorRef(); err != nil {
+	added, err := r.ensureAnchorRef()
+	if err != nil {
 		return fmt.Errorf("ensure pf anchor reference: %w", err)
+	}
+	// If we added the anchor directive, reload the main ruleset so pf
+	// picks up the new anchor reference. Without this reload, the in-memory
+	// pf ruleset does not include the anchor and anchor rules are ignored.
+	if added {
+		if _, err := r.runner.Run(ctx, "pfctl", "-f", r.pfConfPath); err != nil {
+			return fmt.Errorf("reload pf.conf after adding anchor: %w", err)
+		}
 	}
 
 	rules := r.GenerateAnchorRules(bridgeIface, subnet, tunGateway)
@@ -127,33 +136,39 @@ func (r *NetworkRouter) TeardownNetworkRouting(ctx context.Context) error {
 	return nil
 }
 
-// ensureAnchorRef adds an anchor directive to pf.conf if not present.
+// ensureAnchorRef adds an anchor directive to pf.conf if not already present
+// as an active (non-commented) line. Returns true if the directive was added
+// (meaning the caller should reload pf.conf to activate it).
 // pf only evaluates anchor rules when the main ruleset references them.
-func (r *NetworkRouter) ensureAnchorRef() error {
+func (r *NetworkRouter) ensureAnchorRef() (bool, error) {
 	directive := fmt.Sprintf("anchor \"%s\"", r.anchorName)
 
 	data, err := os.ReadFile(r.pfConfPath)
 	if err != nil {
-		return fmt.Errorf("read %s: %w", r.pfConfPath, err)
+		return false, fmt.Errorf("read %s: %w", r.pfConfPath, err)
 	}
 
-	if strings.Contains(string(data), directive) {
-		return nil // already present
+	// Check line-by-line so commented-out directives (e.g. "# anchor ...")
+	// are not mistaken for active ones.
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == directive {
+			return false, nil // already present as an active line
+		}
 	}
 
 	f, err := os.OpenFile(r.pfConfPath, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
-		return fmt.Errorf("open %s for append: %w", r.pfConfPath, err)
+		return false, fmt.Errorf("open %s for append: %w", r.pfConfPath, err)
 	}
 	_, writeErr := fmt.Fprintf(f, "\n%s\n", directive)
 	closeErr := f.Close()
 	if writeErr != nil {
-		return fmt.Errorf("write anchor directive: %w", writeErr)
+		return false, fmt.Errorf("write anchor directive: %w", writeErr)
 	}
 	if closeErr != nil {
-		return fmt.Errorf("close %s: %w", r.pfConfPath, closeErr)
+		return false, fmt.Errorf("close %s: %w", r.pfConfPath, closeErr)
 	}
-	return nil
+	return true, nil
 }
 
 // removeAnchorRef removes the anchor directive from pf.conf.

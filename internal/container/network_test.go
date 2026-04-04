@@ -74,7 +74,9 @@ func writeTempPFConf(t *testing.T, content string) string {
 
 func TestSetupNetworkRouting(t *testing.T) {
 	runner := newMockRunner()
-	// pfctl -a sluice -f <tempfile> should be called.
+	// pfctl -f <pf.conf> reloads the main ruleset after anchor directive is added.
+	runner.onCommand("pfctl -f", nil, nil)
+	// pfctl -a sluice -f <tempfile> loads the anchor rules.
 	runner.onCommand("pfctl -a sluice -f", nil, nil)
 
 	pfConf := writeTempPFConf(t, "# default pf rules\n")
@@ -90,6 +92,9 @@ func TestSetupNetworkRouting(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	if !runner.called("pfctl -f") {
+		t.Error("expected pfctl -f call to reload pf.conf after adding anchor")
+	}
 	if !runner.called("pfctl -a sluice -f") {
 		t.Error("expected pfctl call to load anchor rules from file")
 	}
@@ -124,6 +129,50 @@ func TestSetupNetworkRoutingAnchorAlreadyPresent(t *testing.T) {
 	if count != 1 {
 		t.Errorf("expected exactly 1 anchor reference, got %d", count)
 	}
+
+	// When anchor is already present, pf.conf should NOT be reloaded.
+	if runner.called("pfctl -f") {
+		t.Error("should not reload pf.conf when anchor directive already exists")
+	}
+}
+
+func TestSetupNetworkRoutingCommentedAnchorNotMatched(t *testing.T) {
+	runner := newMockRunner()
+	runner.onCommand("pfctl -f", nil, nil)
+	runner.onCommand("pfctl -a sluice -f", nil, nil)
+
+	// pf.conf has a commented-out anchor directive. Setup should still add
+	// the active directive and reload.
+	pfConf := writeTempPFConf(t, "# anchor \"sluice\"\n")
+	router := NewNetworkRouter(NetworkRouterConfig{
+		Runner:     runner,
+		AnchorName: "sluice",
+		TUNIface:   "utun3",
+		PFConfPath: pfConf,
+	})
+
+	err := router.SetupNetworkRouting(context.Background(), "192.168.64.2", "bridge100", "192.168.64.1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should have reloaded pf.conf because the commented line is not active.
+	if !runner.called("pfctl -f") {
+		t.Error("expected pfctl -f reload when anchor was only commented out")
+	}
+
+	data, _ := os.ReadFile(pfConf)
+	// Should have both the comment and the active directive.
+	lines := strings.Split(string(data), "\n")
+	activeCount := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) == `anchor "sluice"` {
+			activeCount++
+		}
+	}
+	if activeCount != 1 {
+		t.Errorf("expected exactly 1 active anchor directive, got %d in:\n%s", activeCount, data)
+	}
 }
 
 func TestSetupNetworkRoutingBadIP(t *testing.T) {
@@ -152,7 +201,7 @@ func TestSetupNetworkRoutingIPv6(t *testing.T) {
 	}
 }
 
-func TestSetupNetworkRoutingPfctlError(t *testing.T) {
+func TestSetupNetworkRoutingPfctlReloadError(t *testing.T) {
 	runner := newMockRunner()
 	runner.onCommand("pfctl", nil, errors.New("pfctl failed"))
 
@@ -165,7 +214,29 @@ func TestSetupNetworkRoutingPfctlError(t *testing.T) {
 
 	err := router.SetupNetworkRouting(context.Background(), "192.168.64.2", "bridge100", "192.168.64.1")
 	if err == nil {
-		t.Fatal("expected error when pfctl fails")
+		t.Fatal("expected error when pfctl reload fails")
+	}
+	if !strings.Contains(err.Error(), "reload pf.conf") {
+		t.Errorf("error should mention pf.conf reload: %v", err)
+	}
+}
+
+func TestSetupNetworkRoutingAnchorLoadError(t *testing.T) {
+	runner := newMockRunner()
+	// Reload succeeds, but anchor load fails.
+	runner.onCommand("pfctl -f", nil, nil)
+	runner.onCommand("pfctl -a sluice -f", nil, errors.New("pfctl anchor failed"))
+
+	pfConf := writeTempPFConf(t, "# default pf rules\n")
+	router := NewNetworkRouter(NetworkRouterConfig{
+		Runner:     runner,
+		AnchorName: "sluice",
+		PFConfPath: pfConf,
+	})
+
+	err := router.SetupNetworkRouting(context.Background(), "192.168.64.2", "bridge100", "192.168.64.1")
+	if err == nil {
+		t.Fatal("expected error when anchor load fails")
 	}
 	if !strings.Contains(err.Error(), "load pf anchor") {
 		t.Errorf("error should mention pf anchor: %v", err)

@@ -124,9 +124,16 @@ teardown() {
         echo "tun2proxy not running"
     fi
 
-    # Disable IP forwarding (was enabled during setup).
-    sysctl -w net.inet.ip.forwarding=0 >/dev/null 2>&1 || true
-    echo "Disabled IP forwarding."
+    # Restore IP forwarding to its original state (saved during setup).
+    if [[ -f /tmp/sluice-ip-forwarding-orig ]]; then
+        local orig
+        orig=$(cat /tmp/sluice-ip-forwarding-orig)
+        sysctl -w "net.inet.ip.forwarding=$orig" >/dev/null 2>&1 || true
+        rm -f /tmp/sluice-ip-forwarding-orig
+        echo "Restored IP forwarding to original state ($orig)."
+    else
+        echo "Warning: original IP forwarding state not found, leaving unchanged."
+    fi
 
     echo "Teardown complete."
 }
@@ -154,7 +161,8 @@ setup() {
         exit 1
     fi
 
-    # Step 3: Enable IP forwarding.
+    # Step 3: Enable IP forwarding (save original state for teardown).
+    sysctl -n net.inet.ip.forwarding > /tmp/sluice-ip-forwarding-orig 2>/dev/null || true
     sysctl -w net.inet.ip.forwarding=1 >/dev/null
     echo "Enabled IP forwarding."
 
