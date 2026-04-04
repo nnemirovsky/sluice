@@ -694,6 +694,10 @@ func (s *Server) handleWithDetection(
 	dialAddrs []string,
 ) {
 	defer agentConn.Close()
+	// Signal ready immediately: byte detection requires reading client
+	// data, which only arrives after the SOCKS5 CONNECT succeeds. Any
+	// handler failures after this point close the connection, surfacing
+	// as an application-layer error rather than a SOCKS5 failure.
 	ready <- nil
 
 	// Read first bytes with a deadline. For client-first protocols (TLS,
@@ -732,6 +736,15 @@ func (s *Server) handleWithDetection(
 			injConn, err := dialThroughInjector(s.injectorLn.Addr().String(), fqdn, port, s.injector.authToken, pinID)
 			if err != nil {
 				log.Printf("[DETECT] injector failed for %s: %v", hostAddr, err)
+				if binding != nil {
+					// Fail closed for bound connections: credential
+					// injection is required and phantom tokens must not
+					// leak upstream. Unlike the standard bound path
+					// (which returns an error before CONNECT succeeds),
+					// the detection path has already signaled ready, so
+					// this drops the connection at the application layer.
+					return
+				}
 				relayDirect(peekConn, dialAddrs)
 				return
 			}
@@ -740,16 +753,18 @@ func (s *Server) handleWithDetection(
 		}
 	case ProtoSSH:
 		if s.sshJump != nil && binding != nil {
-			innerReady := make(chan error, 1)
-			if err := s.sshJump.HandleConnection(peekConn, dialAddrs, hostAddr, *binding, innerReady); err != nil {
+			// Pass nil for ready: SOCKS5 CONNECT already succeeded (see
+			// comment above), so the handler's readiness signal is unused.
+			// Both HandleConnection implementations guard with
+			// "if ready != nil" before sending.
+			if err := s.sshJump.HandleConnection(peekConn, dialAddrs, hostAddr, *binding, nil); err != nil {
 				log.Printf("[SSH] handler error for %s: %v", hostAddr, err)
 			}
 			return
 		}
 	case ProtoIMAP, ProtoSMTP:
 		if s.mailProxy != nil && binding != nil {
-			innerReady := make(chan error, 1)
-			if err := s.mailProxy.HandleConnection(peekConn, dialAddrs, hostAddr, *binding, proto, innerReady); err != nil {
+			if err := s.mailProxy.HandleConnection(peekConn, dialAddrs, hostAddr, *binding, proto, nil); err != nil {
 				log.Printf("[MAIL] handler error for %s: %v", hostAddr, err)
 			}
 			return
@@ -815,8 +830,9 @@ func (s *Server) handleServerFirstDetection(
 		// Close probe connection. The mail proxy establishes its own
 		// upstream connection to manage STARTTLS and AUTH interception.
 		upstream.Close()
-		innerReady := make(chan error, 1)
-		if err := s.mailProxy.HandleConnection(agentConn, dialAddrs, hostAddr, *binding, serverProto, innerReady); err != nil {
+		// Pass nil for ready: SOCKS5 CONNECT already succeeded in the
+		// parent handleWithDetection call.
+		if err := s.mailProxy.HandleConnection(agentConn, dialAddrs, hostAddr, *binding, serverProto, nil); err != nil {
 			log.Printf("[MAIL] handler error for %s: %v", hostAddr, err)
 		}
 		return
