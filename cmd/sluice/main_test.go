@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -611,5 +612,116 @@ func TestStoreIsEmpty(t *testing.T) {
 	}
 	if empty {
 		t.Error("expected non-empty store after adding rule")
+	}
+}
+
+// TestDetectRuntime verifies runtime auto-detection logic.
+func TestDetectRuntime(t *testing.T) {
+	tests := []struct {
+		name            string
+		dockerAvailable bool
+		appleAvailable  bool
+		goos            string
+		want            string
+	}{
+		{
+			name: "no runtimes available",
+			goos: "linux",
+			want: "",
+		},
+		{
+			name:            "docker only on linux",
+			dockerAvailable: true,
+			goos:            "linux",
+			want:            "docker",
+		},
+		{
+			name:            "docker only on darwin",
+			dockerAvailable: true,
+			goos:            "darwin",
+			want:            "docker",
+		},
+		{
+			name:           "apple only on darwin",
+			appleAvailable: true,
+			goos:           "darwin",
+			want:           "apple",
+		},
+		{
+			name:            "both on darwin prefers apple",
+			dockerAvailable: true,
+			appleAvailable:  true,
+			goos:            "darwin",
+			want:            "apple",
+		},
+		{
+			name:           "apple binary on linux ignored",
+			appleAvailable: true,
+			goos:           "linux",
+			want:           "",
+		},
+		{
+			name:            "both on linux uses docker",
+			dockerAvailable: true,
+			appleAvailable:  true,
+			goos:            "linux",
+			want:            "docker",
+		},
+		{
+			name: "no runtimes on darwin",
+			goos: "darwin",
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := detectRuntime(tt.dockerAvailable, tt.appleAvailable, tt.goos)
+			if got != tt.want {
+				t.Errorf("detectRuntime(%v, %v, %q) = %q, want %q",
+					tt.dockerAvailable, tt.appleAvailable, tt.goos, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsDockerSocketAvailable verifies Docker socket detection.
+func TestIsDockerSocketAvailable(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a real Unix socket.
+	sockPath := filepath.Join(dir, "test.sock")
+	l, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	if !isDockerSocketAvailable(sockPath) {
+		t.Error("expected true for real Unix socket")
+	}
+
+	// Non-existent path.
+	if isDockerSocketAvailable(filepath.Join(dir, "nope.sock")) {
+		t.Error("expected false for non-existent path")
+	}
+
+	// Regular file is not a socket.
+	regularPath := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(regularPath, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if isDockerSocketAvailable(regularPath) {
+		t.Error("expected false for regular file")
+	}
+}
+
+// TestIsAppleCLIAvailable verifies the function returns without panicking.
+func TestIsAppleCLIAvailable(t *testing.T) {
+	// The container binary is typically not installed in test environments.
+	// Just verify the function doesn't panic.
+	got := isAppleCLIAvailable()
+	if got {
+		t.Log("container binary found in PATH (unexpected in most test envs)")
 	}
 }

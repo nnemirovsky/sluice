@@ -7,8 +7,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -57,10 +59,22 @@ func main() {
 	telegramChatIDStr := flag.String("telegram-chat-id", os.Getenv("TELEGRAM_CHAT_ID"), "Telegram chat ID for approvals")
 	healthAddr := flag.String("health-addr", "127.0.0.1:3000", "health check HTTP listen address (serves /healthz)")
 	shutdownTimeout := flag.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout for draining in-flight connections")
+	runtimeFlag := flag.String("runtime", "auto", "container runtime: docker, apple, auto")
 	dockerSocket := flag.String("docker-socket", "", "Docker socket path (auto-detects from DOCKER_HOST or /var/run/docker.sock)")
-	dockerContainer := flag.String("docker-container", envDefault("SLUICE_AGENT_CONTAINER", "openclaw"), "Docker container name for auto-restart on credential changes")
+	containerName := flag.String("container-name", envDefault("SLUICE_AGENT_CONTAINER", "openclaw"), "agent container/VM name")
+	vmImage := flag.String("vm-image", "", "Apple Container OCI image (required for --runtime apple)")
 	phantomDir := flag.String("phantom-dir", "", "shared volume path for phantom token files (enables hot-reload)")
 	flag.Parse()
+
+	// Validate --runtime flag early.
+	switch *runtimeFlag {
+	case "auto", "docker", "apple":
+	default:
+		log.Fatalf("unknown --runtime value %q (valid: docker, apple, auto)", *runtimeFlag)
+	}
+	if *runtimeFlag == "apple" && goruntime.GOOS != "darwin" {
+		log.Fatalf("--runtime apple requires macOS (current OS: %s)", goruntime.GOOS)
+	}
 
 	// Open the SQLite store.
 	db, err := store.New(*dbPath)
@@ -195,21 +209,49 @@ func main() {
 		}
 	}
 
-	// Container manager for auto-restart on credential changes.
+	// Container manager for credential hot-reload and lifecycle management.
 	var containerMgr container.ContainerManager
-	if vaultStore != nil {
+	selectedRuntime := *runtimeFlag
+	if selectedRuntime == "auto" {
+		selectedRuntime = detectRuntime(
+			isDockerSocketAvailable(*dockerSocket),
+			isAppleCLIAvailable(),
+			goruntime.GOOS,
+		)
+	}
+	switch selectedRuntime {
+	case "docker":
 		sock, sockErr := resolveDockerSocket(*dockerSocket)
 		if sockErr != nil {
-			log.Printf("WARNING: %v; container auto-restart disabled", sockErr)
-		} else if sock != "" {
+			log.Printf("WARNING: %v; Docker container management disabled", sockErr)
+		} else {
 			if fi, statErr := os.Stat(sock); statErr == nil && fi.Mode().Type() == os.ModeSocket {
 				client := docker.NewSocketClient(sock)
-				containerMgr = docker.NewManager(client, *dockerContainer)
-				log.Printf("docker manager enabled: socket=%s, container=%s", sock, *dockerContainer)
-			} else if *dockerSocket != "" {
-				log.Printf("WARNING: --docker-socket %q not found or not a socket; container auto-restart disabled", *dockerSocket)
+				containerMgr = docker.NewManager(client, *containerName)
+				log.Printf("docker manager enabled: socket=%s, container=%s", sock, *containerName)
+			} else if *runtimeFlag == "docker" {
+				log.Fatalf("--runtime docker: socket %q not found or not a socket", sock)
+			} else {
+				log.Printf("WARNING: Docker socket %q not available; container management disabled", sock)
 			}
 		}
+	case "apple":
+		cli, cliErr := container.NewAppleCLI(nil)
+		if cliErr != nil {
+			if *runtimeFlag == "apple" {
+				log.Fatalf("--runtime apple: container CLI not available: %v", cliErr)
+			}
+			log.Printf("WARNING: Apple Container CLI not available: %v; container management disabled", cliErr)
+		} else {
+			containerMgr = container.NewAppleManager(container.AppleManagerConfig{
+				CLI:           cli,
+				ContainerName: *containerName,
+				Image:         *vmImage,
+			})
+			log.Printf("apple container manager enabled: container=%s, image=%s", *containerName, *vmImage)
+		}
+	case "":
+		log.Printf("no container runtime detected; container management disabled")
 	}
 
 	// Create the proxy first so the bot can share its engine pointer and
@@ -446,6 +488,37 @@ func resolveDockerSocket(explicit string) (string, error) {
 		return strings.TrimPrefix(raw, "unix://"), nil
 	}
 	return raw, nil
+}
+
+// detectRuntime returns which container runtime to use based on availability.
+// Returns "docker", "apple", or "" (no runtime found).
+// On macOS, prefers Apple Container if both are available.
+func detectRuntime(dockerAvailable, appleAvailable bool, goos string) string {
+	if goos == "darwin" && appleAvailable {
+		return "apple"
+	}
+	if dockerAvailable {
+		return "docker"
+	}
+	return ""
+}
+
+// isDockerSocketAvailable checks whether a Docker socket exists and is a Unix
+// socket. socketFlag is the value of --docker-socket (empty for auto-detect).
+func isDockerSocketAvailable(socketFlag string) bool {
+	sock, err := resolveDockerSocket(socketFlag)
+	if err != nil || sock == "" {
+		return false
+	}
+	fi, err := os.Stat(sock)
+	return err == nil && fi.Mode().Type() == os.ModeSocket
+}
+
+// isAppleCLIAvailable checks whether the Apple Container `container` binary
+// is in PATH.
+func isAppleCLIAvailable() bool {
+	_, err := exec.LookPath("container")
+	return err == nil
 }
 
 // startHealthServer starts a minimal HTTP server serving /healthz.

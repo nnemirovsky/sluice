@@ -182,13 +182,13 @@ Add `--runtime docker|apple` flag. Auto-detect based on available tools.
 - Modify: `cmd/sluice/main.go`
 - Modify: `cmd/sluice/main_test.go`
 
-- [ ] Add `--runtime` flag with values `docker`, `apple`, `auto` (default: auto)
-- [ ] Auto-detection: check if `container` binary exists (Apple), check if Docker socket exists (Docker). Prefer Apple on macOS if both available.
-- [ ] Pass the selected `ContainerManager` to Telegram commands and MCP auto-injection
-- [ ] Add `--container-name` flag (default: "openclaw") shared by both runtimes
-- [ ] Add `--vm-image` flag for Apple Container (the OCI image to run)
-- [ ] Write tests for auto-detection logic
-- [ ] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
+- [x] Add `--runtime` flag with values `docker`, `apple`, `auto` (default: auto)
+- [x] Auto-detection: check if `container` binary exists (Apple), check if Docker socket exists (Docker). Prefer Apple on macOS if both available.
+- [x] Pass the selected `ContainerManager` to Telegram commands and MCP auto-injection
+- [x] Add `--container-name` flag (default: "openclaw") shared by both runtimes
+- [x] Add `--vm-image` flag for Apple Container (the OCI image to run)
+- [x] Write tests for auto-detection logic
+- [x] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
 
 ### Task 7: Sluice native mode (no container runtime)
 
