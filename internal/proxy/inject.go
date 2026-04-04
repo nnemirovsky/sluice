@@ -342,6 +342,12 @@ func (fi *wsFrameInterceptor) Read(p []byte) (int, error) {
 // forwards processed frames to the real upstream.
 func (fi *wsFrameInterceptor) Write(p []byte) (int, error) {
 	n := len(p)
+	// Cap pending buffer at one max frame plus header overhead to prevent
+	// unbounded memory growth from a slow upstream or malformed data.
+	const maxPendingWrite = maxFramePayload + 14
+	if len(fi.writePending)+len(p) > maxPendingWrite {
+		return 0, fmt.Errorf("ws write buffer overflow: %d bytes exceeds limit", len(fi.writePending)+len(p))
+	}
 	fi.writePending = append(fi.writePending, p...)
 
 	for len(fi.writePending) > 0 {

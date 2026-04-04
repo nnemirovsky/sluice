@@ -71,6 +71,11 @@ type QUICProxy struct {
 	// Nil uses the default dial. Tests set this to redirect to a local upstream.
 	upstreamDial func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error)
 
+	// transports caches HTTP/3 transports per upstream host so that multiple
+	// requests to the same host reuse one QUIC connection instead of opening
+	// a new connection (and performing a full TLS handshake) per request.
+	transports sync.Map // map[string]*http3.Transport
+
 	// mu protects listener lifecycle.
 	mu       sync.Mutex
 	listener *quic.Listener
@@ -171,15 +176,47 @@ func (q *QUICProxy) Addr() net.Addr {
 	return q.addr
 }
 
-// Close shuts down the QUIC listener.
+// Close shuts down the QUIC listener and all cached upstream transports.
 func (q *QUICProxy) Close() error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.closed = true
+	q.transports.Range(func(key, value any) bool {
+		if t, ok := value.(*http3.Transport); ok {
+			t.Close()
+		}
+		q.transports.Delete(key)
+		return true
+	})
 	if q.listener != nil {
 		return q.listener.Close()
 	}
 	return nil
+}
+
+// getOrCreateTransport returns a cached HTTP/3 transport for the given host,
+// creating one if it does not already exist. This avoids a full QUIC+TLS
+// handshake per request when multiple requests target the same upstream.
+func (q *QUICProxy) getOrCreateTransport(host string) *http3.Transport {
+	if v, ok := q.transports.Load(host); ok {
+		return v.(*http3.Transport)
+	}
+	tlsCfg := &tls.Config{
+		ServerName: host,
+	}
+	if q.upstreamTLSConfig != nil {
+		tlsCfg = q.upstreamTLSConfig.Clone()
+		tlsCfg.ServerName = host
+	}
+	t := &http3.Transport{
+		TLSClientConfig: tlsCfg,
+		Dial:            q.upstreamDial,
+	}
+	if existing, loaded := q.transports.LoadOrStore(host, t); loaded {
+		t.Close()
+		return existing.(*http3.Transport)
+	}
+	return t
 }
 
 // getConfigForClient returns a per-connection TLS config that generates a
@@ -311,19 +348,9 @@ func (q *QUICProxy) buildHandler(upstreamHost string) http.Handler {
 			upReq.ContentLength = int64(len(reqBody))
 		}
 
-		// Forward to upstream via HTTP/3.
-		tlsCfg := &tls.Config{
-			ServerName: host,
-		}
-		if q.upstreamTLSConfig != nil {
-			tlsCfg = q.upstreamTLSConfig.Clone()
-			tlsCfg.ServerName = host
-		}
-		transport := &http3.Transport{
-			TLSClientConfig: tlsCfg,
-			Dial:            q.upstreamDial,
-		}
-		defer transport.Close()
+		// Forward to upstream via HTTP/3 using a cached transport per host
+		// to avoid a full QUIC+TLS handshake on every request.
+		transport := q.getOrCreateTransport(host)
 
 		resp, err := transport.RoundTrip(upReq)
 		if err != nil {

@@ -168,15 +168,32 @@ func parseDNSName(data []byte, offset int) (string, int, error) {
 }
 
 // BuildNXDOMAIN constructs a minimal DNS NXDOMAIN response for the given
-// query packet. The response echoes the query ID and question section.
+// query packet. The response echoes the query ID and question section,
+// truncated after the last question to avoid trailing bytes from the
+// authority/additional sections of the original query.
 func BuildNXDOMAIN(queryPacket []byte) ([]byte, error) {
 	if len(queryPacket) < dnsHeaderLen {
 		return nil, fmt.Errorf("query too short: %d bytes", len(queryPacket))
 	}
 
-	// Copy the entire query to preserve the question section.
-	resp := make([]byte, len(queryPacket))
-	copy(resp, queryPacket)
+	// Walk past the question section to find the truncation point.
+	qdcount := binary.BigEndian.Uint16(queryPacket[4:6])
+	offset := dnsHeaderLen
+	for i := 0; i < int(qdcount); i++ {
+		_, newOffset, err := parseDNSName(queryPacket, offset)
+		if err != nil {
+			return nil, fmt.Errorf("parse question %d name: %w", i, err)
+		}
+		offset = newOffset
+		if offset+4 > len(queryPacket) {
+			return nil, fmt.Errorf("question %d: truncated QTYPE/QCLASS", i)
+		}
+		offset += 4 // QTYPE + QCLASS
+	}
+
+	// Copy only header + question section (no trailing bytes).
+	resp := make([]byte, offset)
+	copy(resp, queryPacket[:offset])
 
 	// Set response flags: QR=1, RD copied from query, RA=1, RCODE=NXDOMAIN.
 	origFlags := binary.BigEndian.Uint16(queryPacket[2:4])
