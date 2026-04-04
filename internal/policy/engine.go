@@ -3,6 +3,7 @@ package policy
 import (
 	"fmt"
 	"net"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -95,7 +96,15 @@ func LoadFromBytes(data []byte) (*Engine, error) {
 		for _, r := range rules {
 			switch {
 			case r.Tool != "":
-				tr := ToolRule{Tool: r.Tool, Verdict: verdict, Note: r.Name}
+				if len(r.Ports) > 0 {
+					dispatchErr = fmt.Errorf("tool rule %q: ports not supported on tool rules", r.Tool)
+					return
+				}
+				if len(r.Protocols) > 0 {
+					dispatchErr = fmt.Errorf("tool rule %q: protocols not supported on tool rules", r.Tool)
+					return
+				}
+				tr := ToolRule{Tool: r.Tool, Verdict: verdict, Name: r.Name}
 				switch verdict {
 				case "allow":
 					toolAllow = append(toolAllow, tr)
@@ -105,6 +114,18 @@ func LoadFromBytes(data []byte) (*Engine, error) {
 					toolAsk = append(toolAsk, tr)
 				}
 			case r.Pattern != "":
+				if len(r.Ports) > 0 {
+					dispatchErr = fmt.Errorf("pattern rule %q: ports not supported on pattern rules", r.Pattern)
+					return
+				}
+				if len(r.Protocols) > 0 {
+					dispatchErr = fmt.Errorf("pattern rule %q: protocols not supported on pattern rules", r.Pattern)
+					return
+				}
+				if _, regexErr := regexp.Compile(r.Pattern); regexErr != nil {
+					dispatchErr = fmt.Errorf("pattern rule %q: invalid regex: %w", r.Pattern, regexErr)
+					return
+				}
 				if verdict == "deny" {
 					inspectBlock = append(inspectBlock, InspectBlockRule{
 						Pattern: r.Pattern,
@@ -137,11 +158,23 @@ func LoadFromBytes(data []byte) (*Engine, error) {
 
 	// [[redact]] entries are always pattern-based content redact rules.
 	for _, r := range pf.Redact {
+		if r.Pattern == "" {
+			return nil, fmt.Errorf("[[redact]] rule %q: pattern is required", r.Name)
+		}
 		if r.Destination != "" {
 			return nil, fmt.Errorf("[[redact]] rule %q: destination and pattern are mutually exclusive", r.Name)
 		}
 		if r.Tool != "" {
 			return nil, fmt.Errorf("[[redact]] rule %q: tool and pattern are mutually exclusive", r.Name)
+		}
+		if len(r.Ports) > 0 {
+			return nil, fmt.Errorf("[[redact]] rule %q: ports not supported on pattern rules", r.Pattern)
+		}
+		if len(r.Protocols) > 0 {
+			return nil, fmt.Errorf("[[redact]] rule %q: protocols not supported on pattern rules", r.Pattern)
+		}
+		if _, regexErr := regexp.Compile(r.Pattern); regexErr != nil {
+			return nil, fmt.Errorf("[[redact]] rule %q: invalid regex: %w", r.Pattern, regexErr)
 		}
 		inspectRedact = append(inspectRedact, InspectRedactRule{
 			Pattern:     r.Pattern,

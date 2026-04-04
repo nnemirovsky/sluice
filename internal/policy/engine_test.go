@@ -20,7 +20,7 @@ func loadFromTOMLFile(t *testing.T, path string) *Engine {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	if _, err := s.ImportTOML(data); err != nil {
 		t.Fatalf("import TOML: %v", err)
 	}
@@ -559,7 +559,7 @@ func TestLoadFromStoreEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	eng, err := LoadFromStore(s)
 	if err != nil {
@@ -584,14 +584,14 @@ func TestLoadFromStoreWithRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	dvAsk := "ask"
 	tsVal := 60
-	s.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvAsk, TimeoutSec: &tsVal})
-	s.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}})
-	s.AddRule("deny", store.RuleOpts{Destination: "evil.com", Name: "bad site"})
-	s.AddRule("ask", store.RuleOpts{Destination: "*.unknown.com", Ports: []int{80, 443}})
+	_ = s.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvAsk, TimeoutSec: &tsVal})
+	_, _ = s.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}})
+	_, _ = s.AddRule("deny", store.RuleOpts{Destination: "evil.com", Name: "bad site"})
+	_, _ = s.AddRule("ask", store.RuleOpts{Destination: "*.unknown.com", Ports: []int{80, 443}})
 
 	eng, err := LoadFromStore(s)
 	if err != nil {
@@ -633,11 +633,11 @@ func TestLoadFromStoreWithToolRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
-	s.AddRule("allow", store.RuleOpts{Tool: "github__list_*", Name: "read-only"})
-	s.AddRule("deny", store.RuleOpts{Tool: "exec__*", Name: "block exec"})
-	s.AddRule("ask", store.RuleOpts{Tool: "filesystem__write_*"})
+	_, _ = s.AddRule("allow", store.RuleOpts{Tool: "github__list_*", Name: "read-only"})
+	_, _ = s.AddRule("deny", store.RuleOpts{Tool: "exec__*", Name: "block exec"})
+	_, _ = s.AddRule("ask", store.RuleOpts{Tool: "filesystem__write_*"})
 
 	eng, err := LoadFromStore(s)
 	if err != nil {
@@ -665,13 +665,13 @@ func TestLoadFromStoreWithInspectRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
-	s.AddRule("deny", store.RuleOpts{
+	_, _ = s.AddRule("deny", store.RuleOpts{
 		Pattern: `(?i)(sk-[a-zA-Z0-9]{20,})`,
 		Name:    "api_key_leak",
 	})
-	s.AddRule("redact", store.RuleOpts{
+	_, _ = s.AddRule("redact", store.RuleOpts{
 		Pattern:     `(?i)(sk-[a-zA-Z0-9]{20,})`,
 		Name:        "api_key_in_response",
 		Replacement: "[REDACTED]",
@@ -702,7 +702,7 @@ func TestLoadFromStoreNoTelegramConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	eng, err := LoadFromStore(s)
 	if err != nil {
@@ -718,7 +718,7 @@ func TestLoadFromStoreInvalidDefaultVerdict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	// With typed config, the CHECK constraint rejects invalid values at the DB level.
 	invalidDV := "invalid"
@@ -733,11 +733,11 @@ func TestLoadFromStoreZeroTimeoutUsesDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	// Timeout 0 should fall back to the default (120).
 	zeroTimeout := 0
-	s.UpdateConfig(store.ConfigUpdate{TimeoutSec: &zeroTimeout})
+	_ = s.UpdateConfig(store.ConfigUpdate{TimeoutSec: &zeroTimeout})
 	eng, err := LoadFromStore(s)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -753,11 +753,11 @@ func TestLoadFromStoreRecompile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	dvRC := "deny"
-	s.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvRC})
-	s.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}})
+	_ = s.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvRC})
+	_, _ = s.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}})
 
 	eng1, err := LoadFromStore(s)
 	if err != nil {
@@ -771,7 +771,7 @@ func TestLoadFromStoreRecompile(t *testing.T) {
 	}
 
 	// Add a new rule and recompile
-	s.AddRule("allow", store.RuleOpts{Destination: "new.example.com", Ports: []int{443}, Source: "telegram"})
+	_, _ = s.AddRule("allow", store.RuleOpts{Destination: "new.example.com", Ports: []int{443}, Source: "telegram"})
 	eng2, err := LoadFromStore(s)
 	if err != nil {
 		t.Fatalf("second load: %v", err)
@@ -860,8 +860,8 @@ name = "secret_in_response"
 	if len(eng.InspectRedactRules) != 1 {
 		t.Errorf("expected 1 inspect redact rule, got %d", len(eng.InspectRedactRules))
 	}
-	if eng.ToolAllowRules[0].Note != "read-only" {
-		t.Errorf("expected tool note %q, got %q", "read-only", eng.ToolAllowRules[0].Note)
+	if eng.ToolAllowRules[0].Name != "read-only" {
+		t.Errorf("expected tool name %q, got %q", "read-only", eng.ToolAllowRules[0].Name)
 	}
 	if eng.InspectBlockRules[0].Name != "api_key_leak" {
 		t.Errorf("expected block name %q, got %q", "api_key_leak", eng.InspectBlockRules[0].Name)
@@ -876,9 +876,9 @@ func TestLoadFromStoreWithProtocols(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
-	s.AddRule("allow", store.RuleOpts{
+	_, _ = s.AddRule("allow", store.RuleOpts{
 		Destination: "github.com",
 		Ports:       []int{22},
 		Protocols:   []string{"ssh"},
@@ -901,7 +901,7 @@ func TestLoadFromStoreValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	eng, err := LoadFromStore(s)
 	if err != nil {

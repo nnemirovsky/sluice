@@ -580,4 +580,4 @@ This ensures a phantom token can never leak to an upstream, even if the agent se
 
 **Follow-up plans:**
 - Plan 10: HTTP channel (REST API + webhook delivery) and multi-channel support
-- Plan 11: `sluice setup` interactive onboarding wizard
+- Plan 11: Protocol hardening (WebSocket frame inspection, UDP interception, QUIC MITM)

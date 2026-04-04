@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	_ "modernc.org/sqlite"
@@ -36,7 +37,7 @@ func New(path string) (*Store, error) {
 			if createErr != nil {
 				return nil, fmt.Errorf("create db file %q: %w", path, createErr)
 			}
-			f.Close()
+			_ = f.Close()
 		} else if statErr == nil {
 			_ = os.Chmod(path, 0600)
 		}
@@ -53,24 +54,24 @@ func New(path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	// Enable WAL mode for better concurrent read performance.
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("set WAL mode: %w", err)
 	}
 	// Set busy timeout so concurrent writers retry instead of returning
 	// SQLITE_BUSY immediately. 5 seconds covers typical contention windows
 	// between the proxy, CLI, and Telegram bot writing to the same DB.
 	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("set busy timeout: %w", err)
 	}
 	// Enable foreign keys.
 	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 	s := &Store{db: db}
 	if err := runMigrations(db); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("migrate schema: %w", err)
 	}
 	return s, nil
@@ -126,6 +127,7 @@ type RuleExistsOpts struct {
 	Tool        string
 	Pattern     string
 	Ports       []int
+	Protocols   []string
 }
 
 // AddRule inserts a rule into the unified rules table and returns its ID.
@@ -156,22 +158,32 @@ func (s *Store) AddRule(verdict string, opts RuleOpts) (int64, error) {
 	if opts.Pattern != "" && verdict != "deny" && verdict != "redact" {
 		return 0, fmt.Errorf("pattern rules only support deny or redact verdict, got %q", verdict)
 	}
+	if verdict == "redact" && opts.Pattern == "" {
+		return 0, fmt.Errorf("redact rules require a pattern")
+	}
+	if opts.Tool != "" && len(opts.Ports) > 0 {
+		return 0, fmt.Errorf("tool rules do not support ports")
+	}
+	if opts.Tool != "" && len(opts.Protocols) > 0 {
+		return 0, fmt.Errorf("tool rules do not support protocols")
+	}
+	if opts.Pattern != "" && len(opts.Ports) > 0 {
+		return 0, fmt.Errorf("pattern rules do not support ports")
+	}
+	if opts.Pattern != "" && len(opts.Protocols) > 0 {
+		return 0, fmt.Errorf("pattern rules do not support protocols")
+	}
+	if opts.Pattern != "" {
+		if _, regexErr := regexp.Compile(opts.Pattern); regexErr != nil {
+			return 0, fmt.Errorf("pattern %q: invalid regex: %w", opts.Pattern, regexErr)
+		}
+	}
 	source := opts.Source
 	if source == "" {
 		source = "manual"
 	}
-	var portsJSON *string
-	if len(opts.Ports) > 0 {
-		b, _ := json.Marshal(opts.Ports)
-		ps := string(b)
-		portsJSON = &ps
-	}
-	var protocolsJSON *string
-	if len(opts.Protocols) > 0 {
-		b, _ := json.Marshal(opts.Protocols)
-		ps := string(b)
-		protocolsJSON = &ps
-	}
+	portsJSON := portsToJSONPtr(opts.Ports)
+	protocolsJSON := protocolsToJSONPtr(opts.Protocols)
 	res, err := s.db.Exec(
 		`INSERT INTO rules (verdict, destination, tool, pattern, replacement, ports, protocols, name, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		verdict,
@@ -221,7 +233,7 @@ func (s *Store) ListRules(filter RuleFilter) ([]Rule, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list rules: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanRules(rows)
 }
 
@@ -234,12 +246,19 @@ func (s *Store) RuleExists(verdict string, opts RuleExistsOpts) (bool, error) {
 	switch {
 	case opts.Destination != "":
 		portsJSON := portsToJSONPtr(opts.Ports)
+		protocolsJSON := protocolsToJSONPtr(opts.Protocols)
 		if portsJSON != nil {
 			query = "SELECT COUNT(*) FROM rules WHERE verdict = ? AND destination = ? AND ports = ?"
 			args = []any{verdict, opts.Destination, *portsJSON}
 		} else {
 			query = "SELECT COUNT(*) FROM rules WHERE verdict = ? AND destination = ? AND ports IS NULL"
 			args = []any{verdict, opts.Destination}
+		}
+		if protocolsJSON != nil {
+			query += " AND protocols = ?"
+			args = append(args, *protocolsJSON)
+		} else {
+			query += " AND protocols IS NULL"
 		}
 	case opts.Tool != "":
 		query = "SELECT COUNT(*) FROM rules WHERE verdict = ? AND tool = ?"
@@ -440,18 +459,8 @@ func (s *Store) AddBinding(destination, credential string, opts BindingOpts) (in
 	if destination == "" || credential == "" {
 		return 0, fmt.Errorf("destination and credential are required")
 	}
-	var portsJSON *string
-	if len(opts.Ports) > 0 {
-		b, _ := json.Marshal(opts.Ports)
-		ps := string(b)
-		portsJSON = &ps
-	}
-	var protocolsJSON *string
-	if len(opts.Protocols) > 0 {
-		b, _ := json.Marshal(opts.Protocols)
-		ps := string(b)
-		protocolsJSON = &ps
-	}
+	portsJSON := portsToJSONPtr(opts.Ports)
+	protocolsJSON := protocolsToJSONPtr(opts.Protocols)
 	res, err := s.db.Exec(
 		`INSERT INTO bindings (destination, ports, credential, header, template, protocols) VALUES (?, ?, ?, ?, ?, ?)`,
 		destination, portsJSON, credential,
@@ -481,7 +490,7 @@ func (s *Store) ListBindings() ([]BindingRow, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list bindings: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanBindings(rows)
 }
 
@@ -556,7 +565,7 @@ func (s *Store) ListMCPUpstreams() ([]MCPUpstreamRow, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list upstreams: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var upstreams []MCPUpstreamRow
 	for rows.Next() {
@@ -641,7 +650,7 @@ func (s *Store) ListChannels() ([]Channel, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list channels: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var channels []Channel
 	for rows.Next() {
@@ -693,7 +702,7 @@ func (s *Store) ListBindingsByCredential(credential string) ([]BindingRow, error
 	if err != nil {
 		return nil, fmt.Errorf("list bindings by credential: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanBindings(rows)
 }
 
@@ -758,7 +767,7 @@ func (s *Store) AddRuleAndBinding(
 	}
 	defer func() {
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 		}
 	}()
 
@@ -767,18 +776,8 @@ func (s *Store) AddRuleAndBinding(
 	if source == "" {
 		source = "manual"
 	}
-	var portsJSON *string
-	if len(ruleOpts.Ports) > 0 {
-		b, _ := json.Marshal(ruleOpts.Ports)
-		ps := string(b)
-		portsJSON = &ps
-	}
-	var protocolsJSON *string
-	if len(ruleOpts.Protocols) > 0 {
-		b, _ := json.Marshal(ruleOpts.Protocols)
-		ps := string(b)
-		protocolsJSON = &ps
-	}
+	portsJSON := portsToJSONPtr(ruleOpts.Ports)
+	protocolsJSON := protocolsToJSONPtr(ruleOpts.Protocols)
 	res, err := tx.Exec(
 		`INSERT INTO rules (verdict, destination, ports, protocols, name, source) VALUES (?, ?, ?, ?, ?, ?)`,
 		verdict, nilIfEmpty(ruleOpts.Destination), portsJSON, protocolsJSON, nilIfEmpty(ruleOpts.Name), source,
@@ -789,18 +788,8 @@ func (s *Store) AddRuleAndBinding(
 	ruleID, _ = res.LastInsertId()
 
 	// Insert binding.
-	var bPortsJSON *string
-	if len(bindingOpts.Ports) > 0 {
-		b, _ := json.Marshal(bindingOpts.Ports)
-		ps := string(b)
-		bPortsJSON = &ps
-	}
-	var bProtocolsJSON *string
-	if len(bindingOpts.Protocols) > 0 {
-		b, _ := json.Marshal(bindingOpts.Protocols)
-		ps := string(b)
-		bProtocolsJSON = &ps
-	}
+	bPortsJSON := portsToJSONPtr(bindingOpts.Ports)
+	bProtocolsJSON := protocolsToJSONPtr(bindingOpts.Protocols)
 	res, err = tx.Exec(
 		`INSERT INTO bindings (destination, ports, credential, header, template, protocols) VALUES (?, ?, ?, ?, ?, ?)`,
 		ruleOpts.Destination, bPortsJSON, credential,
@@ -862,6 +851,16 @@ func portsToJSONPtr(ports []int) *string {
 		return nil
 	}
 	b, _ := json.Marshal(ports)
+	s := string(b)
+	return &s
+}
+
+// protocolsToJSONPtr converts a protocol slice to a JSON string pointer.
+func protocolsToJSONPtr(protocols []string) *string {
+	if len(protocols) == 0 {
+		return nil
+	}
+	b, _ := json.Marshal(protocols)
 	s := string(b)
 	return &s
 }

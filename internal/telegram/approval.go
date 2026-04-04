@@ -125,9 +125,12 @@ func (tc *TelegramChannel) sendApprovalMessage(req channel.ApprovalRequest) {
 	sent, err := tc.api.Send(msg)
 	if err != nil {
 		log.Printf("telegram send error: %s", sanitizeError(err))
-		if tc.broker != nil {
+		// In a single-channel setup, resolve immediately as Deny rather
+		// than waiting for the full broker timeout. In a multi-channel
+		// setup, another channel may still deliver the prompt, so only
+		// the broker timeout should deny.
+		if tc.broker != nil && len(tc.broker.Channels()) <= 1 {
 			tc.broker.Resolve(req.ID, channel.ResponseDeny)
-			tc.broker.ClearTimedOut(req.ID)
 		}
 		return
 	}
@@ -334,7 +337,7 @@ func (tc *TelegramChannel) handleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
-	if len(response) > telegramMaxMessage {
+	if utf8.RuneCountInString(response) > telegramMaxMessage {
 		// Truncate at a valid UTF-8 rune boundary to avoid splitting
 		// multi-byte characters, which Telegram would reject.
 		cut := telegramMaxMessage

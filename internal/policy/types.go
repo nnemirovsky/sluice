@@ -52,14 +52,13 @@ type PolicyConfig struct {
 type ToolRule struct {
 	Tool    string `toml:"tool"`
 	Verdict string `toml:"verdict"`
-	Note    string `toml:"note"`
+	Name    string `toml:"name"`
 }
 
 // InspectBlockRule defines a pattern that blocks tool arguments when matched.
 type InspectBlockRule struct {
 	Pattern string `toml:"pattern"`
 	Name    string `toml:"name"`
-	Note    string `toml:"note"`
 }
 
 // InspectRedactRule defines a pattern that redacts matched content in tool responses.

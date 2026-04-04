@@ -119,7 +119,7 @@ func loadToolRulesFromStore(s *store.Store, verdict string) ([]ToolRule, error) 
 		rules[i] = ToolRule{
 			Tool:    r.Tool,
 			Verdict: verdict,
-			Note:    r.Name,
+			Name:    r.Name,
 		}
 	}
 	return rules, nil

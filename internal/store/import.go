@@ -37,6 +37,7 @@ type importRedactRule struct {
 	Pattern     string   `toml:"pattern"`
 	Replacement string   `toml:"replacement"`
 	Name        string   `toml:"name"`
+	Tool        string   `toml:"tool"`
 	Destination string   `toml:"destination"`
 	Ports       []int    `toml:"ports"`
 	Protocols   []string `toml:"protocols"`
@@ -115,7 +116,7 @@ func (s *Store) ImportTOML(data []byte) (*ImportResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	res := &ImportResult{}
 
@@ -263,6 +264,18 @@ func insertRuleIfNew(tx *sql.Tx, verdict string, r importRule) (bool, error) {
 	if r.Pattern != "" && verdict != "deny" && verdict != "redact" {
 		return false, fmt.Errorf("pattern rules only support deny or redact verdict, got %q", verdict)
 	}
+	if r.Tool != "" && len(r.Ports) > 0 {
+		return false, fmt.Errorf("tool rule %q: ports not supported on tool rules", r.Tool)
+	}
+	if r.Tool != "" && len(r.Protocols) > 0 {
+		return false, fmt.Errorf("tool rule %q: protocols not supported on tool rules", r.Tool)
+	}
+	if r.Pattern != "" && len(r.Ports) > 0 {
+		return false, fmt.Errorf("pattern rule %q: ports not supported on pattern rules", r.Pattern)
+	}
+	if r.Pattern != "" && len(r.Protocols) > 0 {
+		return false, fmt.Errorf("pattern rule %q: protocols not supported on pattern rules", r.Pattern)
+	}
 
 	for _, p := range r.Ports {
 		if p < 1 || p > 65535 {
@@ -278,7 +291,7 @@ func insertRuleIfNew(tx *sql.Tx, verdict string, r importRule) (bool, error) {
 	}
 
 	// Check for duplicates.
-	exists, err := ruleExistsTx(tx, verdict, r.Destination, r.Tool, r.Pattern, r.Ports)
+	exists, err := ruleExistsTx(tx, verdict, r.Destination, r.Tool, r.Pattern, r.Ports, r.Protocols)
 	if err != nil {
 		return false, err
 	}
@@ -287,12 +300,7 @@ func insertRuleIfNew(tx *sql.Tx, verdict string, r importRule) (bool, error) {
 	}
 
 	portsJSON := portsToJSONPtr(r.Ports)
-	var protocolsJSON *string
-	if len(r.Protocols) > 0 {
-		b, _ := json.Marshal(r.Protocols)
-		ps := string(b)
-		protocolsJSON = &ps
-	}
+	protocolsJSON := protocolsToJSONPtr(r.Protocols)
 
 	if _, err := tx.Exec(
 		`INSERT INTO rules (verdict, destination, tool, pattern, ports, protocols, name, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -317,6 +325,9 @@ func insertRedactRuleIfNew(tx *sql.Tx, r importRedactRule) (bool, error) {
 	if r.Destination != "" {
 		return false, fmt.Errorf("redact rule: destination and pattern are mutually exclusive")
 	}
+	if r.Tool != "" {
+		return false, fmt.Errorf("redact rule %q: tool and pattern are mutually exclusive", r.Pattern)
+	}
 	if len(r.Ports) > 0 {
 		return false, fmt.Errorf("redact rule %q: ports not supported on pattern-only rules", r.Pattern)
 	}
@@ -327,7 +338,7 @@ func insertRedactRuleIfNew(tx *sql.Tx, r importRedactRule) (bool, error) {
 		return false, fmt.Errorf("redact rule %q: invalid regex: %w", r.Pattern, err)
 	}
 
-	exists, err := ruleExistsTx(tx, "redact", r.Destination, "", r.Pattern, r.Ports)
+	exists, err := ruleExistsTx(tx, "redact", r.Destination, "", r.Pattern, r.Ports, r.Protocols)
 	if err != nil {
 		return false, err
 	}
@@ -349,21 +360,28 @@ func insertRedactRuleIfNew(tx *sql.Tx, r importRedactRule) (bool, error) {
 }
 
 // ruleExistsTx checks for an existing rule within a transaction. For network
-// rules, dedup is verdict+destination+ports. For tool rules, verdict+tool.
-// For pattern rules, verdict+pattern.
-func ruleExistsTx(tx *sql.Tx, verdict, destination, tool, pattern string, ports []int) (bool, error) {
+// rules, dedup is verdict+destination+ports+protocols. For tool rules,
+// verdict+tool. For pattern rules, verdict+pattern.
+func ruleExistsTx(tx *sql.Tx, verdict, destination, tool, pattern string, ports []int, protocols []string) (bool, error) {
 	var query string
 	var args []any
 
 	switch {
 	case destination != "":
 		portsJSON := portsToJSONPtr(ports)
+		protocolsJSON := protocolsToJSONPtr(protocols)
 		if portsJSON != nil {
 			query = "SELECT COUNT(*) FROM rules WHERE verdict = ? AND destination = ? AND ports = ?"
 			args = []any{verdict, destination, *portsJSON}
 		} else {
 			query = "SELECT COUNT(*) FROM rules WHERE verdict = ? AND destination = ? AND ports IS NULL"
 			args = []any{verdict, destination}
+		}
+		if protocolsJSON != nil {
+			query += " AND protocols = ?"
+			args = append(args, *protocolsJSON)
+		} else {
+			query += " AND protocols IS NULL"
 		}
 	case tool != "":
 		query = "SELECT COUNT(*) FROM rules WHERE verdict = ? AND tool = ?"
@@ -382,10 +400,11 @@ func ruleExistsTx(tx *sql.Tx, verdict, destination, tool, pattern string, ports 
 	return count > 0, nil
 }
 
-// insertBindingIfNew inserts a binding if no matching destination+credential+ports
-// combination exists. Returns true if inserted. Ports are included in the dedupe
-// check so that distinct bindings for the same credential on different ports
-// (e.g., SMTP vs IMAP) are not collapsed.
+// insertBindingIfNew inserts a binding if no matching
+// destination+credential+ports+header+template+protocols combination exists.
+// Returns true if inserted. All behavioral fields are included in the dedupe
+// check so that distinct bindings (e.g., different headers or protocol scopes
+// for the same credential) are not collapsed.
 func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
 	if b.Destination == "" {
 		return false, fmt.Errorf("binding has empty destination")
@@ -399,10 +418,11 @@ func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
 		}
 	}
 	portsJSON := portsToJSONPtr(b.Ports)
+	protocolsJSON := protocolsToJSONPtr(b.Protocols)
 	var count int
 	err := tx.QueryRow(
-		"SELECT COUNT(*) FROM bindings WHERE destination = ? AND credential = ? AND ports IS ?",
-		b.Destination, b.Credential, portsJSON,
+		"SELECT COUNT(*) FROM bindings WHERE destination = ? AND credential = ? AND ports IS ? AND header IS ? AND template IS ? AND protocols IS ?",
+		b.Destination, b.Credential, portsJSON, nilIfEmpty(b.Header), nilIfEmpty(b.Template), protocolsJSON,
 	).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("check binding exists: %w", err)
@@ -411,12 +431,6 @@ func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
 		return false, nil
 	}
 
-	var protocolsJSON *string
-	if len(b.Protocols) > 0 {
-		pb, _ := json.Marshal(b.Protocols)
-		ps := string(pb)
-		protocolsJSON = &ps
-	}
 	if _, err := tx.Exec(
 		`INSERT INTO bindings (destination, ports, credential, header, template, protocols) VALUES (?, ?, ?, ?, ?, ?)`,
 		b.Destination, portsJSON, b.Credential,

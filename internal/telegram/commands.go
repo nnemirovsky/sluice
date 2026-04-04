@@ -324,7 +324,7 @@ func (h *CommandHandler) policyAllow(dest string) string {
 	}
 
 	// Fallback to in-memory mutation when store is not configured.
-	if err := h.engine.Load().AddAllowRule(dest); err != nil {
+	if err := h.engine.Load().AddAllowRule(dest); err != nil { //nolint:staticcheck // backward compat fallback when no store
 		return fmt.Sprintf("Failed to add allow rule: %v", err)
 	}
 	return fmt.Sprintf("Added allow rule: %s%s", dest, inMemoryWarning)
@@ -348,7 +348,7 @@ func (h *CommandHandler) policyDeny(dest string) string {
 		return fmt.Sprintf("Added deny rule: %s", dest)
 	}
 
-	if err := h.engine.Load().AddDenyRule(dest); err != nil {
+	if err := h.engine.Load().AddDenyRule(dest); err != nil { //nolint:staticcheck // backward compat fallback when no store
 		return fmt.Sprintf("Failed to add deny rule: %v", err)
 	}
 	return fmt.Sprintf("Added deny rule: %s%s", dest, inMemoryWarning)
@@ -377,7 +377,7 @@ func (h *CommandHandler) policyRemove(idStr string) string {
 	}
 
 	// Fallback to in-memory mutation when store is not configured.
-	removed, err := h.engine.Load().RemoveRule(idStr)
+	removed, err := h.engine.Load().RemoveRule(idStr) //nolint:staticcheck // backward compat fallback when no store
 	if !removed {
 		return fmt.Sprintf("No rule found for: %s", idStr)
 	}
@@ -469,6 +469,7 @@ func (h *CommandHandler) credRemove(name string) string {
 	var warnings []string
 	if h.store != nil {
 		h.reloadMu.Lock()
+		defer h.reloadMu.Unlock()
 		if _, err := h.store.RemoveRulesBySource("cred-add:" + name); err != nil {
 			log.Printf("[WARN] remove rules for credential %q: %v", name, err)
 			warnings = append(warnings, fmt.Sprintf("failed to remove rules: %v", err))
@@ -487,7 +488,6 @@ func (h *CommandHandler) credRemove(name string) string {
 			log.Printf("[WARN] rebuild resolver after cred remove failed: %v", err)
 			warnings = append(warnings, fmt.Sprintf("resolver rebuild failed: %v", err))
 		}
-		h.reloadMu.Unlock()
 	}
 
 	msg := fmt.Sprintf("Removed credential: %s", name)
@@ -588,7 +588,7 @@ func (h *CommandHandler) handleAudit(args []string) string {
 	}
 
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Last %d audit entries:\n\n", len(lines)))
+	fmt.Fprintf(&b, "Last %d audit entries:\n\n", len(lines))
 	for _, line := range lines {
 		b.WriteString(line)
 		b.WriteString("\n")
