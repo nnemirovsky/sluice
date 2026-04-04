@@ -141,9 +141,9 @@ SMTP and IMAP servers send a banner before the client speaks. Detection requires
 
 ### Task 5: [Final] Update documentation
 
-- [ ] Update CLAUDE.md: document deep packet detection, explain two-phase detection (port guess + byte confirmation)
-- [ ] Update CLAUDE.md: note that Protocol is integer enum, not string
-- [ ] Update examples/config.toml: add comment noting protocol detection is automatic (no need to specify protocols for standard ports)
+- [x] Update CLAUDE.md: document deep packet detection, explain two-phase detection (port guess + byte confirmation)
+- [x] Update CLAUDE.md: note that Protocol is integer enum, not string
+- [x] Update examples/config.toml: add comment noting protocol detection is automatic (no need to specify protocols for standard ports)
 
 ## Technical Details
 
