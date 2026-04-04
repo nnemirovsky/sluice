@@ -62,12 +62,12 @@ Add `ProtoTCP` and `ProtoUDP` to the Protocol integer enum and replace hardcoded
 
 ### Task 4: Verify acceptance criteria
 
-- [ ] Verify `protocols = ["udp"]` still works in policy rules
-- [ ] Verify `protocols = ["tcp"]` works in policy rules
-- [ ] Verify no hardcoded `"udp"` or `"tcp"` strings remain in policy engine or store (grep check)
-- [ ] Verify `ParseProtocol("tcp")` and `ParseProtocol("udp")` return correct enum values
-- [ ] Run full test suite: `go test ./... -v -timeout 60s -race`
-- [ ] Run linter: `go vet ./...`
+- [x] Verify `protocols = ["udp"]` still works in policy rules
+- [x] Verify `protocols = ["tcp"]` works in policy rules
+- [x] Verify no hardcoded `"udp"` or `"tcp"` strings remain in policy engine or store (grep check)
+- [x] Verify `ParseProtocol("tcp")` and `ParseProtocol("udp")` return correct enum values
+- [x] Run full test suite: `go test ./... -v -timeout 60s -race`
+- [x] Run linter: `go vet ./...`
 
 ### Task 5: [Final] Update documentation
 
