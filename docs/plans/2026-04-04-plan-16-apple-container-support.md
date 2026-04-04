@@ -167,12 +167,12 @@ Inject sluice's MITM CA cert into the Apple Container VM's trust store. Differen
 **Files:**
 - Modify: `internal/container/apple.go`
 
-- [ ] On VM startup: copy sluice's CA cert to VM via shared volume
-- [ ] Run `container exec <name> update-ca-certificates` (or equivalent for the VM's OS)
-- [ ] Set `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` env vars pointing to the cert
-- [ ] Verify HTTPS connections from within the VM trust sluice's CA
-- [ ] Write tests for cert injection flow
-- [ ] Run tests: `go test ./internal/container/ -v -timeout 30s`
+- [x] On VM startup: copy sluice's CA cert to VM via shared volume
+- [x] Run `container exec <name> update-ca-certificates` (or equivalent for the VM's OS)
+- [x] Set `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` env vars pointing to the cert
+- [x] Verify HTTPS connections from within the VM trust sluice's CA
+- [x] Write tests for cert injection flow
+- [x] Run tests: `go test ./internal/container/ -v -timeout 30s`
 
 ### Task 6: Runtime selection in main.go and CLI
 

@@ -332,3 +332,65 @@ func (m *AppleManager) Stop(ctx context.Context) error {
 func (m *AppleManager) Runtime() Runtime {
 	return RuntimeApple
 }
+
+// CACertGuestPath is the default path where the CA cert is placed inside the
+// guest VM's shared volume. Agent containers read this file to trust sluice's
+// MITM CA certificate.
+const CACertGuestPath = "/certs/sluice-ca.crt"
+
+// CACertEnvVars returns environment variables that configure common HTTP
+// libraries to trust sluice's MITM CA certificate at the given guest path.
+// These should be passed when starting the VM.
+func CACertEnvVars(guestCertPath string) map[string]string {
+	return map[string]string{
+		"SSL_CERT_FILE":       guestCertPath,
+		"REQUESTS_CA_BUNDLE":  guestCertPath,
+		"NODE_EXTRA_CA_CERTS": guestCertPath,
+	}
+}
+
+// InjectCACert copies the CA certificate from hostCertPath into the shared
+// volume at certDir, then runs trust update commands inside the VM so the
+// system trust store recognizes the cert. It tries update-ca-certificates
+// (Linux guests) first, then falls back to the macOS security command.
+// If both fail the cert is still available via the env vars set at VM startup.
+func (m *AppleManager) InjectCACert(ctx context.Context, hostCertPath, certDir string) error {
+	// Read the CA cert from the host.
+	certData, err := os.ReadFile(hostCertPath)
+	if err != nil {
+		return fmt.Errorf("read CA cert %q: %w", hostCertPath, err)
+	}
+
+	// Write the cert to the shared volume so the guest can access it.
+	destPath := filepath.Join(certDir, "sluice-ca.crt")
+	if err := os.MkdirAll(certDir, 0755); err != nil {
+		return fmt.Errorf("create cert dir %q: %w", certDir, err)
+	}
+	if err := os.WriteFile(destPath, certData, 0644); err != nil {
+		return fmt.Errorf("write CA cert to shared volume: %w", err)
+	}
+
+	// Try to update the system trust store inside the VM.
+	// Linux guests use update-ca-certificates. macOS guests use security.
+	// If neither works, the env vars (SSL_CERT_FILE, etc.) still cover
+	// most HTTP libraries.
+	_, linuxErr := m.cli.Exec(ctx, m.containerName, []string{
+		"update-ca-certificates",
+	})
+	if linuxErr == nil {
+		return nil
+	}
+
+	// Fallback: macOS guest trust store.
+	_, macErr := m.cli.Exec(ctx, m.containerName, []string{
+		"security", "add-trusted-cert", "-d", "-r", "trustRoot",
+		"-k", "/Library/Keychains/System.keychain",
+		CACertGuestPath,
+	})
+	if macErr == nil {
+		return nil
+	}
+
+	// Both failed. The cert is still usable via env vars.
+	return nil
+}

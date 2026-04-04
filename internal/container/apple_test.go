@@ -875,3 +875,153 @@ func TestNewAppleManagerNilEnv(t *testing.T) {
 		t.Error("env map should be initialized even when nil config")
 	}
 }
+
+func TestCACertEnvVars(t *testing.T) {
+	envs := CACertEnvVars("/certs/sluice-ca.crt")
+
+	want := map[string]string{
+		"SSL_CERT_FILE":       "/certs/sluice-ca.crt",
+		"REQUESTS_CA_BUNDLE":  "/certs/sluice-ca.crt",
+		"NODE_EXTRA_CA_CERTS": "/certs/sluice-ca.crt",
+	}
+	for k, v := range want {
+		if envs[k] != v {
+			t.Errorf("CACertEnvVars[%q] = %q, want %q", k, envs[k], v)
+		}
+	}
+	if len(envs) != len(want) {
+		t.Errorf("CACertEnvVars returned %d entries, want %d", len(envs), len(want))
+	}
+}
+
+func TestCACertGuestPath(t *testing.T) {
+	if CACertGuestPath == "" {
+		t.Error("CACertGuestPath should not be empty")
+	}
+	if !strings.HasSuffix(CACertGuestPath, ".crt") {
+		t.Errorf("CACertGuestPath = %q, should end with .crt", CACertGuestPath)
+	}
+}
+
+func TestInjectCACertLinuxGuest(t *testing.T) {
+	mgr, runner, _ := newTestAppleManager(t)
+
+	// update-ca-certificates succeeds (Linux guest).
+	runner.onCommand("container exec openclaw update-ca-certificates", []byte("ok\n"), nil)
+
+	// Create a fake CA cert file.
+	hostCertDir := t.TempDir()
+	hostCertPath := filepath.Join(hostCertDir, "ca-cert.pem")
+	certContent := "-----BEGIN CERTIFICATE-----\nfake-cert-data\n-----END CERTIFICATE-----\n"
+	if err := os.WriteFile(hostCertPath, []byte(certContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	destDir := t.TempDir()
+	err := mgr.InjectCACert(context.Background(), hostCertPath, destDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify cert was copied to shared volume.
+	data, err := os.ReadFile(filepath.Join(destDir, "sluice-ca.crt"))
+	if err != nil {
+		t.Fatalf("cert file not found in shared volume: %v", err)
+	}
+	if string(data) != certContent {
+		t.Errorf("cert content = %q, want %q", string(data), certContent)
+	}
+
+	// Verify update-ca-certificates was called.
+	if !runner.called("container exec openclaw update-ca-certificates") {
+		t.Error("expected update-ca-certificates exec call")
+	}
+}
+
+func TestInjectCACertMacOSGuest(t *testing.T) {
+	mgr, runner, _ := newTestAppleManager(t)
+
+	// Linux update-ca-certificates fails, macOS security command succeeds.
+	runner.onCommand("container exec openclaw update-ca-certificates", nil, errors.New("command not found"))
+	runner.onCommand("container exec openclaw security", []byte("ok\n"), nil)
+
+	hostCertDir := t.TempDir()
+	hostCertPath := filepath.Join(hostCertDir, "ca-cert.pem")
+	if err := os.WriteFile(hostCertPath, []byte("cert-data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	destDir := t.TempDir()
+	err := mgr.InjectCACert(context.Background(), hostCertPath, destDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify security command was called with correct arguments.
+	cmd := runner.callWith("container exec openclaw security")
+	if cmd == "" {
+		t.Fatal("expected macOS security exec call")
+	}
+	if !strings.Contains(cmd, "add-trusted-cert") {
+		t.Errorf("security command should include add-trusted-cert: %s", cmd)
+	}
+	if !strings.Contains(cmd, "trustRoot") {
+		t.Errorf("security command should include trustRoot: %s", cmd)
+	}
+	if !strings.Contains(cmd, CACertGuestPath) {
+		t.Errorf("security command should include guest cert path: %s", cmd)
+	}
+}
+
+func TestInjectCACertBothTrustCommandsFail(t *testing.T) {
+	mgr, runner, _ := newTestAppleManager(t)
+
+	// Both trust commands fail. Should still succeed (env vars cover it).
+	runner.onCommand("container exec openclaw update-ca-certificates", nil, errors.New("not found"))
+	runner.onCommand("container exec openclaw security", nil, errors.New("not found"))
+
+	hostCertDir := t.TempDir()
+	hostCertPath := filepath.Join(hostCertDir, "ca-cert.pem")
+	if err := os.WriteFile(hostCertPath, []byte("cert-data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	destDir := t.TempDir()
+	err := mgr.InjectCACert(context.Background(), hostCertPath, destDir)
+	if err != nil {
+		t.Fatalf("should not error when trust commands fail (env vars suffice): %v", err)
+	}
+
+	// Cert should still be written to shared volume.
+	if _, err := os.Stat(filepath.Join(destDir, "sluice-ca.crt")); err != nil {
+		t.Errorf("cert file should exist in shared volume: %v", err)
+	}
+}
+
+func TestInjectCACertMissingHostCert(t *testing.T) {
+	mgr, _, _ := newTestAppleManager(t)
+
+	err := mgr.InjectCACert(context.Background(), "/nonexistent/ca-cert.pem", t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for missing host cert")
+	}
+	if !strings.Contains(err.Error(), "read CA cert") {
+		t.Errorf("error should mention read CA cert: %v", err)
+	}
+}
+
+func TestInjectCACertWriteError(t *testing.T) {
+	mgr, _, _ := newTestAppleManager(t)
+
+	hostCertDir := t.TempDir()
+	hostCertPath := filepath.Join(hostCertDir, "ca-cert.pem")
+	if err := os.WriteFile(hostCertPath, []byte("cert-data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Use a non-writable path as the dest dir.
+	err := mgr.InjectCACert(context.Background(), hostCertPath, "/dev/null/impossible")
+	if err == nil {
+		t.Fatal("expected error for unwritable dest dir")
+	}
+}
