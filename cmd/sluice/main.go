@@ -70,6 +70,7 @@ func main() {
 	phantomDir := flag.String("phantom-dir", "", "shared volume path for phantom token files (enables hot-reload)")
 	dnsResolver := flag.String("dns-resolver", "", "upstream DNS resolver address for DNS interception (default: 8.8.8.8:53)")
 	autoInjectMCP := flag.Bool("auto-inject-mcp", false, "auto-inject MCP config into agent container (default true for docker/apple runtimes)")
+	mcpBaseURL := flag.String("mcp-base-url", "", "base URL for auto-injected MCP config (e.g. http://sluice:3000); derived from --health-addr when empty")
 	autoInjectMCPSet := false
 	flag.Parse()
 
@@ -284,6 +285,13 @@ func main() {
 	var selfBypass []string
 	if *autoInjectMCP && *healthAddr != "" {
 		selfBypass = buildSelfBypass(*healthAddr)
+		// When mcp-base-url is set, also bypass the external hostname (e.g.
+		// "sluice:3000" in Docker Compose) that the agent uses to reach us.
+		if *mcpBaseURL != "" {
+			if extra := selfBypassFromURL(*mcpBaseURL, *healthAddr); extra != "" {
+				selfBypass = append(selfBypass, extra)
+			}
+		}
 	}
 
 	// Create the proxy first so the bot can share its engine pointer and
@@ -470,6 +478,9 @@ func main() {
 		// to sluice's gateway via Streamable HTTP.
 		if *autoInjectMCP && containerMgr != nil && *phantomDir != "" {
 			sluiceURL := fmt.Sprintf("http://%s/mcp", *healthAddr)
+			if *mcpBaseURL != "" {
+				sluiceURL = strings.TrimRight(*mcpBaseURL, "/") + "/mcp"
+			}
 			if injectErr := containerMgr.InjectMCPConfig(*phantomDir, sluiceURL); injectErr != nil {
 				log.Printf("WARNING: MCP auto-inject failed: %v", injectErr)
 			} else {
@@ -783,4 +794,27 @@ func buildSelfBypass(healthAddr string) []string {
 		}
 	}
 	return []string{healthAddr}
+}
+
+// selfBypassFromURL extracts a host:port from the given base URL that should
+// be added to the self-bypass set. If the URL host differs from the listen
+// address (e.g. "sluice" vs "0.0.0.0"), it returns the URL's host:port so
+// Docker DNS names are also bypassed. Returns "" when redundant.
+func selfBypassFromURL(baseURL, healthAddr string) string {
+	// Strip scheme.
+	hostport := strings.TrimPrefix(baseURL, "https://")
+	hostport = strings.TrimPrefix(hostport, "http://")
+	// Strip path.
+	if idx := strings.Index(hostport, "/"); idx >= 0 {
+		hostport = hostport[:idx]
+	}
+	// Ensure port is present; default to the health-addr port.
+	if _, _, splitErr := net.SplitHostPort(hostport); splitErr != nil {
+		_, port, _ := net.SplitHostPort(healthAddr)
+		if port == "" {
+			port = "3000"
+		}
+		hostport = net.JoinHostPort(hostport, port)
+	}
+	return hostport
 }

@@ -53,7 +53,10 @@ func (w *WSUpstream) connect() error {
 		return fmt.Errorf("upstream %s: dial %s: %w", w.name, w.url, err)
 	}
 	conn.SetReadLimit(10 * 1024 * 1024)
+
+	w.mu.Lock()
 	w.conn = conn
+	w.mu.Unlock()
 	return nil
 }
 

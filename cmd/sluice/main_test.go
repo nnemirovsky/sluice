@@ -848,6 +848,56 @@ func TestBuildSelfBypass(t *testing.T) {
 	}
 }
 
+// TestSelfBypassFromURL verifies URL-to-bypass-entry extraction.
+func TestSelfBypassFromURL(t *testing.T) {
+	tests := []struct {
+		name       string
+		baseURL    string
+		healthAddr string
+		want       string
+	}{
+		{
+			name:       "docker service name with port",
+			baseURL:    "http://sluice:3000",
+			healthAddr: "0.0.0.0:3000",
+			want:       "sluice:3000",
+		},
+		{
+			name:       "docker service name without port uses health port",
+			baseURL:    "http://sluice",
+			healthAddr: "0.0.0.0:3000",
+			want:       "sluice:3000",
+		},
+		{
+			name:       "URL with path stripped",
+			baseURL:    "http://sluice:3000/mcp",
+			healthAddr: "0.0.0.0:3000",
+			want:       "sluice:3000",
+		},
+		{
+			name:       "https scheme",
+			baseURL:    "https://sluice:3000",
+			healthAddr: "0.0.0.0:3000",
+			want:       "sluice:3000",
+		},
+		{
+			name:       "IP with port",
+			baseURL:    "http://192.168.1.5:3000",
+			healthAddr: "0.0.0.0:3000",
+			want:       "192.168.1.5:3000",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := selfBypassFromURL(tt.baseURL, tt.healthAddr)
+			if got != tt.want {
+				t.Errorf("selfBypassFromURL(%q, %q) = %q, want %q", tt.baseURL, tt.healthAddr, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestStandaloneModeCredentialInjection verifies that credential injection
 // (vault + binding resolver) works without a container manager, since the
 // MITM proxy handles injection independently.

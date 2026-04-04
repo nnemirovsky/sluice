@@ -15,8 +15,9 @@ import (
 // It handles POST for JSON-RPC requests and DELETE for session cleanup.
 // Sessions are tracked via the Mcp-Session-Id header.
 type MCPHTTPHandler struct {
-	gw       *Gateway
-	sessions sync.Map // session ID -> *mcpSession
+	gw        *Gateway
+	sessions  sync.Map   // session ID -> *mcpSession
+	sessionMu sync.Mutex // serializes newSession to enforce cap atomically
 }
 
 type mcpSession struct {
@@ -144,6 +145,9 @@ func (h *MCPHTTPHandler) SessionCount() int {
 const maxSessions = 1000
 
 func (h *MCPHTTPHandler) newSession() *mcpSession {
+	h.sessionMu.Lock()
+	defer h.sessionMu.Unlock()
+
 	// Enforce session cap.
 	if h.SessionCount() >= maxSessions {
 		h.pruneOldestSession()

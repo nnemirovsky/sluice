@@ -80,7 +80,7 @@ func (h *HTTPUpstream) Send(req JSONRPCRequest) (*JSONRPCResponse, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		return nil, fmt.Errorf("upstream %s: HTTP %d: %s", h.name, resp.StatusCode, string(respBody))
 	}
 
