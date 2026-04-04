@@ -221,18 +221,18 @@ On startup (and after MCP upstream changes), automatically configure OpenClaw to
 
 ### Task 8: Verify acceptance criteria
 
-- [ ] Verify stdio upstreams still work (no regression)
-- [ ] Verify Streamable HTTP upstream connects to a remote MCP server
-- [ ] Verify WebSocket upstream connects to a WebSocket MCP server
-- [ ] Verify mixed upstream types in one gateway (stdio + HTTP + WebSocket)
-- [ ] Verify `/mcp` endpoint serves tools to an MCP client over Streamable HTTP
-- [ ] Verify OpenClaw auto-injection writes mcp-servers.json and OpenClaw connects via Streamable HTTP
-- [ ] Verify SOCKS5 self-bypass: OpenClaw's connection to sluice:3000/mcp is auto-allowed without policy rules
-- [ ] Verify OpenClaw container does NOT have Docker socket mounted
-- [ ] Verify policy enforcement applies equally across all transports
-- [ ] Verify `sluice mcp add <name> --transport http --command https://remote-server/mcp` works
-- [ ] Run full test suite: `go test ./... -v -timeout 60s -race`
-- [ ] Run linter: `go vet ./...`
+- [x] Verify stdio upstreams still work (no regression)
+- [x] Verify Streamable HTTP upstream connects to a remote MCP server
+- [x] Verify WebSocket upstream connects to a WebSocket MCP server
+- [x] Verify mixed upstream types in one gateway (stdio + HTTP + WebSocket)
+- [x] Verify `/mcp` endpoint serves tools to an MCP client over Streamable HTTP
+- [x] Verify OpenClaw auto-injection writes mcp-servers.json and OpenClaw connects via Streamable HTTP
+- [x] Verify SOCKS5 self-bypass: OpenClaw's connection to sluice:3000/mcp is auto-allowed without policy rules
+- [x] Verify OpenClaw container does NOT have Docker socket mounted
+- [x] Verify policy enforcement applies equally across all transports
+- [x] Verify `sluice mcp add <name> --transport http --command https://remote-server/mcp` works
+- [x] Run full test suite: `go test ./... -v -timeout 60s -race`
+- [x] Run linter: `go vet ./...`
 
 ### Task 9: [Final] Update documentation
 
