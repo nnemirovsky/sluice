@@ -30,6 +30,10 @@ const (
 // typical agent traffic.
 const maxFramePayload = 16 << 20
 
+// maxAssembledPayload limits the total reassembled size of fragmented
+// WebSocket messages to prevent memory exhaustion from many small fragments.
+const maxAssembledPayload = 64 << 20
+
 // Frame represents a single WebSocket frame per RFC 6455 Section 5.2.
 type Frame struct {
 	FIN     bool
@@ -218,7 +222,12 @@ type FragmentTracker struct {
 	active      bool
 	startOpcode byte
 	fragments   [][]byte
+	totalSize   int
 }
+
+// errFragmentTooLarge is returned when the total reassembled fragment size
+// exceeds maxAssembledPayload.
+var errFragmentTooLarge = errors.New("reassembled websocket message exceeds size limit")
 
 // Accept processes an incoming frame. It returns the reassembled unmasked
 // payload and the original opcode when a complete message is available.
@@ -227,14 +236,15 @@ type FragmentTracker struct {
 // Control frames are never fragmented per RFC 6455 Section 5.4. The caller
 // should handle control frames separately before calling Accept.
 //
-// Returns (payload, opcode, complete). When complete is false the frame was
-// buffered and the caller should not process the payload.
-func (ft *FragmentTracker) Accept(f *Frame) ([]byte, byte, bool) {
+// Returns (payload, opcode, complete, err). When complete is false the frame
+// was buffered and the caller should not process the payload. An error is
+// returned if the reassembled message exceeds maxAssembledPayload.
+func (ft *FragmentTracker) Accept(f *Frame) ([]byte, byte, bool, error) {
 	payload := f.UnmaskedPayload()
 
 	// Non-fragmented message: FIN=true and opcode is not continuation.
 	if f.FIN && f.Opcode != OpcodeContinuation {
-		return payload, f.Opcode, true
+		return payload, f.Opcode, true, nil
 	}
 
 	// Start of fragmented message.
@@ -242,33 +252,39 @@ func (ft *FragmentTracker) Accept(f *Frame) ([]byte, byte, bool) {
 		ft.active = true
 		ft.startOpcode = f.Opcode
 		ft.fragments = [][]byte{payload}
-		return nil, 0, false
+		ft.totalSize = len(payload)
+		return nil, 0, false, nil
 	}
 
 	// Continuation frame without an active fragment sequence is invalid.
 	if !ft.active {
-		return nil, 0, false
+		return nil, 0, false, nil
+	}
+
+	if ft.totalSize+len(payload) > maxAssembledPayload {
+		ft.active = false
+		ft.fragments = nil
+		ft.totalSize = 0
+		return nil, 0, false, errFragmentTooLarge
 	}
 
 	ft.fragments = append(ft.fragments, payload)
+	ft.totalSize += len(payload)
 
 	// Final continuation frame.
 	if f.FIN {
-		total := 0
-		for _, frag := range ft.fragments {
-			total += len(frag)
-		}
-		assembled := make([]byte, 0, total)
+		assembled := make([]byte, 0, ft.totalSize)
 		for _, frag := range ft.fragments {
 			assembled = append(assembled, frag...)
 		}
 		opcode := ft.startOpcode
 		ft.active = false
 		ft.fragments = nil
-		return assembled, opcode, true
+		ft.totalSize = 0
+		return assembled, opcode, true, nil
 	}
 
-	return nil, 0, false
+	return nil, 0, false, nil
 }
 
 // wsBlockRule is a compiled content deny rule for WebSocket frames.
@@ -420,7 +436,10 @@ func (wp *WSProxy) relayFrames(src io.Reader, dst io.Writer, pairs []phantomPair
 		}
 
 		// Feed data frames to the fragment tracker.
-		payload, opcode, complete := ft.Accept(frame)
+		payload, opcode, complete, acceptErr := ft.Accept(frame)
+		if acceptErr != nil {
+			return acceptErr
+		}
 		if !complete {
 			continue
 		}

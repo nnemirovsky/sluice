@@ -62,8 +62,6 @@ func main() {
 	dnsResolver := flag.String("dns-resolver", "", "upstream DNS resolver address for DNS interception (default: 8.8.8.8:53)")
 	flag.Parse()
 
-	_ = dnsResolver // Will be wired into DNS interceptor in Task 8.
-
 	// Open the SQLite store.
 	db, err := store.New(*dbPath)
 	if err != nil {
@@ -217,14 +215,15 @@ func main() {
 	// Create the proxy first so the bot can share its engine pointer and
 	// reload mutex.
 	srv, err := proxy.New(proxy.Config{
-		ListenAddr: *listenAddr,
-		Policy:     eng,
-		Audit:      logger,
-		Broker:     broker, // nil until channel setup below
-		Provider:   provider,
-		Resolver:   bindingResolver,
-		VaultDir:   vaultCfg.Dir,
-		Store:      db,
+		ListenAddr:  *listenAddr,
+		Policy:      eng,
+		Audit:       logger,
+		Broker:      broker, // nil until channel setup below
+		Provider:    provider,
+		Resolver:    bindingResolver,
+		VaultDir:    vaultCfg.Dir,
+		Store:       db,
+		DNSResolver: *dnsResolver,
 	})
 	if err != nil {
 		log.Fatalf("start proxy: %v", err)

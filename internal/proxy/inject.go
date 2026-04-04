@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -301,7 +302,10 @@ func (fi *wsFrameInterceptor) Read(p []byte) (int, error) {
 			break
 		}
 
-		payload, opcode, complete := fi.readTracker.Accept(frame)
+		payload, opcode, complete, acceptErr := fi.readTracker.Accept(frame)
+		if acceptErr != nil {
+			return 0, acceptErr
+		}
 		if !complete {
 			continue
 		}
@@ -344,7 +348,13 @@ func (fi *wsFrameInterceptor) Write(p []byte) (int, error) {
 		reader := bytes.NewReader(fi.writePending)
 		frame, err := ReadFrame(reader)
 		if err != nil {
-			break // incomplete frame, wait for more data
+			// If the error is due to insufficient data (io.EOF or
+			// io.ErrUnexpectedEOF), wait for more bytes. Otherwise
+			// the frame is structurally invalid and will never parse.
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				break
+			}
+			return 0, fmt.Errorf("ws frame parse: %w", err)
 		}
 
 		consumed := len(fi.writePending) - int(reader.Len())
@@ -360,7 +370,10 @@ func (fi *wsFrameInterceptor) Write(p []byte) (int, error) {
 			continue
 		}
 
-		payload, opcode, complete := fi.writeTracker.Accept(frame)
+		payload, opcode, complete, acceptErr := fi.writeTracker.Accept(frame)
+		if acceptErr != nil {
+			return 0, acceptErr
+		}
 		if !complete {
 			continue
 		}
@@ -477,10 +490,6 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 		boundCreds = res.CredentialsForDestination(host, port, proto)
 	}
 
-	type phantomPair struct {
-		phantom []byte
-		secret  vault.SecureBytes
-	}
 	var pairs []phantomPair
 	for _, name := range boundCreds {
 		secret, err := inj.provider.Get(name)

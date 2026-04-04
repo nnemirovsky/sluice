@@ -345,7 +345,10 @@ func TestFragmentTracker_Unfragmented(t *testing.T) {
 	ft := &FragmentTracker{}
 	f := &Frame{FIN: true, Opcode: OpcodeText, Payload: []byte("hello")}
 
-	payload, opcode, complete := ft.Accept(f)
+	payload, opcode, complete, err := ft.Accept(f)
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
 	if !complete {
 		t.Fatal("expected complete=true for unfragmented message")
 	}
@@ -362,21 +365,30 @@ func TestFragmentTracker_ThreeFragments(t *testing.T) {
 
 	// Fragment 1: start (FIN=false, opcode=text)
 	f1 := &Frame{FIN: false, Opcode: OpcodeText, Payload: []byte("hel")}
-	_, _, complete := ft.Accept(f1)
+	_, _, complete, err := ft.Accept(f1)
+	if err != nil {
+		t.Fatalf("Accept f1: %v", err)
+	}
 	if complete {
 		t.Fatal("first fragment should not be complete")
 	}
 
 	// Fragment 2: continuation (FIN=false, opcode=continuation)
 	f2 := &Frame{FIN: false, Opcode: OpcodeContinuation, Payload: []byte("lo, ")}
-	_, _, complete = ft.Accept(f2)
+	_, _, complete, err = ft.Accept(f2)
+	if err != nil {
+		t.Fatalf("Accept f2: %v", err)
+	}
 	if complete {
 		t.Fatal("middle fragment should not be complete")
 	}
 
 	// Fragment 3: final (FIN=true, opcode=continuation)
 	f3 := &Frame{FIN: true, Opcode: OpcodeContinuation, Payload: []byte("world")}
-	payload, opcode, complete := ft.Accept(f3)
+	payload, opcode, complete, err := ft.Accept(f3)
+	if err != nil {
+		t.Fatalf("Accept f3: %v", err)
+	}
 	if !complete {
 		t.Fatal("final fragment should be complete")
 	}
@@ -396,13 +408,19 @@ func TestFragmentTracker_MaskedFragments(t *testing.T) {
 	part2 := []byte("part2")
 
 	f1 := &Frame{FIN: false, Opcode: OpcodeText, Masked: true, MaskKey: key, Payload: applyMask(part1, key)}
-	_, _, complete := ft.Accept(f1)
+	_, _, complete, err := ft.Accept(f1)
+	if err != nil {
+		t.Fatalf("Accept f1: %v", err)
+	}
 	if complete {
 		t.Fatal("first fragment should not be complete")
 	}
 
 	f2 := &Frame{FIN: true, Opcode: OpcodeContinuation, Masked: true, MaskKey: key, Payload: applyMask(part2, key)}
-	payload, opcode, complete := ft.Accept(f2)
+	payload, opcode, complete, err := ft.Accept(f2)
+	if err != nil {
+		t.Fatalf("Accept f2: %v", err)
+	}
 	if !complete {
 		t.Fatal("final fragment should be complete")
 	}
@@ -419,7 +437,10 @@ func TestFragmentTracker_ContinuationWithoutStart(t *testing.T) {
 
 	// A continuation frame without a preceding start frame should not complete.
 	f := &Frame{FIN: true, Opcode: OpcodeContinuation, Payload: []byte("orphan")}
-	_, _, complete := ft.Accept(f)
+	_, _, complete, err := ft.Accept(f)
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
 	if complete {
 		t.Error("continuation without start should not produce a complete message")
 	}
@@ -430,16 +451,24 @@ func TestFragmentTracker_SequentialMessages(t *testing.T) {
 
 	// First complete fragmented message.
 	f1 := &Frame{FIN: false, Opcode: OpcodeText, Payload: []byte("msg1-")}
-	ft.Accept(f1)
+	if _, _, _, err := ft.Accept(f1); err != nil {
+		t.Fatalf("Accept f1: %v", err)
+	}
 	f2 := &Frame{FIN: true, Opcode: OpcodeContinuation, Payload: []byte("end")}
-	payload, opcode, complete := ft.Accept(f2)
+	payload, opcode, complete, err := ft.Accept(f2)
+	if err != nil {
+		t.Fatalf("Accept f2: %v", err)
+	}
 	if !complete || opcode != OpcodeText || !bytes.Equal(payload, []byte("msg1-end")) {
 		t.Fatalf("first message: complete=%v, opcode=%d, payload=%q", complete, opcode, payload)
 	}
 
 	// Second unfragmented message.
 	f3 := &Frame{FIN: true, Opcode: OpcodeBinary, Payload: []byte{0xFF}}
-	payload, opcode, complete = ft.Accept(f3)
+	payload, opcode, complete, err = ft.Accept(f3)
+	if err != nil {
+		t.Fatalf("Accept f3: %v", err)
+	}
 	if !complete || opcode != OpcodeBinary || !bytes.Equal(payload, []byte{0xFF}) {
 		t.Fatalf("second message: complete=%v, opcode=%d, payload=%v", complete, opcode, payload)
 	}

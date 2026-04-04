@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 
@@ -21,6 +22,10 @@ import (
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/vault"
 )
+
+// maxQUICBody limits the request/response body size the QUIC proxy is willing
+// to buffer. 128 MiB is generous for typical API traffic.
+const maxQUICBody = 128 << 20
 
 // QUICBlockRuleConfig defines a content deny rule for QUICProxy construction.
 type QUICBlockRuleConfig struct {
@@ -225,8 +230,8 @@ func (q *QUICProxy) buildHandler(upstreamHost string) http.Handler {
 		}
 		port := 443
 		if r.URL.Port() != "" {
-			if p, err := fmt.Sscanf(r.URL.Port(), "%d", &port); p == 0 || err != nil {
-				port = 443
+			if p, err := strconv.Atoi(r.URL.Port()); err == nil {
+				port = p
 			}
 		}
 
@@ -260,7 +265,7 @@ func (q *QUICProxy) buildHandler(upstreamHost string) http.Handler {
 		var reqBody []byte
 		if r.Body != nil && r.Body != http.NoBody {
 			var readErr error
-			reqBody, readErr = io.ReadAll(r.Body)
+			reqBody, readErr = io.ReadAll(io.LimitReader(r.Body, maxQUICBody))
 			_ = r.Body.Close()
 			if readErr != nil {
 				http.Error(w, "request body read error", http.StatusBadGateway)
@@ -324,7 +329,7 @@ func (q *QUICProxy) buildHandler(upstreamHost string) http.Handler {
 		defer resp.Body.Close()
 
 		// Read upstream response body for redaction.
-		respBody, err := io.ReadAll(resp.Body)
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxQUICBody))
 		if err != nil {
 			http.Error(w, "upstream response read error", http.StatusBadGateway)
 			return
@@ -448,92 +453,3 @@ func (q *QUICProxy) logAudit(host string, port int, verdict, reason string) {
 	}
 }
 
-// ExtractSNI extracts the Server Name Indication from a QUIC Initial packet
-// by parsing the TLS ClientHello embedded in the CRYPTO frame. This is used
-// for logging and routing before the QUIC handshake completes.
-//
-// The function parses the minimal QUIC long header structure to reach the
-// TLS payload. Returns empty string if the packet cannot be parsed.
-func ExtractSNI(data []byte) string {
-	if len(data) < 5 {
-		return ""
-	}
-	// Must be a long header (form bit set).
-	if data[0]&0x80 == 0 {
-		return ""
-	}
-
-	offset := 5 // skip first byte + 4-byte version
-
-	// DCID length + DCID
-	if offset >= len(data) {
-		return ""
-	}
-	dcidLen := int(data[offset])
-	offset += 1 + dcidLen
-
-	// SCID length + SCID
-	if offset >= len(data) {
-		return ""
-	}
-	scidLen := int(data[offset])
-	offset += 1 + scidLen
-
-	// Token length (variable-length integer)
-	if offset >= len(data) {
-		return ""
-	}
-	tokenLen, tokenLenSize := decodeVarInt(data[offset:])
-	if tokenLenSize == 0 {
-		return ""
-	}
-	offset += tokenLenSize + int(tokenLen)
-
-	// Packet length (variable-length integer)
-	if offset >= len(data) {
-		return ""
-	}
-	_, pktLenSize := decodeVarInt(data[offset:])
-	if pktLenSize == 0 {
-		return ""
-	}
-	offset += pktLenSize
-
-	// The rest is encrypted packet number + payload. We cannot decrypt it
-	// without knowing the initial keys derived from the DCID.
-	// For SNI extraction before handshake we need to derive QUIC initial
-	// secrets, which is complex. Return empty for now.
-	// The TLS ClientHello SNI is available after the handshake via
-	// GetConfigForClient, which is the primary extraction path.
-	_ = offset
-	return ""
-}
-
-// decodeVarInt decodes a QUIC variable-length integer (RFC 9000, Section 16).
-// Returns the value and the number of bytes consumed. Returns 0,0 on error.
-func decodeVarInt(data []byte) (uint64, int) {
-	if len(data) == 0 {
-		return 0, 0
-	}
-	prefix := data[0] >> 6
-	length := 1 << prefix
-	if len(data) < length {
-		return 0, 0
-	}
-	var val uint64
-	switch length {
-	case 1:
-		val = uint64(data[0] & 0x3F)
-	case 2:
-		val = uint64(data[0]&0x3F)<<8 | uint64(data[1])
-	case 4:
-		val = uint64(data[0]&0x3F)<<24 | uint64(data[1])<<16 |
-			uint64(data[2])<<8 | uint64(data[3])
-	case 8:
-		val = uint64(data[0]&0x3F)<<56 | uint64(data[1])<<48 |
-			uint64(data[2])<<40 | uint64(data[3])<<32 |
-			uint64(data[4])<<24 | uint64(data[5])<<16 |
-			uint64(data[6])<<8 | uint64(data[7])
-	}
-	return val, length
-}

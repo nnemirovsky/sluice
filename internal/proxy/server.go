@@ -746,7 +746,10 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 			}
 
 			// Validate that the source matches the ASSOCIATE request's client.
-			clientAddr := request.RemoteAddr.(*net.TCPAddr)
+			clientAddr, clientOK := request.RemoteAddr.(*net.TCPAddr)
+			if !clientOK {
+				continue
+			}
 			udpSrc, srcOK := srcAddr.(*net.UDPAddr)
 			if !srcOK {
 				continue
@@ -796,36 +799,63 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 				continue
 			}
 
-			// QUIC interception: QUIC packets on HTTPS ports are routed to
-			// QUICProxy for HTTP/3 MITM credential injection. Use session
-			// tracking so multi-packet handshakes share the same local socket.
-			if s.quicProxy != nil && IsQUICPacket(payload) && isHTTPSPort(port) {
-				quicAddr := s.quicProxy.Addr()
-				if quicAddr != nil {
-					sessionKey := "quic:" + dest + ":" + strconv.Itoa(port)
-					mu.Lock()
-					sess, exists := sessions[sessionKey]
-					if !exists {
-						upstream, listenErr := net.ListenPacket("udp", "127.0.0.1:0")
-						if listenErr != nil {
-							mu.Unlock()
-							log.Printf("[QUIC] create upstream for %s: %v", sessionKey, listenErr)
-							continue
-						}
-						sess = &udpSession{upstream: upstream, lastSeen: time.Now()}
-						sessions[sessionKey] = sess
-						go s.relayUDPResponses(upstream, bindLn, srcAddr)
-					} else {
-						sess.lastSeen = time.Now()
-					}
-					mu.Unlock()
+			// QUIC interception: route packets to QUICProxy for HTTP/3 MITM
+			// credential injection. Check existing sessions first so
+			// short-header packets (used after handshake) are routed
+			// correctly. Only use IsQUICPacket to decide whether to
+			// CREATE a new session (it only matches long-header initials).
+			if s.quicProxy != nil && isHTTPSPort(port) {
+				sessionKey := "quic:" + dest + ":" + strconv.Itoa(port)
+				mu.Lock()
+				sess, exists := sessions[sessionKey]
+				mu.Unlock()
 
-					if _, writeErr := sess.upstream.WriteTo(payload, quicAddr); writeErr != nil {
+				if exists {
+					sess.lastSeen = time.Now()
+					if _, writeErr := sess.upstream.WriteTo(payload, s.quicProxy.Addr()); writeErr != nil {
 						log.Printf("[QUIC] write to proxy: %v", writeErr)
 					}
 					continue
 				}
-				// QUICProxy not yet listening, fall through to normal UDP handling.
+
+				if IsQUICPacket(payload) {
+					quicAddr := s.quicProxy.Addr()
+					if quicAddr != nil {
+						// Evaluate policy before creating a new QUIC session.
+						verdict := s.udpRelay.evaluateUDP(dest, port)
+						if verdict != policy.Allow {
+							if s.udpRelay.audit != nil {
+								if logErr := s.udpRelay.audit.Log(audit.Event{
+									Destination: dest,
+									Port:        port,
+									Protocol:    "quic",
+									Verdict:     "deny",
+									Reason:      "quic denied by policy",
+								}); logErr != nil {
+									log.Printf("audit log write error: %v", logErr)
+								}
+							}
+							continue
+						}
+
+						upstream, listenErr := net.ListenPacket("udp", "127.0.0.1:0")
+						if listenErr != nil {
+							log.Printf("[QUIC] create upstream for %s: %v", sessionKey, listenErr)
+							continue
+						}
+						mu.Lock()
+						sess = &udpSession{upstream: upstream, lastSeen: time.Now()}
+						sessions[sessionKey] = sess
+						mu.Unlock()
+						go s.relayUDPResponses(upstream, bindLn, srcAddr)
+
+						if _, writeErr := sess.upstream.WriteTo(payload, quicAddr); writeErr != nil {
+							log.Printf("[QUIC] write to proxy: %v", writeErr)
+						}
+						continue
+					}
+					// QUICProxy not yet listening, fall through to normal UDP handling.
+				}
 			}
 
 			// General UDP: evaluate policy via UDPRelay.
