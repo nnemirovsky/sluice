@@ -22,6 +22,10 @@ import (
 	"github.com/nemirovsky/sluice/internal/vault"
 )
 
+// maxMITMBody limits the request body size the HTTPS MITM proxy reads for
+// phantom token replacement. Matches the QUIC proxy limit (16 MiB).
+const maxMITMBody = 16 << 20
+
 // phantomPrefix is the byte prefix for all phantom tokens, used for quick
 // detection before applying the more expensive regex strip.
 var phantomPrefix = []byte("SLUICE_PHANTOM:")
@@ -547,8 +551,10 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 
 	// Replace bound phantom tokens in the request body, then strip
 	// any remaining unbound phantom tokens.
+	// Limit body size to prevent memory exhaustion from oversized
+	// requests (matches the QUIC proxy's maxQUICBody limit).
 	if r.Body != nil && r.Body != http.NoBody {
-		body, readErr := io.ReadAll(r.Body)
+		body, readErr := io.ReadAll(io.LimitReader(r.Body, maxMITMBody))
 		_ = r.Body.Close()
 		if readErr != nil {
 			log.Printf("[INJECT] body read error for %s:%d: %v", host, port, readErr)
