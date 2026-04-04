@@ -197,13 +197,13 @@ Support running sluice as a standalone proxy on macOS without any container runt
 **Files:**
 - Modify: `cmd/sluice/main.go`
 
-- [ ] When `--runtime none`: skip container manager initialization entirely
-- [ ] Sluice runs as SOCKS5 proxy + MCP gateway only
-- [ ] User manually configures `ALL_PROXY=socks5://localhost:1080` in their shell
-- [ ] Credential injection still works (MITM proxy runs, just no automatic container management)
-- [ ] MCP gateway still works (stdio upstreams as child processes)
-- [ ] Write tests for standalone mode startup
-- [ ] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
+- [x] When `--runtime none`: skip container manager initialization entirely
+- [x] Sluice runs as SOCKS5 proxy + MCP gateway only
+- [x] User manually configures `ALL_PROXY=socks5://localhost:1080` in their shell
+- [x] Credential injection still works (MITM proxy runs, just no automatic container management)
+- [x] MCP gateway still works (stdio upstreams as child processes)
+- [x] Write tests for standalone mode startup
+- [x] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
 
 ### Task 8: Verify acceptance criteria
 

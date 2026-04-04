@@ -12,6 +12,7 @@ type Runtime int
 const (
 	RuntimeDocker Runtime = 0
 	RuntimeApple  Runtime = 1
+	RuntimeNone   Runtime = 2
 )
 
 // String returns a human-readable name for the runtime.
@@ -21,6 +22,8 @@ func (r Runtime) String() string {
 		return "docker"
 	case RuntimeApple:
 		return "apple"
+	case RuntimeNone:
+		return "none"
 	default:
 		return "unknown"
 	}

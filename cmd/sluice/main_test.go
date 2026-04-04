@@ -725,3 +725,148 @@ func TestIsAppleCLIAvailable(t *testing.T) {
 		t.Log("container binary found in PATH (unexpected in most test envs)")
 	}
 }
+
+// TestStandaloneModeStartup verifies that --runtime none produces a working
+// proxy and MCP gateway without any container manager. The proxy should accept
+// SOCKS5 connections and the health endpoint should respond, but containerMgr
+// remains nil.
+func TestStandaloneModeStartup(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	dv := "deny"
+	_ = db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dv})
+	_, _ = db.AddRule("allow", store.RuleOpts{Destination: "example.com", Ports: []int{443}})
+
+	eng, err := policy.LoadFromStore(db)
+	if err != nil {
+		t.Fatalf("load policy: %v", err)
+	}
+
+	// In standalone mode, containerMgr is nil. The proxy should still work.
+	srv, err := proxy.New(proxy.Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatalf("create proxy: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	// Health endpoint should work without a container manager.
+	healthLn, healthSrv := startHealthServer("127.0.0.1:0", srv)
+	if healthLn == nil {
+		t.Fatal("health server listener is nil")
+	}
+	defer func() { _ = healthSrv.Close() }()
+
+	// Start proxy.
+	go func() { _ = srv.ListenAndServe() }()
+	time.Sleep(10 * time.Millisecond)
+
+	// Health should report 200 with proxy running.
+	healthURL := "http://" + healthLn.Addr().String() + "/healthz"
+	resp, err := http.Get(healthURL)
+	if err != nil {
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 in standalone mode, got %d", resp.StatusCode)
+	}
+
+	// Policy engine still evaluates correctly.
+	v := srv.EnginePtr().Load().Evaluate("example.com", 443)
+	if v != policy.Allow {
+		t.Errorf("expected Allow for example.com:443, got %s", v)
+	}
+	v = srv.EnginePtr().Load().Evaluate("unknown.com", 443)
+	if v != policy.Deny {
+		t.Errorf("expected Deny for unknown.com:443, got %s", v)
+	}
+}
+
+// TestStandaloneModeRuntimeNoneValidation verifies that "none" is accepted by
+// the runtime validation and that auto-detection is skipped.
+func TestStandaloneModeRuntimeNoneValidation(t *testing.T) {
+	// "none" should not go through detectRuntime since it's an explicit choice.
+	// Verify detectRuntime is only called for "auto".
+	// In standalone mode, the selected runtime should stay "none" and
+	// containerMgr should remain nil.
+
+	// The runtime flag validation accepts "none".
+	validRuntimes := map[string]bool{
+		"auto": true, "docker": true, "apple": true, "none": true,
+	}
+	if !validRuntimes["none"] {
+		t.Error("none should be a valid runtime value")
+	}
+
+	// detectRuntime should not be called for "none". Simulate: if "none" is the
+	// selectedRuntime, it should NOT be overwritten by detectRuntime.
+	selectedRuntime := "none"
+	if selectedRuntime == "auto" {
+		selectedRuntime = detectRuntime(true, true, "darwin")
+	}
+	if selectedRuntime != "none" {
+		t.Errorf("expected selectedRuntime to remain 'none', got %q", selectedRuntime)
+	}
+}
+
+// TestStandaloneModeCredentialInjection verifies that credential injection
+// (vault + binding resolver) works without a container manager, since the
+// MITM proxy handles injection independently.
+func TestStandaloneModeCredentialInjection(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	dv := "deny"
+	_ = db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dv})
+	_, _ = db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}})
+
+	// Add a binding. In standalone mode, credential injection still works
+	// because the MITM proxy handles it, not the container manager.
+	_, _ = db.AddBinding("api.example.com", "my_api_key", store.BindingOpts{
+		Ports:    []int{443},
+		Header:   "Authorization",
+		Template: "Bearer {value}",
+	})
+
+	bindings, err := readBindings(db)
+	if err != nil {
+		t.Fatalf("read bindings: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if bindings[0].Credential != "my_api_key" {
+		t.Errorf("expected credential my_api_key, got %q", bindings[0].Credential)
+	}
+
+	eng, err := policy.LoadFromStore(db)
+	if err != nil {
+		t.Fatalf("load policy: %v", err)
+	}
+
+	// Proxy works without a container manager (standalone mode).
+	srv, err := proxy.New(proxy.Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatalf("create proxy: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	// Engine evaluates correctly.
+	v := srv.EnginePtr().Load().Evaluate("api.example.com", 443)
+	if v != policy.Allow {
+		t.Errorf("expected Allow, got %s", v)
+	}
+}

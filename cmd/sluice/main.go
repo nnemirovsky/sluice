@@ -59,7 +59,7 @@ func main() {
 	telegramChatIDStr := flag.String("telegram-chat-id", os.Getenv("TELEGRAM_CHAT_ID"), "Telegram chat ID for approvals")
 	healthAddr := flag.String("health-addr", "127.0.0.1:3000", "health check HTTP listen address (serves /healthz)")
 	shutdownTimeout := flag.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout for draining in-flight connections")
-	runtimeFlag := flag.String("runtime", "auto", "container runtime: docker, apple, auto")
+	runtimeFlag := flag.String("runtime", "auto", "container runtime: docker, apple, none, auto")
 	dockerSocket := flag.String("docker-socket", "", "Docker socket path (auto-detects from DOCKER_HOST or /var/run/docker.sock)")
 	containerName := flag.String("container-name", envDefault("SLUICE_AGENT_CONTAINER", "openclaw"), "agent container/VM name")
 	vmImage := flag.String("vm-image", "", "Apple Container OCI image (required for --runtime apple)")
@@ -68,9 +68,9 @@ func main() {
 
 	// Validate --runtime flag early.
 	switch *runtimeFlag {
-	case "auto", "docker", "apple":
+	case "auto", "docker", "apple", "none":
 	default:
-		log.Fatalf("unknown --runtime value %q (valid: docker, apple, auto)", *runtimeFlag)
+		log.Fatalf("unknown --runtime value %q (valid: docker, apple, none, auto)", *runtimeFlag)
 	}
 	if *runtimeFlag == "apple" && goruntime.GOOS != "darwin" {
 		log.Fatalf("--runtime apple requires macOS (current OS: %s)", goruntime.GOOS)
@@ -250,6 +250,8 @@ func main() {
 			})
 			log.Printf("apple container manager enabled: container=%s, image=%s", *containerName, *vmImage)
 		}
+	case "none":
+		log.Printf("standalone mode: no container runtime (configure ALL_PROXY=socks5://%s manually)", *listenAddr)
 	case "":
 		log.Printf("no container runtime detected; container management disabled")
 	}
