@@ -12,7 +12,7 @@ func newTestStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -32,7 +32,7 @@ func TestNewCreatesSchema(t *testing.T) {
 
 	// Verify rules table is empty.
 	var ruleCount int
-	s.db.QueryRow("SELECT COUNT(*) FROM rules").Scan(&ruleCount)
+	_ = s.db.QueryRow("SELECT COUNT(*) FROM rules").Scan(&ruleCount)
 	if ruleCount != 0 {
 		t.Errorf("rules table should be empty, got %d", ruleCount)
 	}
@@ -316,6 +316,41 @@ func TestAddRuleMutualExclusivity(t *testing.T) {
 	}
 }
 
+func TestAddRuleRedactRequiresPattern(t *testing.T) {
+	s := newTestStore(t)
+	// Redact with destination but no pattern should fail.
+	_, err := s.AddRule("redact", RuleOpts{Destination: "example.com"})
+	if err == nil {
+		t.Error("redact rule with destination (no pattern) should fail")
+	}
+	// Redact with tool but no pattern should fail.
+	_, err = s.AddRule("redact", RuleOpts{Tool: "exec__*"})
+	if err == nil {
+		t.Error("redact rule with tool (no pattern) should fail")
+	}
+	// Redact with pattern should succeed.
+	_, err = s.AddRule("redact", RuleOpts{Pattern: "sk-.*", Replacement: "[REDACTED]"})
+	if err != nil {
+		t.Errorf("redact rule with pattern should succeed: %v", err)
+	}
+}
+
+func TestAddRuleInvalidPort(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.AddRule("allow", RuleOpts{Destination: "example.com", Ports: []int{0}})
+	if err == nil {
+		t.Error("port 0 should fail validation")
+	}
+	_, err = s.AddRule("allow", RuleOpts{Destination: "example.com", Ports: []int{70000}})
+	if err == nil {
+		t.Error("port 70000 should fail validation")
+	}
+	_, err = s.AddRule("allow", RuleOpts{Destination: "example.com", Ports: []int{443}})
+	if err != nil {
+		t.Errorf("port 443 should succeed: %v", err)
+	}
+}
+
 func TestRemoveRule(t *testing.T) {
 	s := newTestStore(t)
 	id, _ := s.AddRule("allow", RuleOpts{Destination: "example.com"})
@@ -364,10 +399,10 @@ func TestRemoveRuleUnified(t *testing.T) {
 
 func TestListRulesFilterByVerdict(t *testing.T) {
 	s := newTestStore(t)
-	s.AddRule("allow", RuleOpts{Destination: "a.com"})
-	s.AddRule("deny", RuleOpts{Destination: "b.com"})
-	s.AddRule("ask", RuleOpts{Destination: "c.com"})
-	s.AddRule("allow", RuleOpts{Destination: "d.com"})
+	_, _ = s.AddRule("allow", RuleOpts{Destination: "a.com"})
+	_, _ = s.AddRule("deny", RuleOpts{Destination: "b.com"})
+	_, _ = s.AddRule("ask", RuleOpts{Destination: "c.com"})
+	_, _ = s.AddRule("allow", RuleOpts{Destination: "d.com"})
 
 	allows, _ := s.ListRules(RuleFilter{Verdict: "allow", Type: "network"})
 	if len(allows) != 2 {
@@ -385,9 +420,9 @@ func TestListRulesFilterByVerdict(t *testing.T) {
 
 func TestListRulesFilterByType(t *testing.T) {
 	s := newTestStore(t)
-	s.AddRule("allow", RuleOpts{Destination: "a.com"})
-	s.AddRule("allow", RuleOpts{Tool: "github__list_*"})
-	s.AddRule("deny", RuleOpts{Pattern: `sk-[a-zA-Z0-9]+`})
+	_, _ = s.AddRule("allow", RuleOpts{Destination: "a.com"})
+	_, _ = s.AddRule("allow", RuleOpts{Tool: "github__list_*"})
+	_, _ = s.AddRule("deny", RuleOpts{Pattern: `sk-[a-zA-Z0-9]+`})
 
 	network, _ := s.ListRules(RuleFilter{Type: "network"})
 	if len(network) != 1 {
@@ -418,9 +453,9 @@ func TestListRulesFilterByType(t *testing.T) {
 
 func TestListRulesFilterVerdictAndType(t *testing.T) {
 	s := newTestStore(t)
-	s.AddRule("allow", RuleOpts{Tool: "tool_a"})
-	s.AddRule("deny", RuleOpts{Tool: "tool_b"})
-	s.AddRule("ask", RuleOpts{Tool: "tool_c"})
+	_, _ = s.AddRule("allow", RuleOpts{Tool: "tool_a"})
+	_, _ = s.AddRule("deny", RuleOpts{Tool: "tool_b"})
+	_, _ = s.AddRule("ask", RuleOpts{Tool: "tool_c"})
 
 	allows, _ := s.ListRules(RuleFilter{Verdict: "allow", Type: "tool"})
 	if len(allows) != 1 {
@@ -712,7 +747,7 @@ func TestMCPUpstreamValidation(t *testing.T) {
 
 func TestMCPUpstreamDuplicateName(t *testing.T) {
 	s := newTestStore(t)
-	s.AddMCPUpstream("github", "npx", MCPUpstreamOpts{})
+	_, _ = s.AddMCPUpstream("github", "npx", MCPUpstreamOpts{})
 	_, err := s.AddMCPUpstream("github", "node", MCPUpstreamOpts{})
 	if err == nil {
 		t.Error("duplicate name should fail")
@@ -721,7 +756,7 @@ func TestMCPUpstreamDuplicateName(t *testing.T) {
 
 func TestMCPUpstreamDefaultTimeout(t *testing.T) {
 	s := newTestStore(t)
-	s.AddMCPUpstream("test", "cmd", MCPUpstreamOpts{})
+	_, _ = s.AddMCPUpstream("test", "cmd", MCPUpstreamOpts{})
 	upstreams, _ := s.ListMCPUpstreams()
 	if upstreams[0].TimeoutSec != 120 {
 		t.Errorf("default timeout = %d, want 120", upstreams[0].TimeoutSec)
@@ -743,7 +778,7 @@ func TestMCPUpstreamRemoveNonExistent(t *testing.T) {
 
 func TestRuleExistsNetwork(t *testing.T) {
 	s := newTestStore(t)
-	s.AddRule("allow", RuleOpts{Destination: "example.com", Ports: []int{443}})
+	_, _ = s.AddRule("allow", RuleOpts{Destination: "example.com", Ports: []int{443}})
 
 	exists, _ := s.RuleExists("allow", RuleExistsOpts{Destination: "example.com", Ports: []int{443}})
 	if !exists {
@@ -761,7 +796,7 @@ func TestRuleExistsNetwork(t *testing.T) {
 
 func TestRuleExistsNilPorts(t *testing.T) {
 	s := newTestStore(t)
-	s.AddRule("deny", RuleOpts{Destination: "evil.com"})
+	_, _ = s.AddRule("deny", RuleOpts{Destination: "evil.com"})
 
 	exists, _ := s.RuleExists("deny", RuleExistsOpts{Destination: "evil.com"})
 	if !exists {
@@ -775,7 +810,7 @@ func TestRuleExistsNilPorts(t *testing.T) {
 
 func TestRuleExistsTool(t *testing.T) {
 	s := newTestStore(t)
-	s.AddRule("allow", RuleOpts{Tool: "github__list_*"})
+	_, _ = s.AddRule("allow", RuleOpts{Tool: "github__list_*"})
 
 	exists, _ := s.RuleExists("allow", RuleExistsOpts{Tool: "github__list_*"})
 	if !exists {
@@ -789,7 +824,7 @@ func TestRuleExistsTool(t *testing.T) {
 
 func TestRuleExistsPattern(t *testing.T) {
 	s := newTestStore(t)
-	s.AddRule("deny", RuleOpts{Pattern: `sk-[a-zA-Z0-9]+`})
+	_, _ = s.AddRule("deny", RuleOpts{Pattern: `sk-[a-zA-Z0-9]+`})
 
 	exists, _ := s.RuleExists("deny", RuleExistsOpts{Pattern: `sk-[a-zA-Z0-9]+`})
 	if !exists {
@@ -809,9 +844,47 @@ func TestRuleExistsRequiresField(t *testing.T) {
 	}
 }
 
+func TestRuleExistsProtocolScoped(t *testing.T) {
+	s := newTestStore(t)
+	_, _ = s.AddRule("allow", RuleOpts{
+		Destination: "api.example.com",
+		Ports:       []int{443},
+		Protocols:   []string{"https"},
+	})
+
+	// Same destination+ports but different protocols should not match.
+	exists, _ := s.RuleExists("allow", RuleExistsOpts{
+		Destination: "api.example.com",
+		Ports:       []int{443},
+		Protocols:   []string{"http"},
+	})
+	if exists {
+		t.Error("different protocols should not match")
+	}
+
+	// Same destination+ports+protocols should match.
+	exists, _ = s.RuleExists("allow", RuleExistsOpts{
+		Destination: "api.example.com",
+		Ports:       []int{443},
+		Protocols:   []string{"https"},
+	})
+	if !exists {
+		t.Error("same protocols should match")
+	}
+
+	// Nil protocols should not match non-nil.
+	exists, _ = s.RuleExists("allow", RuleExistsOpts{
+		Destination: "api.example.com",
+		Ports:       []int{443},
+	})
+	if exists {
+		t.Error("nil protocols should not match non-nil")
+	}
+}
+
 func TestBindingExists(t *testing.T) {
 	s := newTestStore(t)
-	s.AddBinding("api.example.com", "my_key", BindingOpts{})
+	_, _ = s.AddBinding("api.example.com", "my_key", BindingOpts{})
 
 	exists, _ := s.BindingExists("api.example.com", "my_key")
 	if !exists {
@@ -825,7 +898,7 @@ func TestBindingExists(t *testing.T) {
 
 func TestMCPUpstreamExists(t *testing.T) {
 	s := newTestStore(t)
-	s.AddMCPUpstream("github", "npx", MCPUpstreamOpts{})
+	_, _ = s.AddMCPUpstream("github", "npx", MCPUpstreamOpts{})
 
 	exists, _ := s.MCPUpstreamExists("github")
 	if !exists {
@@ -914,7 +987,7 @@ func TestConcurrentConfigAccess(t *testing.T) {
 
 func TestRuleWithNullOptionalFields(t *testing.T) {
 	s := newTestStore(t)
-	s.AddRule("ask", RuleOpts{Destination: "example.com"})
+	_, _ = s.AddRule("ask", RuleOpts{Destination: "example.com"})
 
 	rules, _ := s.ListRules(RuleFilter{Type: "network"})
 	r := rules[0]
@@ -928,7 +1001,7 @@ func TestRuleWithNullOptionalFields(t *testing.T) {
 
 func TestMCPUpstreamNilArgsEnv(t *testing.T) {
 	s := newTestStore(t)
-	s.AddMCPUpstream("simple", "cmd", MCPUpstreamOpts{})
+	_, _ = s.AddMCPUpstream("simple", "cmd", MCPUpstreamOpts{})
 
 	upstreams, _ := s.ListMCPUpstreams()
 	u := upstreams[0]
@@ -944,10 +1017,10 @@ func TestMCPUpstreamNilArgsEnv(t *testing.T) {
 
 func TestRemoveRulesBySource(t *testing.T) {
 	s := newTestStore(t)
-	s.AddRule("allow", RuleOpts{Destination: "a.com", Source: "seed"})
-	s.AddRule("deny", RuleOpts{Destination: "b.com", Source: "seed"})
-	s.AddRule("allow", RuleOpts{Tool: "github__list_*", Source: "seed"})
-	s.AddRule("allow", RuleOpts{Destination: "c.com", Source: "manual"})
+	_, _ = s.AddRule("allow", RuleOpts{Destination: "a.com", Source: "seed"})
+	_, _ = s.AddRule("deny", RuleOpts{Destination: "b.com", Source: "seed"})
+	_, _ = s.AddRule("allow", RuleOpts{Tool: "github__list_*", Source: "seed"})
+	_, _ = s.AddRule("allow", RuleOpts{Destination: "c.com", Source: "manual"})
 
 	n, err := s.RemoveRulesBySource("seed")
 	if err != nil {

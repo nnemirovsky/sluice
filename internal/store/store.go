@@ -178,6 +178,11 @@ func (s *Store) AddRule(verdict string, opts RuleOpts) (int64, error) {
 			return 0, fmt.Errorf("pattern %q: invalid regex: %w", opts.Pattern, regexErr)
 		}
 	}
+	for _, p := range opts.Ports {
+		if p < 1 || p > 65535 {
+			return 0, fmt.Errorf("invalid port %d (must be 1-65535)", p)
+		}
+	}
 	source := opts.Source
 	if source == "" {
 		source = "manual"
