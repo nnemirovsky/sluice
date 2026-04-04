@@ -76,6 +76,13 @@ type QUICProxy struct {
 	// a new connection (and performing a full TLS handshake) per request.
 	transports sync.Map // map[string]*http3.Transport
 
+	// certCache caches per-host TLS certificates so that repeated QUIC
+	// connections to the same host reuse an already-generated certificate
+	// instead of performing expensive ECDSA key generation and signing on
+	// every connection. Certificates have 24h validity, and the cache is
+	// never evicted (host cardinality is bounded by policy allow rules).
+	certCache sync.Map // map[string]tls.Certificate
+
 	// mu protects listener lifecycle.
 	mu       sync.Mutex
 	listener *quic.Listener
@@ -219,23 +226,41 @@ func (q *QUICProxy) getOrCreateTransport(host string) *http3.Transport {
 	return t
 }
 
-// getConfigForClient returns a per-connection TLS config that generates a
-// certificate matching the SNI from the ClientHello.
+// getConfigForClient returns a per-connection TLS config with a certificate
+// matching the SNI from the ClientHello. Certificates are cached per host so
+// that repeated connections avoid expensive ECDSA key generation.
 func (q *QUICProxy) getConfigForClient(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 	host := hello.ServerName
 	if host == "" {
 		host = "localhost"
 	}
 
-	cert, err := GenerateHostCert(q.caCert, host)
+	cert, err := q.getOrCreateCert(host)
 	if err != nil {
-		return nil, fmt.Errorf("generate cert for %s: %w", host, err)
+		return nil, err
 	}
 
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		NextProtos:   []string{"h3"},
 	}, nil
+}
+
+// getOrCreateCert returns a cached TLS certificate for the host, generating
+// one if it does not already exist in the cache.
+func (q *QUICProxy) getOrCreateCert(host string) (tls.Certificate, error) {
+	if v, ok := q.certCache.Load(host); ok {
+		return v.(tls.Certificate), nil
+	}
+	cert, err := GenerateHostCert(q.caCert, host)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("generate cert for %s: %w", host, err)
+	}
+	// Store-or-load to handle concurrent generation for the same host.
+	if existing, loaded := q.certCache.LoadOrStore(host, cert); loaded {
+		return existing.(tls.Certificate), nil
+	}
+	return cert, nil
 }
 
 // handleConnection processes a single accepted QUIC connection by serving
