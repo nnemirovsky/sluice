@@ -42,3 +42,4 @@ dist/
 
 # Claude
 .claude/settings.local.json
+go/
