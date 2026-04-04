@@ -33,7 +33,6 @@ curl -x socks5h://127.0.0.1:1080 https://api.anthropic.com/
 | `--shutdown-timeout` | `10s` | Graceful shutdown timeout |
 | `--runtime` | `auto` | Container runtime: `docker`, `apple`, `none`, `auto` |
 | `--container-name` | `openclaw` | Agent container name (env: `SLUICE_AGENT_CONTAINER`) |
-| `--vm-image` | (none) | Apple Container OCI image (required for `--runtime apple`) |
 | `--docker-socket` | (auto-detect) | Docker socket path for container management |
 | `--phantom-dir` | (none) | Shared volume path for phantom token files (enables hot-reload) |
 
@@ -193,7 +192,7 @@ Three-container architecture: sluice + tun2proxy + openclaw. All agent traffic i
 Apple Container (macOS Virtualization.framework micro-VMs) is supported as an alternative to Docker. It provides native macOS isolation with access to Apple frameworks (EventKit, Messages, CallKit) that Linux containers cannot reach.
 
 ```bash
-sudo ./sluice --runtime apple --container-name openclaw --vm-image openclaw/openclaw:latest
+./sluice --runtime apple --container-name openclaw
 ```
 
 Traffic routing uses macOS pf rules to redirect VM bridge traffic through tun2proxy on the host to sluice's SOCKS5 proxy. APNS traffic (port 5223) is detected as a distinct protocol for policy rules.

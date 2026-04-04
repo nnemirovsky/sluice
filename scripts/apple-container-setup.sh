@@ -111,7 +111,7 @@ teardown() {
     fi
 
     # Remove anchor reference from /etc/pf.conf if present.
-    if grep -qF "anchor \"$ANCHOR_NAME\"" /etc/pf.conf 2>/dev/null; then
+    if grep -q "^anchor \"$ANCHOR_NAME\"$" /etc/pf.conf 2>/dev/null; then
         sed -i '' "/^anchor \"$ANCHOR_NAME\"$/d" /etc/pf.conf
         pfctl -f /etc/pf.conf 2>/dev/null || true
         echo "Removed anchor reference from /etc/pf.conf"
@@ -184,7 +184,7 @@ setup() {
     # Step 5: Ensure the anchor is referenced in /etc/pf.conf.
     # pf anchors are only evaluated if the main ruleset contains a matching
     # anchor directive. Without this, the rules load silently but never apply.
-    if ! grep -qF "anchor \"$ANCHOR_NAME\"" /etc/pf.conf 2>/dev/null; then
+    if ! grep -q "^anchor \"$ANCHOR_NAME\"$" /etc/pf.conf 2>/dev/null; then
         echo "Adding anchor reference to /etc/pf.conf..."
         cp /etc/pf.conf "/etc/pf.conf.sluice-backup.$$"
         echo "anchor \"$ANCHOR_NAME\"" >> /etc/pf.conf
