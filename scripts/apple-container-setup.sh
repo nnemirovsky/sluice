@@ -79,14 +79,14 @@ fi
 # Detect bridge interface. Apple Container VMs use bridge100 by default.
 detect_bridge() {
     # Look for bridge interfaces with an IP in the 192.168.64.0/24 range.
+    # Apple Container typically assigns VMs to this subnet on bridge100.
     for iface in $(ifconfig -l 2>/dev/null | tr ' ' '\n' | grep '^bridge'); do
         local ip
         ip=$(ifconfig "$iface" 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -1)
-        if [[ -n "$ip" ]]; then
+        if [[ -n "$ip" ]] && [[ "$ip" =~ ^192\.168\.64\. ]]; then
             BRIDGE_IFACE="$iface"
-            # Derive subnet: replace last octet with 0/24.
-            VM_SUBNET=$(echo "$ip" | sed 's/\.[0-9]*$/.0\/24/')
-            TUN_GATEWAY=$(echo "$ip" | sed 's/\.[0-9]*$/.1/')
+            VM_SUBNET="192.168.64.0/24"
+            TUN_GATEWAY="192.168.64.1"
             echo "Detected bridge interface: $BRIDGE_IFACE (subnet: $VM_SUBNET)"
             return 0
         fi
@@ -108,6 +108,13 @@ teardown() {
         echo "Flushed pf anchor: $ANCHOR_NAME"
     else
         echo "Warning: could not flush pf anchor (may not exist)"
+    fi
+
+    # Remove anchor reference from /etc/pf.conf if present.
+    if grep -qF "anchor \"$ANCHOR_NAME\"" /etc/pf.conf 2>/dev/null; then
+        sed -i '' "/^anchor \"$ANCHOR_NAME\"$/d" /etc/pf.conf
+        pfctl -f /etc/pf.conf 2>/dev/null || true
+        echo "Removed anchor reference from /etc/pf.conf"
     fi
 
     # Kill tun2proxy if running.
@@ -166,7 +173,18 @@ setup() {
         echo "tun2proxy running (PID: $TUN2PROXY_PID)"
     fi
 
-    # Step 5: Apply pf anchor rules.
+    # Step 5: Ensure the anchor is referenced in /etc/pf.conf.
+    # pf anchors are only evaluated if the main ruleset contains a matching
+    # anchor directive. Without this, the rules load silently but never apply.
+    if ! grep -qF "anchor \"$ANCHOR_NAME\"" /etc/pf.conf 2>/dev/null; then
+        echo "Adding anchor reference to /etc/pf.conf..."
+        cp /etc/pf.conf "/etc/pf.conf.sluice-backup.$$"
+        echo "anchor \"$ANCHOR_NAME\"" >> /etc/pf.conf
+        pfctl -f /etc/pf.conf
+        echo "Anchor reference added (backup: /etc/pf.conf.sluice-backup.$$)"
+    fi
+
+    # Step 6: Apply pf anchor rules.
     echo "Applying pf rules..."
 
     # Write anchor rules.

@@ -62,7 +62,6 @@ func main() {
 	runtimeFlag := flag.String("runtime", "auto", "container runtime: docker, apple, none, auto")
 	dockerSocket := flag.String("docker-socket", "", "Docker socket path (auto-detects from DOCKER_HOST or /var/run/docker.sock)")
 	containerName := flag.String("container-name", envDefault("SLUICE_AGENT_CONTAINER", "openclaw"), "agent container/VM name")
-	vmImage := flag.String("vm-image", "", "Apple Container OCI image (required for --runtime apple)")
 	phantomDir := flag.String("phantom-dir", "", "shared volume path for phantom token files (enables hot-reload)")
 	flag.Parse()
 
@@ -246,9 +245,8 @@ func main() {
 			containerMgr = container.NewAppleManager(container.AppleManagerConfig{
 				CLI:           cli,
 				ContainerName: *containerName,
-				Image:         *vmImage,
 			})
-			log.Printf("apple container manager enabled: container=%s, image=%s", *containerName, *vmImage)
+			log.Printf("apple container manager enabled: container=%s", *containerName)
 		}
 	case "none":
 		log.Printf("standalone mode: no container runtime (configure ALL_PROXY=socks5://%s manually)", *listenAddr)

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -60,15 +62,27 @@ func TestGenerateAnchorRulesDefaults(t *testing.T) {
 	}
 }
 
+// writeTempPFConf creates a temp pf.conf for testing and returns its path.
+func writeTempPFConf(t *testing.T, content string) string {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "pf.conf")
+	if err := os.WriteFile(f, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
 func TestSetupNetworkRouting(t *testing.T) {
 	runner := newMockRunner()
 	// pfctl -a sluice -f <tempfile> should be called.
 	runner.onCommand("pfctl -a sluice -f", nil, nil)
 
+	pfConf := writeTempPFConf(t, "# default pf rules\n")
 	router := NewNetworkRouter(NetworkRouterConfig{
 		Runner:     runner,
 		AnchorName: "sluice",
 		TUNIface:   "utun3",
+		PFConfPath: pfConf,
 	})
 
 	err := router.SetupNetworkRouting(context.Background(), "192.168.64.2", "bridge100", "192.168.64.1")
@@ -78,6 +92,37 @@ func TestSetupNetworkRouting(t *testing.T) {
 
 	if !runner.called("pfctl -a sluice -f") {
 		t.Error("expected pfctl call to load anchor rules from file")
+	}
+
+	// Verify anchor reference was added to pf.conf.
+	data, _ := os.ReadFile(pfConf)
+	if !strings.Contains(string(data), `anchor "sluice"`) {
+		t.Error("pf.conf should contain anchor reference after setup")
+	}
+}
+
+func TestSetupNetworkRoutingAnchorAlreadyPresent(t *testing.T) {
+	runner := newMockRunner()
+	runner.onCommand("pfctl -a sluice -f", nil, nil)
+
+	pfConf := writeTempPFConf(t, "# defaults\nanchor \"sluice\"\n")
+	router := NewNetworkRouter(NetworkRouterConfig{
+		Runner:     runner,
+		AnchorName: "sluice",
+		TUNIface:   "utun3",
+		PFConfPath: pfConf,
+	})
+
+	err := router.SetupNetworkRouting(context.Background(), "192.168.64.2", "bridge100", "192.168.64.1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify the anchor directive was not duplicated.
+	data, _ := os.ReadFile(pfConf)
+	count := strings.Count(string(data), `anchor "sluice"`)
+	if count != 1 {
+		t.Errorf("expected exactly 1 anchor reference, got %d", count)
 	}
 }
 
@@ -111,9 +156,11 @@ func TestSetupNetworkRoutingPfctlError(t *testing.T) {
 	runner := newMockRunner()
 	runner.onCommand("pfctl", nil, errors.New("pfctl failed"))
 
+	pfConf := writeTempPFConf(t, "# default pf rules\n")
 	router := NewNetworkRouter(NetworkRouterConfig{
 		Runner:     runner,
 		AnchorName: "sluice",
+		PFConfPath: pfConf,
 	})
 
 	err := router.SetupNetworkRouting(context.Background(), "192.168.64.2", "bridge100", "192.168.64.1")
@@ -129,9 +176,11 @@ func TestTeardownNetworkRouting(t *testing.T) {
 	runner := newMockRunner()
 	runner.onCommand("pfctl -a sluice -F all", nil, nil)
 
+	pfConf := writeTempPFConf(t, "# defaults\nanchor \"sluice\"\n")
 	router := NewNetworkRouter(NetworkRouterConfig{
 		Runner:     runner,
 		AnchorName: "sluice",
+		PFConfPath: pfConf,
 	})
 
 	err := router.TeardownNetworkRouting(context.Background())
@@ -141,6 +190,12 @@ func TestTeardownNetworkRouting(t *testing.T) {
 
 	if !runner.called("pfctl -a sluice -F all") {
 		t.Error("expected pfctl flush call")
+	}
+
+	// Verify anchor reference was removed from pf.conf.
+	data, _ := os.ReadFile(pfConf)
+	if strings.Contains(string(data), `anchor "sluice"`) {
+		t.Error("pf.conf should not contain anchor reference after teardown")
 	}
 }
 

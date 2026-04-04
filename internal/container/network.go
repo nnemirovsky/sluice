@@ -16,6 +16,7 @@ type NetworkRouter struct {
 	runner     CommandRunner
 	anchorName string
 	tunIface   string
+	pfConfPath string
 }
 
 // NetworkRouterConfig holds configuration for creating a NetworkRouter.
@@ -23,6 +24,7 @@ type NetworkRouterConfig struct {
 	Runner     CommandRunner
 	AnchorName string // pf anchor name (default: "sluice")
 	TUNIface   string // TUN interface for tun2proxy (default: "utun3")
+	PFConfPath string // path to pf.conf (default: "/etc/pf.conf")
 }
 
 // NewNetworkRouter creates a NetworkRouter with the given config.
@@ -39,10 +41,15 @@ func NewNetworkRouter(cfg NetworkRouterConfig) *NetworkRouter {
 	if runner == nil {
 		runner = ExecRunner{}
 	}
+	pfConf := cfg.PFConfPath
+	if pfConf == "" {
+		pfConf = "/etc/pf.conf"
+	}
 	return &NetworkRouter{
 		runner:     runner,
 		anchorName: anchor,
 		tunIface:   tun,
+		pfConfPath: pfConf,
 	}
 }
 
@@ -62,13 +69,20 @@ func (r *NetworkRouter) GenerateAnchorRules(bridgeIface, vmSubnet, tunGateway st
 }
 
 // SetupNetworkRouting generates pf anchor rules for the given VM IP and loads
-// them via pfctl. It detects the bridge interface and subnet from the VM IP.
+// them via pfctl. It ensures /etc/pf.conf references the anchor (required for
+// pf to evaluate anchor rules), then loads the anchor rules.
 // Requires root privileges (pfctl needs sudo).
 func (r *NetworkRouter) SetupNetworkRouting(ctx context.Context, vmIP, bridgeIface, tunGateway string) error {
 	// Derive /24 subnet from VM IP.
 	subnet, err := subnetFromIP(vmIP)
 	if err != nil {
 		return fmt.Errorf("derive subnet from VM IP %q: %w", vmIP, err)
+	}
+
+	// Ensure the main pf config references our anchor. Without this, the
+	// anchor rules load silently but are never evaluated by pf.
+	if err := r.ensureAnchorRef(); err != nil {
+		return fmt.Errorf("ensure pf anchor reference: %w", err)
 	}
 
 	rules := r.GenerateAnchorRules(bridgeIface, subnet, tunGateway)
@@ -101,13 +115,65 @@ func (r *NetworkRouter) loadAnchorFromFile(ctx context.Context, rules string) er
 	return nil
 }
 
-// TeardownNetworkRouting removes the pf anchor rules by flushing the anchor.
+// TeardownNetworkRouting removes the pf anchor rules by flushing the anchor
+// and removing the anchor reference from /etc/pf.conf.
 func (r *NetworkRouter) TeardownNetworkRouting(ctx context.Context) error {
 	_, err := r.runner.Run(ctx, "pfctl", "-a", r.anchorName, "-F", "all")
 	if err != nil {
 		return fmt.Errorf("flush pf anchor %q: %w", r.anchorName, err)
 	}
+	// Best-effort removal of anchor reference from /etc/pf.conf.
+	_ = r.removeAnchorRef()
 	return nil
+}
+
+// ensureAnchorRef adds an anchor directive to pf.conf if not present.
+// pf only evaluates anchor rules when the main ruleset references them.
+func (r *NetworkRouter) ensureAnchorRef() error {
+	directive := fmt.Sprintf("anchor \"%s\"", r.anchorName)
+
+	data, err := os.ReadFile(r.pfConfPath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", r.pfConfPath, err)
+	}
+
+	if strings.Contains(string(data), directive) {
+		return nil // already present
+	}
+
+	f, err := os.OpenFile(r.pfConfPath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("open %s for append: %w", r.pfConfPath, err)
+	}
+	_, writeErr := fmt.Fprintf(f, "\n%s\n", directive)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return fmt.Errorf("write anchor directive: %w", writeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close %s: %w", r.pfConfPath, closeErr)
+	}
+	return nil
+}
+
+// removeAnchorRef removes the anchor directive from pf.conf.
+func (r *NetworkRouter) removeAnchorRef() error {
+	directive := fmt.Sprintf("anchor \"%s\"", r.anchorName)
+
+	data, err := os.ReadFile(r.pfConfPath)
+	if err != nil {
+		return err
+	}
+
+	lines := strings.Split(string(data), "\n")
+	var filtered []string
+	for _, line := range lines {
+		if strings.TrimSpace(line) != directive {
+			filtered = append(filtered, line)
+		}
+	}
+
+	return os.WriteFile(r.pfConfPath, []byte(strings.Join(filtered, "\n")), 0644)
 }
 
 // DefaultBridgeInterface returns the default bridge interface name and the

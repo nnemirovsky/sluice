@@ -523,7 +523,6 @@ func newTestAppleManager(t *testing.T) (*AppleManager, *mockRunner, string) {
 	mgr := NewAppleManager(AppleManagerConfig{
 		CLI:           cli,
 		ContainerName: "openclaw",
-		Image:         "openclaw/openclaw:latest",
 	})
 
 	return mgr, runner, tmpDir

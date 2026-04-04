@@ -194,14 +194,12 @@ func (c *AppleCLI) List(ctx context.Context) ([]VMListEntry, error) {
 type AppleManager struct {
 	cli           *AppleCLI
 	containerName string
-	image         string
 }
 
 // AppleManagerConfig holds configuration for creating an AppleManager.
 type AppleManagerConfig struct {
 	CLI           *AppleCLI
 	ContainerName string
-	Image         string
 }
 
 // NewAppleManager creates a new AppleManager from the given config.
@@ -209,7 +207,6 @@ func NewAppleManager(cfg AppleManagerConfig) *AppleManager {
 	return &AppleManager{
 		cli:           cfg.CLI,
 		containerName: cfg.ContainerName,
-		image:         cfg.Image,
 	}
 }
 
