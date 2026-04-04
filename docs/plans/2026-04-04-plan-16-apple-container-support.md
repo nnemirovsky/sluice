@@ -207,18 +207,18 @@ Support running sluice as a standalone proxy on macOS without any container runt
 
 ### Task 8: Verify acceptance criteria
 
-- [ ] Verify Apple Container VM starts with correct env vars and volumes
-- [ ] Verify pf rules redirect VM traffic through tun2proxy to sluice SOCKS5
-- [ ] Verify HTTPS MITM works (CA cert trusted by VM)
-- [ ] Verify credential hot-reload via shared volume + container exec
-- [ ] Verify MCP auto-injection works (mcp-servers.json in shared volume)
-- [ ] Verify APNS protocol detected on port 5223 and rules with `protocols = ["apns"]` match
-- [ ] Verify Apple service traffic (iCloud, iMessage signaling) routes through sluice
-- [ ] Verify Docker backend still works (no regression)
-- [ ] Verify auto-detection picks correct runtime
-- [ ] Verify standalone mode (no container runtime) works
-- [ ] Run full test suite: `go test ./... -v -timeout 60s`
-- [ ] Run linter: `go vet ./...`
+- [x] Verify Apple Container VM starts with correct env vars and volumes
+- [x] Verify pf rules redirect VM traffic through tun2proxy to sluice SOCKS5
+- [x] Verify HTTPS MITM works (CA cert trusted by VM)
+- [x] Verify credential hot-reload via shared volume + container exec
+- [x] Verify MCP auto-injection works (mcp-servers.json in shared volume)
+- [x] Verify APNS protocol detected on port 5223 and rules with `protocols = ["apns"]` match
+- [x] Verify Apple service traffic (iCloud, iMessage signaling) routes through sluice
+- [x] Verify Docker backend still works (no regression)
+- [x] Verify auto-detection picks correct runtime
+- [x] Verify standalone mode (no container runtime) works
+- [x] Run full test suite: `go test ./... -v -timeout 60s`
+- [x] Run linter: `go vet ./...`
 
 ### Task 9: [Final] Update documentation
 
