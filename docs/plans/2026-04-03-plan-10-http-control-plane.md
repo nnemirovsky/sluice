@@ -212,23 +212,23 @@ ALTER TABLE channels ADD COLUMN webhook_secret TEXT;
 
 ### Task 7: Verify acceptance criteria
 
-- [ ] Verify `go generate ./internal/api/` produces valid code from OpenAPI spec
-- [ ] Verify all REST API endpoints work with bearer token auth
-- [ ] Verify API returns 403 when SLUICE_API_TOKEN is not set
-- [ ] Verify API routes return 403 with `{"error": "HTTP channel is not enabled", "code": "channel_disabled"}` when HTTP channel is disabled
-- [ ] Verify `/healthz` stays active even when HTTP channel is disabled
-- [ ] Verify HTTP channel delivers approvals via HTTP POST with HMAC signature
-- [ ] Verify sync response path (verdict in webhook response body)
-- [ ] Verify async callback path (202 + POST /api/approvals/:id/resolve)
-- [ ] Verify multi-channel: Telegram + HTTP both enabled, approval broadcast to both, first response wins
-- [ ] Verify cross-channel cancellation: Telegram approves, HTTP prompt gets cancelled (and vice versa)
-- [ ] Verify `sluice channel add --type http --url https://...` creates new channel row
-- [ ] Verify `sluice channel list` shows all channels with status
-- [ ] Verify `sluice channel remove <id>` removes channel (cannot remove last enabled channel)
-- [ ] Verify policy CRUD via API writes to store and recompiles engine
-- [ ] Verify credential management via API triggers phantom regen + hot reload
-- [ ] Run full test suite: `go test ./... -v -timeout 60s -race`
-- [ ] Run linter: `go vet ./...`
+- [x] Verify `go generate ./internal/api/` produces valid code from OpenAPI spec
+- [x] Verify all REST API endpoints work with bearer token auth
+- [x] Verify API returns 403 when SLUICE_API_TOKEN is not set
+- [x] Verify API routes return 403 with `{"error": "HTTP channel is not enabled", "code": "channel_disabled"}` when HTTP channel is disabled
+- [x] Verify `/healthz` stays active even when HTTP channel is disabled
+- [x] Verify HTTP channel delivers approvals via HTTP POST with HMAC signature
+- [x] Verify sync response path (verdict in webhook response body)
+- [x] Verify async callback path (202 + POST /api/approvals/:id/resolve)
+- [x] Verify multi-channel: Telegram + HTTP both enabled, approval broadcast to both, first response wins
+- [x] Verify cross-channel cancellation: Telegram approves, HTTP prompt gets cancelled (and vice versa)
+- [x] Verify `sluice channel add --type http --url https://...` creates new channel row
+- [x] Verify `sluice channel list` shows all channels with status
+- [x] Verify `sluice channel remove <id>` removes channel (cannot remove last enabled channel)
+- [x] Verify policy CRUD via API writes to store and recompiles engine
+- [x] Verify credential management via API triggers phantom regen + hot reload
+- [x] Run full test suite: `go test ./... -v -timeout 60s -race`
+- [x] Run linter: `go vet ./...`
 
 ### Task 8: [Final] Update documentation
 
