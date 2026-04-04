@@ -79,17 +79,17 @@ RFC 6455 Section 5.2 frame format: 2-14 byte header, optional 4-byte mask, paylo
 - Create: `internal/proxy/ws.go`
 - Create: `internal/proxy/ws_test.go`
 
-- [ ] Implement `Frame` struct: `FIN bool`, `Opcode byte` (0x0=continuation, 0x1=text, 0x2=binary, 0x8=close, 0x9=ping, 0xA=pong), `Masked bool`, `MaskKey [4]byte`, `Payload []byte`
-- [ ] Implement `ReadFrame(r io.Reader) (*Frame, error)` that parses the wire format
-- [ ] Implement `WriteFrame(w io.Writer, f *Frame) error` that serializes the wire format
-- [ ] Implement `Frame.UnmaskedPayload() []byte` that applies the XOR mask
-- [ ] Implement `Frame.SetPayload(data []byte)` that updates payload and adjusts length. If frame was masked, re-masks with same key.
-- [ ] Handle continuation frames: track fragmented messages, reassemble for inspection, forward individual frames
-- [ ] Write tests for parsing text frames (masked and unmasked)
-- [ ] Write tests for binary frames and control frames (ping, pong, close)
-- [ ] Write tests for extended payload lengths (126 = 16-bit, 127 = 64-bit)
-- [ ] Write tests for frame round-trip (parse then serialize, verify identical)
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] Implement `Frame` struct: `FIN bool`, `Opcode byte` (0x0=continuation, 0x1=text, 0x2=binary, 0x8=close, 0x9=ping, 0xA=pong), `Masked bool`, `MaskKey [4]byte`, `Payload []byte`
+- [x] Implement `ReadFrame(r io.Reader) (*Frame, error)` that parses the wire format
+- [x] Implement `WriteFrame(w io.Writer, f *Frame) error` that serializes the wire format
+- [x] Implement `Frame.UnmaskedPayload() []byte` that applies the XOR mask
+- [x] Implement `Frame.SetPayload(data []byte)` that updates payload and adjusts length. If frame was masked, re-masks with same key.
+- [x] Handle continuation frames: track fragmented messages, reassemble for inspection, forward individual frames
+- [x] Write tests for parsing text frames (masked and unmasked)
+- [x] Write tests for binary frames and control frames (ping, pong, close)
+- [x] Write tests for extended payload lengths (126 = 16-bit, 127 = 64-bit)
+- [x] Write tests for frame round-trip (parse then serialize, verify identical)
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 3: WebSocket proxy with phantom token replacement
 
