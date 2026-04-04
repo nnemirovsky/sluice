@@ -1,17 +1,11 @@
-// Package docker manages agent containers, handling credential rotation by
-// restarting containers with updated phantom environment variables.
-package docker
+package container
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/nemirovsky/sluice/internal/container"
 )
 
 // ContainerClient abstracts Docker Engine API operations for testability.
@@ -61,16 +55,16 @@ type ContainerSpec struct {
 	Entrypoint  []string
 }
 
-// Manager manages Docker container lifecycle for credential rotation.
-// It implements the container.ContainerManager interface.
-type Manager struct {
+// DockerManager manages Docker container lifecycle for credential rotation.
+// It implements the ContainerManager interface.
+type DockerManager struct {
 	client        ContainerClient
 	containerName string
 }
 
-// NewManager creates a new Docker container manager.
-func NewManager(client ContainerClient, containerName string) *Manager {
-	return &Manager{
+// NewDockerManager creates a new Docker container manager.
+func NewDockerManager(client ContainerClient, containerName string) *DockerManager {
+	return &DockerManager{
 		client:        client,
 		containerName: containerName,
 	}
@@ -81,7 +75,7 @@ func NewManager(client ContainerClient, containerName string) *Manager {
 // phantomEnv is written as a separate file (key = filename, value = contents).
 // If the exec command fails (e.g. the agent image does not support "secrets
 // reload"), it falls back to RestartWithEnv for backward compatibility.
-func (m *Manager) ReloadSecrets(ctx context.Context, phantomDir string, phantomEnv map[string]string) error {
+func (m *DockerManager) ReloadSecrets(ctx context.Context, phantomDir string, phantomEnv map[string]string) error {
 	// Write each phantom token as a file in the shared volume.
 	for name, value := range phantomEnv {
 		path := filepath.Join(phantomDir, name)
@@ -110,7 +104,7 @@ func (m *Manager) ReloadSecrets(ctx context.Context, phantomDir string, phantomE
 // RestartWithEnv recreates the container with updated environment variables.
 // It inspects the current container config, stops and removes it, creates a
 // new container with the same config plus updated env vars, and starts it.
-func (m *Manager) RestartWithEnv(ctx context.Context, envUpdates map[string]string) error {
+func (m *DockerManager) RestartWithEnv(ctx context.Context, envUpdates map[string]string) error {
 	info, err := m.client.InspectContainer(ctx, m.containerName)
 	if err != nil {
 		return fmt.Errorf("inspect container: %w", err)
@@ -148,12 +142,12 @@ func (m *Manager) RestartWithEnv(ctx context.Context, envUpdates map[string]stri
 }
 
 // Status returns container health information.
-func (m *Manager) Status(ctx context.Context) (container.ContainerStatus, error) {
+func (m *DockerManager) Status(ctx context.Context) (ContainerStatus, error) {
 	info, err := m.client.InspectContainer(ctx, m.containerName)
 	if err != nil {
-		return container.ContainerStatus{}, err
+		return ContainerStatus{}, err
 	}
-	return container.ContainerStatus{
+	return ContainerStatus{
 		ID:      info.ID,
 		Running: info.Running,
 		Image:   info.Image,
@@ -162,17 +156,17 @@ func (m *Manager) Status(ctx context.Context) (container.ContainerStatus, error)
 
 // InjectMCPConfig is a no-op for Docker. MCP configuration is handled via
 // compose volumes and environment variables in the Docker deployment model.
-func (m *Manager) InjectMCPConfig(_, _ string) error {
+func (m *DockerManager) InjectMCPConfig(_, _ string) error {
 	return nil
 }
 
-// Runtime returns container.RuntimeDocker.
-func (m *Manager) Runtime() container.Runtime {
-	return container.RuntimeDocker
+// Runtime returns RuntimeDocker.
+func (m *DockerManager) Runtime() Runtime {
+	return RuntimeDocker
 }
 
 // Stop stops the agent container.
-func (m *Manager) Stop(ctx context.Context) error {
+func (m *DockerManager) Stop(ctx context.Context) error {
 	return m.client.StopContainer(ctx, m.containerName, 10)
 }
 
@@ -206,56 +200,4 @@ func mergeEnv(existing []string, updates map[string]string) []string {
 		result = append(result, k+"="+v)
 	}
 	return result
-}
-
-// GeneratePhantomToken creates a phantom token value matching the expected
-// format for the given credential name. SDKs validate token prefixes, so
-// phantom tokens must pass basic format checks.
-func GeneratePhantomToken(credName string) string {
-	rnd := randomHex(20)
-	switch {
-	case strings.Contains(credName, "anthropic"):
-		return "sk-ant-phantom-" + rnd
-	case strings.Contains(credName, "openai"):
-		return "sk-phantom-" + rnd
-	case strings.Contains(credName, "github"):
-		return "ghp_phantom" + rnd
-	default:
-		return "phantom-" + rnd
-	}
-}
-
-// CredNameToEnvVar converts a credential name to an environment variable name.
-// Non-alphanumeric characters (hyphens, dots, etc.) are replaced with underscores
-// to produce valid shell environment variable names.
-func CredNameToEnvVar(name string) string {
-	var b strings.Builder
-	b.Grow(len(name))
-	for _, c := range strings.ToUpper(name) {
-		if (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
-			b.WriteRune(c)
-		} else {
-			b.WriteByte('_')
-		}
-	}
-	return b.String()
-}
-
-// GeneratePhantomEnv generates phantom token environment variables for all
-// given credential names. Returns a map of ENV_VAR_NAME to phantom value.
-func GeneratePhantomEnv(credNames []string) map[string]string {
-	result := make(map[string]string, len(credNames))
-	for _, name := range credNames {
-		envVar := CredNameToEnvVar(name)
-		result[envVar] = GeneratePhantomToken(name)
-	}
-	return result
-}
-
-func randomHex(n int) string {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return hex.EncodeToString(b)
 }

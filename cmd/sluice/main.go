@@ -21,7 +21,6 @@ import (
 	"github.com/nemirovsky/sluice/internal/channel"
 	httpchannel "github.com/nemirovsky/sluice/internal/channel/http"
 	"github.com/nemirovsky/sluice/internal/container"
-	"github.com/nemirovsky/sluice/internal/docker"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
 	"github.com/nemirovsky/sluice/internal/store"
@@ -235,8 +234,8 @@ func main() {
 			log.Printf("WARNING: %v; Docker container management disabled", sockErr)
 		} else {
 			if fi, statErr := os.Stat(sock); statErr == nil && fi.Mode().Type() == os.ModeSocket {
-				client := docker.NewSocketClient(sock)
-				containerMgr = docker.NewManager(client, *containerName)
+				client := container.NewSocketClient(sock)
+				containerMgr = container.NewDockerManager(client, *containerName)
 				log.Printf("docker manager enabled: socket=%s, container=%s", sock, *containerName)
 			} else if *runtimeFlag == "docker" {
 				log.Fatalf("--runtime docker: socket %q not found or not a socket", sock)

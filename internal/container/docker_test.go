@@ -1,4 +1,4 @@
-package docker
+package container
 
 import (
 	"context"
@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/nemirovsky/sluice/internal/container"
 )
 
 // mockClient implements ContainerClient for testing.
@@ -70,16 +68,16 @@ func (m *mockClient) ExecInContainer(_ context.Context, name string, cmd []strin
 	return m.execErr
 }
 
-// Compile-time check that Manager implements container.ContainerManager.
-var _ container.ContainerManager = (*Manager)(nil)
+// Compile-time check that DockerManager implements ContainerManager.
+var _ ContainerManager = (*DockerManager)(nil)
 
-func TestManagerImplementsContainerManager(t *testing.T) {
+func TestDockerManagerImplementsContainerManager(t *testing.T) {
 	mc := &mockClient{}
-	mgr := NewManager(mc, "test")
+	mgr := NewDockerManager(mc, "test")
 
 	// Verify Runtime() returns Docker.
-	if mgr.Runtime() != container.RuntimeDocker {
-		t.Errorf("Runtime() = %v, want %v", mgr.Runtime(), container.RuntimeDocker)
+	if mgr.Runtime() != RuntimeDocker {
+		t.Errorf("Runtime() = %v, want %v", mgr.Runtime(), RuntimeDocker)
 	}
 
 	// Verify InjectMCPConfig is a no-op.
@@ -107,7 +105,7 @@ func TestRestartWithEnv(t *testing.T) {
 		createdID: "def456",
 	}
 
-	mgr := NewManager(mc, "openclaw")
+	mgr := NewDockerManager(mc, "openclaw")
 	err := mgr.RestartWithEnv(context.Background(), map[string]string{
 		"ANTHROPIC_API_KEY": "sk-ant-phantom-newvalue",
 		"NEW_VAR":           "new-value",
@@ -206,7 +204,7 @@ func TestRestartWithEnvInspectError(t *testing.T) {
 	mc := &mockClient{
 		inspectErr: fmt.Errorf("container not found"),
 	}
-	mgr := NewManager(mc, "openclaw")
+	mgr := NewDockerManager(mc, "openclaw")
 	err := mgr.RestartWithEnv(context.Background(), map[string]string{"A": "1"})
 	if err == nil {
 		t.Fatal("expected error")
@@ -221,7 +219,7 @@ func TestRestartWithEnvStopError(t *testing.T) {
 		state:   ContainerState{ID: "abc", Image: "test"},
 		stopErr: fmt.Errorf("timeout"),
 	}
-	mgr := NewManager(mc, "openclaw")
+	mgr := NewDockerManager(mc, "openclaw")
 	err := mgr.RestartWithEnv(context.Background(), map[string]string{"A": "1"})
 	if err == nil {
 		t.Fatal("expected error")
@@ -236,7 +234,7 @@ func TestRestartWithEnvRemoveError(t *testing.T) {
 		state:     ContainerState{ID: "abc", Image: "test"},
 		removeErr: fmt.Errorf("in use"),
 	}
-	mgr := NewManager(mc, "openclaw")
+	mgr := NewDockerManager(mc, "openclaw")
 	err := mgr.RestartWithEnv(context.Background(), map[string]string{"A": "1"})
 	if err == nil {
 		t.Fatal("expected error")
@@ -251,7 +249,7 @@ func TestRestartWithEnvCreateError(t *testing.T) {
 		state:     ContainerState{ID: "abc", Image: "test"},
 		createErr: fmt.Errorf("image not found"),
 	}
-	mgr := NewManager(mc, "openclaw")
+	mgr := NewDockerManager(mc, "openclaw")
 	err := mgr.RestartWithEnv(context.Background(), map[string]string{"A": "1"})
 	if err == nil {
 		t.Fatal("expected error")
@@ -267,7 +265,7 @@ func TestRestartWithEnvStartError(t *testing.T) {
 		createdID: "new123",
 		startErr:  fmt.Errorf("port conflict"),
 	}
-	mgr := NewManager(mc, "openclaw")
+	mgr := NewDockerManager(mc, "openclaw")
 	err := mgr.RestartWithEnv(context.Background(), map[string]string{"A": "1"})
 	if err == nil {
 		t.Fatal("expected error")
@@ -277,7 +275,7 @@ func TestRestartWithEnvStartError(t *testing.T) {
 	}
 }
 
-func TestStatus(t *testing.T) {
+func TestDockerManagerStatus(t *testing.T) {
 	mc := &mockClient{
 		state: ContainerState{
 			ID:      "abc123",
@@ -286,7 +284,7 @@ func TestStatus(t *testing.T) {
 		},
 	}
 
-	mgr := NewManager(mc, "openclaw")
+	mgr := NewDockerManager(mc, "openclaw")
 	status, err := mgr.Status(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -302,80 +300,15 @@ func TestStatus(t *testing.T) {
 	}
 }
 
-func TestStop(t *testing.T) {
+func TestDockerManagerStop(t *testing.T) {
 	mc := &mockClient{}
-	mgr := NewManager(mc, "openclaw")
+	mgr := NewDockerManager(mc, "openclaw")
 	err := mgr.Stop(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !mc.stopped {
 		t.Error("container should have been stopped")
-	}
-}
-
-func TestGeneratePhantomToken(t *testing.T) {
-	tests := []struct {
-		name   string
-		prefix string
-	}{
-		{"anthropic_api_key", "sk-ant-phantom-"},
-		{"openai_api_key", "sk-phantom-"},
-		{"github_token", "ghp_phantom"},
-		{"unknown_cred", "phantom-"},
-	}
-
-	for _, tt := range tests {
-		token := GeneratePhantomToken(tt.name)
-		if !strings.HasPrefix(token, tt.prefix) {
-			t.Errorf("GeneratePhantomToken(%q) = %q, want prefix %q", tt.name, token, tt.prefix)
-		}
-		if len(token) < len(tt.prefix)+10 {
-			t.Errorf("GeneratePhantomToken(%q) too short: %q", tt.name, token)
-		}
-	}
-
-	// Verify uniqueness across calls.
-	t1 := GeneratePhantomToken("anthropic_api_key")
-	t2 := GeneratePhantomToken("anthropic_api_key")
-	if t1 == t2 {
-		t.Error("phantom tokens should be unique across calls")
-	}
-}
-
-func TestGeneratePhantomEnv(t *testing.T) {
-	env := GeneratePhantomEnv([]string{"anthropic_api_key", "github_token"})
-
-	if _, ok := env["ANTHROPIC_API_KEY"]; !ok {
-		t.Error("should have ANTHROPIC_API_KEY")
-	}
-	if _, ok := env["GITHUB_TOKEN"]; !ok {
-		t.Error("should have GITHUB_TOKEN")
-	}
-	if !strings.HasPrefix(env["ANTHROPIC_API_KEY"], "sk-ant-phantom-") {
-		t.Errorf("ANTHROPIC_API_KEY should match format: %s", env["ANTHROPIC_API_KEY"])
-	}
-	if !strings.HasPrefix(env["GITHUB_TOKEN"], "ghp_phantom") {
-		t.Errorf("GITHUB_TOKEN should match format: %s", env["GITHUB_TOKEN"])
-	}
-}
-
-func TestCredNameToEnvVar(t *testing.T) {
-	tests := []struct {
-		name string
-		want string
-	}{
-		{"anthropic_api_key", "ANTHROPIC_API_KEY"},
-		{"github_token", "GITHUB_TOKEN"},
-		{"my_secret", "MY_SECRET"},
-		{"my-api-key", "MY_API_KEY"},
-		{"cred.name.dots", "CRED_NAME_DOTS"},
-	}
-	for _, tt := range tests {
-		got := CredNameToEnvVar(tt.name)
-		if got != tt.want {
-			t.Errorf("CredNameToEnvVar(%q) = %q, want %q", tt.name, got, tt.want)
-		}
 	}
 }
 
@@ -469,7 +402,7 @@ func TestMergeEnvRemoval(t *testing.T) {
 func TestReloadSecretsWritesFiles(t *testing.T) {
 	dir := t.TempDir()
 	mc := &mockClient{}
-	mgr := NewManager(mc, "openclaw")
+	mgr := NewDockerManager(mc, "openclaw")
 
 	phantomEnv := map[string]string{
 		"ANTHROPIC_API_KEY": "sk-ant-phantom-abc123",
@@ -516,7 +449,7 @@ func TestReloadSecretsRemovesFiles(t *testing.T) {
 	}
 
 	mc := &mockClient{}
-	mgr := NewManager(mc, "openclaw")
+	mgr := NewDockerManager(mc, "openclaw")
 
 	err := mgr.ReloadSecrets(context.Background(), dir, map[string]string{
 		"OLD_TOKEN": "", // empty = remove
@@ -533,7 +466,7 @@ func TestReloadSecretsRemovesFiles(t *testing.T) {
 func TestReloadSecretsCallsExec(t *testing.T) {
 	dir := t.TempDir()
 	mc := &mockClient{}
-	mgr := NewManager(mc, "openclaw")
+	mgr := NewDockerManager(mc, "openclaw")
 
 	err := mgr.ReloadSecrets(context.Background(), dir, map[string]string{
 		"API_KEY": "phantom-value",
@@ -560,7 +493,7 @@ func TestReloadSecretsFallbackToRestart(t *testing.T) {
 		state:     ContainerState{ID: "abc", Image: "openclaw:latest"},
 		createdID: "new123",
 	}
-	mgr := NewManager(mc, "openclaw")
+	mgr := NewDockerManager(mc, "openclaw")
 
 	err := mgr.ReloadSecrets(context.Background(), dir, map[string]string{
 		"API_KEY": "phantom-value",
@@ -591,7 +524,7 @@ func TestReloadSecretsFallbackRestartFails(t *testing.T) {
 		execErr:    fmt.Errorf("exec failed"),
 		inspectErr: fmt.Errorf("container not found"),
 	}
-	mgr := NewManager(mc, "openclaw")
+	mgr := NewDockerManager(mc, "openclaw")
 
 	err := mgr.ReloadSecrets(context.Background(), dir, map[string]string{
 		"API_KEY": "phantom-value",

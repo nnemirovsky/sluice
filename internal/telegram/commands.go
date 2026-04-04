@@ -13,7 +13,6 @@ import (
 
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/container"
-	"github.com/nemirovsky/sluice/internal/docker"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
@@ -521,10 +520,10 @@ func (h *CommandHandler) credMutationComplete(msg string, removedCreds ...string
 		return msg + "\nWarning: failed to list credentials for container update: " + err.Error()
 	}
 
-	phantomEnv := docker.GeneratePhantomEnv(names)
+	phantomEnv := vault.GeneratePhantomEnv(names)
 	// Mark removed credentials with empty values so they are cleaned up.
 	for _, removed := range removedCreds {
-		envVar := docker.CredNameToEnvVar(removed)
+		envVar := vault.CredNameToEnvVar(removed)
 		if _, exists := phantomEnv[envVar]; !exists {
 			phantomEnv[envVar] = ""
 		}
