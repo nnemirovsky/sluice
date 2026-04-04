@@ -55,10 +55,10 @@ Add `ProtoTCP` and `ProtoUDP` to the Protocol integer enum and replace hardcoded
 - Modify: `internal/store/import.go`
 - Modify: `internal/store/store.go` (if protocol validation exists)
 
-- [ ] Replace hardcoded `"udp": true` in `validProtocolNames` with reference to `proxy.protocolNames` or add `"tcp"` alongside `"udp"`
-- [ ] Ensure `"tcp"` is also valid in the store (not just `"udp"`)
-- [ ] Write test: import a TOML config with `protocols = ["tcp"]` rule, verify it's accepted
-- [ ] Run tests: `go test ./internal/store/ -v -timeout 30s`
+- [x] Replace hardcoded `"udp": true` in `validProtocolNames` with reference to `proxy.protocolNames` or add `"tcp"` alongside `"udp"`
+- [x] Ensure `"tcp"` is also valid in the store (not just `"udp"`)
+- [x] Write test: import a TOML config with `protocols = ["tcp"]` rule, verify it's accepted
+- [x] Run tests: `go test ./internal/store/ -v -timeout 30s`
 
 ### Task 4: Verify acceptance criteria
 

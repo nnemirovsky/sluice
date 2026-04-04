@@ -130,9 +130,8 @@ type importFile struct {
 }
 
 // validProtocolNames lists recognized protocol names for validation during
-// TOML import. These correspond to the Protocol enum values in the proxy
-// package (proxy.protocolNames). "udp" is included as a transport-level
-// label used in policy rules. Keep in sync with proxy.protocolNames;
+// TOML import. These correspond 1:1 with the Protocol enum values in the
+// proxy package (proxy.protocolNames). Keep in sync with proxy.protocolNames;
 // TestValidProtocolNamesSync verifies this.
 var validProtocolNames = map[string]bool{
 	"generic": true,
@@ -147,6 +146,7 @@ var validProtocolNames = map[string]bool{
 	"dns":     true,
 	"quic":    true,
 	"apns":    true,
+	"tcp":     true,
 	"udp":     true,
 }
 
