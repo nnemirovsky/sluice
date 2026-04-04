@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -113,7 +114,7 @@ func (s *Server) GetApiApprovals(w http.ResponseWriter, r *http.Request) {
 // PostApiApprovalsIdResolve resolves a pending approval request.
 func (s *Server) PostApiApprovalsIdResolve(w http.ResponseWriter, r *http.Request, id string) {
 	var req ResolveRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "")
 		return
 	}
@@ -215,7 +216,7 @@ func BearerAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if auth[len(prefix):] != token {
+		if subtle.ConstantTimeCompare([]byte(auth[len(prefix):]), []byte(token)) != 1 {
 			writeError(w, http.StatusUnauthorized, "invalid token", "unauthorized")
 			return
 		}
@@ -290,7 +291,7 @@ func (s *Server) GetApiRules(w http.ResponseWriter, r *http.Request, params GetA
 // PostApiRules adds a new policy rule and recompiles the engine.
 func (s *Server) PostApiRules(w http.ResponseWriter, r *http.Request) {
 	var req CreateRuleRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "")
 		return
 	}
@@ -639,7 +640,7 @@ func (s *Server) GetApiConfig(w http.ResponseWriter, r *http.Request) {
 // PatchApiConfig updates configuration and recompiles the engine.
 func (s *Server) PatchApiConfig(w http.ResponseWriter, r *http.Request) {
 	var req ConfigUpdate
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "")
 		return
 	}
@@ -705,7 +706,7 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req CreateCredentialRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "")
 		return
 	}
@@ -803,9 +804,13 @@ func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request
 		defer s.reloadMu.Unlock()
 	}
 
-	// Remove associated bindings and rules.
+	// Remove associated bindings and auto-created rules.
 	if _, err := s.store.RemoveBindingsByCredential(name); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to remove bindings: "+err.Error(), "")
+		return
+	}
+	if _, err := s.store.RemoveRulesByName("credential: " + name); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to remove associated rules: "+err.Error(), "")
 		return
 	}
 
@@ -845,7 +850,7 @@ func (s *Server) GetApiBindings(w http.ResponseWriter, r *http.Request) {
 // PostApiBindings adds a new credential binding.
 func (s *Server) PostApiBindings(w http.ResponseWriter, r *http.Request) {
 	var req CreateBindingRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "")
 		return
 	}
@@ -929,7 +934,7 @@ func (s *Server) GetApiMcpUpstreams(w http.ResponseWriter, r *http.Request) {
 // PostApiMcpUpstreams adds a new MCP upstream.
 func (s *Server) PostApiMcpUpstreams(w http.ResponseWriter, r *http.Request) {
 	var req CreateMCPUpstreamRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "")
 		return
 	}
@@ -1100,7 +1105,7 @@ func (s *Server) GetApiChannels(w http.ResponseWriter, r *http.Request) {
 // PatchApiChannelsId updates a notification channel.
 func (s *Server) PatchApiChannelsId(w http.ResponseWriter, r *http.Request, id int64) {
 	var req ChannelUpdate
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "")
 		return
 	}
@@ -1139,6 +1144,14 @@ func (s *Server) PatchApiChannelsId(w http.ResponseWriter, r *http.Request, id i
 }
 
 // --- Helpers ---
+
+// maxRequestBody is the maximum size of a JSON request body (1 MB).
+const maxRequestBody = 1 << 20
+
+// limitedBody wraps r.Body with a size limit to prevent memory exhaustion.
+func limitedBody(w http.ResponseWriter, r *http.Request) io.ReadCloser {
+	return http.MaxBytesReader(w, r.Body, maxRequestBody)
+}
 
 // storeRuleToAPI converts a store.Rule to the API Rule type.
 func storeRuleToAPI(r store.Rule) Rule {
@@ -1266,7 +1279,8 @@ func storeChannelToAPI(ch store.Channel) Channel {
 		apiCh.WebhookUrl = &ch.WebhookURL
 	}
 	if ch.WebhookSecret != "" {
-		apiCh.WebhookSecret = &ch.WebhookSecret
+		masked := "***"
+		apiCh.WebhookSecret = &masked
 	}
 	if ch.CreatedAt != "" {
 		if t, err := time.Parse("2006-01-02 15:04:05", ch.CreatedAt); err == nil {
@@ -1277,6 +1291,7 @@ func storeChannelToAPI(ch store.Channel) Channel {
 }
 
 // readRecentAuditEntries reads the last N entries from the audit log file.
+// Uses a circular buffer to avoid loading the entire file into memory.
 func readRecentAuditEntries(path string, limit int) ([]AuditEntry, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -1284,8 +1299,10 @@ func readRecentAuditEntries(path string, limit int) ([]AuditEntry, error) {
 	}
 	defer f.Close()
 
-	// Read all lines, keep last N.
-	var lines [][]byte
+	// Circular buffer: keep only the last N non-empty lines.
+	ring := make([][]byte, limit)
+	idx := 0
+	count := 0
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -1294,18 +1311,24 @@ func readRecentAuditEntries(path string, limit int) ([]AuditEntry, error) {
 		}
 		cp := make([]byte, len(line))
 		copy(cp, line)
-		lines = append(lines, cp)
+		ring[idx%limit] = cp
+		idx++
+		count++
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
 
-	// Take last N lines.
-	start := 0
-	if len(lines) > limit {
-		start = len(lines) - limit
+	// Extract the last N lines in order.
+	n := count
+	if n > limit {
+		n = limit
 	}
-	recent := lines[start:]
+	recent := make([][]byte, n)
+	startIdx := idx - n
+	for i := 0; i < n; i++ {
+		recent[i] = ring[(startIdx+i)%limit]
+	}
 
 	entries := make([]AuditEntry, 0, len(recent))
 	for _, line := range recent {

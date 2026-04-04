@@ -802,6 +802,16 @@ func (s *Store) RemoveRulesBySource(source string) (int64, error) {
 	return res.RowsAffected()
 }
 
+// RemoveRulesByName deletes all rules matching a name.
+// Returns the number deleted.
+func (s *Store) RemoveRulesByName(name string) (int64, error) {
+	res, err := s.db.Exec("DELETE FROM rules WHERE name = ?", name)
+	if err != nil {
+		return 0, fmt.Errorf("delete rules by name: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // --- Store queries ---
 
 // IsEmpty returns true if the store has no rules, bindings, or MCP upstreams.

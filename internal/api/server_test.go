@@ -1066,7 +1066,7 @@ func TestPatchApiConfig_Success(t *testing.T) {
 	t.Setenv("SLUICE_API_TOKEN", "tok")
 	handler := newTestHandler(t, srv, st)
 
-	body := `{"default_verdict": "deny", "timeout_sec": 60}`
+	body := `{"default_verdict": "ask", "timeout_sec": 60}`
 	req := httptest.NewRequest("PATCH", "/api/config", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("Content-Type", "application/json")
@@ -1081,8 +1081,8 @@ func TestPatchApiConfig_Success(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&cfg); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if cfg.DefaultVerdict == nil || string(*cfg.DefaultVerdict) != "deny" {
-		t.Errorf("expected deny, got %v", cfg.DefaultVerdict)
+	if cfg.DefaultVerdict == nil || string(*cfg.DefaultVerdict) != "ask" {
+		t.Errorf("expected ask, got %v", cfg.DefaultVerdict)
 	}
 	if cfg.TimeoutSec == nil || *cfg.TimeoutSec != 60 {
 		t.Errorf("expected 60, got %v", cfg.TimeoutSec)

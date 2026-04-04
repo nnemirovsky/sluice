@@ -401,7 +401,7 @@ func TestNotify_SendsNotification(t *testing.T) {
 	defer srv.Close()
 
 	ch, _ := NewHTTPChannel(Config{WebhookURL: srv.URL})
-	err := ch.Notify(nil, "proxy restarted")
+	err := ch.Notify(context.Background(), "proxy restarted")
 	if err != nil {
 		t.Fatalf("Notify failed: %v", err)
 	}

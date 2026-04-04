@@ -16,6 +16,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -78,6 +79,13 @@ func NewHTTPChannel(cfg Config) (*HTTPChannel, error) {
 	if cfg.WebhookURL == "" {
 		return nil, fmt.Errorf("webhook_url is required")
 	}
+	u, err := url.Parse(cfg.WebhookURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid webhook_url: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("webhook_url scheme must be http or https, got %q", u.Scheme)
+	}
 
 	client := cfg.HTTPClient
 	if client == nil {
@@ -111,11 +119,6 @@ func (h *HTTPChannel) RequestApproval(ctx context.Context, req channel.ApprovalR
 }
 
 func (h *HTTPChannel) deliverApproval(req channel.ApprovalRequest) {
-	defer func() {
-		// Only clean up pending if the request was not resolved synchronously.
-		// The pending entry is removed after sync resolution or by CancelApproval.
-	}()
-
 	if h.broker != nil && !h.broker.HasWaiter(req.ID) {
 		h.pending.Delete(req.ID)
 		h.broker.ClearTimedOut(req.ID)
@@ -328,7 +331,7 @@ func computeHMAC(body []byte, secret string) string {
 // parseVerdict converts a string verdict to a channel.Response.
 func parseVerdict(v string) channel.Response {
 	switch v {
-	case "allow_once":
+	case "allow", "allow_once":
 		return channel.ResponseAllowOnce
 	case "always_allow":
 		return channel.ResponseAlwaysAllow
