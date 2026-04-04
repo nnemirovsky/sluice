@@ -1480,19 +1480,29 @@ protocols = ["udp"]
 
 	// 4. Connect an HTTP/3 client directly to the QUIC proxy to verify
 	// the credential injection pipeline works end-to-end. The proxy
-	// generates a per-host cert signed by its CA.
+	// generates a per-host cert signed by its CA. We create a known local
+	// UDP socket and register it as an expected destination so the proxy
+	// accepts the connection.
 	proxyCAX509 := srv.quicProxy.caX509
+
+	localConn, localErr := net.ListenPacket("udp", "127.0.0.1:0")
+	if localErr != nil {
+		t.Fatalf("listen local UDP: %v", localErr)
+	}
+	defer localConn.Close()
+	srv.quicProxy.RegisterExpectedHost(localConn.LocalAddr().String(), sni, 443)
 
 	pool := x509.NewCertPool()
 	pool.AddCert(proxyCAX509)
 
+	quicUDPAddr, _ := net.ResolveUDPAddr("udp", quicAddr.String())
 	transport := &http3.Transport{
 		TLSClientConfig: &tls.Config{
 			RootCAs:    pool,
 			ServerName: sni,
 		},
 		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
-			return quic.DialAddr(ctx, quicAddr.String(), tlsCfg, cfg)
+			return quic.Dial(ctx, localConn, quicUDPAddr, tlsCfg, cfg)
 		},
 	}
 	defer transport.Close()

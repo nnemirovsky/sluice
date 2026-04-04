@@ -32,7 +32,7 @@ var phantomPrefix = []byte("SLUICE_PHANTOM:")
 
 // phantomStripRe is a last-resort regex for stripping phantom tokens when
 // provider.List() cannot enumerate all credential names. It matches word
-// characters and dots but not hyphens to avoid consuming surrounding text.
+// characters, dots, and hyphens.
 // The primary strip path uses exact matching via provider.List().
 var phantomStripRe = regexp.MustCompile(`SLUICE_PHANTOM:[\w.\-]+`)
 

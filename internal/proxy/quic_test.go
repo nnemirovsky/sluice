@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -308,11 +309,28 @@ func setupQUICProxyForH3(
 }
 
 // doH3Request sends an HTTP/3 request through the QUICProxy MITM and returns
-// the response status, headers, and body.
-func doH3Request(t *testing.T, proxyAddr string, caX509 *x509.Certificate, sni, method, path string, body []byte, extraHeaders map[string]string) (int, http.Header, string) {
+// the response status, headers, and body. It creates a known local UDP socket,
+// registers it as an expected destination with the QUIC proxy, and uses
+// quic.Dial (not DialAddr) so the proxy can verify the source.
+func doH3Request(t *testing.T, qp *QUICProxy, proxyAddr string, caX509 *x509.Certificate, sni, method, path string, body []byte, extraHeaders map[string]string) (int, http.Header, string) {
 	t.Helper()
 	pool := x509.NewCertPool()
 	pool.AddCert(caX509)
+
+	// Create a local UDP socket so we know the source address for
+	// expected host registration.
+	localConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen local UDP: %v", err)
+	}
+	defer localConn.Close()
+	qp.RegisterExpectedHost(localConn.LocalAddr().String(), sni, 443)
+	defer qp.UnregisterExpectedHost(localConn.LocalAddr().String())
+
+	proxyUDPAddr, err := net.ResolveUDPAddr("udp", proxyAddr)
+	if err != nil {
+		t.Fatalf("resolve proxy addr: %v", err)
+	}
 
 	transport := &http3.Transport{
 		TLSClientConfig: &tls.Config{
@@ -320,7 +338,7 @@ func doH3Request(t *testing.T, proxyAddr string, caX509 *x509.Certificate, sni, 
 			ServerName: sni,
 		},
 		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
-			return quic.DialAddr(ctx, proxyAddr, tlsCfg, cfg)
+			return quic.Dial(ctx, localConn, proxyUDPAddr, tlsCfg, cfg)
 		},
 	}
 	defer transport.Close()
@@ -330,17 +348,17 @@ func doH3Request(t *testing.T, proxyAddr string, caX509 *x509.Certificate, sni, 
 	if body != nil {
 		bodyReader = bytes.NewReader(body)
 	}
-	req, err := http.NewRequest(method, reqURL, bodyReader)
-	if err != nil {
-		t.Fatalf("create request: %v", err)
+	req, reqErr := http.NewRequest(method, reqURL, bodyReader)
+	if reqErr != nil {
+		t.Fatalf("create request: %v", reqErr)
 	}
 	for k, v := range extraHeaders {
 		req.Header.Set(k, v)
 	}
 
-	resp, err := transport.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("HTTP/3 request: %v", err)
+	resp, roundTripErr := transport.RoundTrip(req)
+	if roundTripErr != nil {
+		t.Fatalf("HTTP/3 request: %v", roundTripErr)
 	}
 	defer resp.Body.Close()
 
@@ -387,7 +405,7 @@ func TestQUICProxy_HTTP3PhantomTokenReplacement(t *testing.T) {
 
 	// Send request with phantom token in Authorization header.
 	phantomToken := PhantomToken("test_api_key")
-	status, headers, body := doH3Request(t, proxyAddr, proxyCAX509,
+	status, headers, body := doH3Request(t, qp, proxyAddr, proxyCAX509,
 		"api.example.com", "POST", "/v1/test",
 		[]byte("payload with "+phantomToken+" inside"),
 		map[string]string{
@@ -445,7 +463,7 @@ func TestQUICProxy_HTTP3ContentDenyBlocks(t *testing.T) {
 	defer qp.Close()
 
 	// Request with banned content should be blocked.
-	status, _, _ := doH3Request(t, proxyAddr, proxyCAX509,
+	status, _, _ := doH3Request(t, qp, proxyAddr, proxyCAX509,
 		"api.example.com", "POST", "/v1/data",
 		[]byte(`{"password = hunter2"}`),
 		nil,
@@ -455,7 +473,7 @@ func TestQUICProxy_HTTP3ContentDenyBlocks(t *testing.T) {
 	}
 
 	// Request without banned content should pass.
-	status2, _, _ := doH3Request(t, proxyAddr, proxyCAX509,
+	status2, _, _ := doH3Request(t, qp, proxyAddr, proxyCAX509,
 		"api.example.com", "POST", "/v1/data",
 		[]byte(`{"message": "hello world"}`),
 		nil,
@@ -488,7 +506,7 @@ func TestQUICProxy_HTTP3ContentRedact(t *testing.T) {
 	proxyAddr := waitForQUICAddr(t, qp)
 	defer qp.Close()
 
-	status, _, body := doH3Request(t, proxyAddr, proxyCAX509,
+	status, _, body := doH3Request(t, qp, proxyAddr, proxyCAX509,
 		"api.example.com", "GET", "/v1/data",
 		nil, nil,
 	)

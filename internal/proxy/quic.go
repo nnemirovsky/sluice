@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
-	"strconv"
 	"sync"
 	"sync/atomic"
 
@@ -58,6 +57,13 @@ type quicInspectRules struct {
 	redact []quicRedactRule
 }
 
+// expectedDest holds the SOCKS5 destination that was policy-checked so the
+// QUIC proxy can verify SNI and use the correct port for credential resolution.
+type expectedDest struct {
+	host string
+	port int
+}
+
 // QUICProxy terminates QUIC connections from the agent using sluice's CA
 // certificate. It generates per-host TLS certificates based on the SNI
 // from the TLS ClientHello, enabling HTTP/3 MITM credential injection.
@@ -89,10 +95,12 @@ type QUICProxy struct {
 	// never evicted (host cardinality is bounded by policy allow rules).
 	certCache sync.Map // map[string]tls.Certificate
 
-	// expectedHosts maps UDP source addresses to the SOCKS5 destination
-	// that was policy-checked. handleConnection verifies the TLS SNI
-	// matches the expected host to prevent policy bypass via SNI spoofing.
-	expectedHosts sync.Map // map[string]string
+	// expectedDests maps UDP source addresses to the SOCKS5 destination
+	// (host + port) that was policy-checked. handleConnection verifies
+	// the TLS SNI matches the expected host, and buildHandler uses the
+	// policy-checked port for credential resolution rather than trusting
+	// the URL port from the HTTP/3 request.
+	expectedDests sync.Map // map[string]expectedDest
 
 	// mu protects listener lifecycle.
 	mu       sync.Mutex
@@ -206,16 +214,17 @@ func (q *QUICProxy) Addr() net.Addr {
 }
 
 // RegisterExpectedHost records that packets arriving from srcAddr should
-// have a TLS SNI matching host. Must be called before forwarding QUIC
-// packets so handleConnection can verify the SNI against the SOCKS5
-// destination that was policy-checked.
-func (q *QUICProxy) RegisterExpectedHost(srcAddr string, host string) {
-	q.expectedHosts.Store(srcAddr, host)
+// have a TLS SNI matching host. The port is the SOCKS5 destination port
+// used for policy evaluation and credential binding resolution.
+// Must be called before forwarding QUIC packets so handleConnection can
+// verify the SNI against the SOCKS5 destination that was policy-checked.
+func (q *QUICProxy) RegisterExpectedHost(srcAddr string, host string, port int) {
+	q.expectedDests.Store(srcAddr, expectedDest{host: host, port: port})
 }
 
 // UnregisterExpectedHost removes the expected host mapping for srcAddr.
 func (q *QUICProxy) UnregisterExpectedHost(srcAddr string) {
-	q.expectedHosts.Delete(srcAddr)
+	q.expectedDests.Delete(srcAddr)
 }
 
 // Close shuts down the QUIC listener and all cached upstream transports.
@@ -307,22 +316,32 @@ func (q *QUICProxy) handleConnection(conn *quic.Conn) {
 	remoteKey := conn.RemoteAddr().String()
 	log.Printf("[QUIC] accepted connection from %s (SNI: %s)", remoteKey, sni)
 
+	// Look up the SOCKS5 destination that was policy-checked for this source.
+	// Reject connections with no registered expected host to prevent direct
+	// connections to the loopback QUIC listener from bypassing policy.
+	expected, ok := q.expectedDests.Load(remoteKey)
+	if !ok {
+		log.Printf("[QUIC] no expected destination for %s, rejecting", remoteKey)
+		if err := conn.CloseWithError(0x01, "no expected destination"); err != nil {
+			log.Printf("[QUIC] close error: %v", err)
+		}
+		return
+	}
+	dest := expected.(expectedDest)
+
 	// Verify the TLS SNI matches the SOCKS5 destination that was
 	// policy-checked. Without this check, an agent could send QUIC packets
 	// to an allowed destination but set the SNI to a different host,
 	// bypassing policy and potentially exfiltrating credentials.
-	if expected, ok := q.expectedHosts.Load(remoteKey); ok {
-		expectedHost := expected.(string)
-		if sni != expectedHost {
-			log.Printf("[QUIC] SNI mismatch: expected %q, got %q from %s", expectedHost, sni, remoteKey)
-			if err := conn.CloseWithError(0x01, "SNI mismatch"); err != nil {
-				log.Printf("[QUIC] close error: %v", err)
-			}
-			return
+	if sni != dest.host {
+		log.Printf("[QUIC] SNI mismatch: expected %q, got %q from %s", dest.host, sni, remoteKey)
+		if err := conn.CloseWithError(0x01, "SNI mismatch"); err != nil {
+			log.Printf("[QUIC] close error: %v", err)
 		}
+		return
 	}
 
-	handler := q.buildHandler(sni)
+	handler := q.buildHandler(sni, dest.port)
 	srv := &http3.Server{
 		Handler: handler,
 	}
@@ -334,19 +353,16 @@ func (q *QUICProxy) handleConnection(conn *quic.Conn) {
 // buildHandler returns an http.Handler that proxies HTTP/3 requests to the
 // given upstream host. It applies phantom token replacement in request
 // headers and body, checks content deny rules, and applies redact rules
-// to the response body before returning it to the agent.
-func (q *QUICProxy) buildHandler(upstreamHost string) http.Handler {
+// to the response body before returning it to the agent. The destPort is
+// the SOCKS5 destination port that was policy-checked, used for credential
+// binding resolution instead of trusting the URL port from the request.
+func (q *QUICProxy) buildHandler(upstreamHost string, destPort int) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := upstreamHost
 		if host == "" {
 			host = r.Host
 		}
-		port := 443
-		if r.URL.Port() != "" {
-			if p, err := strconv.Atoi(r.URL.Port()); err == nil {
-				port = p
-			}
-		}
+		port := destPort
 
 		// Build phantom token pairs for credentials bound to this destination.
 		pairs := q.buildPhantomPairs(host, port)

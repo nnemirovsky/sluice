@@ -864,7 +864,7 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 						}
 						// Register expected host so the QUIC proxy can verify
 						// that the TLS SNI matches the policy-checked destination.
-						s.quicProxy.RegisterExpectedHost(upstream.LocalAddr().String(), dest)
+						s.quicProxy.RegisterExpectedHost(upstream.LocalAddr().String(), dest, port)
 						mu.Lock()
 						sess = &udpSession{upstream: upstream, lastSeen: time.Now()}
 						sessions[sessionKey] = sess
