@@ -127,15 +127,15 @@ Implement the generated server interface for approval and status endpoints. Thes
 - Modify: `internal/api/server.go`
 - Modify: `internal/api/server_test.go`
 
-- [ ] Implement `GetApiRules` with query param filtering (?verdict=, ?type=network|tool|pattern)
-- [ ] Implement `PostApiRules` accepting generated request type, calls store.AddRule, recompiles engine
-- [ ] Implement `DeleteApiRulesId` calls store.RemoveRule, recompiles engine
-- [ ] Implement `PostApiRulesImport` accepting multipart TOML file upload, calls store.ImportTOML
-- [ ] Implement `GetApiRulesExport` returning TOML representation
-- [ ] Implement `GetApiConfig` returning typed config as generated response type
-- [ ] Implement `PatchApiConfig` accepting partial update, calls store.UpdateConfig, recompiles engine
-- [ ] Write tests for each handler (success + error cases)
-- [ ] Run tests: `go test ./internal/api/ -v -timeout 30s`
+- [x] Implement `GetApiRules` with query param filtering (?verdict=, ?type=network|tool|pattern)
+- [x] Implement `PostApiRules` accepting generated request type, calls store.AddRule, recompiles engine
+- [x] Implement `DeleteApiRulesId` calls store.RemoveRule, recompiles engine
+- [x] Implement `PostApiRulesImport` accepting multipart TOML file upload, calls store.ImportTOML
+- [x] Implement `GetApiRulesExport` returning TOML representation
+- [x] Implement `GetApiConfig` returning typed config as generated response type
+- [x] Implement `PatchApiConfig` accepting partial update, calls store.UpdateConfig, recompiles engine
+- [x] Write tests for each handler (success + error cases)
+- [x] Run tests: `go test ./internal/api/ -v -timeout 30s`
 
 ### Task 4: Implement credential, binding, MCP, audit, and channel handlers
 

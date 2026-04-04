@@ -1,28 +1,37 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/nemirovsky/sluice/internal/channel"
+	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
 	"github.com/nemirovsky/sluice/internal/store"
 )
 
 // Server implements the generated ServerInterface for the sluice REST API.
-// Only approval, status, and health handlers are implemented here (Task 2).
-// Remaining handlers are added in subsequent tasks and embed Unimplemented
-// to satisfy the interface.
 type Server struct {
 	Unimplemented
 	store     *store.Store
 	broker    *channel.Broker
 	proxySrv  *proxy.Server
 	auditPath string
+	enginePtr *atomic.Pointer[policy.Engine]
+	reloadMu  *sync.Mutex
 }
 
-// NewServer creates a new API server.
+// NewServer creates a new API server. enginePtr and reloadMu are optional
+// and only needed when rule/config mutations should trigger engine recompilation.
 func NewServer(st *store.Store, broker *channel.Broker, proxySrv *proxy.Server, auditPath string) *Server {
 	return &Server{
 		store:     st,
@@ -30,6 +39,31 @@ func NewServer(st *store.Store, broker *channel.Broker, proxySrv *proxy.Server, 
 		proxySrv:  proxySrv,
 		auditPath: auditPath,
 	}
+}
+
+// SetEnginePtr sets the shared engine pointer and reload mutex for rule
+// mutation handlers. This is called after construction when the proxy
+// server is available.
+func (s *Server) SetEnginePtr(ptr *atomic.Pointer[policy.Engine], mu *sync.Mutex) {
+	s.enginePtr = ptr
+	s.reloadMu = mu
+}
+
+// recompileEngine rebuilds the policy engine from the store and atomically
+// swaps it. Returns an error if recompilation fails.
+func (s *Server) recompileEngine() error {
+	if s.enginePtr == nil {
+		return nil
+	}
+	newEng, err := policy.LoadFromStore(s.store)
+	if err != nil {
+		return err
+	}
+	if err := newEng.Validate(); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+	s.enginePtr.Store(newEng)
+	return nil
 }
 
 // GetHealthz returns 200 when the proxy is listening.
@@ -215,6 +249,466 @@ func ChannelGateMiddleware(st *store.Store) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// --- Rule management handlers ---
+
+// GetApiRules returns policy rules with optional filtering.
+func (s *Server) GetApiRules(w http.ResponseWriter, r *http.Request, params GetApiRulesParams) {
+	filter := store.RuleFilter{}
+	if params.Verdict != nil {
+		filter.Verdict = string(*params.Verdict)
+	}
+	if params.Type != nil {
+		filter.Type = string(*params.Type)
+	}
+
+	rules, err := s.store.ListRules(filter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list rules", "")
+		return
+	}
+
+	result := make([]Rule, len(rules))
+	for i, r := range rules {
+		result[i] = storeRuleToAPI(r)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+// PostApiRules adds a new policy rule and recompiles the engine.
+func (s *Server) PostApiRules(w http.ResponseWriter, r *http.Request) {
+	var req CreateRuleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", "")
+		return
+	}
+
+	if !req.Verdict.Valid() {
+		writeError(w, http.StatusBadRequest, "invalid verdict", "")
+		return
+	}
+
+	opts := store.RuleOpts{
+		Name:   ptrStr(req.Name),
+		Source: "api",
+	}
+	if req.Destination != nil {
+		opts.Destination = *req.Destination
+	}
+	if req.Tool != nil {
+		opts.Tool = *req.Tool
+	}
+	if req.Pattern != nil {
+		opts.Pattern = *req.Pattern
+	}
+	if req.Replacement != nil {
+		opts.Replacement = *req.Replacement
+	}
+	if req.Ports != nil {
+		opts.Ports = *req.Ports
+	}
+	if req.Protocols != nil {
+		opts.Protocols = *req.Protocols
+	}
+
+	if s.reloadMu != nil {
+		s.reloadMu.Lock()
+		defer s.reloadMu.Unlock()
+	}
+
+	id, err := s.store.AddRule(string(req.Verdict), opts)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "")
+		return
+	}
+
+	if err := s.recompileEngine(); err != nil {
+		writeError(w, http.StatusInternalServerError, "rule added but engine recompile failed: "+err.Error(), "")
+		return
+	}
+
+	// Read back the rule to return the full object.
+	rules, err := s.store.ListRules(store.RuleFilter{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read back rule", "")
+		return
+	}
+	for _, rule := range rules {
+		if rule.ID == id {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(storeRuleToAPI(rule))
+			return
+		}
+	}
+
+	// Fallback: return minimal response.
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(Rule{Id: id, Verdict: RuleVerdict(req.Verdict)})
+}
+
+// DeleteApiRulesId removes a policy rule and recompiles the engine.
+func (s *Server) DeleteApiRulesId(w http.ResponseWriter, r *http.Request, id int64) {
+	if s.reloadMu != nil {
+		s.reloadMu.Lock()
+		defer s.reloadMu.Unlock()
+	}
+
+	deleted, err := s.store.RemoveRule(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to remove rule", "")
+		return
+	}
+	if !deleted {
+		writeError(w, http.StatusNotFound, "rule not found", "")
+		return
+	}
+
+	if err := s.recompileEngine(); err != nil {
+		writeError(w, http.StatusInternalServerError, "rule removed but engine recompile failed: "+err.Error(), "")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// PostApiRulesImport imports rules from a TOML file upload.
+func (s *Server) PostApiRulesImport(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error(), "")
+		return
+	}
+
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "missing file field", "")
+		return
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read file", "")
+		return
+	}
+
+	if s.reloadMu != nil {
+		s.reloadMu.Lock()
+		defer s.reloadMu.Unlock()
+	}
+
+	result, err := s.store.ImportTOML(data)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "import failed: "+err.Error(), "")
+		return
+	}
+
+	if err := s.recompileEngine(); err != nil {
+		writeError(w, http.StatusInternalServerError, "import succeeded but engine recompile failed: "+err.Error(), "")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(ImportResult{
+		RulesInserted:    result.RulesInserted,
+		RulesSkipped:     result.RulesSkipped,
+		BindingsInserted: result.BindingsInserted,
+		BindingsSkipped:  result.BindingsSkipped,
+		UpstreamsInserted: result.UpstreamsInserted,
+		UpstreamsSkipped:  result.UpstreamsSkipped,
+		ConfigSet:        result.ConfigSet,
+	})
+}
+
+// GetApiRulesExport exports the current rules as TOML.
+func (s *Server) GetApiRulesExport(w http.ResponseWriter, r *http.Request) {
+	var buf bytes.Buffer
+
+	cfg, err := s.store.GetConfig()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read config", "")
+		return
+	}
+
+	if cfg.DefaultVerdict != "" || cfg.TimeoutSec != 0 {
+		buf.WriteString("[policy]\n")
+		if cfg.DefaultVerdict != "" {
+			fmt.Fprintf(&buf, "default = %q\n", cfg.DefaultVerdict)
+		}
+		if cfg.TimeoutSec != 0 {
+			fmt.Fprintf(&buf, "timeout_sec = %d\n", cfg.TimeoutSec)
+		}
+		buf.WriteString("\n")
+	}
+
+	if cfg.VaultProvider != "" || cfg.VaultDir != "" || len(cfg.VaultProviders) > 0 {
+		buf.WriteString("[vault]\n")
+		if cfg.VaultProvider != "" {
+			fmt.Fprintf(&buf, "provider = %q\n", cfg.VaultProvider)
+		}
+		if cfg.VaultDir != "" {
+			fmt.Fprintf(&buf, "dir = %q\n", cfg.VaultDir)
+		}
+		if len(cfg.VaultProviders) > 0 {
+			quoted := make([]string, len(cfg.VaultProviders))
+			for i, p := range cfg.VaultProviders {
+				quoted[i] = fmt.Sprintf("%q", p)
+			}
+			fmt.Fprintf(&buf, "providers = [%s]\n", strings.Join(quoted, ", "))
+		}
+		buf.WriteString("\n")
+	}
+
+	// Network, tool, and pattern rules.
+	for _, verdict := range []string{"allow", "deny", "ask"} {
+		networkRules, err := s.store.ListRules(store.RuleFilter{Verdict: verdict, Type: "network"})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list rules", "")
+			return
+		}
+		for _, rule := range networkRules {
+			fmt.Fprintf(&buf, "[[%s]]\n", verdict)
+			fmt.Fprintf(&buf, "destination = %q\n", rule.Destination)
+			if len(rule.Ports) > 0 {
+				portsJSON, _ := json.Marshal(rule.Ports)
+				fmt.Fprintf(&buf, "ports = %s\n", string(portsJSON))
+			}
+			if len(rule.Protocols) > 0 {
+				protocolsJSON, _ := json.Marshal(rule.Protocols)
+				fmt.Fprintf(&buf, "protocols = %s\n", string(protocolsJSON))
+			}
+			if rule.Name != "" {
+				fmt.Fprintf(&buf, "name = %q\n", rule.Name)
+			}
+			buf.WriteString("\n")
+		}
+
+		toolRules, err := s.store.ListRules(store.RuleFilter{Verdict: verdict, Type: "tool"})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list rules", "")
+			return
+		}
+		for _, rule := range toolRules {
+			fmt.Fprintf(&buf, "[[%s]]\n", verdict)
+			fmt.Fprintf(&buf, "tool = %q\n", rule.Tool)
+			if rule.Name != "" {
+				fmt.Fprintf(&buf, "name = %q\n", rule.Name)
+			}
+			buf.WriteString("\n")
+		}
+	}
+
+	// Content deny patterns.
+	denyPatterns, err := s.store.ListRules(store.RuleFilter{Verdict: "deny", Type: "pattern"})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list rules", "")
+		return
+	}
+	for _, rule := range denyPatterns {
+		buf.WriteString("[[deny]]\n")
+		fmt.Fprintf(&buf, "pattern = %q\n", rule.Pattern)
+		if rule.Name != "" {
+			fmt.Fprintf(&buf, "name = %q\n", rule.Name)
+		}
+		buf.WriteString("\n")
+	}
+
+	// Redact rules.
+	redactRules, err := s.store.ListRules(store.RuleFilter{Verdict: "redact", Type: "pattern"})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list rules", "")
+		return
+	}
+	for _, rule := range redactRules {
+		buf.WriteString("[[redact]]\n")
+		fmt.Fprintf(&buf, "pattern = %q\n", rule.Pattern)
+		if rule.Replacement != "" {
+			fmt.Fprintf(&buf, "replacement = %q\n", rule.Replacement)
+		}
+		if rule.Name != "" {
+			fmt.Fprintf(&buf, "name = %q\n", rule.Name)
+		}
+		buf.WriteString("\n")
+	}
+
+	// Bindings.
+	bindings, err := s.store.ListBindings()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list bindings", "")
+		return
+	}
+	for _, b := range bindings {
+		buf.WriteString("[[binding]]\n")
+		fmt.Fprintf(&buf, "destination = %q\n", b.Destination)
+		if len(b.Ports) > 0 {
+			portsJSON, _ := json.Marshal(b.Ports)
+			fmt.Fprintf(&buf, "ports = %s\n", string(portsJSON))
+		}
+		fmt.Fprintf(&buf, "credential = %q\n", b.Credential)
+		if b.Header != "" {
+			fmt.Fprintf(&buf, "header = %q\n", b.Header)
+		}
+		if b.Template != "" {
+			fmt.Fprintf(&buf, "template = %q\n", b.Template)
+		}
+		if len(b.Protocols) > 0 {
+			protocolsJSON, _ := json.Marshal(b.Protocols)
+			fmt.Fprintf(&buf, "protocols = %s\n", string(protocolsJSON))
+		}
+		buf.WriteString("\n")
+	}
+
+	// MCP upstreams.
+	upstreams, err := s.store.ListMCPUpstreams()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list upstreams", "")
+		return
+	}
+	for _, u := range upstreams {
+		buf.WriteString("[[mcp_upstream]]\n")
+		fmt.Fprintf(&buf, "name = %q\n", u.Name)
+		fmt.Fprintf(&buf, "command = %q\n", u.Command)
+		if len(u.Args) > 0 {
+			argsJSON, _ := json.Marshal(u.Args)
+			fmt.Fprintf(&buf, "args = %s\n", string(argsJSON))
+		}
+		if u.TimeoutSec != 120 {
+			fmt.Fprintf(&buf, "timeout_sec = %d\n", u.TimeoutSec)
+		}
+		if len(u.Env) > 0 {
+			keys := make([]string, 0, len(u.Env))
+			for k := range u.Env {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			parts := make([]string, 0, len(u.Env))
+			for _, k := range keys {
+				parts = append(parts, fmt.Sprintf("%q = %q", k, u.Env[k]))
+			}
+			fmt.Fprintf(&buf, "env = {%s}\n", strings.Join(parts, ", "))
+		}
+		buf.WriteString("\n")
+	}
+
+	w.Header().Set("Content-Type", "application/toml")
+	w.Write(buf.Bytes())
+}
+
+// --- Config handlers ---
+
+// GetApiConfig returns the current configuration.
+func (s *Server) GetApiConfig(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.store.GetConfig()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read config", "")
+		return
+	}
+
+	resp := Config{}
+	if cfg.DefaultVerdict != "" {
+		dv := ConfigDefaultVerdict(cfg.DefaultVerdict)
+		resp.DefaultVerdict = &dv
+	}
+	if cfg.TimeoutSec != 0 {
+		resp.TimeoutSec = &cfg.TimeoutSec
+	}
+	if cfg.VaultProvider != "" {
+		resp.VaultProvider = &cfg.VaultProvider
+	}
+	if cfg.VaultDir != "" {
+		resp.VaultDir = &cfg.VaultDir
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// PatchApiConfig updates configuration and recompiles the engine.
+func (s *Server) PatchApiConfig(w http.ResponseWriter, r *http.Request) {
+	var req ConfigUpdate
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", "")
+		return
+	}
+
+	update := store.ConfigUpdate{}
+	if req.DefaultVerdict != nil {
+		dv := string(*req.DefaultVerdict)
+		update.DefaultVerdict = &dv
+	}
+	if req.TimeoutSec != nil {
+		update.TimeoutSec = req.TimeoutSec
+	}
+
+	if s.reloadMu != nil {
+		s.reloadMu.Lock()
+		defer s.reloadMu.Unlock()
+	}
+
+	if err := s.store.UpdateConfig(update); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "")
+		return
+	}
+
+	if err := s.recompileEngine(); err != nil {
+		writeError(w, http.StatusInternalServerError, "config updated but engine recompile failed: "+err.Error(), "")
+		return
+	}
+
+	// Return the updated config.
+	s.GetApiConfig(w, r)
+}
+
+// --- Helpers ---
+
+// storeRuleToAPI converts a store.Rule to the API Rule type.
+func storeRuleToAPI(r store.Rule) Rule {
+	rule := Rule{
+		Id:      r.ID,
+		Verdict: RuleVerdict(r.Verdict),
+	}
+	if r.Destination != "" {
+		rule.Destination = &r.Destination
+	}
+	if r.Tool != "" {
+		rule.Tool = &r.Tool
+	}
+	if r.Pattern != "" {
+		rule.Pattern = &r.Pattern
+	}
+	if r.Replacement != "" {
+		rule.Replacement = &r.Replacement
+	}
+	if len(r.Ports) > 0 {
+		rule.Ports = &r.Ports
+	}
+	if len(r.Protocols) > 0 {
+		rule.Protocols = &r.Protocols
+	}
+	if r.Name != "" {
+		rule.Name = &r.Name
+	}
+	if r.Source != "" {
+		rule.Source = &r.Source
+	}
+	if r.CreatedAt != "" {
+		if t, err := time.Parse("2006-01-02 15:04:05", r.CreatedAt); err == nil {
+			rule.CreatedAt = &t
+		}
+	}
+	return rule
+}
+
+// ptrStr returns the value of a string pointer or empty string if nil.
+func ptrStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // writeError writes a JSON error response.
