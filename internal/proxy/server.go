@@ -18,7 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/armon/go-socks5"
+	"github.com/things-go/go-socks5"
+	"github.com/things-go/go-socks5/statute"
 
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/channel"
@@ -182,10 +183,11 @@ type policyRuleSet struct {
 }
 
 func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context.Context, bool) {
-	// BIND and ASSOCIATE are not implemented. Return true so go-socks5
-	// reaches its own handler and sends the correct commandNotSupported
-	// reply instead of ruleFailure.
-	if req.Command != socks5.ConnectCommand {
+	// BIND is not implemented; ASSOCIATE is handled by go-socks5's built-in
+	// UDP relay. Return true for both so go-socks5 reaches its own handler
+	// instead of sending ruleFailure. Per-datagram policy enforcement for
+	// UDP ASSOCIATE will be added via a custom associate handler.
+	if req.Command != statute.CommandConnect {
 		return ctx, true
 	}
 
@@ -375,20 +377,11 @@ func New(cfg Config) (*Server, error) {
 	srv.rules = rules
 	srv.dnsResolver = dnsRes
 
-	socksCfg := &socks5.Config{
-		Rules:    rules,
-		Resolver: dnsRes,
-		Dial:     srv.dial,
-	}
-	socksServer, err := socks5.New(socksCfg)
-	if err != nil {
-		_ = ln.Close()
-		if srv.injectorLn != nil {
-			_ = srv.injectorLn.Close()
-		}
-		return nil, fmt.Errorf("socks5: %w", err)
-	}
-	srv.socks = socksServer
+	srv.socks = socks5.NewServer(
+		socks5.WithRule(rules),
+		socks5.WithResolver(dnsRes),
+		socks5.WithDial(srv.dial),
+	)
 
 	return srv, nil
 }

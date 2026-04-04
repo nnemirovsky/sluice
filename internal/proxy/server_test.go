@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"context"
+	"encoding/binary"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -815,5 +817,198 @@ default = "allow"
 	_, err = dialer.Dial("tcp", "127.0.0.1:9999")
 	if err == nil {
 		t.Fatal("expected connection to be rejected after shutdown")
+	}
+}
+
+// socks5UDPAssociate performs a SOCKS5 handshake with UDP ASSOCIATE command.
+// Returns the UDP relay address on success, or an error if the server rejects
+// the command. The TCP control connection is returned and must be kept alive
+// for the duration of the UDP session.
+func socks5UDPAssociate(proxyAddr string) (relayAddr *net.UDPAddr, controlConn net.Conn, err error) {
+	conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+	if err != nil {
+		return nil, nil, fmt.Errorf("connect to proxy: %w", err)
+	}
+
+	// SOCKS5 auth negotiation: version=5, 1 method, no-auth=0x00
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		conn.Close()
+		return nil, nil, fmt.Errorf("write auth: %w", err)
+	}
+
+	authResp := make([]byte, 2)
+	if _, err := conn.Read(authResp); err != nil {
+		conn.Close()
+		return nil, nil, fmt.Errorf("read auth: %w", err)
+	}
+	if authResp[0] != 0x05 || authResp[1] != 0x00 {
+		conn.Close()
+		return nil, nil, fmt.Errorf("auth rejected: %x", authResp)
+	}
+
+	// SOCKS5 UDP ASSOCIATE request: version=5, cmd=ASSOCIATE(0x03), rsv=0,
+	// atyp=IPv4(0x01), addr=0.0.0.0, port=0
+	req := []byte{0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
+	if _, err := conn.Write(req); err != nil {
+		conn.Close()
+		return nil, nil, fmt.Errorf("write associate: %w", err)
+	}
+
+	// Read reply: version(1) + rep(1) + rsv(1) + atyp(1) + BND.ADDR + BND.PORT
+	header := make([]byte, 4)
+	if _, err := conn.Read(header); err != nil {
+		conn.Close()
+		return nil, nil, fmt.Errorf("read reply header: %w", err)
+	}
+	if header[0] != 0x05 {
+		conn.Close()
+		return nil, nil, fmt.Errorf("unexpected version: %d", header[0])
+	}
+	if header[1] != 0x00 {
+		conn.Close()
+		return nil, nil, fmt.Errorf("associate rejected with reply code: 0x%02x", header[1])
+	}
+
+	// Parse BND.ADDR based on atyp
+	var ip net.IP
+	switch header[3] {
+	case 0x01: // IPv4
+		addr := make([]byte, 4+2)
+		if _, err := conn.Read(addr); err != nil {
+			conn.Close()
+			return nil, nil, fmt.Errorf("read ipv4 addr: %w", err)
+		}
+		ip = net.IP(addr[:4])
+		port := binary.BigEndian.Uint16(addr[4:6])
+		return &net.UDPAddr{IP: ip, Port: int(port)}, conn, nil
+	case 0x04: // IPv6
+		addr := make([]byte, 16+2)
+		if _, err := conn.Read(addr); err != nil {
+			conn.Close()
+			return nil, nil, fmt.Errorf("read ipv6 addr: %w", err)
+		}
+		ip = net.IP(addr[:16])
+		port := binary.BigEndian.Uint16(addr[16:18])
+		return &net.UDPAddr{IP: ip, Port: int(port)}, conn, nil
+	default:
+		conn.Close()
+		return nil, nil, fmt.Errorf("unexpected atyp: %d", header[3])
+	}
+}
+
+func TestUDPAssociateAvailable(t *testing.T) {
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
+
+	relayAddr, controlConn, err := socks5UDPAssociate(srv.Addr())
+	if err != nil {
+		t.Fatalf("UDP ASSOCIATE should succeed: %v", err)
+	}
+	defer controlConn.Close()
+
+	if relayAddr.Port == 0 {
+		t.Fatal("expected non-zero relay port")
+	}
+	t.Logf("UDP relay listening at %s", relayAddr)
+}
+
+func TestUDPAssociateRelaysDatagrams(t *testing.T) {
+	// Start a UDP echo server.
+	echoConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echoConn.Close()
+	echoAddr := echoConn.LocalAddr().(*net.UDPAddr)
+
+	go func() {
+		buf := make([]byte, 65535)
+		for {
+			n, addr, err := echoConn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			echoConn.WriteTo(buf[:n], addr)
+		}
+	}()
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
+
+	relayAddr, controlConn, err := socks5UDPAssociate(srv.Addr())
+	if err != nil {
+		t.Fatalf("UDP ASSOCIATE: %v", err)
+	}
+	defer controlConn.Close()
+
+	// Open a UDP socket to communicate with the relay.
+	clientConn, err := net.DialUDP("udp", nil, relayAddr)
+	if err != nil {
+		t.Fatalf("dial relay: %v", err)
+	}
+	defer clientConn.Close()
+
+	// Build SOCKS5 UDP datagram: RSV(2) + FRAG(1) + ATYP(1) + DST.ADDR + DST.PORT + DATA
+	echoIP := echoAddr.IP.To4()
+	payload := []byte("hello-udp")
+	datagram := make([]byte, 0, 10+len(payload))
+	datagram = append(datagram, 0x00, 0x00) // RSV
+	datagram = append(datagram, 0x00)       // FRAG
+	datagram = append(datagram, 0x01)       // ATYP IPv4
+	datagram = append(datagram, echoIP...)
+	datagram = append(datagram, byte(echoAddr.Port>>8), byte(echoAddr.Port))
+	datagram = append(datagram, payload...)
+
+	if _, err := clientConn.Write(datagram); err != nil {
+		t.Fatalf("send datagram: %v", err)
+	}
+
+	// Read response through relay.
+	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	respBuf := make([]byte, 65535)
+	n, err := clientConn.Read(respBuf)
+	if err != nil {
+		t.Fatalf("read relay response: %v", err)
+	}
+
+	// Parse SOCKS5 UDP response header to extract the data.
+	resp := respBuf[:n]
+	if len(resp) < 10 {
+		t.Fatalf("response too short: %d bytes", len(resp))
+	}
+	// Skip RSV(2) + FRAG(1) + ATYP(1) + ADDR(4) + PORT(2) = 10 bytes for IPv4.
+	respData := resp[10:]
+	if string(respData) != "hello-udp" {
+		t.Errorf("expected 'hello-udp', got %q", string(respData))
 	}
 }

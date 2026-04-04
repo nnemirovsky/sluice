@@ -138,12 +138,12 @@ Drop-in replacement that adds UDP ASSOCIATE support.
 - Modify: `internal/proxy/server.go` (update import path)
 - Modify: all files importing `armon/go-socks5`
 
-- [ ] Replace `github.com/armon/go-socks5` with `github.com/things-go/go-socks5` in go.mod
-- [ ] Update all import paths
-- [ ] Verify API compatibility (things-go maintains the same interface for TCP)
-- [ ] Run full test suite to verify no regressions: `go test ./... -v -timeout 60s`
-- [ ] Write a test that verifies UDP ASSOCIATE is available in the new library
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] Replace `github.com/armon/go-socks5` with `github.com/things-go/go-socks5` in go.mod
+- [x] Update all import paths
+- [x] Verify API compatibility (things-go maintains the same interface for TCP)
+- [x] Run full test suite to verify no regressions: `go test ./... -v -timeout 60s`
+- [x] Write a test that verifies UDP ASSOCIATE is available in the new library
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 6: UDP relay with policy enforcement
 
