@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nemirovsky/sluice/internal/api"
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/docker"
@@ -259,11 +260,12 @@ func main() {
 		log.Printf("telegram approval channel started")
 	}
 
-	// Start health check HTTP server on :3000 (or --health-addr).
-	healthLn, healthSrv := startHealthServer(*healthAddr, srv)
+	// Start HTTP server with health check and REST API on :3000 (or --health-addr).
+	apiServer := api.NewServer(db, broker, srv, *auditPath)
+	healthLn, healthSrv := startAPIServer(*healthAddr, apiServer, db)
 	if healthLn != nil {
 		defer func() { _ = healthSrv.Close() }()
-		log.Printf("health check server listening on %s", healthLn.Addr())
+		log.Printf("HTTP API server listening on %s", healthLn.Addr())
 	}
 
 	log.Printf("sluice SOCKS5 proxy listening on %s", srv.Addr())
@@ -447,28 +449,29 @@ func resolveDockerSocket(explicit string) (string, error) {
 	return raw, nil
 }
 
-// startHealthServer starts a minimal HTTP server serving /healthz.
-func startHealthServer(addr string, srv *proxy.Server) (net.Listener, *http.Server) {
+// startAPIServer starts the HTTP server with the generated chi router.
+// It serves both /healthz (no auth) and /api/* (bearer auth + channel gate).
+func startAPIServer(addr string, apiSrv *api.Server, st *store.Store) (net.Listener, *http.Server) {
 	if addr == "" {
 		return nil, nil
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Printf("WARNING: failed to start health server on %s: %v", addr, err)
+		log.Printf("WARNING: failed to start API server on %s: %v", addr, err)
 		return nil, nil
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		if srv.IsListening() {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ok"))
-		} else {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte("not ready"))
-		}
+	// oapi-codegen wraps handlers bottom-up: last middleware in the slice
+	// becomes the outermost layer. List channel gate first, then auth, so
+	// the request hits auth before the channel gate. This ensures bad tokens
+	// get 401 before the channel gate reveals whether HTTP channel is enabled.
+	handler := api.HandlerWithOptions(apiSrv, api.ChiServerOptions{
+		Middlewares: []api.MiddlewareFunc{
+			api.ChannelGateMiddleware(st),
+			api.BearerAuthMiddleware,
+		},
 	})
 	httpSrv := &http.Server{
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go httpSrv.Serve(ln) //nolint:errcheck

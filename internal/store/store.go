@@ -656,6 +656,22 @@ func (s *Store) UpdateChannel(id int64, u ChannelUpdate) error {
 	return nil
 }
 
+// AddChannel inserts a new channel row with the given type and enabled state.
+func (s *Store) AddChannel(chType int, enabled bool) (int64, error) {
+	enabledInt := 0
+	if enabled {
+		enabledInt = 1
+	}
+	res, err := s.db.Exec(
+		"INSERT INTO channels (type, enabled) VALUES (?, ?)",
+		chType, enabledInt,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("add channel: %w", err)
+	}
+	return res.LastInsertId()
+}
+
 // ListChannels returns all channels.
 func (s *Store) ListChannels() ([]Channel, error) {
 	rows, err := s.db.Query("SELECT id, type, enabled, created_at FROM channels ORDER BY id")

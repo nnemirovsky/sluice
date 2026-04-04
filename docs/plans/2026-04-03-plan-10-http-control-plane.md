@@ -109,17 +109,17 @@ Implement the generated server interface for approval and status endpoints. Thes
 - Create: `internal/api/server_test.go`
 - Modify: `cmd/sluice/main.go` (mount generated chi router on health server)
 
-- [ ] Create `Server` struct in `internal/api/server.go` holding references to store, broker, vault, audit path, proxy server
-- [ ] Implement `GetHealthz` handler (returns 200 ok when proxy is listening)
-- [ ] Implement `GetApiApprovals` handler (returns pending approval requests from broker)
-- [ ] Implement `PostApiApprovalsIdResolve` handler (calls broker.Resolve with verdict)
-- [ ] Implement `GetApiStatus` handler (proxy listening state, pending count, channel statuses)
-- [ ] Add bearer token auth middleware using `SLUICE_API_TOKEN` env var. If not set, all `/api/*` return 403.
-- [ ] Gate API routes: `/api/*` returns 403 `{"error": "HTTP channel is not enabled", "code": "channel_disabled"}` when no channels row has type=1 (HTTP) and enabled=1. `/healthz` always active regardless. Auth check (401/403 `unauthorized`) runs before channel check so bad tokens never reveal channel state.
-- [ ] Mount the generated chi handler on the existing health check server in main.go (replace simple `/healthz` mux)
-- [ ] Write tests for each handler using httptest
-- [ ] Write tests for auth middleware (valid/missing/wrong token, disabled API)
-- [ ] Run tests: `go test ./internal/api/ -v -timeout 30s`
+- [x] Create `Server` struct in `internal/api/server.go` holding references to store, broker, vault, audit path, proxy server
+- [x] Implement `GetHealthz` handler (returns 200 ok when proxy is listening)
+- [x] Implement `GetApiApprovals` handler (returns pending approval requests from broker)
+- [x] Implement `PostApiApprovalsIdResolve` handler (calls broker.Resolve with verdict)
+- [x] Implement `GetApiStatus` handler (proxy listening state, pending count, channel statuses)
+- [x] Add bearer token auth middleware using `SLUICE_API_TOKEN` env var. If not set, all `/api/*` return 403.
+- [x] Gate API routes: `/api/*` returns 403 `{"error": "HTTP channel is not enabled", "code": "channel_disabled"}` when no channels row has type=1 (HTTP) and enabled=1. `/healthz` always active regardless. Auth check (401/403 `unauthorized`) runs before channel check so bad tokens never reveal channel state.
+- [x] Mount the generated chi handler on the existing health check server in main.go (replace simple `/healthz` mux)
+- [x] Write tests for each handler using httptest
+- [x] Write tests for auth middleware (valid/missing/wrong token, disabled API)
+- [x] Run tests: `go test ./internal/api/ -v -timeout 30s`
 
 ### Task 3: Implement rule management handlers
 
