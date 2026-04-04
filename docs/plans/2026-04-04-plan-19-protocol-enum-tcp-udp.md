@@ -44,10 +44,10 @@ Add `ProtoTCP` and `ProtoUDP` to the Protocol integer enum and replace hardcoded
 **Files:**
 - Modify: `internal/policy/engine.go`
 
-- [ ] Replace `"udp"` in `matchRulesStrictProto` calls with `proxy.ProtoUDP.String()` or use integer comparison if the compiled rules store Protocol values as integers
-- [ ] If the compiled rules store protocols as strings, convert to integers. If too invasive, use `proxy.ProtoUDP.String()` for now.
-- [ ] Verify `EvaluateUDP` and `EvaluateQUIC` still work correctly
-- [ ] Run tests: `go test ./internal/policy/ -v -timeout 30s`
+- [x] Replace `"udp"` in `matchRulesStrictProto` calls with `proxy.ProtoUDP.String()` or use integer comparison if the compiled rules store Protocol values as integers
+- [x] If the compiled rules store protocols as strings, convert to integers. If too invasive, use `proxy.ProtoUDP.String()` for now.
+- [x] Verify `EvaluateUDP` and `EvaluateQUIC` still work correctly
+- [x] Run tests: `go test ./internal/policy/ -v -timeout 30s`
 
 ### Task 3: Update store validation
 

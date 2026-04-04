@@ -10,6 +10,13 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// Protocol name constants matching proxy.Protocol.String() values.
+// Defined here to avoid a circular import (proxy imports policy).
+const (
+	protoNameUDP  = "udp"
+	protoNameQUIC = "quic"
+)
+
 type compiledRule struct {
 	glob      *Glob
 	ports     map[int]bool
@@ -621,10 +628,10 @@ func (e *Engine) EvaluateUDP(dest string, port int) Verdict {
 	if e.compiled == nil {
 		return Deny
 	}
-	if matchRulesStrictProto(e.compiled.denyRules, dest, port, "udp") {
+	if matchRulesStrictProto(e.compiled.denyRules, dest, port, protoNameUDP) {
 		return Deny
 	}
-	if matchRulesStrictProto(e.compiled.allowRules, dest, port, "udp") {
+	if matchRulesStrictProto(e.compiled.allowRules, dest, port, protoNameUDP) {
 		return Allow
 	}
 	return Deny
@@ -643,18 +650,18 @@ func (e *Engine) EvaluateQUIC(dest string, port int) Verdict {
 		return Deny
 	}
 	// Check QUIC-specific deny rules first.
-	if matchRulesStrictProto(e.compiled.denyRules, dest, port, "quic") {
+	if matchRulesStrictProto(e.compiled.denyRules, dest, port, protoNameQUIC) {
 		return Deny
 	}
 	// Check QUIC-specific allow rules.
-	if matchRulesStrictProto(e.compiled.allowRules, dest, port, "quic") {
+	if matchRulesStrictProto(e.compiled.allowRules, dest, port, protoNameQUIC) {
 		return Allow
 	}
 	// No QUIC-specific rule matched. Fall back to UDP evaluation.
-	if matchRulesStrictProto(e.compiled.denyRules, dest, port, "udp") {
+	if matchRulesStrictProto(e.compiled.denyRules, dest, port, protoNameUDP) {
 		return Deny
 	}
-	if matchRulesStrictProto(e.compiled.allowRules, dest, port, "udp") {
+	if matchRulesStrictProto(e.compiled.allowRules, dest, port, protoNameUDP) {
 		return Allow
 	}
 	return Deny
