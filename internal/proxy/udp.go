@@ -162,6 +162,7 @@ func (r *UDPRelay) Serve(ctx context.Context, conn net.PacketConn, clientAddr ne
 				if logErr := r.audit.Log(audit.Event{
 					Destination: dest,
 					Port:        port,
+					Protocol:    "udp",
 					Verdict:     "deny",
 					Reason:      "udp denied",
 				}); logErr != nil {
@@ -204,6 +205,7 @@ func (r *UDPRelay) Serve(ctx context.Context, conn net.PacketConn, clientAddr ne
 			if logErr := r.audit.Log(audit.Event{
 				Destination: dest,
 				Port:        port,
+				Protocol:    "udp",
 				Verdict:     "allow",
 			}); logErr != nil {
 				log.Printf("audit log write error: %v", logErr)

@@ -219,6 +219,7 @@ func (d *DNSInterceptor) HandleQuery(query []byte) ([]byte, error) {
 		if logErr := d.audit.Log(audit.Event{
 			Destination: domain,
 			Port:        53,
+			Protocol:    "dns",
 			Verdict:     verdictStr,
 			Reason:      fmt.Sprintf("dns query type=%d", questions[0].Type),
 		}); logErr != nil {

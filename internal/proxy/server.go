@@ -52,22 +52,25 @@ type Config struct {
 	Store         *store.Store             // nil = in-memory only (no persistence)
 	WSBlockRules  []WSBlockRuleConfig      // WebSocket content deny rules
 	WSRedactRules []WSRedactRuleConfig     // WebSocket content redact rules
+	DNSResolver   string                   // upstream DNS resolver for intercepted queries (default: 8.8.8.8:53)
 }
 
 // Server wraps a SOCKS5 server with policy enforcement and audit logging.
 type Server struct {
-	listener    net.Listener
-	socks       *socks5.Server
-	rules       *policyRuleSet
-	dnsResolver *policyResolver
-	injector    *Injector
-	injectorLn  net.Listener
-	sshJump     *SSHJumpHost
-	mailProxy   *MailProxy
-	resolver    atomic.Pointer[vault.BindingResolver]
-	closed      atomic.Bool
-	serving     atomic.Bool
-	activeConns sync.WaitGroup
+	listener       net.Listener
+	socks          *socks5.Server
+	rules          *policyRuleSet
+	dnsResolver    *policyResolver
+	injector       *Injector
+	injectorLn     net.Listener
+	sshJump        *SSHJumpHost
+	mailProxy      *MailProxy
+	udpRelay       *UDPRelay
+	dnsInterceptor *DNSInterceptor
+	resolver       atomic.Pointer[vault.BindingResolver]
+	closed         atomic.Bool
+	serving        atomic.Bool
+	activeConns    sync.WaitGroup
 }
 
 type contextKey string
@@ -377,10 +380,15 @@ func New(cfg Config) (*Server, error) {
 	srv.rules = rules
 	srv.dnsResolver = dnsRes
 
+	// Create UDP relay and DNS interceptor for UDP ASSOCIATE sessions.
+	srv.udpRelay = NewUDPRelay(enginePtr, cfg.Audit)
+	srv.dnsInterceptor = NewDNSInterceptor(enginePtr, cfg.Audit, cfg.DNSResolver)
+
 	srv.socks = socks5.NewServer(
 		socks5.WithRule(rules),
 		socks5.WithResolver(dnsRes),
 		socks5.WithDial(srv.dial),
+		socks5.WithAssociateHandle(srv.handleAssociate),
 	)
 
 	return srv, nil
@@ -654,6 +662,218 @@ func dialThroughInjector(injectorAddr, host string, port int, authToken, pinID s
 		return &bufferedConn{Reader: br, Conn: conn}, nil
 	}
 	return conn, nil
+}
+
+// handleAssociate is the custom SOCKS5 UDP ASSOCIATE handler registered via
+// WithAssociateHandle. It creates a UDP listener, replies with its address,
+// then dispatches datagrams to the DNSInterceptor (port 53) or UDPRelay
+// (all other ports). The handler blocks until the TCP control connection
+// closes, at which point all UDP sessions are cleaned up.
+func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request *socks5.Request) error {
+	// Bind a UDP listener on the same IP as the TCP connection.
+	tcpAddr, ok := request.LocalAddr.(*net.TCPAddr)
+	if !ok {
+		if err := socks5.SendReply(writer, statute.RepServerFailure, nil); err != nil {
+			return fmt.Errorf("send reply: %w", err)
+		}
+		return fmt.Errorf("local address is not TCP: %T", request.LocalAddr)
+	}
+	udpAddr := &net.UDPAddr{IP: tcpAddr.IP, Port: 0}
+	bindLn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		if err := socks5.SendReply(writer, statute.RepServerFailure, nil); err != nil {
+			return fmt.Errorf("send reply: %w", err)
+		}
+		return fmt.Errorf("listen udp: %w", err)
+	}
+
+	// Tell the client where to send UDP datagrams.
+	if err := socks5.SendReply(writer, statute.RepSuccess, bindLn.LocalAddr()); err != nil {
+		bindLn.Close()
+		return fmt.Errorf("send reply: %w", err)
+	}
+
+	// Track upstream UDP sessions for non-DNS traffic.
+	var mu sync.Mutex
+	sessions := make(map[string]*udpSession)
+
+	// Start the datagram dispatch loop in a goroutine.
+	go func() {
+		defer func() {
+			mu.Lock()
+			for _, sess := range sessions {
+				sess.upstream.Close()
+			}
+			mu.Unlock()
+			bindLn.Close()
+		}()
+
+		buf := make([]byte, 65535)
+		for {
+			bindLn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+			n, srcAddr, readErr := bindLn.ReadFrom(buf)
+			if readErr != nil {
+				if ne, ok := readErr.(net.Error); ok && ne.Timeout() {
+					// Clean up expired sessions on timeout.
+					mu.Lock()
+					now := time.Now()
+					for key, sess := range sessions {
+						if now.Sub(sess.lastSeen) > udpSessionTimeout {
+							sess.upstream.Close()
+							delete(sessions, key)
+						}
+					}
+					mu.Unlock()
+					continue
+				}
+				return
+			}
+
+			// Validate that the source matches the ASSOCIATE request's client.
+			clientAddr := request.RemoteAddr.(*net.TCPAddr)
+			udpSrc, srcOK := srcAddr.(*net.UDPAddr)
+			if !srcOK {
+				continue
+			}
+			// Per RFC 1928: if the client specified 0.0.0.0:0, accept from any
+			// source IP that matches the TCP client.
+			if !request.DestAddr.IP.IsUnspecified() && !request.DestAddr.IP.Equal(udpSrc.IP) {
+				continue
+			}
+			if request.DestAddr.Port != 0 && request.DestAddr.Port != udpSrc.Port {
+				continue
+			}
+			// Also verify the source IP matches the TCP control connection's
+			// remote IP to prevent other hosts from injecting datagrams.
+			if !clientAddr.IP.Equal(udpSrc.IP) {
+				continue
+			}
+
+			dest, port, payload, parseErr := ParseSOCKS5UDPHeader(buf[:n])
+			if parseErr != nil {
+				log.Printf("[UDP] invalid datagram from %s: %v", srcAddr, parseErr)
+				continue
+			}
+
+			// DNS interception: port 53 traffic goes to the DNS interceptor.
+			if port == 53 && s.dnsInterceptor != nil {
+				resp, dnsErr := s.dnsInterceptor.HandleQuery(payload)
+				if dnsErr != nil {
+					log.Printf("[DNS] query handling error: %v", dnsErr)
+					continue
+				}
+				// Wrap DNS response in SOCKS5 UDP header.
+				dstIP := net.ParseIP(dest)
+				if dstIP == nil {
+					// Domain name destination: resolve for response header.
+					addrs, resolveErr := net.LookupIP(dest)
+					if resolveErr != nil || len(addrs) == 0 {
+						log.Printf("[DNS] cannot resolve %s for response header: %v", dest, resolveErr)
+						continue
+					}
+					dstIP = addrs[0]
+				}
+				respDatagram := BuildSOCKS5UDPResponse(dstIP, port, resp)
+				if _, writeErr := bindLn.WriteTo(respDatagram, srcAddr); writeErr != nil {
+					log.Printf("[DNS] write response to client: %v", writeErr)
+				}
+				continue
+			}
+
+			// General UDP: evaluate policy via UDPRelay.
+			verdict := s.udpRelay.evaluateUDP(dest, port)
+			if verdict != policy.Allow {
+				if s.udpRelay.audit != nil {
+					if logErr := s.udpRelay.audit.Log(audit.Event{
+						Destination: dest,
+						Port:        port,
+						Protocol:    "udp",
+						Verdict:     "deny",
+						Reason:      "udp denied",
+					}); logErr != nil {
+						log.Printf("audit log write error: %v", logErr)
+					}
+				}
+				continue
+			}
+
+			// Relay allowed datagram to upstream.
+			dstAddr, resolveErr := net.ResolveUDPAddr("udp", net.JoinHostPort(dest, strconv.Itoa(port)))
+			if resolveErr != nil {
+				log.Printf("[UDP] resolve %s:%d: %v", dest, port, resolveErr)
+				continue
+			}
+
+			sessionKey := dstAddr.String()
+			mu.Lock()
+			sess, exists := sessions[sessionKey]
+			if !exists {
+				upstream, listenErr := net.ListenPacket("udp", "127.0.0.1:0")
+				if listenErr != nil {
+					mu.Unlock()
+					log.Printf("[UDP] create upstream for %s: %v", sessionKey, listenErr)
+					continue
+				}
+				sess = &udpSession{upstream: upstream, lastSeen: time.Now()}
+				sessions[sessionKey] = sess
+				// Start a goroutine to relay responses from upstream back to client.
+				go s.relayUDPResponses(upstream, bindLn, srcAddr)
+			} else {
+				sess.lastSeen = time.Now()
+			}
+			mu.Unlock()
+
+			if _, writeErr := sess.upstream.WriteTo(payload, dstAddr); writeErr != nil {
+				log.Printf("[UDP] write to %s: %v", sessionKey, writeErr)
+			}
+
+			if s.udpRelay.audit != nil {
+				if logErr := s.udpRelay.audit.Log(audit.Event{
+					Destination: dest,
+					Port:        port,
+					Protocol:    "udp",
+					Verdict:     "allow",
+				}); logErr != nil {
+					log.Printf("audit log write error: %v", logErr)
+				}
+			}
+		}
+	}()
+
+	// Block on the TCP control connection. When it closes, the deferred
+	// cleanup in the goroutine above will run (bindLn.Close causes the
+	// ReadFrom to return an error, exiting the loop).
+	tcpBuf := make([]byte, 1)
+	for {
+		if _, err := request.Reader.Read(tcpBuf); err != nil {
+			bindLn.Close()
+			return nil
+		}
+	}
+}
+
+// relayUDPResponses reads response datagrams from an upstream connection and
+// wraps them in SOCKS5 UDP headers before sending to the client.
+func (s *Server) relayUDPResponses(upstream net.PacketConn, relay *net.UDPConn, clientAddr net.Addr) {
+	buf := make([]byte, 65535)
+	for {
+		upstream.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		n, srcAddr, err := upstream.ReadFrom(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			return
+		}
+		udpAddr, ok := srcAddr.(*net.UDPAddr)
+		if !ok {
+			continue
+		}
+		resp := BuildSOCKS5UDPResponse(udpAddr.IP, udpAddr.Port, buf[:n])
+		if _, writeErr := relay.WriteTo(resp, clientAddr); writeErr != nil {
+			log.Printf("[UDP] write response to client: %v", writeErr)
+		}
+	}
 }
 
 // generatePinID returns a random hex string used to key per-connection

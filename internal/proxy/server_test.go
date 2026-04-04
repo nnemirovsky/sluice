@@ -947,10 +947,15 @@ func TestUDPAssociateRelaysDatagrams(t *testing.T) {
 		}
 	}()
 
-	eng, err := policy.LoadFromBytes([]byte(`
+	eng, err := policy.LoadFromBytes([]byte(fmt.Sprintf(`
 [policy]
 default = "allow"
-`))
+
+[[allow]]
+destination = "127.0.0.1"
+ports = [%d]
+protocols = ["udp"]
+`, echoAddr.Port)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1011,4 +1016,306 @@ default = "allow"
 	if string(respData) != "hello-udp" {
 		t.Errorf("expected 'hello-udp', got %q", string(respData))
 	}
+}
+
+func TestUDPAssociateWithPolicyDeny(t *testing.T) {
+	// Policy explicitly allows UDP to a specific address, denies everything else.
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "192.0.2.99"
+ports = [9999]
+protocols = ["udp"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
+
+	relayAddr, controlConn, err := socks5UDPAssociate(srv.Addr())
+	if err != nil {
+		t.Fatalf("UDP ASSOCIATE: %v", err)
+	}
+	defer controlConn.Close()
+
+	clientConn, err := net.DialUDP("udp", nil, relayAddr)
+	if err != nil {
+		t.Fatalf("dial relay: %v", err)
+	}
+	defer clientConn.Close()
+
+	// Send a datagram to a denied destination (127.0.0.1:12345).
+	payload := []byte("denied-traffic")
+	datagram := make([]byte, 0, 10+len(payload))
+	datagram = append(datagram, 0x00, 0x00) // RSV
+	datagram = append(datagram, 0x00)       // FRAG
+	datagram = append(datagram, 0x01)       // ATYP IPv4
+	datagram = append(datagram, 127, 0, 0, 1)
+	denyPort := uint16(12345)
+	datagram = append(datagram, byte(denyPort>>8), byte(denyPort))
+	datagram = append(datagram, payload...)
+
+	if _, err := clientConn.Write(datagram); err != nil {
+		t.Fatalf("send datagram: %v", err)
+	}
+
+	// Should not receive a response since the destination is denied.
+	clientConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	respBuf := make([]byte, 65535)
+	_, err = clientConn.Read(respBuf)
+	if err == nil {
+		t.Fatal("expected timeout reading from denied destination, got response")
+	}
+	if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+		t.Fatalf("expected timeout error, got: %v", err)
+	}
+}
+
+func TestUDPAssociateDNSInterception(t *testing.T) {
+	// Start a mock DNS server that returns a canned response.
+	dnsConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dnsConn.Close()
+	dnsAddr := dnsConn.LocalAddr().(*net.UDPAddr)
+
+	go func() {
+		buf := make([]byte, 65535)
+		for {
+			n, addr, err := dnsConn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			// Echo the query back as a "response" with QR bit set.
+			resp := make([]byte, n)
+			copy(resp, buf[:n])
+			// Set QR=1 in flags (byte 2-3).
+			resp[2] |= 0x80
+			dnsConn.WriteTo(resp, addr)
+		}
+	}()
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "example.com"
+ports = [53]
+protocols = ["dns"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr:  "127.0.0.1:0",
+		Policy:      eng,
+		DNSResolver: dnsAddr.String(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
+
+	relayAddr, controlConn, err := socks5UDPAssociate(srv.Addr())
+	if err != nil {
+		t.Fatalf("UDP ASSOCIATE: %v", err)
+	}
+	defer controlConn.Close()
+
+	clientConn, err := net.DialUDP("udp", nil, relayAddr)
+	if err != nil {
+		t.Fatalf("dial relay: %v", err)
+	}
+	defer clientConn.Close()
+
+	// Build a DNS query for example.com (allowed).
+	dnsQuery := buildTestDNSQuery(0x1234, "example.com", 1) // A record
+
+	// Wrap DNS query in SOCKS5 UDP datagram addressed to the DNS server IP on port 53.
+	dnsIP := dnsAddr.IP.To4()
+	datagram := make([]byte, 0, 10+len(dnsQuery))
+	datagram = append(datagram, 0x00, 0x00) // RSV
+	datagram = append(datagram, 0x00)       // FRAG
+	datagram = append(datagram, 0x01)       // ATYP IPv4
+	datagram = append(datagram, dnsIP...)
+	datagram = append(datagram, byte(53>>8), byte(53))
+	datagram = append(datagram, dnsQuery...)
+
+	if _, err := clientConn.Write(datagram); err != nil {
+		t.Fatalf("send DNS datagram: %v", err)
+	}
+
+	// Read the DNS response through the relay.
+	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	respBuf := make([]byte, 65535)
+	n, err := clientConn.Read(respBuf)
+	if err != nil {
+		t.Fatalf("read DNS response: %v", err)
+	}
+
+	// Parse SOCKS5 UDP header: RSV(2) + FRAG(1) + ATYP(1) + ADDR(4) + PORT(2) = 10
+	resp := respBuf[:n]
+	if len(resp) < 10 {
+		t.Fatalf("DNS response too short: %d bytes", len(resp))
+	}
+	dnsResp := resp[10:]
+
+	// Verify the DNS response has QR bit set and matches our query ID.
+	if len(dnsResp) < 4 {
+		t.Fatal("DNS response payload too short")
+	}
+	respID := binary.BigEndian.Uint16(dnsResp[0:2])
+	if respID != 0x1234 {
+		t.Errorf("expected query ID 0x1234, got 0x%04x", respID)
+	}
+	if dnsResp[2]&0x80 == 0 {
+		t.Error("expected QR=1 in DNS response")
+	}
+}
+
+func TestUDPAssociateDNSInterceptionNXDOMAIN(t *testing.T) {
+	// DNS interceptor should return NXDOMAIN for denied domains without
+	// contacting the upstream resolver.
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "allowed.example.com"
+ports = [53]
+protocols = ["dns"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr:  "127.0.0.1:0",
+		Policy:      eng,
+		DNSResolver: "127.0.0.1:1", // invalid resolver; should not be contacted
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
+
+	relayAddr, controlConn, err := socks5UDPAssociate(srv.Addr())
+	if err != nil {
+		t.Fatalf("UDP ASSOCIATE: %v", err)
+	}
+	defer controlConn.Close()
+
+	clientConn, err := net.DialUDP("udp", nil, relayAddr)
+	if err != nil {
+		t.Fatalf("dial relay: %v", err)
+	}
+	defer clientConn.Close()
+
+	// Query for a denied domain.
+	dnsQuery := buildTestDNSQuery(0xABCD, "denied.example.com", 1)
+
+	// Use a loopback IP as the DNS server address (port 53).
+	datagram := make([]byte, 0, 10+len(dnsQuery))
+	datagram = append(datagram, 0x00, 0x00) // RSV
+	datagram = append(datagram, 0x00)       // FRAG
+	datagram = append(datagram, 0x01)       // ATYP IPv4
+	datagram = append(datagram, 127, 0, 0, 1)
+	datagram = append(datagram, byte(53>>8), byte(53))
+	datagram = append(datagram, dnsQuery...)
+
+	if _, err := clientConn.Write(datagram); err != nil {
+		t.Fatalf("send DNS datagram: %v", err)
+	}
+
+	// Should receive an NXDOMAIN response.
+	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	respBuf := make([]byte, 65535)
+	n, err := clientConn.Read(respBuf)
+	if err != nil {
+		t.Fatalf("read NXDOMAIN response: %v", err)
+	}
+
+	resp := respBuf[:n]
+	if len(resp) < 10 {
+		t.Fatalf("NXDOMAIN response too short: %d bytes", len(resp))
+	}
+	dnsResp := resp[10:]
+
+	if len(dnsResp) < 4 {
+		t.Fatal("DNS response payload too short")
+	}
+	// Check query ID matches.
+	respID := binary.BigEndian.Uint16(dnsResp[0:2])
+	if respID != 0xABCD {
+		t.Errorf("expected query ID 0xABCD, got 0x%04x", respID)
+	}
+	// Check QR=1.
+	if dnsResp[2]&0x80 == 0 {
+		t.Error("expected QR=1 in NXDOMAIN response")
+	}
+	// Check RCODE=3 (NXDOMAIN) in lower 4 bits of byte 3.
+	rcode := dnsResp[3] & 0x0F
+	if rcode != 3 {
+		t.Errorf("expected RCODE=3 (NXDOMAIN), got %d", rcode)
+	}
+}
+
+// buildTestDNSQuery constructs a minimal DNS query packet.
+func buildTestDNSQuery(id uint16, domain string, qtype uint16) []byte {
+	var buf []byte
+	// Header: ID(2) + Flags(2) + QDCOUNT(2) + ANCOUNT(2) + NSCOUNT(2) + ARCOUNT(2)
+	buf = append(buf, byte(id>>8), byte(id))
+	buf = append(buf, 0x01, 0x00) // Flags: RD=1
+	buf = append(buf, 0x00, 0x01) // QDCOUNT=1
+	buf = append(buf, 0x00, 0x00) // ANCOUNT=0
+	buf = append(buf, 0x00, 0x00) // NSCOUNT=0
+	buf = append(buf, 0x00, 0x00) // ARCOUNT=0
+
+	// Question section: domain name in wire format.
+	parts := splitDomainLabels(domain)
+	for _, part := range parts {
+		buf = append(buf, byte(len(part)))
+		buf = append(buf, []byte(part)...)
+	}
+	buf = append(buf, 0x00) // Root label
+
+	// QTYPE and QCLASS.
+	buf = append(buf, byte(qtype>>8), byte(qtype))
+	buf = append(buf, 0x00, 0x01) // QCLASS IN
+
+	return buf
+}
+
+// splitDomainLabels splits a domain name into its labels.
+func splitDomainLabels(domain string) []string {
+	var labels []string
+	start := 0
+	for i := 0; i < len(domain); i++ {
+		if domain[i] == '.' {
+			if i > start {
+				labels = append(labels, domain[start:i])
+			}
+			start = i + 1
+		}
+	}
+	if start < len(domain) {
+		labels = append(labels, domain[start:])
+	}
+	return labels
 }

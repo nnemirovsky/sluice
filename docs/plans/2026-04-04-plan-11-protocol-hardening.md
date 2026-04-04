@@ -193,15 +193,15 @@ Connect UDP relay and DNS interceptor to the SOCKS5 server.
 - Modify: `internal/proxy/server.go`
 - Modify: `internal/proxy/server_test.go`
 
-- [ ] Configure `things-go/go-socks5` to handle UDP ASSOCIATE requests
-- [ ] On UDP ASSOCIATE: create UDP relay bound to a local port, return to client
-- [ ] Wire relay to use `UDPRelay` for general UDP and `DNSInterceptor` for port 53
-- [ ] UDP connection tracking: map client addresses to relay sessions, clean up on TCP control connection close
-- [ ] Update audit logging: log UDP events with protocol="udp" or protocol="dns"
-- [ ] Write integration test: SOCKS5 client sends UDP ASSOCIATE, sends UDP packet, receives response
-- [ ] Write integration test: DNS query through UDP ASSOCIATE to mock DNS server
-- [ ] Write integration test: blocked UDP destination dropped silently
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] Configure `things-go/go-socks5` to handle UDP ASSOCIATE requests
+- [x] On UDP ASSOCIATE: create UDP relay bound to a local port, return to client
+- [x] Wire relay to use `UDPRelay` for general UDP and `DNSInterceptor` for port 53
+- [x] UDP connection tracking: map client addresses to relay sessions, clean up on TCP control connection close
+- [x] Update audit logging: log UDP events with protocol="udp" or protocol="dns"
+- [x] Write integration test: SOCKS5 client sends UDP ASSOCIATE, sends UDP packet, receives response
+- [x] Write integration test: DNS query through UDP ASSOCIATE to mock DNS server
+- [x] Write integration test: blocked UDP destination dropped silently
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 9: QUIC packet detection and HTTP/3 termination
 
