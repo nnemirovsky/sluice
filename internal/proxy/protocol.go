@@ -42,6 +42,10 @@ const (
 	// ProtoAPNS indicates Apple Push Notification Service traffic (port 5223).
 	ProtoAPNS Protocol = 11
 	// ProtoTCP indicates generic TCP transport (used in policy protocol filters).
+	// Note: accepted in policy rules for validation consistency with ProtoUDP,
+	// but does not yet have a dedicated evaluation path. TCP connections use
+	// Evaluate/EvaluateWithProtocol which resolve to application-level
+	// protocol names (http, https, ssh, etc.), not "tcp".
 	ProtoTCP Protocol = 12
 	// ProtoUDP indicates generic UDP transport (used in policy protocol filters).
 	ProtoUDP Protocol = 13

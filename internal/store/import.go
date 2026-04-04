@@ -133,6 +133,12 @@ type importFile struct {
 // TOML import. These correspond 1:1 with the Protocol enum values in the
 // proxy package (proxy.protocolNames). Keep in sync with proxy.protocolNames;
 // TestValidProtocolNamesSync verifies this.
+//
+// Note: "tcp" and "udp" are transport-level meta-protocols used in policy
+// rules. "udp" is evaluated via EvaluateUDP/EvaluateQUIC in the policy
+// engine. "tcp" is accepted for validation consistency but does not yet
+// have a dedicated evaluation path (TCP connections use Evaluate which
+// resolves to application-level protocols like "http", "https", etc.).
 var validProtocolNames = map[string]bool{
 	"generic": true,
 	"http":    true,

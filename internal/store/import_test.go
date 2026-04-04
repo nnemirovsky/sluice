@@ -826,10 +826,12 @@ vault = "sluice-creds"
 }
 
 func TestValidProtocolNamesSync(t *testing.T) {
-	// Verify validProtocolNames stays in sync with the proxy package's
-	// Protocol enum. Each name here must correspond to a proxy.Protocol
-	// value via proxy.ParseProtocol. If this test fails, a protocol was
-	// added to one map but not the other.
+	// Verify validProtocolNames contains the canonical set of protocol
+	// names. This list must match proxy.protocolNames in the proxy package.
+	// Because store cannot import proxy (proxy imports policy which would
+	// create a cycle via proxy -> policy, store -> proxy), we maintain a
+	// hardcoded expected list here. If a protocol is added to proxy, update
+	// both validProtocolNames and this list.
 	expectedProtos := []string{
 		"generic", "http", "https", "ssh", "imap", "smtp",
 		"ws", "wss", "grpc", "dns", "quic", "apns",
