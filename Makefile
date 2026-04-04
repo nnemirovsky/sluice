@@ -1,4 +1,4 @@
-.PHONY: build test test-coverage lint fmt tidy install clean release release-snapshot
+.PHONY: build test test-coverage lint fmt tidy install clean release release-snapshot generate lint-api
 
 # Build
 build:
@@ -39,6 +39,14 @@ release-snapshot:
 # Release
 release:
 	goreleaser release --clean
+
+# Generate API code from OpenAPI spec
+generate:
+	cd internal/api && oapi-codegen --config config.yaml ../../api/openapi.yaml
+
+# Lint OpenAPI spec
+lint-api:
+	npx @redocly/cli lint api/openapi.yaml
 
 # Clean
 clean:

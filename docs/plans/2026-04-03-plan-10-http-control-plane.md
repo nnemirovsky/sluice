@@ -89,16 +89,16 @@ Define the full API surface in OpenAPI 3.0 YAML. Set up oapi-codegen with chi-se
 /api/status                     GET    -- proxy stats
 ```
 
-- [ ] Write `api/openapi.yaml` with all endpoints, request/response schemas, bearer auth security scheme. `/healthz` has no security. All `/api/*` require bearerAuth.
-- [ ] Define schemas for all request/response types: Rule, Config, Binding, MCPUpstream, Channel, ApprovalRequest, Credential, AuditEntry, VerifyResult, ImportResult, StatusResponse
-- [ ] Create `internal/api/config.yaml` with oapi-codegen config (package: api, chi-server: true, models: true, embedded-spec: true)
-- [ ] Create `internal/api/generate.go` with `//go:generate oapi-codegen --config config.yaml ../../api/openapi.yaml`
-- [ ] Add oapi-codegen, chi, kin-openapi, oapi-codegen/runtime dependencies to go.mod
-- [ ] Run `go generate ./internal/api/` to produce `api.gen.go`
-- [ ] Add `generate` target to Makefile: `cd internal/api && oapi-codegen --config config.yaml ../../api/openapi.yaml`
-- [ ] Add `lint-api` target to Makefile: `npx @redocly/cli lint api/openapi.yaml`
-- [ ] Verify generated code compiles: `go build ./internal/api/`
-- [ ] Run tests: `go test ./... -v -timeout 30s`
+- [x] Write `api/openapi.yaml` with all endpoints, request/response schemas, bearer auth security scheme. `/healthz` has no security. All `/api/*` require bearerAuth.
+- [x] Define schemas for all request/response types: Rule, Config, Binding, MCPUpstream, Channel, ApprovalRequest, Credential, AuditEntry, VerifyResult, ImportResult, StatusResponse
+- [x] Create `internal/api/config.yaml` with oapi-codegen config (package: api, chi-server: true, models: true, embedded-spec: true)
+- [x] Create `internal/api/generate.go` with `//go:generate oapi-codegen --config config.yaml ../../api/openapi.yaml`
+- [x] Add oapi-codegen, chi, kin-openapi, oapi-codegen/runtime dependencies to go.mod
+- [x] Run `go generate ./internal/api/` to produce `api.gen.go`
+- [x] Add `generate` target to Makefile: `cd internal/api && oapi-codegen --config config.yaml ../../api/openapi.yaml`
+- [x] Add `lint-api` target to Makefile: `npx @redocly/cli lint api/openapi.yaml`
+- [x] Verify generated code compiles: `go build ./internal/api/`
+- [x] Run tests: `go test ./... -v -timeout 30s`
 
 ### Task 2: Implement approval and status handlers
 
