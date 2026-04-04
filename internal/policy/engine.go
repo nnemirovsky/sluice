@@ -583,3 +583,24 @@ func (e *Engine) EvaluateWithProtocol(dest string, port int, proto string) Verdi
 	}
 	return e.Default
 }
+
+// EvaluateUDP checks a destination and port with UDP-specific semantics.
+// Only explicit allow rules produce an Allow verdict. Deny rules take priority
+// as usual. Ask rules and the engine default verdict are treated as Deny
+// because per-packet approval is impractical. This implements the UDP
+// default-deny strategy where UDP traffic requires an explicit allow rule.
+func (e *Engine) EvaluateUDP(dest string, port int) Verdict {
+	dest = normalizeDestination(dest)
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.compiled == nil {
+		return Deny
+	}
+	if matchRulesWithProto(e.compiled.denyRules, dest, port, "udp") {
+		return Deny
+	}
+	if matchRulesWithProto(e.compiled.allowRules, dest, port, "udp") {
+		return Allow
+	}
+	return Deny
+}

@@ -153,17 +153,17 @@ Handle SOCKS5 UDP ASSOCIATE sessions with per-datagram policy evaluation.
 - Create: `internal/proxy/udp.go`
 - Create: `internal/proxy/udp_test.go`
 
-- [ ] Implement `UDPRelay` struct that handles SOCKS5 UDP ASSOCIATE sessions
-- [ ] On each UDP datagram: extract destination address, evaluate policy (same engine as TCP)
-- [ ] Default verdict for UDP: deny (unless explicitly allowed). Safe default since most legitimate API traffic uses TCP.
-- [ ] Allowed datagrams: relay to destination, relay response back
-- [ ] Denied datagrams: drop silently, log to audit
-- [ ] Ask datagrams: deny immediately (Telegram approval for individual UDP packets is not practical)
-- [ ] `protocols = ["udp"]` matching in policy evaluation
-- [ ] Write tests for UDP policy evaluation (allow, deny, ask-treated-as-deny)
-- [ ] Write tests for UDP relay (send datagram, receive response)
-- [ ] Write tests for default-deny behavior
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] Implement `UDPRelay` struct that handles SOCKS5 UDP ASSOCIATE sessions
+- [x] On each UDP datagram: extract destination address, evaluate policy (same engine as TCP)
+- [x] Default verdict for UDP: deny (unless explicitly allowed). Safe default since most legitimate API traffic uses TCP.
+- [x] Allowed datagrams: relay to destination, relay response back
+- [x] Denied datagrams: drop silently, log to audit
+- [x] Ask datagrams: deny immediately (Telegram approval for individual UDP packets is not practical)
+- [x] `protocols = ["udp"]` matching in policy evaluation
+- [x] Write tests for UDP policy evaluation (allow, deny, ask-treated-as-deny)
+- [x] Write tests for UDP relay (send datagram, receive response)
+- [x] Write tests for default-deny behavior
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 7: DNS query interception
 
