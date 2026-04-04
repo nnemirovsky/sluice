@@ -21,6 +21,8 @@ type WSUpstream struct {
 	mu      sync.Mutex
 	nextID  atomic.Int64
 	timeout time.Duration
+	ctx     context.Context    // cancelled by Stop to unblock in-flight reads
+	cancel  context.CancelFunc // cancels ctx
 }
 
 // NewWSUpstream creates a WSUpstream for the given WebSocket URL and timeout.
@@ -29,19 +31,22 @@ func NewWSUpstream(name, url string, timeoutSec int) *WSUpstream {
 	if timeoutSec > 0 {
 		timeout = time.Duration(timeoutSec) * time.Second
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &WSUpstream{
 		name:    name,
 		url:     url,
 		timeout: timeout,
+		ctx:     ctx,
+		cancel:  cancel,
 	}
 }
 
 // connect dials the WebSocket server with the "mcp" subprotocol.
 func (w *WSUpstream) connect() error {
-	ctx, cancel := context.WithTimeout(context.Background(), w.timeout)
-	defer cancel()
+	dialCtx, dialCancel := context.WithTimeout(w.ctx, w.timeout)
+	defer dialCancel()
 
-	conn, _, err := websocket.Dial(ctx, w.url, &websocket.DialOptions{
+	conn, _, err := websocket.Dial(dialCtx, w.url, &websocket.DialOptions{
 		Subprotocols: []string{"mcp"},
 	})
 	if err != nil {
@@ -69,7 +74,7 @@ func (w *WSUpstream) Send(req JSONRPCRequest) (*JSONRPCResponse, error) {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), w.timeout)
+	ctx, cancel := context.WithTimeout(w.ctx, w.timeout)
 	defer cancel()
 
 	if err := w.conn.Write(ctx, websocket.MessageText, data); err != nil {
@@ -202,18 +207,25 @@ func (w *WSUpstream) CallTool(toolName string, arguments json.RawMessage) (*JSON
 // performing the full MCP handshake again. Call this after a connection
 // drop to re-establish communication with the upstream server.
 func (w *WSUpstream) Reconnect() error {
+	w.cancel()
+
 	w.mu.Lock()
 	if w.conn != nil {
 		_ = w.conn.Close(websocket.StatusGoingAway, "reconnecting")
 		w.conn = nil
 	}
+	// Reset context for the new connection.
+	w.ctx, w.cancel = context.WithCancel(context.Background())
 	w.mu.Unlock()
 
 	return w.Initialize()
 }
 
-// Stop closes the WebSocket connection with a normal closure status.
+// Stop cancels in-flight operations and closes the WebSocket connection.
 func (w *WSUpstream) Stop() error {
+	// Cancel the context first to unblock any in-flight Send waiting on Read.
+	w.cancel()
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 

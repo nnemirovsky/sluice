@@ -197,8 +197,9 @@ template = "Bearer {value}"
 # transport = "stdio"
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-github"]
-# env = ["GITHUB_PERSONAL_ACCESS_TOKEN=vault:github_token"]
 # timeout_sec = 60
+# [mcp_upstream.env]
+# GITHUB_PERSONAL_ACCESS_TOKEN = "vault:github_token"
 
 # Remote Streamable HTTP upstream
 # [[mcp_upstream]]

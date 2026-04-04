@@ -38,6 +38,18 @@ func postMCP(handler http.Handler, body string, headers map[string]string) *http
 	return rec
 }
 
+// initSession performs an initialize handshake and returns the session ID.
+func initSession(t *testing.T, handler http.Handler) string {
+	t.Helper()
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}`
+	rec := postMCP(handler, body, nil)
+	sid := rec.Header().Get("Mcp-Session-Id")
+	if sid == "" {
+		t.Fatal("initialize did not return session ID")
+	}
+	return sid
+}
+
 func TestMCPHTTPInitializeReturnsSessionID(t *testing.T) {
 	handler := newTestMCPHandler(t)
 
@@ -252,6 +264,17 @@ func TestMCPHTTPInvalidSessionReturns404(t *testing.T) {
 	}
 }
 
+func TestMCPHTTPMissingSessionReturns400(t *testing.T) {
+	handler := newTestMCPHandler(t)
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+	rec := postMCP(handler, body, nil)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing session, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestMCPHTTPNotificationReturns202(t *testing.T) {
 	handler := newTestMCPHandler(t)
 
@@ -434,9 +457,10 @@ func TestMCPHTTPPolicyEnforcement(t *testing.T) {
 
 func TestMCPHTTPPing(t *testing.T) {
 	handler := newTestMCPHandler(t)
+	sid := initSession(t, handler)
 
-	body := `{"jsonrpc":"2.0","id":1,"method":"ping"}`
-	rec := postMCP(handler, body, nil)
+	body := `{"jsonrpc":"2.0","id":2,"method":"ping"}`
+	rec := postMCP(handler, body, map[string]string{"Mcp-Session-Id": sid})
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
@@ -454,8 +478,10 @@ func TestMCPHTTPPing(t *testing.T) {
 func TestMCPHTTPNoContentTypeAllowed(t *testing.T) {
 	// Some clients may omit Content-Type. Accept it gracefully.
 	handler := newTestMCPHandler(t)
+	sid := initSession(t, handler)
 
-	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"ping"}`))
+	req.Header.Set("Mcp-Session-Id", sid)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -486,11 +512,13 @@ func TestMCPHTTPSessionEchoedOnSubsequentRequests(t *testing.T) {
 // the Server-Sent Events format: "data: <json>\n\n".
 func TestMCPHTTPStreamedResponse(t *testing.T) {
 	handler := newTestMCPHandler(t)
+	sid := initSession(t, handler)
 
-	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test__greet","arguments":{"name":"stream"}}}`
+	body := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"test__greet","arguments":{"name":"stream"}}}`
 	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Mcp-Session-Id", sid)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

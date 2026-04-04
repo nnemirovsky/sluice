@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -29,6 +30,7 @@ type GatewayConfig struct {
 // Gateway intercepts tool calls between an AI agent and upstream MCP servers,
 // applying tool-level policy and optional Telegram approval.
 type Gateway struct {
+	mu           sync.RWMutex
 	upstreams    map[string]MCPUpstream    // upstream name -> upstream
 	upstreamCfgs map[string]UpstreamConfig // original configs (with vault: prefixes) for restart
 	toolMap      map[string]string         // namespaced tool -> upstream name
@@ -125,6 +127,8 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 
 // Tools returns all discovered tools from all upstreams (namespaced).
 func (gw *Gateway) Tools() []Tool {
+	gw.mu.RLock()
+	defer gw.mu.RUnlock()
 	return gw.allTools
 }
 
@@ -134,7 +138,7 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 	verdict := gw.policy.Evaluate(req.Name)
 	finalVerdict := verdict
 
-	switch verdict {
+	switch verdict { //nolint:exhaustive // only Deny needs special handling before approval
 	case policy.Deny:
 		gw.logAudit(req.Name, "tool_call", finalVerdict)
 		return &ToolResult{
@@ -204,15 +208,20 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 
 	gw.logAudit(req.Name, "tool_call", finalVerdict)
 
-	// Find upstream
+	// Find upstream (read lock protects map access during RestartUpstream).
+	gw.mu.RLock()
 	upstreamName, ok := gw.toolMap[req.Name]
+	var upstream MCPUpstream
+	if ok {
+		upstream = gw.upstreams[upstreamName]
+	}
+	gw.mu.RUnlock()
 	if !ok {
 		return &ToolResult{
 			Content: []ToolContent{{Type: "text", Text: fmt.Sprintf("Unknown tool: %s", req.Name)}},
 			IsError: true,
 		}, nil
 	}
-	upstream := gw.upstreams[upstreamName]
 
 	// Strip namespace prefix for upstream call
 	originalName := strings.TrimPrefix(req.Name, upstreamName+"__")
@@ -276,12 +285,15 @@ func (gw *Gateway) logAudit(tool, action string, verdict policy.Verdict) {
 // pick up new values. The upstream's tools are re-discovered and the
 // tool map is updated.
 func (gw *Gateway) RestartUpstream(name string) error {
+	gw.mu.RLock()
 	u, ok := gw.upstreams[name]
+	cfg, cfgOK := gw.upstreamCfgs[name]
+	gw.mu.RUnlock()
+
 	if !ok {
 		return fmt.Errorf("upstream %q not found", name)
 	}
-	cfg, ok := gw.upstreamCfgs[name]
-	if !ok {
+	if !cfgOK {
 		return fmt.Errorf("no stored config for upstream %q", name)
 	}
 
@@ -307,7 +319,14 @@ func (gw *Gateway) RestartUpstream(name string) error {
 		return fmt.Errorf("reinitialize upstream %s: %w", name, err)
 	}
 
-	// Collect old tool names for this upstream before removing them.
+	tools, err := newU.DiscoverTools()
+	if err != nil {
+		_ = newU.Stop()
+		return fmt.Errorf("rediscover tools %s: %w", name, err)
+	}
+
+	// Hold write lock while swapping maps and slices.
+	gw.mu.Lock()
 	oldTools := make(map[string]bool)
 	for toolName, upName := range gw.toolMap {
 		if upName == name {
@@ -315,17 +334,9 @@ func (gw *Gateway) RestartUpstream(name string) error {
 			delete(gw.toolMap, toolName)
 		}
 	}
-
-	tools, err := newU.DiscoverTools()
-	if err != nil {
-		_ = newU.Stop()
-		return fmt.Errorf("rediscover tools %s: %w", name, err)
-	}
 	for _, t := range tools {
 		gw.toolMap[t.Name] = name
 	}
-
-	// Rebuild allTools: remove old tools for this upstream and append new ones.
 	filtered := make([]Tool, 0, len(gw.allTools))
 	for _, t := range gw.allTools {
 		if !oldTools[t.Name] {
@@ -333,8 +344,9 @@ func (gw *Gateway) RestartUpstream(name string) error {
 		}
 	}
 	gw.allTools = append(filtered, tools...)
-
 	gw.upstreams[name] = newU
+	gw.mu.Unlock()
+
 	log.Printf("upstream %s restarted, %d tools discovered", name, len(tools))
 	return nil
 }

@@ -43,9 +43,6 @@ func NewHTTPUpstream(name, url string, timeoutSec int) *HTTPUpstream {
 // the response. It attaches the Mcp-Session-Id header if a session has
 // been established.
 func (h *HTTPUpstream) Send(req JSONRPCRequest) (*JSONRPCResponse, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
@@ -57,9 +54,12 @@ func (h *HTTPUpstream) Send(req JSONRPCRequest) (*JSONRPCResponse, error) {
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json, text/event-stream")
+
+	h.mu.Lock()
 	if h.sessionID != "" {
 		httpReq.Header.Set("Mcp-Session-Id", h.sessionID)
 	}
+	h.mu.Unlock()
 
 	resp, err := h.client.Do(httpReq)
 	if err != nil {
@@ -69,7 +69,9 @@ func (h *HTTPUpstream) Send(req JSONRPCRequest) (*JSONRPCResponse, error) {
 
 	// Store session ID from response.
 	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
+		h.mu.Lock()
 		h.sessionID = sid
+		h.mu.Unlock()
 	}
 
 	if resp.StatusCode != http.StatusOK {

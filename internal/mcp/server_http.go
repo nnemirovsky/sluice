@@ -66,7 +66,12 @@ func (h *MCPHTTPHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 	if req.Method == "initialize" {
 		sess := h.newSession()
 		w.Header().Set("Mcp-Session-Id", sess.id)
-	} else if sessionID != "" {
+	} else if req.Method == "notifications/initialized" {
+		// Notifications do not require a session.
+	} else if sessionID == "" {
+		http.Error(w, "Mcp-Session-Id header required", http.StatusBadRequest)
+		return
+	} else {
 		if _, ok := h.sessions.Load(sessionID); !ok {
 			http.Error(w, "Invalid or expired session", http.StatusNotFound)
 			return
@@ -134,11 +139,37 @@ func (h *MCPHTTPHandler) SessionCount() int {
 	return count
 }
 
+// maxSessions is the upper bound on concurrent sessions to prevent unbounded
+// memory growth from repeated initialize requests without cleanup.
+const maxSessions = 1000
+
 func (h *MCPHTTPHandler) newSession() *mcpSession {
+	// Enforce session cap.
+	if h.SessionCount() >= maxSessions {
+		h.pruneOldestSession()
+	}
+
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	id := hex.EncodeToString(b)
 	sess := &mcpSession{id: id, createdAt: time.Now()}
 	h.sessions.Store(id, sess)
 	return sess
+}
+
+// pruneOldestSession removes the session with the earliest createdAt time.
+func (h *MCPHTTPHandler) pruneOldestSession() {
+	var oldestID string
+	var oldestTime time.Time
+	h.sessions.Range(func(key, value interface{}) bool {
+		sess := value.(*mcpSession)
+		if oldestID == "" || sess.createdAt.Before(oldestTime) {
+			oldestID = key.(string)
+			oldestTime = sess.createdAt
+		}
+		return true
+	})
+	if oldestID != "" {
+		h.sessions.Delete(oldestID)
+	}
 }
