@@ -168,18 +168,23 @@ Set up the e2e test directory, helper utilities, and build tags.
 - `//go:build e2e && darwin` -- macOS-specific (Apple Container)
 - `//go:build e2e && linux` -- Linux-specific (Docker)
 
+**Compose file:**
+- Create: `compose.e2e.yml` -- stripped-down compose for e2e: sluice + tun2proxy + test runner container (no OpenClaw). Test runner has go toolchain and runs the e2e binary.
+
 **Makefile targets:**
 ```makefile
 test-e2e:
 	go test -tags=e2e ./e2e/ -v -count=1 -timeout=300s
 
-test-e2e-linux:
-	go test -tags="e2e linux" ./e2e/ -v -count=1 -timeout=300s
+test-e2e-docker:
+	docker compose -f compose.e2e.yml up --build --abort-on-container-exit --exit-code-from test-runner
+	docker compose -f compose.e2e.yml down -v
 
 test-e2e-macos:
 	go test -tags="e2e darwin" ./e2e/ -v -count=1 -timeout=300s
 ```
 
+- [ ] Create `compose.e2e.yml` with three services: sluice (build from source), tun2proxy, test-runner (runs `go test -tags="e2e linux"` inside the compose network). Test-runner uses `network_mode: "service:tun2proxy"` so its traffic routes through sluice.
 - [ ] Create `e2e/doc.go` with `//go:build e2e` and package documentation
 - [ ] Create `e2e/helpers_test.go` with shared utilities: `startSluice(t, opts)`, `stopSluice(t)`, `connectSOCKS5(t, addr)`, `importConfig(t, toml)`, `waitForHealthy(t, addr)`
 - [ ] Helper: `startSluice` spawns sluice binary with temp DB, temp config, temp audit log. Returns cleanup func.
