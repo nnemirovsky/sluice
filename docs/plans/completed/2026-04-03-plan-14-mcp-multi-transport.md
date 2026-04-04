@@ -58,7 +58,7 @@ Allow upstreams to specify their transport type. Default remains stdio for backw
 **Files:**
 - Modify: `internal/mcp/types.go`
 - Modify: `internal/store/store.go` (add transport column to mcp_upstreams)
-- Create migration: `internal/store/migrations/000003_upstream_transport.up.sql`
+- Create migration: `internal/store/migrations/000005_upstream_transport.up.sql`
 
 **Transport types:**
 ```go
@@ -69,13 +69,13 @@ const (
 )
 ```
 
-- [ ] Add `transport` column to `mcp_upstreams` table (default "stdio") via migration 000003
-- [ ] Add `Transport string` field to `UpstreamConfig` and `MCPUpstreamRow`
-- [ ] Update `AddMCPUpstream`, `ListMCPUpstreams` for new column
-- [ ] Update TOML import to parse `transport` field from `[[mcp_upstream]]`
-- [ ] Update `sluice mcp add` CLI to accept `--transport stdio|http|websocket` (default stdio)
-- [ ] Write tests for transport field CRUD
-- [ ] Run tests: `go test ./internal/store/ -v -timeout 30s`
+- [x] Add `transport` column to `mcp_upstreams` table (default "stdio") via migration 000005
+- [x] Add `Transport string` field to `UpstreamConfig` and `MCPUpstreamRow`
+- [x] Update `AddMCPUpstream`, `ListMCPUpstreams` for new column
+- [x] Update TOML import to parse `transport` field from `[[mcp_upstream]]`
+- [x] Update `sluice mcp add` CLI to accept `--transport stdio|http|websocket` (default stdio)
+- [x] Write tests for transport field CRUD
+- [x] Run tests: `go test ./internal/store/ -v -timeout 30s`
 
 ### Task 2: Streamable HTTP upstream client
 
@@ -85,16 +85,16 @@ Connect to remote MCP servers via Streamable HTTP (POST to single endpoint, `Mcp
 - Create: `internal/mcp/transport_http.go`
 - Create: `internal/mcp/transport_http_test.go`
 
-- [ ] Implement `HTTPUpstream` struct that satisfies the same interface as `Upstream` (SendRequest, Initialize, DiscoverTools, Stop)
-- [ ] On `Initialize`: POST `initialize` JSON-RPC to the upstream URL, read `Mcp-Session-Id` from response header, store for subsequent requests
-- [ ] On `SendRequest`: POST JSON-RPC with `Mcp-Session-Id` header, read response
-- [ ] Handle SSE streaming responses (for long-running tool calls that stream progress)
-- [ ] Support `DELETE` request to close session on `Stop`
-- [ ] Configurable timeout per-upstream (from `timeout_sec`)
-- [ ] Write tests with httptest mock MCP server
-- [ ] Write tests for session ID management
-- [ ] Write tests for streaming response handling
-- [ ] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
+- [x] Implement `HTTPUpstream` struct that satisfies the same interface as `Upstream` (SendRequest, Initialize, DiscoverTools, Stop)
+- [x] On `Initialize`: POST `initialize` JSON-RPC to the upstream URL, read `Mcp-Session-Id` from response header, store for subsequent requests
+- [x] On `SendRequest`: POST JSON-RPC with `Mcp-Session-Id` header, read response
+- [x] Handle SSE streaming responses (for long-running tool calls that stream progress)
+- [x] Support `DELETE` request to close session on `Stop`
+- [x] Configurable timeout per-upstream (from `timeout_sec`)
+- [x] Write tests with httptest mock MCP server
+- [x] Write tests for session ID management
+- [x] Write tests for streaming response handling
+- [x] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
 
 ### Task 3: WebSocket upstream client
 
@@ -104,15 +104,15 @@ Connect to remote MCP servers via WebSocket (`mcp` subprotocol).
 - Create: `internal/mcp/transport_ws.go`
 - Create: `internal/mcp/transport_ws_test.go`
 
-- [ ] Add `github.com/coder/websocket` dependency
-- [ ] Implement `WSUpstream` struct satisfying the same interface as `Upstream`
-- [ ] On `Initialize`: WebSocket dial with `Sec-WebSocket-Protocol: mcp`, send `initialize` JSON-RPC, read response
-- [ ] On `SendRequest`: write JSON-RPC text frame, read response frame
-- [ ] Handle bidirectional communication (server-initiated notifications)
-- [ ] Support session ID via subprotocol (`mcp.session-id.<ID>`) or query parameter
-- [ ] Write tests with mock WebSocket MCP server
-- [ ] Write tests for reconnection on connection drop
-- [ ] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
+- [x] Add `github.com/coder/websocket` dependency
+- [x] Implement `WSUpstream` struct satisfying the same interface as `Upstream`
+- [x] On `Initialize`: WebSocket dial with `Sec-WebSocket-Protocol: mcp`, send `initialize` JSON-RPC, read response
+- [x] On `SendRequest`: write JSON-RPC text frame, read response frame
+- [x] Handle bidirectional communication (server-initiated notifications)
+- [x] Support session ID via subprotocol (`mcp.session-id.<ID>`) or query parameter
+- [x] Write tests with mock WebSocket MCP server
+- [x] Write tests for reconnection on connection drop
+- [x] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
 
 ### Task 4: Wire transports into gateway startup
 
@@ -122,11 +122,11 @@ Route upstream creation to the correct transport based on config.
 - Modify: `internal/mcp/gateway.go`
 - Modify: `internal/mcp/gateway_test.go`
 
-- [ ] In `NewGateway`: check `UpstreamConfig.Transport` and instantiate `Upstream` (stdio), `HTTPUpstream`, or `WSUpstream`
-- [ ] All three satisfy the same interface: `Initialize`, `DiscoverTools`, `SendRequest`, `Stop`
-- [ ] Mixed upstreams work: some stdio (local), some HTTP (remote), some WebSocket (real-time)
-- [ ] Write test with mixed upstream types
-- [ ] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
+- [x] In `NewGateway`: check `UpstreamConfig.Transport` and instantiate `Upstream` (stdio), `HTTPUpstream`, or `WSUpstream`
+- [x] All three satisfy the same interface: `Initialize`, `DiscoverTools`, `SendRequest`, `Stop`
+- [x] Mixed upstreams work: some stdio (local), some HTTP (remote), some WebSocket (real-time)
+- [x] Write test with mixed upstream types
+- [x] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
 
 ### Task 5: MCP upstream credential injection via env vars
 
@@ -159,15 +159,15 @@ Startup:
 
 The `vault:` prefix in env values signals that the value is a vault credential name to resolve. Plain values are passed through as-is.
 
-- [ ] In `StartUpstream`: scan env map for values with `vault:` prefix
-- [ ] For each `vault:` value: call `provider.Get(name)`, set the real credential as the env var value
-- [ ] Plain env values (no prefix) pass through unchanged
-- [ ] Release credential memory after setting env (best-effort, Go copies strings)
-- [ ] On credential rotation (vault change): stop and restart the upstream process to pick up new credentials
-- [ ] Write test: env value with `vault:` prefix is resolved from mock provider
-- [ ] Write test: env value without prefix is passed through unchanged
-- [ ] Write test: missing vault credential returns clear error on startup
-- [ ] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
+- [x] In `StartUpstream`: scan env map for values with `vault:` prefix
+- [x] For each `vault:` value: call `provider.Get(name)`, set the real credential as the env var value
+- [x] Plain env values (no prefix) pass through unchanged
+- [x] Release credential memory after setting env (best-effort, Go copies strings)
+- [x] On credential rotation (vault change): stop and restart the upstream process to pick up new credentials
+- [x] Write test: env value with `vault:` prefix is resolved from mock provider
+- [x] Write test: env value without prefix is passed through unchanged
+- [x] Write test: missing vault credential returns clear error on startup
+- [x] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
 
 ### Task 6: Expose gateway via Streamable HTTP server
 
@@ -178,14 +178,14 @@ Allow OpenClaw (or any MCP client) to connect to sluice's gateway via HTTP inste
 - Create: `internal/mcp/server_http_test.go`
 - Modify: `cmd/sluice/main.go` (mount MCP HTTP handler)
 
-- [ ] Implement `MCPHTTPHandler` that serves `POST /mcp` endpoint following the Streamable HTTP spec
-- [ ] Generate `Mcp-Session-Id` on `initialize` request, track sessions
-- [ ] Route `tools/list` and `tools/call` through the existing `Gateway.HandleToolCall` (same policy enforcement, audit, approval flow)
-- [ ] Support SSE streaming for long-running tool calls
-- [ ] Support `DELETE /mcp` to close session
-- [ ] Mount on the HTTP server at `/mcp` (only when MCP gateway mode is active)
-- [ ] Write tests with httptest verifying full MCP handshake + tool call
-- [ ] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
+- [x] Implement `MCPHTTPHandler` that serves `POST /mcp` endpoint following the Streamable HTTP spec
+- [x] Generate `Mcp-Session-Id` on `initialize` request, track sessions
+- [x] Route `tools/list` and `tools/call` through the existing `Gateway.HandleToolCall` (same policy enforcement, audit, approval flow)
+- [x] Support SSE streaming for long-running tool calls
+- [x] Support `DELETE /mcp` to close session
+- [x] Mount on the HTTP server at `/mcp` (only when MCP gateway mode is active)
+- [x] Write tests with httptest verifying full MCP handshake + tool call
+- [x] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
 
 ### Task 7: Auto-inject sluice as MCP server into OpenClaw
 
@@ -209,38 +209,38 @@ On startup (and after MCP upstream changes), automatically configure OpenClaw to
 }
 ```
 
-- [ ] Implement `InjectMCPConfig(phantomDir, sluiceURL string) error` that writes `mcp-servers.json` to the shared phantoms volume
-- [ ] Call `InjectMCPConfig` on sluice startup (after gateway is ready) and after `sluice mcp add/remove`
-- [ ] Trigger OpenClaw to re-read MCP config via `docker exec openclaw openclaw mcp reload`. If exec fails, OpenClaw picks it up on next restart.
-- [ ] Add SOCKS5 self-bypass: auto-allow connections to sluice's own listener addresses (health/MCP server) without policy evaluation. Hardcoded, not configurable.
-- [ ] Add `--auto-inject-mcp` flag (default true in Docker, false otherwise) to control this behavior
-- [ ] Write tests for config file generation
-- [ ] Write tests for self-bypass (connection to sluice's own address bypasses policy)
-- [ ] Run tests: `go test ./internal/docker/ -v -timeout 30s`
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] Implement `InjectMCPConfig(phantomDir, sluiceURL string) error` that writes `mcp-servers.json` to the shared phantoms volume
+- [x] Call `InjectMCPConfig` on sluice startup (after gateway is ready) and after `sluice mcp add/remove`
+- [x] Trigger OpenClaw to re-read MCP config via `docker exec openclaw openclaw mcp reload`. If exec fails, OpenClaw picks it up on next restart.
+- [x] Add SOCKS5 self-bypass: auto-allow connections to sluice's own listener addresses (health/MCP server) without policy evaluation. Hardcoded, not configurable.
+- [x] Add `--auto-inject-mcp` flag (default true in Docker, false otherwise) to control this behavior
+- [x] Write tests for config file generation
+- [x] Write tests for self-bypass (connection to sluice's own address bypasses policy)
+- [x] Run tests: `go test ./internal/docker/ -v -timeout 30s`
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 8: Verify acceptance criteria
 
-- [ ] Verify stdio upstreams still work (no regression)
-- [ ] Verify Streamable HTTP upstream connects to a remote MCP server
-- [ ] Verify WebSocket upstream connects to a WebSocket MCP server
-- [ ] Verify mixed upstream types in one gateway (stdio + HTTP + WebSocket)
-- [ ] Verify `/mcp` endpoint serves tools to an MCP client over Streamable HTTP
-- [ ] Verify OpenClaw auto-injection writes mcp-servers.json and OpenClaw connects via Streamable HTTP
-- [ ] Verify SOCKS5 self-bypass: OpenClaw's connection to sluice:3000/mcp is auto-allowed without policy rules
-- [ ] Verify OpenClaw container does NOT have Docker socket mounted
-- [ ] Verify policy enforcement applies equally across all transports
-- [ ] Verify `sluice mcp add <name> --transport http --command https://remote-server/mcp` works
-- [ ] Run full test suite: `go test ./... -v -timeout 60s -race`
-- [ ] Run linter: `go vet ./...`
+- [x] Verify stdio upstreams still work (no regression)
+- [x] Verify Streamable HTTP upstream connects to a remote MCP server
+- [x] Verify WebSocket upstream connects to a WebSocket MCP server
+- [x] Verify mixed upstream types in one gateway (stdio + HTTP + WebSocket)
+- [x] Verify `/mcp` endpoint serves tools to an MCP client over Streamable HTTP
+- [x] Verify OpenClaw auto-injection writes mcp-servers.json and OpenClaw connects via Streamable HTTP
+- [x] Verify SOCKS5 self-bypass: OpenClaw's connection to sluice:3000/mcp is auto-allowed without policy rules
+- [x] Verify OpenClaw container does NOT have Docker socket mounted
+- [x] Verify policy enforcement applies equally across all transports
+- [x] Verify `sluice mcp add <name> --transport http --command https://remote-server/mcp` works
+- [x] Run full test suite: `go test ./... -v -timeout 60s -race`
+- [x] Run linter: `go vet ./...`
 
 ### Task 9: [Final] Update documentation
 
-- [ ] Update CLAUDE.md: document MCP transport types (stdio, http, websocket)
-- [ ] Update CLAUDE.md: document `/mcp` Streamable HTTP server endpoint
-- [ ] Update CLAUDE.md: document auto-injection into OpenClaw
-- [ ] Update examples/config.toml: add remote MCP upstream examples with transport field
-- [ ] Update compose.yml: document auto-injection behavior
+- [x] Update CLAUDE.md: document MCP transport types (stdio, http, websocket)
+- [x] Update CLAUDE.md: document `/mcp` Streamable HTTP server endpoint
+- [x] Update CLAUDE.md: document auto-injection into OpenClaw
+- [x] Update examples/config.toml: add remote MCP upstream examples with transport field
+- [x] Update compose.yml: document auto-injection behavior
 
 ## Technical Details
 

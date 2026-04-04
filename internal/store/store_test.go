@@ -1157,6 +1157,115 @@ func TestMCPUpstreamNilArgsEnv(t *testing.T) {
 	}
 }
 
+// --- MCP Upstream Transport ---
+
+func TestMCPUpstreamTransportDefault(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.AddMCPUpstream("test", "npx", MCPUpstreamOpts{})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	upstreams, _ := s.ListMCPUpstreams()
+	if upstreams[0].Transport != "stdio" {
+		t.Errorf("default transport = %q, want stdio", upstreams[0].Transport)
+	}
+}
+
+func TestMCPUpstreamTransportHTTP(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.AddMCPUpstream("github", "https://mcp.github.com/v1", MCPUpstreamOpts{
+		Transport:  "http",
+		TimeoutSec: 60,
+	})
+	if err != nil {
+		t.Fatalf("add http upstream: %v", err)
+	}
+	upstreams, _ := s.ListMCPUpstreams()
+	if upstreams[0].Transport != "http" {
+		t.Errorf("transport = %q, want http", upstreams[0].Transport)
+	}
+	if upstreams[0].Command != "https://mcp.github.com/v1" {
+		t.Errorf("command = %q", upstreams[0].Command)
+	}
+}
+
+func TestMCPUpstreamTransportWebSocket(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.AddMCPUpstream("realtime", "wss://mcp.example.com/ws", MCPUpstreamOpts{
+		Transport: "websocket",
+	})
+	if err != nil {
+		t.Fatalf("add ws upstream: %v", err)
+	}
+	upstreams, _ := s.ListMCPUpstreams()
+	if upstreams[0].Transport != "websocket" {
+		t.Errorf("transport = %q, want websocket", upstreams[0].Transport)
+	}
+}
+
+func TestMCPUpstreamTransportInvalid(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.AddMCPUpstream("bad", "cmd", MCPUpstreamOpts{
+		Transport: "grpc",
+	})
+	if err == nil {
+		t.Error("invalid transport should fail")
+	}
+}
+
+func TestMCPUpstreamTransportExplicitStdio(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.AddMCPUpstream("local", "npx", MCPUpstreamOpts{
+		Transport: "stdio",
+		Args:      []string{"-y", "@mcp/server-filesystem"},
+	})
+	if err != nil {
+		t.Fatalf("add stdio upstream: %v", err)
+	}
+	upstreams, _ := s.ListMCPUpstreams()
+	if upstreams[0].Transport != "stdio" {
+		t.Errorf("transport = %q, want stdio", upstreams[0].Transport)
+	}
+}
+
+func TestMCPUpstreamTransportMixedTypes(t *testing.T) {
+	s := newTestStore(t)
+
+	_, err := s.AddMCPUpstream("local-fs", "npx", MCPUpstreamOpts{
+		Transport: "stdio",
+		Args:      []string{"-y", "@mcp/server-filesystem"},
+	})
+	if err != nil {
+		t.Fatalf("add stdio: %v", err)
+	}
+	_, err = s.AddMCPUpstream("remote-github", "https://mcp.github.com/v1", MCPUpstreamOpts{
+		Transport: "http",
+	})
+	if err != nil {
+		t.Fatalf("add http: %v", err)
+	}
+	_, err = s.AddMCPUpstream("realtime-data", "wss://mcp.example.com/ws", MCPUpstreamOpts{
+		Transport: "websocket",
+	})
+	if err != nil {
+		t.Fatalf("add ws: %v", err)
+	}
+
+	upstreams, _ := s.ListMCPUpstreams()
+	if len(upstreams) != 3 {
+		t.Fatalf("expected 3 upstreams, got %d", len(upstreams))
+	}
+	if upstreams[0].Transport != "stdio" {
+		t.Errorf("upstream[0] transport = %q, want stdio", upstreams[0].Transport)
+	}
+	if upstreams[1].Transport != "http" {
+		t.Errorf("upstream[1] transport = %q, want http", upstreams[1].Transport)
+	}
+	if upstreams[2].Transport != "websocket" {
+		t.Errorf("upstream[2] transport = %q, want websocket", upstreams[2].Transport)
+	}
+}
+
 // --- RemoveRulesBySource ---
 
 func TestRemoveRulesBySource(t *testing.T) {

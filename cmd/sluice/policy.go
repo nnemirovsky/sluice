@@ -450,6 +450,9 @@ func handlePolicyExport(args []string) {
 		fmt.Println("[[mcp_upstream]]")
 		fmt.Printf("name = %q\n", u.Name)
 		fmt.Printf("command = %q\n", u.Command)
+		if u.Transport != "" && u.Transport != "stdio" {
+			fmt.Printf("transport = %q\n", u.Transport)
+		}
 		if len(u.Args) > 0 {
 			argsJSON, _ := json.Marshal(u.Args)
 			fmt.Printf("args = %s\n", string(argsJSON))

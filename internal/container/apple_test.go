@@ -769,9 +769,20 @@ func TestAppleManagerInjectMCPConfigExecError(t *testing.T) {
 	mgr, runner, tmpDir := newTestAppleManager(t)
 	runner.onCommand("container exec", nil, errors.New("exec failed"))
 
+	// Exec failure should not cause InjectMCPConfig to fail.
+	// The file should still be written, and the error is logged.
 	err := mgr.InjectMCPConfig(tmpDir, "http://localhost:3000/mcp")
-	if err == nil {
-		t.Fatal("expected error when exec fails")
+	if err != nil {
+		t.Fatalf("InjectMCPConfig() = %v, want nil (exec error is best-effort)", err)
+	}
+
+	// Verify the file was still written despite exec failure.
+	data, readErr := os.ReadFile(filepath.Join(tmpDir, "mcp-servers.json"))
+	if readErr != nil {
+		t.Fatalf("read mcp-servers.json: %v", readErr)
+	}
+	if !strings.Contains(string(data), "sluice") {
+		t.Error("mcp-servers.json should contain sluice config")
 	}
 }
 

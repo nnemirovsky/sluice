@@ -21,6 +21,7 @@ import (
 	"github.com/nemirovsky/sluice/internal/channel"
 	httpchannel "github.com/nemirovsky/sluice/internal/channel/http"
 	"github.com/nemirovsky/sluice/internal/container"
+	"github.com/nemirovsky/sluice/internal/mcp"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
 	"github.com/nemirovsky/sluice/internal/store"
@@ -68,7 +69,17 @@ func main() {
 	containerName := flag.String("container-name", envDefault("SLUICE_AGENT_CONTAINER", "openclaw"), "agent container/VM name")
 	phantomDir := flag.String("phantom-dir", "", "shared volume path for phantom token files (enables hot-reload)")
 	dnsResolver := flag.String("dns-resolver", "", "upstream DNS resolver address for DNS interception (default: 8.8.8.8:53)")
+	autoInjectMCP := flag.Bool("auto-inject-mcp", false, "auto-inject MCP config into agent container (default true for docker/apple runtimes)")
+	mcpBaseURL := flag.String("mcp-base-url", "", "base URL for auto-injected MCP config (e.g. http://sluice:3000); derived from --health-addr when empty")
+	autoInjectMCPSet := false
 	flag.Parse()
+
+	// Track whether the flag was explicitly set by the user.
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "auto-inject-mcp" {
+			autoInjectMCPSet = true
+		}
+	})
 
 	// Validate --runtime flag early.
 	switch *runtimeFlag {
@@ -263,6 +274,26 @@ func main() {
 		log.Printf("no container runtime detected; container management disabled")
 	}
 
+	// Default auto-inject-mcp to true when a container runtime is active
+	// and the user did not explicitly set the flag.
+	if !autoInjectMCPSet && containerMgr != nil {
+		*autoInjectMCP = true
+	}
+
+	// Build self-bypass addresses so the agent's MCP HTTP connection to
+	// sluice is auto-allowed without policy evaluation.
+	var selfBypass []string
+	if *autoInjectMCP && *healthAddr != "" {
+		selfBypass = buildSelfBypass(*healthAddr)
+		// When mcp-base-url is set, also bypass the external hostname (e.g.
+		// "sluice:3000" in Docker Compose) that the agent uses to reach us.
+		if *mcpBaseURL != "" {
+			if extra := selfBypassFromURL(*mcpBaseURL, *healthAddr); extra != "" {
+				selfBypass = append(selfBypass, extra)
+			}
+		}
+	}
+
 	// Create the proxy first so the bot can share its engine pointer and
 	// reload mutex.
 	// Convert policy engine inspect rules to protocol-specific config structs
@@ -294,6 +325,7 @@ func main() {
 		WSRedactRules:   wsRedactRules,
 		QUICBlockRules:  quicBlockRules,
 		QUICRedactRules: quicRedactRules,
+		SelfBypass:      selfBypass,
 	})
 	if err != nil {
 		log.Fatalf("start proxy: %v", err)
@@ -378,6 +410,85 @@ func main() {
 		log.Printf("no approval channels configured (ask rules will auto-deny)")
 	}
 
+	// MCP gateway: if upstreams are configured, start the gateway and
+	// serve it via HTTP on /mcp alongside the API.
+	var mcpHandler http.Handler
+	upstreamRows, mcpListErr := db.ListMCPUpstreams()
+	if mcpListErr != nil {
+		log.Printf("WARNING: failed to list MCP upstreams: %v", mcpListErr)
+	} else if len(upstreamRows) > 0 {
+		mcpUpstreams := make([]mcp.UpstreamConfig, len(upstreamRows))
+		for i, r := range upstreamRows {
+			mcpUpstreams[i] = mcp.UpstreamConfig{
+				Name:       r.Name,
+				Command:    r.Command,
+				Args:       r.Args,
+				Env:        r.Env,
+				TimeoutSec: r.TimeoutSec,
+				Transport:  r.Transport,
+			}
+		}
+
+		toolRules := eng.ToolRules()
+		toolPolicy, tpErr := mcp.NewToolPolicy(toolRules, eng.Default)
+		if tpErr != nil {
+			log.Fatalf("compile MCP tool policy: %v", tpErr)
+		}
+
+		var mcpInspector *mcp.ContentInspector
+		if len(eng.InspectBlockRules) > 0 || len(eng.InspectRedactRules) > 0 {
+			mcpInspector, err = mcp.NewContentInspector(eng.InspectBlockRules, eng.InspectRedactRules)
+			if err != nil {
+				log.Fatalf("create MCP content inspector: %v", err)
+			}
+		}
+
+		var credResolver mcp.CredentialResolver
+		if provider != nil {
+			credResolver = func(name string) (string, error) {
+				sb, getErr := provider.Get(name)
+				if getErr != nil {
+					return "", getErr
+				}
+				val := sb.String()
+				sb.Release()
+				return val, nil
+			}
+		}
+
+		mcpGW, gwErr := mcp.NewGateway(mcp.GatewayConfig{
+			Upstreams:          mcpUpstreams,
+			ToolPolicy:         toolPolicy,
+			Inspector:          mcpInspector,
+			Audit:              logger,
+			Broker:             broker,
+			TimeoutSec:         eng.TimeoutSec,
+			Store:              db,
+			CredentialResolver: credResolver,
+		})
+		if gwErr != nil {
+			log.Fatalf("start MCP gateway: %v", gwErr)
+		}
+		defer mcpGW.Stop()
+
+		mcpHandler = mcp.NewMCPHTTPHandler(mcpGW)
+		log.Printf("MCP gateway on /mcp: %d tools from %d upstreams", len(mcpGW.Tools()), len(mcpUpstreams))
+
+		// Auto-inject MCP config into the agent container so it connects
+		// to sluice's gateway via Streamable HTTP.
+		if *autoInjectMCP && containerMgr != nil && *phantomDir != "" {
+			sluiceURL := fmt.Sprintf("http://%s/mcp", *healthAddr)
+			if *mcpBaseURL != "" {
+				sluiceURL = strings.TrimRight(*mcpBaseURL, "/") + "/mcp"
+			}
+			if injectErr := containerMgr.InjectMCPConfig(*phantomDir, sluiceURL); injectErr != nil {
+				log.Printf("WARNING: MCP auto-inject failed: %v", injectErr)
+			} else {
+				log.Printf("MCP config injected into agent container (url=%s)", sluiceURL)
+			}
+		}
+	}
+
 	// Start HTTP server with health check and REST API on :3000 (or --health-addr).
 	apiServer := api.NewServer(db, broker, srv, *auditPath)
 	apiServer.SetEnginePtr(srv.EnginePtr(), srv.ReloadMu())
@@ -388,7 +499,7 @@ func main() {
 	if containerMgr != nil {
 		apiServer.SetContainerManager(containerMgr, *phantomDir)
 	}
-	healthLn, healthSrv := startAPIServer(*healthAddr, apiServer, db)
+	healthLn, healthSrv := startAPIServer(*healthAddr, apiServer, db, mcpHandler)
 	if healthLn != nil {
 		defer func() { _ = healthSrv.Close() }()
 		log.Printf("HTTP API server listening on %s", healthLn.Addr())
@@ -620,8 +731,9 @@ func isAppleCLIAvailable() bool {
 }
 
 // startAPIServer starts the HTTP server with the generated chi router.
-// It serves both /healthz (no auth) and /api/* (bearer auth + channel gate).
-func startAPIServer(addr string, apiSrv *api.Server, st *store.Store) (net.Listener, *http.Server) {
+// It serves /healthz (no auth), /api/* (bearer auth + channel gate), and
+// optionally /mcp (MCP Streamable HTTP, no auth) when mcpHandler is non-nil.
+func startAPIServer(addr string, apiSrv *api.Server, st *store.Store, mcpHandler http.Handler) (net.Listener, *http.Server) {
 	if addr == "" {
 		return nil, nil
 	}
@@ -634,16 +746,75 @@ func startAPIServer(addr string, apiSrv *api.Server, st *store.Store) (net.Liste
 	// becomes the outermost layer. List channel gate first, then auth, so
 	// the request hits auth before the channel gate. This ensures bad tokens
 	// get 401 before the channel gate reveals whether HTTP channel is enabled.
-	handler := api.HandlerWithOptions(apiSrv, api.ChiServerOptions{
+	apiHandler := api.HandlerWithOptions(apiSrv, api.ChiServerOptions{
 		Middlewares: []api.MiddlewareFunc{
 			api.ChannelGateMiddleware(st),
 			api.BearerAuthMiddleware,
 		},
 	})
+
+	var handler http.Handler
+	if mcpHandler != nil {
+		mux := http.NewServeMux()
+		mux.Handle("/mcp", mcpHandler)
+		mux.Handle("/", apiHandler)
+		handler = mux
+	} else {
+		handler = apiHandler
+	}
+
 	httpSrv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go httpSrv.Serve(ln) //nolint:errcheck
 	return ln, httpSrv
+}
+
+// buildSelfBypass expands a health-addr listen address into all concrete
+// host:port strings that should bypass SOCKS5 policy. When the address
+// binds to 0.0.0.0 or [::], it expands to 127.0.0.1:port and [::1]:port
+// so connections from the agent container to sluice's loopback addresses
+// are also auto-allowed.
+func buildSelfBypass(healthAddr string) []string {
+	host, port, err := net.SplitHostPort(healthAddr)
+	if err != nil {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// Hostname (e.g. "sluice"). Include as-is.
+		return []string{healthAddr}
+	}
+	if ip.IsUnspecified() {
+		// Listening on all interfaces. Bypass loopback addresses.
+		return []string{
+			net.JoinHostPort("127.0.0.1", port),
+			net.JoinHostPort("::1", port),
+		}
+	}
+	return []string{healthAddr}
+}
+
+// selfBypassFromURL extracts a host:port from the given base URL that should
+// be added to the self-bypass set. If the URL host differs from the listen
+// address (e.g. "sluice" vs "0.0.0.0"), it returns the URL's host:port so
+// Docker DNS names are also bypassed. Returns "" when redundant.
+func selfBypassFromURL(baseURL, healthAddr string) string {
+	// Strip scheme.
+	hostport := strings.TrimPrefix(baseURL, "https://")
+	hostport = strings.TrimPrefix(hostport, "http://")
+	// Strip path.
+	if idx := strings.Index(hostport, "/"); idx >= 0 {
+		hostport = hostport[:idx]
+	}
+	// Ensure port is present; default to the health-addr port.
+	if _, _, splitErr := net.SplitHostPort(hostport); splitErr != nil {
+		_, port, _ := net.SplitHostPort(healthAddr)
+		if port == "" {
+			port = "3000"
+		}
+		hostport = net.JoinHostPort(hostport, port)
+	}
+	return hostport
 }

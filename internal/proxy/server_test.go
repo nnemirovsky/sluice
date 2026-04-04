@@ -1573,3 +1573,137 @@ default = "allow"
 		t.Error("QUIC proxy should not be created without a vault provider")
 	}
 }
+
+func TestSelfBypassAllowsConnectionWithoutPolicy(t *testing.T) {
+	// Start a simple TCP echo server to act as sluice's own HTTP listener.
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = echo.Close() }()
+	go func() {
+		for {
+			conn, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = conn.Write([]byte("self"))
+			_ = conn.Close()
+		}
+	}()
+
+	// Use a deny-all policy. Without self-bypass, this connection would fail.
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create proxy with self-bypass for the echo server's address.
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		SelfBypass: []string{echo.Addr().String()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
+
+	// Connect through SOCKS5 proxy to the self-bypass address.
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := dialer.Dial("tcp", echo.Addr().String())
+	if err != nil {
+		t.Fatalf("dial through proxy to self-bypass address: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	buf := make([]byte, 4)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(buf[:n]) != "self" {
+		t.Errorf("expected 'self', got %q", string(buf[:n]))
+	}
+}
+
+func TestSelfBypassDoesNotAffectOtherAddresses(t *testing.T) {
+	// Start two echo servers.
+	bypass, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = bypass.Close() }()
+
+	denied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = denied.Close() }()
+
+	go func() {
+		for {
+			conn, err := bypass.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = conn.Write([]byte("ok"))
+			_ = conn.Close()
+		}
+	}()
+	go func() {
+		for {
+			conn, err := denied.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+
+	// Deny-all policy with self-bypass only for one address.
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		SelfBypass: []string{bypass.Addr().String()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
+
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Connection to bypassed address should succeed.
+	conn, err := dialer.Dial("tcp", bypass.Addr().String())
+	if err != nil {
+		t.Fatalf("dial through proxy to bypass address: %v", err)
+	}
+	_ = conn.Close()
+
+	// Connection to non-bypassed address should be denied.
+	_, err = dialer.Dial("tcp", denied.Addr().String())
+	if err == nil {
+		t.Fatal("expected denial for non-bypass address, but connection succeeded")
+	}
+}

@@ -797,6 +797,9 @@ components:
           type: string
         command:
           type: string
+        transport:
+          type: string
+          description: "Transport type: stdio, http, or websocket"
         args:
           type: array
           items:
@@ -819,6 +822,9 @@ components:
           type: string
         command:
           type: string
+        transport:
+          type: string
+          description: "Transport type: stdio (default), http, or websocket"
         args:
           type: array
           items:

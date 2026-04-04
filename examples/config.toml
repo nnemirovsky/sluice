@@ -180,17 +180,41 @@ template = "Bearer {value}"
 # All /api/* endpoints require bearer token auth and an enabled HTTP channel.
 
 # --- MCP upstream servers ---
-# Each upstream is spawned as a child process by the MCP gateway.
+# Each upstream connects to an MCP server. Three transport types are supported:
+#   stdio (default) - spawns a child process
+#   http            - connects to a remote Streamable HTTP endpoint
+#   websocket       - connects to a remote WebSocket endpoint
+# For http/websocket transports, "command" holds the URL instead of a binary.
 # timeout_sec sets the per-upstream request timeout (default: 120s).
+# Env values with "vault:" prefix are resolved from the credential vault.
 
-# [[mcp_upstream]]
-# name = "github"
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-github"]
-# timeout_sec = 60
-
+# Local stdio upstream (child process)
 # [[mcp_upstream]]
 # name = "filesystem"
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+# timeout_sec = 30
+
+# Local stdio upstream with vault credential injection
+# [[mcp_upstream]]
+# name = "github"
+# transport = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-github"]
+# timeout_sec = 60
+# [mcp_upstream.env]
+# GITHUB_PERSONAL_ACCESS_TOKEN = "vault:github_token"
+
+# Remote Streamable HTTP upstream
+# [[mcp_upstream]]
+# name = "remote-github"
+# transport = "http"
+# command = "https://mcp.github.com/v1"
+# timeout_sec = 60
+
+# Remote WebSocket upstream
+# [[mcp_upstream]]
+# name = "realtime-data"
+# transport = "websocket"
+# command = "wss://mcp.example.com/ws"
 # timeout_sec = 30

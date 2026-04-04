@@ -6,6 +6,7 @@ require (
 	filippo.io/age v1.3.1
 	github.com/1password/onepassword-sdk-go v0.4.0
 	github.com/BurntSushi/toml v1.6.0
+	github.com/coder/websocket v1.8.14
 	github.com/elazarl/goproxy v1.8.3
 	github.com/getkin/kin-openapi v0.134.0
 	github.com/go-chi/chi/v5 v5.2.5

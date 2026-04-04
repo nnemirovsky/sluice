@@ -578,6 +578,131 @@ func TestHandleMCPAddEnvInvalidFormat(t *testing.T) {
 	}
 }
 
+// TestHandleMCPAddWithTransportHTTP verifies that the --transport flag stores
+// the correct transport type for HTTP upstreams.
+func TestHandleMCPAddWithTransportHTTP(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	err := handleMCPAdd([]string{
+		"--db", dbPath,
+		"--command", "https://remote-server/mcp",
+		"--transport", "http",
+		"--timeout", "60",
+		"github",
+	})
+	if err != nil {
+		t.Fatalf("mcp add --transport http: %v", err)
+	}
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	upstreams, err := db.ListMCPUpstreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upstreams) != 1 {
+		t.Fatalf("expected 1 upstream, got %d", len(upstreams))
+	}
+	if upstreams[0].Name != "github" {
+		t.Errorf("expected name github, got %q", upstreams[0].Name)
+	}
+	if upstreams[0].Command != "https://remote-server/mcp" {
+		t.Errorf("expected command https://remote-server/mcp, got %q", upstreams[0].Command)
+	}
+	if upstreams[0].Transport != "http" {
+		t.Errorf("expected transport http, got %q", upstreams[0].Transport)
+	}
+	if upstreams[0].TimeoutSec != 60 {
+		t.Errorf("expected timeout 60, got %d", upstreams[0].TimeoutSec)
+	}
+}
+
+// TestHandleMCPAddWithTransportWebSocket verifies the --transport websocket flag.
+func TestHandleMCPAddWithTransportWebSocket(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	err := handleMCPAdd([]string{
+		"--db", dbPath,
+		"--command", "wss://mcp.example.com/ws",
+		"--transport", "websocket",
+		"realtime",
+	})
+	if err != nil {
+		t.Fatalf("mcp add --transport websocket: %v", err)
+	}
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	upstreams, err := db.ListMCPUpstreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upstreams) != 1 {
+		t.Fatalf("expected 1 upstream, got %d", len(upstreams))
+	}
+	if upstreams[0].Transport != "websocket" {
+		t.Errorf("expected transport websocket, got %q", upstreams[0].Transport)
+	}
+}
+
+// TestHandleMCPAddWithTransportInvalid verifies that invalid transport types are rejected.
+func TestHandleMCPAddWithTransportInvalid(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	err := handleMCPAdd([]string{
+		"--db", dbPath,
+		"--command", "server",
+		"--transport", "grpc",
+		"myserver",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid transport type")
+	}
+}
+
+// TestHandleMCPAddDefaultTransportIsStdio verifies that omitting --transport defaults to stdio.
+func TestHandleMCPAddDefaultTransportIsStdio(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	err := handleMCPAdd([]string{
+		"--db", dbPath,
+		"--command", "my-server",
+		"local",
+	})
+	if err != nil {
+		t.Fatalf("mcp add (default transport): %v", err)
+	}
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	upstreams, err := db.ListMCPUpstreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upstreams) != 1 {
+		t.Fatalf("expected 1 upstream, got %d", len(upstreams))
+	}
+	if upstreams[0].Transport != "stdio" {
+		t.Errorf("expected transport stdio, got %q", upstreams[0].Transport)
+	}
+}
+
 // TestMCPGatewayStoreBackedUpstreams verifies that a gateway config can be
 // built from store-backed upstreams with all fields populated correctly.
 func TestMCPGatewayStoreBackedUpstreams(t *testing.T) {

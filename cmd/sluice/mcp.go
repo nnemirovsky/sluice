@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +21,7 @@ import (
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/telegram"
+	"github.com/nemirovsky/sluice/internal/vault"
 )
 
 func handleMCPCommand(args []string) error {
@@ -100,6 +103,7 @@ func handleMCPGateway(args []string) error {
 			Args:       r.Args,
 			Env:        r.Env,
 			TimeoutSec: r.TimeoutSec,
+			Transport:  r.Transport,
 		}
 	}
 
@@ -174,14 +178,38 @@ func handleMCPGateway(args []string) error {
 			len(eng.InspectBlockRules), len(eng.InspectRedactRules))
 	}
 
+	// Build credential resolver so vault: prefixed env values in upstream
+	// configs are resolved to real credentials.
+	var credResolver mcp.CredentialResolver
+	vaultCfg, err := readVaultConfig(db)
+	if err != nil {
+		log.Printf("vault config unavailable (vault: env values will not be resolved): %v", err)
+	} else {
+		provider, provErr := vault.NewProviderFromConfig(vaultCfg)
+		if provErr != nil {
+			log.Printf("vault provider unavailable (vault: env values will not be resolved): %v", provErr)
+		} else {
+			credResolver = func(name string) (string, error) {
+				sb, getErr := provider.Get(name)
+				if getErr != nil {
+					return "", getErr
+				}
+				val := sb.String()
+				sb.Release()
+				return val, nil
+			}
+		}
+	}
+
 	gw, err := mcp.NewGateway(mcp.GatewayConfig{
-		Upstreams:  upstreams,
-		ToolPolicy: toolPolicy,
-		Inspector:  inspector,
-		Audit:      logger,
-		Broker:     broker,
-		TimeoutSec: eng.TimeoutSec,
-		Store:      db,
+		Upstreams:          upstreams,
+		ToolPolicy:         toolPolicy,
+		Inspector:          inspector,
+		Audit:              logger,
+		Broker:             broker,
+		TimeoutSec:         eng.TimeoutSec,
+		Store:              db,
+		CredentialResolver: credResolver,
 	})
 	if err != nil {
 		return fmt.Errorf("start MCP gateway: %w", err)
@@ -219,20 +247,25 @@ func handleMCPGateway(args []string) error {
 func handleMCPAdd(args []string) error {
 	fs := flag.NewFlagSet("mcp add", flag.ExitOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	command := fs.String("command", "", "command to run the MCP server")
+	command := fs.String("command", "", "command to run (stdio) or URL (http/websocket)")
 	argsStr := fs.String("args", "", "comma-separated arguments for the command")
 	envStr := fs.String("env", "", "comma-separated KEY=VAL environment variables")
 	timeout := fs.Int("timeout", 120, "upstream timeout in seconds")
+	transport := fs.String("transport", "stdio", "transport type: stdio, http, or websocket")
 	_ = fs.Parse(args)
 
 	if fs.NArg() == 0 || *command == "" {
-		fmt.Println("usage: sluice mcp add <name> --command <cmd> [--args \"arg1,arg2\"] [--env \"KEY=VAL,...\"] [--timeout 120]")
+		fmt.Println("usage: sluice mcp add <name> --command <cmd> [--transport stdio|http|websocket] [--args \"arg1,arg2\"] [--env \"KEY=VAL,...\"] [--timeout 120]")
 		os.Exit(1)
 	}
 	name := fs.Arg(0)
 
 	if err := mcp.ValidateUpstreamName(name); err != nil {
 		return fmt.Errorf("invalid upstream name: %w", err)
+	}
+
+	if !mcp.ValidTransport(*transport) {
+		return fmt.Errorf("invalid transport %q: must be stdio, http, or websocket", *transport)
 	}
 
 	var cmdArgs []string
@@ -261,11 +294,24 @@ func handleMCPAdd(args []string) error {
 		Args:       cmdArgs,
 		Env:        env,
 		TimeoutSec: *timeout,
+		Transport:  *transport,
 	})
 	if err != nil {
 		return fmt.Errorf("add upstream: %w", err)
 	}
-	fmt.Printf("added MCP upstream %q [%d] (command: %s)\n", name, id, *command)
+	fmt.Printf("added MCP upstream %q [%d] (transport: %s, command: %s)\n", name, id, *transport, *command)
+	fmt.Println("NOTE: if the MCP gateway is running, restart sluice for the new upstream to take effect")
+
+	// Best-effort: write mcp-servers.json so the agent picks up the MCP
+	// gateway on next reload/restart. Only if phantom-dir is detectable.
+	if dir := os.Getenv("SLUICE_PHANTOM_DIR"); dir != "" {
+		url := os.Getenv("SLUICE_URL")
+		if url == "" {
+			url = "http://127.0.0.1:3000/mcp"
+		}
+		writeMCPServersJSON(dir, url)
+	}
+
 	return nil
 }
 
@@ -291,6 +337,10 @@ func handleMCPList(args []string) error {
 	}
 
 	for _, u := range upstreams {
+		transportStr := ""
+		if u.Transport != "" && u.Transport != "stdio" {
+			transportStr = " transport=" + u.Transport
+		}
 		argsStr := ""
 		if len(u.Args) > 0 {
 			argsStr = " args=" + strings.Join(u.Args, ",")
@@ -312,7 +362,7 @@ func handleMCPList(args []string) error {
 		if u.TimeoutSec != 120 {
 			timeoutStr = fmt.Sprintf(" timeout=%ds", u.TimeoutSec)
 		}
-		fmt.Printf("[%d] %s command=%s%s%s%s\n", u.ID, u.Name, u.Command, argsStr, envStr, timeoutStr)
+		fmt.Printf("[%d] %s command=%s%s%s%s%s\n", u.ID, u.Name, u.Command, transportStr, argsStr, envStr, timeoutStr)
 	}
 	return nil
 }
@@ -343,5 +393,36 @@ func handleMCPRemove(args []string) error {
 		os.Exit(1)
 	}
 	fmt.Printf("removed MCP upstream %q\n", name)
+	fmt.Println("NOTE: if the MCP gateway is running, restart sluice for the removal to take effect")
+
+	// Best-effort: update mcp-servers.json.
+	if dir := os.Getenv("SLUICE_PHANTOM_DIR"); dir != "" {
+		url := os.Getenv("SLUICE_URL")
+		if url == "" {
+			url = "http://127.0.0.1:3000/mcp"
+		}
+		writeMCPServersJSON(dir, url)
+	}
+
 	return nil
+}
+
+// writeMCPServersJSON writes an mcp-servers.json file to the phantom directory
+// so the agent container knows how to connect to sluice's MCP gateway.
+func writeMCPServersJSON(phantomDir, sluiceURL string) {
+	mcpConfig := map[string]any{
+		"sluice": map[string]any{
+			"url":       sluiceURL,
+			"transport": "streamable-http",
+		},
+	}
+	data, err := json.Marshal(mcpConfig)
+	if err != nil {
+		log.Printf("WARNING: failed to marshal mcp-servers.json: %v", err)
+		return
+	}
+	path := filepath.Join(phantomDir, "mcp-servers.json")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		log.Printf("WARNING: failed to write %s: %v", path, err)
+	}
 }
