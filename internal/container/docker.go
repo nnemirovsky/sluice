@@ -2,10 +2,13 @@ package container
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // ContainerClient abstracts Docker Engine API operations for testability.
@@ -154,9 +157,34 @@ func (m *DockerManager) Status(ctx context.Context) (ContainerStatus, error) {
 	}, nil
 }
 
-// InjectMCPConfig is a no-op for Docker. MCP configuration is handled via
-// compose volumes and environment variables in the Docker deployment model.
-func (m *DockerManager) InjectMCPConfig(_, _ string) error {
+// InjectMCPConfig writes an mcp-servers.json file to the shared phantoms
+// volume and signals the agent container to reload MCP configuration via
+// docker exec. If exec fails, the agent picks up the config on next restart.
+func (m *DockerManager) InjectMCPConfig(phantomDir, sluiceURL string) error {
+	mcpConfig := map[string]any{
+		"sluice": map[string]any{
+			"url":       sluiceURL,
+			"transport": "streamable-http",
+		},
+	}
+
+	data, err := json.Marshal(mcpConfig)
+	if err != nil {
+		return fmt.Errorf("marshal mcp config: %w", err)
+	}
+
+	path := filepath.Join(phantomDir, "mcp-servers.json")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("write mcp config: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if execErr := m.client.ExecInContainer(ctx, m.containerName,
+		[]string{"openclaw", "mcp", "reload"}); execErr != nil {
+		// Best-effort: agent picks up config on next restart.
+		log.Printf("MCP config written to %s but exec reload failed: %v", path, execErr)
+	}
 	return nil
 }
 

@@ -69,7 +69,16 @@ func main() {
 	containerName := flag.String("container-name", envDefault("SLUICE_AGENT_CONTAINER", "openclaw"), "agent container/VM name")
 	phantomDir := flag.String("phantom-dir", "", "shared volume path for phantom token files (enables hot-reload)")
 	dnsResolver := flag.String("dns-resolver", "", "upstream DNS resolver address for DNS interception (default: 8.8.8.8:53)")
+	autoInjectMCP := flag.Bool("auto-inject-mcp", false, "auto-inject MCP config into agent container (default true for docker/apple runtimes)")
+	autoInjectMCPSet := false
 	flag.Parse()
+
+	// Track whether the flag was explicitly set by the user.
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "auto-inject-mcp" {
+			autoInjectMCPSet = true
+		}
+	})
 
 	// Validate --runtime flag early.
 	switch *runtimeFlag {
@@ -264,6 +273,19 @@ func main() {
 		log.Printf("no container runtime detected; container management disabled")
 	}
 
+	// Default auto-inject-mcp to true when a container runtime is active
+	// and the user did not explicitly set the flag.
+	if !autoInjectMCPSet && containerMgr != nil {
+		*autoInjectMCP = true
+	}
+
+	// Build self-bypass addresses so the agent's MCP HTTP connection to
+	// sluice is auto-allowed without policy evaluation.
+	var selfBypass []string
+	if *autoInjectMCP && *healthAddr != "" {
+		selfBypass = buildSelfBypass(*healthAddr)
+	}
+
 	// Create the proxy first so the bot can share its engine pointer and
 	// reload mutex.
 	// Convert policy engine inspect rules to protocol-specific config structs
@@ -295,6 +317,7 @@ func main() {
 		WSRedactRules:   wsRedactRules,
 		QUICBlockRules:  quicBlockRules,
 		QUICRedactRules: quicRedactRules,
+		SelfBypass:      selfBypass,
 	})
 	if err != nil {
 		log.Fatalf("start proxy: %v", err)
@@ -442,6 +465,17 @@ func main() {
 
 		mcpHandler = mcp.NewMCPHTTPHandler(mcpGW)
 		log.Printf("MCP gateway on /mcp: %d tools from %d upstreams", len(mcpGW.Tools()), len(mcpUpstreams))
+
+		// Auto-inject MCP config into the agent container so it connects
+		// to sluice's gateway via Streamable HTTP.
+		if *autoInjectMCP && containerMgr != nil && *phantomDir != "" {
+			sluiceURL := fmt.Sprintf("http://%s/mcp", *healthAddr)
+			if injectErr := containerMgr.InjectMCPConfig(*phantomDir, sluiceURL); injectErr != nil {
+				log.Printf("WARNING: MCP auto-inject failed: %v", injectErr)
+			} else {
+				log.Printf("MCP config injected into agent container (url=%s)", sluiceURL)
+			}
+		}
 	}
 
 	// Start HTTP server with health check and REST API on :3000 (or --health-addr).
@@ -724,4 +758,29 @@ func startAPIServer(addr string, apiSrv *api.Server, st *store.Store, mcpHandler
 	}
 	go httpSrv.Serve(ln) //nolint:errcheck
 	return ln, httpSrv
+}
+
+// buildSelfBypass expands a health-addr listen address into all concrete
+// host:port strings that should bypass SOCKS5 policy. When the address
+// binds to 0.0.0.0 or [::], it expands to 127.0.0.1:port and [::1]:port
+// so connections from the agent container to sluice's loopback addresses
+// are also auto-allowed.
+func buildSelfBypass(healthAddr string) []string {
+	host, port, err := net.SplitHostPort(healthAddr)
+	if err != nil {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// Hostname (e.g. "sluice"). Include as-is.
+		return []string{healthAddr}
+	}
+	if ip.IsUnspecified() {
+		// Listening on all interfaces. Bypass loopback addresses.
+		return []string{
+			net.JoinHostPort("127.0.0.1", port),
+			net.JoinHostPort("::1", port),
+		}
+	}
+	return []string{healthAddr}
 }

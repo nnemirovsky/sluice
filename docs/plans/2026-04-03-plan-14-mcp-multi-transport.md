@@ -209,15 +209,15 @@ On startup (and after MCP upstream changes), automatically configure OpenClaw to
 }
 ```
 
-- [ ] Implement `InjectMCPConfig(phantomDir, sluiceURL string) error` that writes `mcp-servers.json` to the shared phantoms volume
-- [ ] Call `InjectMCPConfig` on sluice startup (after gateway is ready) and after `sluice mcp add/remove`
-- [ ] Trigger OpenClaw to re-read MCP config via `docker exec openclaw openclaw mcp reload`. If exec fails, OpenClaw picks it up on next restart.
-- [ ] Add SOCKS5 self-bypass: auto-allow connections to sluice's own listener addresses (health/MCP server) without policy evaluation. Hardcoded, not configurable.
-- [ ] Add `--auto-inject-mcp` flag (default true in Docker, false otherwise) to control this behavior
-- [ ] Write tests for config file generation
-- [ ] Write tests for self-bypass (connection to sluice's own address bypasses policy)
-- [ ] Run tests: `go test ./internal/docker/ -v -timeout 30s`
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] Implement `InjectMCPConfig(phantomDir, sluiceURL string) error` that writes `mcp-servers.json` to the shared phantoms volume
+- [x] Call `InjectMCPConfig` on sluice startup (after gateway is ready) and after `sluice mcp add/remove`
+- [x] Trigger OpenClaw to re-read MCP config via `docker exec openclaw openclaw mcp reload`. If exec fails, OpenClaw picks it up on next restart.
+- [x] Add SOCKS5 self-bypass: auto-allow connections to sluice's own listener addresses (health/MCP server) without policy evaluation. Hardcoded, not configurable.
+- [x] Add `--auto-inject-mcp` flag (default true in Docker, false otherwise) to control this behavior
+- [x] Write tests for config file generation
+- [x] Write tests for self-bypass (connection to sluice's own address bypasses policy)
+- [x] Run tests: `go test ./internal/docker/ -v -timeout 30s`
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 8: Verify acceptance criteria
 

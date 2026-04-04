@@ -794,6 +794,60 @@ func TestStandaloneModeStartup(t *testing.T) {
 }
 
 
+// TestBuildSelfBypass verifies the self-bypass address expansion.
+func TestBuildSelfBypass(t *testing.T) {
+	tests := []struct {
+		name      string
+		addr      string
+		want      []string
+	}{
+		{
+			name: "specific IP",
+			addr: "127.0.0.1:3000",
+			want: []string{"127.0.0.1:3000"},
+		},
+		{
+			name: "unspecified IPv4 expands to loopbacks",
+			addr: "0.0.0.0:3000",
+			want: []string{"127.0.0.1:3000", "[::1]:3000"},
+		},
+		{
+			name: "unspecified IPv6 expands to loopbacks",
+			addr: "[::]:3000",
+			want: []string{"127.0.0.1:3000", "[::1]:3000"},
+		},
+		{
+			name: "hostname preserved",
+			addr: "sluice:3000",
+			want: []string{"sluice:3000"},
+		},
+		{
+			name: "invalid addr returns nil",
+			addr: "invalid",
+			want: nil,
+		},
+		{
+			name: "specific IPv6",
+			addr: "[::1]:3000",
+			want: []string{"[::1]:3000"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildSelfBypass(tt.addr)
+			if len(got) != len(tt.want) {
+				t.Fatalf("buildSelfBypass(%q) = %v, want %v", tt.addr, got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Errorf("buildSelfBypass(%q)[%d] = %q, want %q", tt.addr, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 // TestStandaloneModeCredentialInjection verifies that credential injection
 // (vault + binding resolver) works without a container manager, since the
 // MITM proxy handles injection independently.

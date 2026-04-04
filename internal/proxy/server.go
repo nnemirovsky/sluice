@@ -55,6 +55,7 @@ type Config struct {
 	QUICBlockRules  []QUICBlockRuleConfig    // QUIC/HTTP3 content deny rules
 	QUICRedactRules []QUICRedactRuleConfig   // QUIC/HTTP3 content redact rules
 	DNSResolver     string                   // upstream DNS resolver for intercepted queries (default: 8.8.8.8:53)
+	SelfBypass      []string                 // host:port addresses to auto-allow without policy evaluation (sluice's own listeners)
 }
 
 // Server wraps a SOCKS5 server with policy enforcement and audit logging.
@@ -105,9 +106,10 @@ func isPrivateIP(ip net.IP) bool {
 // return an error so go-socks5 sends a hostUnreachable reply instead of the
 // ruleFailure that would result from failing inside Allow().
 type policyResolver struct {
-	engine *atomic.Pointer[policy.Engine]
-	audit  *audit.FileLogger
-	broker *channel.Broker
+	engine     *atomic.Pointer[policy.Engine]
+	audit      *audit.FileLogger
+	broker     *channel.Broker
+	selfBypass map[string]bool // skip CouldBeAllowed check for self addresses
 }
 
 func (r *policyResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
@@ -181,11 +183,12 @@ func (r *policyResolver) Resolve(ctx context.Context, name string) (context.Cont
 }
 
 type policyRuleSet struct {
-	engine   *atomic.Pointer[policy.Engine]
-	reloadMu *sync.Mutex // serializes engine swaps and dynamic rule mutations
-	audit    *audit.FileLogger
-	broker   *channel.Broker
-	store    *store.Store
+	engine     *atomic.Pointer[policy.Engine]
+	reloadMu   *sync.Mutex // serializes engine swaps and dynamic rule mutations
+	audit      *audit.FileLogger
+	broker     *channel.Broker
+	store      *store.Store
+	selfBypass map[string]bool // host:port addresses that bypass policy (sluice's own listeners)
 }
 
 func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context.Context, bool) {
@@ -211,6 +214,21 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 	// appending a dot to the hostname.
 	dest = strings.TrimRight(dest, ".")
 	port := req.DestAddr.Port
+
+	// Self-bypass: auto-allow connections to sluice's own listener
+	// addresses (health/MCP server) without policy evaluation. This
+	// prevents the agent's MCP HTTP connection from being blocked or
+	// triggering approval when routed through the SOCKS5 proxy.
+	if len(r.selfBypass) > 0 {
+		target := net.JoinHostPort(dest, strconv.Itoa(port))
+		if r.selfBypass[target] {
+			log.Printf("[BYPASS] %s (self)", target)
+			proto := DetectProtocol(port)
+			ctx = context.WithValue(ctx, ctxKeyProtocol, proto)
+			ctx = context.WithValue(ctx, ctxKeyFQDN, dest)
+			return ctx, true
+		}
+	}
 
 	// Use the engine snapshot from Resolve() (stored in context) to ensure
 	// consistent policy evaluation within a single request. For IP-based
@@ -378,8 +396,16 @@ func New(cfg Config) (*Server, error) {
 	enginePtr.Store(cfg.Policy)
 	reloadMu := new(sync.Mutex)
 
-	rules := &policyRuleSet{engine: enginePtr, reloadMu: reloadMu, audit: cfg.Audit, broker: cfg.Broker, store: cfg.Store}
-	dnsRes := &policyResolver{engine: enginePtr, audit: cfg.Audit, broker: cfg.Broker}
+	var bypassSet map[string]bool
+	if len(cfg.SelfBypass) > 0 {
+		bypassSet = make(map[string]bool, len(cfg.SelfBypass))
+		for _, addr := range cfg.SelfBypass {
+			bypassSet[addr] = true
+		}
+	}
+
+	rules := &policyRuleSet{engine: enginePtr, reloadMu: reloadMu, audit: cfg.Audit, broker: cfg.Broker, store: cfg.Store, selfBypass: bypassSet}
+	dnsRes := &policyResolver{engine: enginePtr, audit: cfg.Audit, broker: cfg.Broker, selfBypass: bypassSet}
 	srv.rules = rules
 	srv.dnsResolver = dnsRes
 
