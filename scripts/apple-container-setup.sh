@@ -117,6 +117,10 @@ teardown() {
         echo "tun2proxy not running"
     fi
 
+    # Disable IP forwarding (was enabled during setup).
+    sysctl -w net.inet.ip.forwarding=0 >/dev/null 2>&1 || true
+    echo "Disabled IP forwarding."
+
     echo "Teardown complete."
 }
 

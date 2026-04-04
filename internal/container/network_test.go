@@ -15,8 +15,8 @@ func TestGenerateAnchorRules(t *testing.T) {
 
 	rules := router.GenerateAnchorRules("bridge100", "192.168.64.0/24", "192.168.64.1")
 
-	// Verify the route-to rule redirects VM traffic through TUN.
-	if !strings.Contains(rules, "pass in on bridge100 route-to (utun3 192.168.64.1) from 192.168.64.0/24 to any") {
+	// Verify the route-to rule redirects TCP VM traffic through TUN.
+	if !strings.Contains(rules, "pass in on bridge100 route-to (utun3 192.168.64.1) proto tcp from 192.168.64.0/24 to any") {
 		t.Errorf("missing route-to rule in:\n%s", rules)
 	}
 
@@ -41,7 +41,7 @@ func TestGenerateAnchorRulesCustomTUN(t *testing.T) {
 
 	rules := router.GenerateAnchorRules("bridge101", "10.0.0.0/24", "10.0.0.1")
 
-	if !strings.Contains(rules, "pass in on bridge101 route-to (utun7 10.0.0.1) from 10.0.0.0/24 to any") {
+	if !strings.Contains(rules, "pass in on bridge101 route-to (utun7 10.0.0.1) proto tcp from 10.0.0.0/24 to any") {
 		t.Errorf("should use custom TUN interface:\n%s", rules)
 	}
 	if !strings.Contains(rules, "pass out on bridge101 from any to 10.0.0.0/24") {
@@ -62,8 +62,8 @@ func TestGenerateAnchorRulesDefaults(t *testing.T) {
 
 func TestSetupNetworkRouting(t *testing.T) {
 	runner := newMockRunner()
-	// The first pfctl call (stdin load) succeeds.
-	runner.onCommand("pfctl -a sluice -f -", nil, nil)
+	// pfctl -a sluice -f <tempfile> should be called.
+	runner.onCommand("pfctl -a sluice -f", nil, nil)
 
 	router := NewNetworkRouter(NetworkRouterConfig{
 		Runner:     runner,
@@ -76,30 +76,8 @@ func TestSetupNetworkRouting(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !runner.called("pfctl -a sluice -f -") {
-		t.Error("expected pfctl call to load anchor rules")
-	}
-}
-
-func TestSetupNetworkRoutingFallback(t *testing.T) {
-	runner := newMockRunner()
-	// First pfctl call fails, triggering sh -c fallback.
-	runner.onCommand("pfctl -a sluice -f -", nil, errors.New("stdin not supported"))
-	runner.onCommand("sh -c", nil, nil)
-
-	router := NewNetworkRouter(NetworkRouterConfig{
-		Runner:     runner,
-		AnchorName: "sluice",
-		TUNIface:   "utun3",
-	})
-
-	err := router.SetupNetworkRouting(context.Background(), "192.168.64.2", "bridge100", "192.168.64.1")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !runner.called("sh -c") {
-		t.Error("expected sh -c fallback call")
+	if !runner.called("pfctl -a sluice -f") {
+		t.Error("expected pfctl call to load anchor rules from file")
 	}
 }
 
@@ -132,7 +110,6 @@ func TestSetupNetworkRoutingIPv6(t *testing.T) {
 func TestSetupNetworkRoutingPfctlError(t *testing.T) {
 	runner := newMockRunner()
 	runner.onCommand("pfctl", nil, errors.New("pfctl failed"))
-	runner.onCommand("sh -c", nil, errors.New("sh also failed"))
 
 	router := NewNetworkRouter(NetworkRouterConfig{
 		Runner:     runner,
@@ -237,7 +214,7 @@ func TestSubnetFromIP(t *testing.T) {
 	}
 }
 
-func TestDetectBridgeInterface(t *testing.T) {
+func TestDefaultBridgeInterface(t *testing.T) {
 	runner := newMockRunner()
 	runner.onCommand("container --version", []byte("v1.0\n"), nil)
 
@@ -252,7 +229,7 @@ func TestDetectBridgeInterface(t *testing.T) {
 
 	cli, _ := NewAppleCLIWithBin("container", runner)
 
-	bridge, ip, err := DetectBridgeInterface(context.Background(), cli, "openclaw")
+	bridge, ip, err := DefaultBridgeInterface(context.Background(), cli, "openclaw")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -264,7 +241,7 @@ func TestDetectBridgeInterface(t *testing.T) {
 	}
 }
 
-func TestDetectBridgeInterfaceNoIP(t *testing.T) {
+func TestDefaultBridgeInterfaceNoIP(t *testing.T) {
 	runner := newMockRunner()
 	runner.onCommand("container --version", []byte("v1.0\n"), nil)
 
@@ -277,7 +254,7 @@ func TestDetectBridgeInterfaceNoIP(t *testing.T) {
 
 	cli, _ := NewAppleCLIWithBin("container", runner)
 
-	_, _, err := DetectBridgeInterface(context.Background(), cli, "openclaw")
+	_, _, err := DefaultBridgeInterface(context.Background(), cli, "openclaw")
 	if err == nil {
 		t.Fatal("expected error when VM has no IP")
 	}
@@ -286,14 +263,14 @@ func TestDetectBridgeInterfaceNoIP(t *testing.T) {
 	}
 }
 
-func TestDetectBridgeInterfaceInspectError(t *testing.T) {
+func TestDefaultBridgeInterfaceInspectError(t *testing.T) {
 	runner := newMockRunner()
 	runner.onCommand("container --version", []byte("v1.0\n"), nil)
 	runner.onCommand("container inspect", nil, errors.New("VM not found"))
 
 	cli, _ := NewAppleCLIWithBin("container", runner)
 
-	_, _, err := DetectBridgeInterface(context.Background(), cli, "nonexistent")
+	_, _, err := DefaultBridgeInterface(context.Background(), cli, "nonexistent")
 	if err == nil {
 		t.Fatal("expected error")
 	}

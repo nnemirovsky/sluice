@@ -632,6 +632,7 @@ func TestAppleManagerRestartWithEnv(t *testing.T) {
 		Image: "openclaw/openclaw:latest",
 		State: VMState{Status: "running", Running: true},
 		Env:   []string{"EXISTING=keep", "UPDATE_ME=old"},
+		Mounts: []VMBind{{Source: "/host/phantoms", Destination: "/phantoms"}},
 	}})
 	runner.onCommand("container inspect", inspectJSON, nil)
 	runner.onCommand("container stop", nil, nil)
@@ -672,6 +673,10 @@ func TestAppleManagerRestartWithEnv(t *testing.T) {
 	}
 	if !strings.Contains(runCmd, "-e EXISTING=keep") {
 		t.Errorf("run should preserve existing env: %s", runCmd)
+	}
+	// Verify volumes from inspect output are preserved.
+	if !strings.Contains(runCmd, "-v /host/phantoms:/phantoms") {
+		t.Errorf("run should preserve inspected volumes: %s", runCmd)
 	}
 }
 
@@ -858,21 +863,6 @@ func TestAppleManagerRuntime(t *testing.T) {
 	mgr, _, _ := newTestAppleManager(t)
 	if mgr.Runtime() != RuntimeApple {
 		t.Errorf("Runtime() = %v, want RuntimeApple", mgr.Runtime())
-	}
-}
-
-func TestNewAppleManagerNilEnv(t *testing.T) {
-	runner := newMockRunner()
-	runner.onCommand("container --version", []byte("v1.0\n"), nil)
-	cli, _ := NewAppleCLIWithBin("container", runner)
-
-	mgr := NewAppleManager(AppleManagerConfig{
-		CLI:           cli,
-		ContainerName: "test",
-		Image:         "test:latest",
-	})
-	if mgr.env == nil {
-		t.Error("env map should be initialized even when nil config")
 	}
 }
 

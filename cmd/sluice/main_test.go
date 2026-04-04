@@ -789,32 +789,6 @@ func TestStandaloneModeStartup(t *testing.T) {
 	}
 }
 
-// TestStandaloneModeRuntimeNoneValidation verifies that "none" is accepted by
-// the runtime validation and that auto-detection is skipped.
-func TestStandaloneModeRuntimeNoneValidation(t *testing.T) {
-	// "none" should not go through detectRuntime since it's an explicit choice.
-	// Verify detectRuntime is only called for "auto".
-	// In standalone mode, the selected runtime should stay "none" and
-	// containerMgr should remain nil.
-
-	// The runtime flag validation accepts "none".
-	validRuntimes := map[string]bool{
-		"auto": true, "docker": true, "apple": true, "none": true,
-	}
-	if !validRuntimes["none"] {
-		t.Error("none should be a valid runtime value")
-	}
-
-	// detectRuntime should not be called for "none". Simulate: if "none" is the
-	// selectedRuntime, it should NOT be overwritten by detectRuntime.
-	selectedRuntime := "none"
-	if selectedRuntime == "auto" {
-		selectedRuntime = detectRuntime(true, true, "darwin")
-	}
-	if selectedRuntime != "none" {
-		t.Errorf("expected selectedRuntime to remain 'none', got %q", selectedRuntime)
-	}
-}
 
 // TestStandaloneModeCredentialInjection verifies that credential injection
 // (vault + binding resolver) works without a container manager, since the

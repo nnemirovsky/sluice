@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 )
 
@@ -52,8 +53,9 @@ func (r *NetworkRouter) GenerateAnchorRules(bridgeIface, vmSubnet, tunGateway st
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Sluice pf anchor: redirect Apple Container VM traffic\n")
 	fmt.Fprintf(&b, "# Bridge: %s, Subnet: %s, TUN: %s\n\n", bridgeIface, vmSubnet, r.tunIface)
-	// Route all VM outbound traffic through the TUN device to tun2proxy.
-	fmt.Fprintf(&b, "pass in on %s route-to (%s %s) from %s to any\n", bridgeIface, r.tunIface, tunGateway, vmSubnet)
+	// Route TCP traffic from the VM through the TUN device to tun2proxy.
+	// Only TCP is routed because SOCKS5/tun2proxy cannot handle UDP or ICMP.
+	fmt.Fprintf(&b, "pass in on %s route-to (%s %s) proto tcp from %s to any\n", bridgeIface, r.tunIface, tunGateway, vmSubnet)
 	// Allow return traffic back to the VM subnet.
 	fmt.Fprintf(&b, "pass out on %s from any to %s\n", bridgeIface, vmSubnet)
 	return b.String()
@@ -71,21 +73,28 @@ func (r *NetworkRouter) SetupNetworkRouting(ctx context.Context, vmIP, bridgeIfa
 
 	rules := r.GenerateAnchorRules(bridgeIface, subnet, tunGateway)
 
-	// Load the anchor rules via pfctl.
-	// pfctl -a <anchor> -f - reads rules from stdin. We pass via echo.
-	_, err = r.runner.Run(ctx, "pfctl", "-a", r.anchorName, "-f", "-")
-	if err != nil {
-		// Fallback: write to temp file and load.
-		return r.loadAnchorFromString(ctx, rules)
-	}
-	return nil
+	// Write rules to a temp file and load via pfctl. This avoids shell
+	// injection risks from interpolating rules into a shell command.
+	return r.loadAnchorFromFile(ctx, rules)
 }
 
-// loadAnchorFromString writes rules to a temp path and loads via pfctl.
-func (r *NetworkRouter) loadAnchorFromString(ctx context.Context, rules string) error {
-	// Use sh -c with echo pipe to load rules into pfctl.
-	cmd := fmt.Sprintf("echo '%s' | pfctl -a %s -f -", rules, r.anchorName)
-	_, err := r.runner.Run(ctx, "sh", "-c", cmd)
+// loadAnchorFromFile writes rules to a temp file and loads via pfctl -f.
+func (r *NetworkRouter) loadAnchorFromFile(ctx context.Context, rules string) error {
+	f, err := os.CreateTemp("", "sluice-pf-*.conf")
+	if err != nil {
+		return fmt.Errorf("create temp pf rules file: %w", err)
+	}
+	defer os.Remove(f.Name())
+
+	if _, err := f.WriteString(rules); err != nil {
+		f.Close()
+		return fmt.Errorf("write pf rules: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close pf rules file: %w", err)
+	}
+
+	_, err = r.runner.Run(ctx, "pfctl", "-a", r.anchorName, "-f", f.Name())
 	if err != nil {
 		return fmt.Errorf("load pf anchor %q: %w", r.anchorName, err)
 	}
@@ -101,10 +110,11 @@ func (r *NetworkRouter) TeardownNetworkRouting(ctx context.Context) error {
 	return nil
 }
 
-// DetectBridgeInterface extracts the bridge interface from a VM's IP address
-// by inspecting the VM via the provided AppleCLI and matching the IP to a
-// known bridge subnet. Returns the bridge interface name (e.g., "bridge100").
-func DetectBridgeInterface(ctx context.Context, cli *AppleCLI, vmName string) (string, string, error) {
+// DefaultBridgeInterface returns the default bridge interface name and the
+// VM's IP address. Apple Container VMs typically use bridge100, so this is
+// used as a default. The actual bridge detection is done by the setup script
+// (scripts/apple-container-setup.sh) which iterates host interfaces.
+func DefaultBridgeInterface(ctx context.Context, cli *AppleCLI, vmName string) (string, string, error) {
 	info, err := cli.Inspect(ctx, vmName)
 	if err != nil {
 		return "", "", fmt.Errorf("inspect VM %q: %w", vmName, err)
@@ -113,8 +123,8 @@ func DetectBridgeInterface(ctx context.Context, cli *AppleCLI, vmName string) (s
 	if ip == "" {
 		return "", "", fmt.Errorf("VM %q has no IP address", vmName)
 	}
-	// Apple Container VMs typically use bridge100 with 192.168.64.0/24.
-	// Return the detected IP and default bridge interface.
+	// Default to bridge100. For accurate detection, use the setup script
+	// which correlates VM IP with host interface subnets.
 	return "bridge100", ip, nil
 }
 

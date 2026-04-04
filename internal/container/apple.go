@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // CommandRunner abstracts os/exec for testability.
@@ -195,7 +196,6 @@ type AppleManager struct {
 	containerName string
 	image         string
 	volumes       []VolumeMount
-	env           map[string]string
 }
 
 // AppleManagerConfig holds configuration for creating an AppleManager.
@@ -204,21 +204,15 @@ type AppleManagerConfig struct {
 	ContainerName string
 	Image         string
 	Volumes       []VolumeMount
-	Env           map[string]string
 }
 
 // NewAppleManager creates a new AppleManager from the given config.
 func NewAppleManager(cfg AppleManagerConfig) *AppleManager {
-	env := cfg.Env
-	if env == nil {
-		env = make(map[string]string)
-	}
 	return &AppleManager{
 		cli:           cfg.CLI,
 		containerName: cfg.ContainerName,
 		image:         cfg.Image,
 		volumes:       cfg.Volumes,
-		env:           env,
 	}
 }
 
@@ -278,11 +272,22 @@ func (m *AppleManager) RestartWithEnv(ctx context.Context, envUpdates map[string
 		return fmt.Errorf("remove VM: %w", err)
 	}
 
+	// Reconstruct volumes from the inspect output to preserve mounts that
+	// may have been added after the manager was created.
+	var vols []VolumeMount
+	for _, bind := range info.Mounts {
+		vols = append(vols, VolumeMount{
+			HostPath:  bind.Source,
+			GuestPath: bind.Destination,
+			ReadOnly:  bind.ReadOnly,
+		})
+	}
+
 	return m.cli.Run(ctx, RunConfig{
 		Name:    m.containerName,
 		Image:   info.Image,
 		Env:     existingEnv,
-		Volumes: m.volumes,
+		Volumes: vols,
 	})
 }
 
@@ -305,7 +310,8 @@ func (m *AppleManager) InjectMCPConfig(phantomDir, sluiceURL string) error {
 		return fmt.Errorf("write mcp config: %w", err)
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	_, execErr := m.cli.Exec(ctx, m.containerName, []string{"openclaw", "mcp", "reload"})
 	return execErr
 }
@@ -371,9 +377,16 @@ func (m *AppleManager) InjectCACert(ctx context.Context, hostCertPath, certDir s
 	}
 
 	// Try to update the system trust store inside the VM.
-	// Linux guests use update-ca-certificates. macOS guests use security.
+	// Linux guests use update-ca-certificates (which scans
+	// /usr/local/share/ca-certificates/). macOS guests use security.
 	// If neither works, the env vars (SSL_CERT_FILE, etc.) still cover
 	// most HTTP libraries.
+	_, _ = m.cli.Exec(ctx, m.containerName, []string{
+		"mkdir", "-p", "/usr/local/share/ca-certificates",
+	})
+	_, _ = m.cli.Exec(ctx, m.containerName, []string{
+		"cp", CACertGuestPath, "/usr/local/share/ca-certificates/sluice-ca.crt",
+	})
 	_, linuxErr := m.cli.Exec(ctx, m.containerName, []string{
 		"update-ca-certificates",
 	})

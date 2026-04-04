@@ -20,7 +20,7 @@ go test ./... -v -timeout 30s
 
 ## Project Structure
 
-- `cmd/sluice/main.go` - CLI entrypoint with flag parsing and signal handling
+- `cmd/sluice/main.go` - CLI entrypoint with flag parsing, runtime selection (--runtime docker|apple|none|auto), and signal handling
 - `cmd/sluice/cred.go` - CLI subcommand handler for credential management (add/list/remove with optional policy+binding auto-creation)
 - `cmd/sluice/audit.go` - CLI subcommand handler for audit log verification (`audit verify`)
 - `cmd/sluice/cert.go` - CLI subcommand handler for CA certificate generation (`cert generate`)
@@ -32,7 +32,7 @@ go test ./... -v -timeout 30s
 - `internal/store/migrations/000001_init.up.sql` - Initial schema migration (rules, config, bindings, mcp_upstreams, channels)
 - `internal/store/migrations/000001_init.down.sql` - Rollback for initial schema
 - `internal/proxy/server.go` - SOCKS5 server wrapping `armon/go-socks5` with policy enforcement
-- `internal/proxy/protocol.go` - Port-based protocol detection (HTTP, HTTPS, SSH, IMAP, SMTP, generic)
+- `internal/proxy/protocol.go` - Port-based protocol detection (HTTP, HTTPS, SSH, IMAP, SMTP, APNS, generic)
 - `internal/proxy/ca.go` - Self-signed CA generation and persistence for HTTPS MITM
 - `internal/proxy/inject.go` - HTTPS MITM credential injector using goproxy with scoped phantom token replacement and unbound token stripping
 - `internal/proxy/ssh.go` - SSH jump host with vault key injection and bidirectional channel relay
@@ -353,7 +353,7 @@ SSH credential injection: `SSHJumpHost` accepts the agent's SSH connection with 
 
 Mail credential injection: `MailProxy` intercepts IMAP LOGIN and SMTP AUTH PLAIN/LOGIN commands. For base64-encoded auth data, it decodes, replaces phantom tokens, and re-encodes. Non-auth traffic is relayed unchanged.
 
-Docker integration: Three-container architecture (sluice + tun2proxy + openclaw) with `network_mode: "service:tun2proxy"` routing all openclaw traffic through sluice's SOCKS5 proxy. `docker.Manager` wraps a `ContainerClient` interface with `ExecInContainer` for docker exec and standard container lifecycle methods. On credential mutation via Telegram `/cred` commands or CLI, `credMutationComplete` regenerates phantom environment variables using `GeneratePhantomEnv` and calls `Manager.ReloadSecrets`. Hot reload writes each phantom token as a file in a shared `sluice-phantoms` volume (e.g. `/phantoms/ANTHROPIC_API_KEY`) then runs `docker exec openclaw openclaw secrets reload`. If exec fails (agent image does not support reload), it falls back to `RestartWithEnv` which recreates the container with updated env vars. `BotConfig.Vault` and `BotConfig.DockerMgr` wire the vault and Docker manager into Telegram command handling. The sluice entrypoint generates a CA cert and copies it to a shared volume so openclaw can trust HTTPS MITM certificates via `SSL_CERT_FILE`.
+Docker integration: Three-container architecture (sluice + tun2proxy + openclaw) with `network_mode: "service:tun2proxy"` routing all openclaw traffic through sluice's SOCKS5 proxy. `docker.Manager` wraps a `ContainerClient` interface with `ExecInContainer` for docker exec and standard container lifecycle methods. On credential mutation via Telegram `/cred` commands or CLI, `credMutationComplete` regenerates phantom environment variables using `GeneratePhantomEnv` and calls `Manager.ReloadSecrets`. Hot reload writes each phantom token as a file in a shared `sluice-phantoms` volume (e.g. `/phantoms/ANTHROPIC_API_KEY`) then runs `docker exec openclaw openclaw secrets reload`. If exec fails (agent image does not support reload), it falls back to `RestartWithEnv` which recreates the container with updated env vars. `ChannelConfig.Vault` and `ChannelConfig.ContainerMgr` wire the vault and container manager (any `container.ContainerManager` implementation) into Telegram command handling. The sluice entrypoint generates a CA cert and copies it to a shared volume so openclaw can trust HTTPS MITM certificates via `SSL_CERT_FILE`.
 
 Health check: A minimal HTTP server on `127.0.0.1:3000` (configurable via `--health-addr`) serves `/healthz`, returning 200 when the SOCKS5 proxy is listening. The Dockerfile includes a `HEALTHCHECK` directive using `wget` against this endpoint. compose.yml uses `service_healthy` conditions to sequence startup: tun2proxy waits for sluice, openclaw waits for tun2proxy.
 
@@ -594,6 +594,7 @@ their bound destinations, preventing cross-credential exfiltration.
 | **HTTP/HTTPS** | Built-in MITM, byte-level phantom swap (handles any auth scheme) |
 | **SSH** | Sluice acts as SSH jump host, injects key from vault |
 | **IMAP/SMTP** | Sluice proxies AUTH command, swaps phantom password for real |
+| **APNS** | Connection-level allow/deny only (port 5223, Apple Push Notification Service) |
 | **Generic TCP** | Connection-level allow/deny only (no credential injection) |
 
 ## Docker Compose
