@@ -896,6 +896,88 @@ func TestLoadFromStoreWithProtocols(t *testing.T) {
 	}
 }
 
+func TestEvaluateWithProtocol(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "echo.example.com"
+ports = [443]
+protocols = ["wss"]
+
+[[allow]]
+destination = "grpc.example.com"
+ports = [443]
+protocols = ["grpc"]
+
+[[deny]]
+destination = "*.example.com"
+protocols = ["ws"]
+
+[[allow]]
+destination = "dns.google"
+ports = [53]
+protocols = ["dns"]
+
+[[deny]]
+destination = "*"
+protocols = ["quic"]
+name = "block all quic"
+
+[[allow]]
+destination = "api.example.com"
+ports = [443]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		dest  string
+		port  int
+		proto string
+		want  Verdict
+	}{
+		// WSS rule matches when proto="wss"
+		{"wss_match", "echo.example.com", 443, "wss", Allow},
+		// Same dest+port without explicit proto falls back to portToProtocol (https) which does not match wss rule
+		{"wss_no_proto", "echo.example.com", 443, "", Deny},
+		// gRPC rule matches when proto="grpc"
+		{"grpc_match", "grpc.example.com", 443, "grpc", Allow},
+		// gRPC dest without proto falls back to https (no grpc rule matches https)
+		{"grpc_no_proto", "grpc.example.com", 443, "", Deny},
+		// WS deny rule
+		{"ws_deny", "any.example.com", 80, "ws", Deny},
+		// DNS allow rule on port 53
+		{"dns_allow", "dns.google", 53, "dns", Allow},
+		// DNS also works without explicit proto since portToProtocol(53) = "dns"
+		{"dns_port_based", "dns.google", 53, "", Allow},
+		// QUIC deny rule
+		{"quic_deny", "cdn.example.com", 443, "quic", Deny},
+		// Non-protocol-scoped allow rule works with port-based detection
+		{"plain_https", "api.example.com", 443, "", Allow},
+		// Non-protocol-scoped allow rule also works with explicit proto
+		{"plain_https_explicit", "api.example.com", 443, "https", Allow},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := eng.EvaluateWithProtocol(tt.dest, tt.port, tt.proto)
+			if got != tt.want {
+				t.Errorf("EvaluateWithProtocol(%q, %d, %q) = %v, want %v",
+					tt.dest, tt.port, tt.proto, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPortToProtocolDNS(t *testing.T) {
+	if got := portToProtocol(53); got != "dns" {
+		t.Errorf("portToProtocol(53) = %q, want %q", got, "dns")
+	}
+}
+
 func TestLoadFromStoreValidate(t *testing.T) {
 	s, err := store.New(":memory:")
 	if err != nil {

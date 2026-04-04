@@ -31,6 +31,8 @@ func portToProtocol(port int) string {
 		return "imap"
 	case 25, 587, 465:
 		return "smtp"
+	case 53:
+		return "dns"
 	default:
 		return ""
 	}
@@ -282,6 +284,14 @@ func (e *Engine) compile() error {
 }
 
 func matchRules(rules []compiledRule, dest string, port int) bool {
+	return matchRulesWithProto(rules, dest, port, "")
+}
+
+// matchRulesWithProto checks compiled rules against a destination, port, and
+// optional explicit protocol. When proto is non-empty it takes precedence over
+// the port-based heuristic, allowing header-detected protocols (ws, wss, grpc)
+// and packet-detected protocols (quic) to match protocol-scoped rules.
+func matchRulesWithProto(rules []compiledRule, dest string, port int, proto string) bool {
 	for _, r := range rules {
 		if !r.glob.Match(dest) {
 			continue
@@ -290,8 +300,11 @@ func matchRules(rules []compiledRule, dest string, port int) bool {
 			continue
 		}
 		if len(r.protocols) > 0 {
-			proto := portToProtocol(port)
-			if proto == "" || !r.protocols[proto] {
+			effective := proto
+			if effective == "" {
+				effective = portToProtocol(port)
+			}
+			if effective == "" || !r.protocols[effective] {
 				continue
 			}
 		}
@@ -544,19 +557,28 @@ func (e *Engine) Validate() error {
 // Evaluate checks a destination and port against the compiled policy rules.
 // Deny rules are checked first, then allow, then ask. Falls back to default.
 func (e *Engine) Evaluate(dest string, port int) Verdict {
+	return e.EvaluateWithProtocol(dest, port, "")
+}
+
+// EvaluateWithProtocol checks a destination, port, and explicit protocol
+// against the compiled policy rules. The proto parameter overrides port-based
+// protocol detection, allowing header-detected protocols (ws, wss, grpc) and
+// packet-detected protocols (dns, quic) to match protocol-scoped rules.
+// Pass "" to fall back to port-based detection (same as Evaluate).
+func (e *Engine) EvaluateWithProtocol(dest string, port int, proto string) Verdict {
 	dest = normalizeDestination(dest)
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.compiled == nil {
 		return e.Default
 	}
-	if matchRules(e.compiled.denyRules, dest, port) {
+	if matchRulesWithProto(e.compiled.denyRules, dest, port, proto) {
 		return Deny
 	}
-	if matchRules(e.compiled.allowRules, dest, port) {
+	if matchRulesWithProto(e.compiled.allowRules, dest, port, proto) {
 		return Allow
 	}
-	if matchRules(e.compiled.askRules, dest, port) {
+	if matchRulesWithProto(e.compiled.askRules, dest, port, proto) {
 		return Ask
 	}
 	return e.Default

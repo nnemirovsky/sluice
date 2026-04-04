@@ -62,14 +62,14 @@ UDP protocols:  DNS (query-level policy), QUIC (HTTP/3 MITM), generic (allow/den
 **Files:**
 - Modify: `internal/proxy/protocol.go`
 
-- [ ] Add `ProtoWS Protocol = "ws"`, `ProtoWSS Protocol = "wss"`, `ProtoGRPC Protocol = "grpc"`, `ProtoDNS Protocol = "dns"`, `ProtoQUIC Protocol = "quic"` to the Protocol enum
-- [ ] gRPC detection: in the MITM request handler, check `Content-Type: application/grpc` and tag the request context with ProtoGRPC
-- [ ] WebSocket detection: check for `Connection: Upgrade` + `Upgrade: websocket` headers. Tag as ProtoWS (plaintext) or ProtoWSS (over TLS).
-- [ ] DNS detection: UDP port 53 = ProtoDNS
-- [ ] QUIC detection: implement `isQUICPacket(data []byte) bool` checking QUIC long header format (first two bits = 1, version field at bytes 1-4)
-- [ ] Update policy evaluation to match these new protocol values in rules
-- [ ] Write tests for each detection method
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] Add `ProtoWS Protocol = "ws"`, `ProtoWSS Protocol = "wss"`, `ProtoGRPC Protocol = "grpc"`, `ProtoDNS Protocol = "dns"`, `ProtoQUIC Protocol = "quic"` to the Protocol enum
+- [x] gRPC detection: in the MITM request handler, check `Content-Type: application/grpc` and tag the request context with ProtoGRPC
+- [x] WebSocket detection: check for `Connection: Upgrade` + `Upgrade: websocket` headers. Tag as ProtoWS (plaintext) or ProtoWSS (over TLS).
+- [x] DNS detection: UDP port 53 = ProtoDNS
+- [x] QUIC detection: implement `isQUICPacket(data []byte) bool` checking QUIC long header format (first two bits = 1, version field at bytes 1-4)
+- [x] Update policy evaluation to match these new protocol values in rules
+- [x] Write tests for each detection method
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 2: WebSocket frame parser
 
