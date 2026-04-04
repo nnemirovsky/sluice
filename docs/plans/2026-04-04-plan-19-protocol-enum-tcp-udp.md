@@ -71,8 +71,8 @@ Add `ProtoTCP` and `ProtoUDP` to the Protocol integer enum and replace hardcoded
 
 ### Task 5: [Final] Update documentation
 
-- [ ] Update CLAUDE.md protocol table: add TCP and UDP transport-level protocol values
-- [ ] Update examples/config.toml: ensure UDP deny-all example uses the documented protocol name
+- [x] Update CLAUDE.md protocol table: add TCP and UDP transport-level protocol values
+- [x] Update examples/config.toml: ensure UDP deny-all example uses the documented protocol name
 
 ## Technical Details
 

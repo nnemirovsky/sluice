@@ -32,7 +32,7 @@ go test ./... -v -timeout 30s
 - `internal/store/migrations/000001_init.up.sql` - Initial schema migration (rules, config, bindings, mcp_upstreams, channels)
 - `internal/store/migrations/000001_init.down.sql` - Rollback for initial schema
 - `internal/proxy/server.go` - SOCKS5 server wrapping `things-go/go-socks5` with TCP and UDP policy enforcement, two-phase protocol detection in the dial path (client byte peeking with 200ms timeout, server banner reading for SMTP/IMAP), and bufferedConn wrapper for replaying peeked bytes
-- `internal/proxy/protocol.go` - Protocol type (integer enum with String/ParseProtocol) and two-phase detection: port-based guess via DetectProtocol, then byte-level confirmation via DetectFromClientBytes (TLS, SSH, HTTP) and DetectFromServerBytes (SMTP, IMAP). Supports HTTP, HTTPS, SSH, IMAP, SMTP, WebSocket (ws/wss), gRPC, DNS, QUIC, APNS, and generic.
+- `internal/proxy/protocol.go` - Protocol type (integer enum with String/ParseProtocol) and two-phase detection: port-based guess via DetectProtocol, then byte-level confirmation via DetectFromClientBytes (TLS, SSH, HTTP) and DetectFromServerBytes (SMTP, IMAP). Supports HTTP, HTTPS, SSH, IMAP, SMTP, WebSocket (ws/wss), gRPC, DNS, QUIC, APNS, TCP, UDP, and generic.
 - `internal/proxy/ca.go` - Self-signed CA generation and persistence for HTTPS MITM
 - `internal/proxy/inject.go` - HTTPS MITM credential injector using goproxy with scoped phantom token replacement and unbound token stripping
 - `internal/proxy/ssh.go` - SSH jump host with vault key injection and bidirectional channel relay
@@ -651,6 +651,8 @@ their bound destinations, preventing cross-credential exfiltration.
 | **DNS** | UDP | N/A | Domain-level policy (NXDOMAIN for denied) |
 | **QUIC/HTTP3** | UDP | HTTP/3 MITM, phantom swap via quic-go | Full HTTP/3 request/response |
 | **APNS** | TCP | Connection-level allow/deny only (port 5223) | N/A |
+| **TCP** | TCP | Transport-level meta-protocol for policy rules matching any TCP-based protocol | N/A |
+| **UDP** | UDP | Transport-level meta-protocol for policy rules matching any UDP-based protocol | N/A |
 | **Generic TCP** | TCP | Connection-level allow/deny only | None |
 | **Generic UDP** | UDP | Connection-level allow/deny only (default-deny) | None |
 
