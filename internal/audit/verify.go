@@ -29,7 +29,7 @@ func VerifyChain(path string) (*VerifyResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open audit log: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	result := &VerifyResult{}
 	expectedHash := hashLine([]byte("")) // genesis

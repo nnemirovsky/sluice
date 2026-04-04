@@ -63,10 +63,10 @@ func openVaultStore(dbPath string) *vault.Store {
 			}
 			cfg, cfgErr := db.GetConfig()
 			if cfgErr != nil {
-				db.Close()
+				_ = db.Close()
 				log.Fatalf("read config from store: %v", cfgErr)
 			}
-			db.Close()
+			_ = db.Close()
 
 			if cfg.VaultDir != "" {
 				vaultDir = cfg.VaultDir
@@ -127,7 +127,7 @@ func handleCredAdd(args []string) {
 	portsStr := fs.String("ports", "", "comma-separated port list for the allow rule (e.g. 443,80)")
 	header := fs.String("header", "", "header for the binding (e.g. Authorization)")
 	template := fs.String("template", "", "template for credential injection (e.g. \"Bearer {value}\")")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	if fs.NArg() == 0 {
 		fmt.Println("usage: sluice cred add <name> [--destination host] [--ports 443] [--header Authorization] [--template \"Bearer {value}\"]")
@@ -183,7 +183,7 @@ func handleCredAdd(args []string) {
 		if err != nil {
 			log.Fatalf("open store: %v", err)
 		}
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 	}
 
 	// Inputs validated and DB is open. Now persist the credential.
@@ -260,7 +260,7 @@ func handleCredAdd(args []string) {
 func handleCredList(args []string) {
 	fs := flag.NewFlagSet("cred list", flag.ExitOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	vs := openVaultStore(*dbPath)
 	names, err := vs.List()
@@ -291,7 +291,7 @@ func handleCredList(args []string) {
 		}
 		return
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	for _, n := range names {
 		bindings, bErr := db.ListBindingsByCredential(n)
@@ -324,7 +324,7 @@ func handleCredList(args []string) {
 func handleCredRemove(args []string) {
 	fs := flag.NewFlagSet("cred remove", flag.ExitOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	if fs.NArg() == 0 {
 		fmt.Println("usage: sluice cred remove <name>")
@@ -364,7 +364,7 @@ func handleCredRemove(args []string) {
 		log.Printf("warning: could not open database %q for cleanup: %v (stale rules/bindings may remain)", *dbPath, dbErr)
 	}
 	if dbErr == nil {
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 
 		credSource := credAddSourcePrefix + name
 		n, rmErr := db.RemoveRulesBySource(credSource)

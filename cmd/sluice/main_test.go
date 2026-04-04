@@ -21,12 +21,12 @@ func TestReloadPolicyConcurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Seed with initial policy.
 	dv := "deny"
-	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dv})
-	db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}})
+	_ = db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dv})
+	_, _ = db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}})
 
 	eng, err := policy.LoadFromStore(db)
 	if err != nil {
@@ -40,7 +40,7 @@ func TestReloadPolicyConcurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create server: %v", err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	// Simulate rapid concurrent SIGHUP-style reloads. Each goroutine
 	// modifies the store and recompiles the engine.
@@ -53,10 +53,10 @@ func TestReloadPolicyConcurrent(t *testing.T) {
 			// Alternate between adding/removing a rule to vary state.
 			if n%2 == 0 {
 				vd := "deny"
-				db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &vd})
+				_ = db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &vd})
 			} else {
 				va := "allow"
-				db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &va})
+				_ = db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &va})
 			}
 			newEng, loadErr := policy.LoadFromStore(db)
 			if loadErr != nil {
@@ -90,11 +90,11 @@ func TestReloadPolicyValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	dvVal := "deny"
-	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvVal})
-	db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}})
+	_ = db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvVal})
+	_, _ = db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}})
 
 	eng, err := policy.LoadFromStore(db)
 	if err != nil {
@@ -108,7 +108,7 @@ func TestReloadPolicyValidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create server: %v", err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	// Set an invalid default verdict in the store. With typed config, the
 	// CHECK constraint rejects the invalid value at the DB level.
@@ -167,11 +167,11 @@ func TestEngineValidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	dvEV := "deny"
-	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvEV})
-	db.AddRule("allow", store.RuleOpts{Destination: "example.com"})
+	_ = db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvEV})
+	_, _ = db.AddRule("allow", store.RuleOpts{Destination: "example.com"})
 
 	eng, err := policy.LoadFromStore(db)
 	if err != nil {
@@ -195,10 +195,10 @@ func TestHealthzEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	dvHealth := "deny"
-	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvHealth})
+	_ = db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvHealth})
 
 	eng, err := policy.LoadFromStore(db)
 	if err != nil {
@@ -217,7 +217,7 @@ func TestHealthzEndpoint(t *testing.T) {
 	if healthLn == nil {
 		t.Fatal("health server listener is nil")
 	}
-	defer healthSrv.Close()
+	defer func() { _ = healthSrv.Close() }()
 
 	healthURL := "http://" + healthLn.Addr().String() + "/healthz"
 
@@ -229,13 +229,13 @@ func TestHealthzEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /healthz before serve: %v", err)
 	}
-	resp0.Body.Close()
+	_ = resp0.Body.Close()
 	if resp0.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 before proxy is serving, got %d", resp0.StatusCode)
 	}
 
 	// Start serving in background.
-	go srv.ListenAndServe()
+	go func() { _ = srv.ListenAndServe() }()
 	time.Sleep(10 * time.Millisecond)
 
 	// Proxy is serving, should get 200.
@@ -243,20 +243,20 @@ func TestHealthzEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /healthz: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200 while proxy is up, got %d", resp.StatusCode)
 	}
 
 	// Close the proxy.
-	srv.Close()
+	_ = srv.Close()
 
 	// Should get 503 now.
 	resp2, err := http.Get(healthURL)
 	if err != nil {
 		t.Fatalf("GET /healthz after close: %v", err)
 	}
-	resp2.Body.Close()
+	_ = resp2.Body.Close()
 	if resp2.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 after proxy close, got %d", resp2.StatusCode)
 	}
@@ -362,7 +362,7 @@ template = "Bearer {value}"
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	empty, err := db.IsEmpty()
 	if err != nil {
@@ -446,11 +446,11 @@ func TestSIGHUPRecompileFromStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Initial state: deny everything.
 	dvSIG := "deny"
-	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvSIG})
+	_ = db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvSIG})
 
 	eng, err := policy.LoadFromStore(db)
 	if err != nil {
@@ -464,7 +464,7 @@ func TestSIGHUPRecompileFromStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create server: %v", err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	// Verify initial state.
 	v := srv.EnginePtr().Load().Evaluate("api.example.com", 443)
@@ -473,7 +473,7 @@ func TestSIGHUPRecompileFromStore(t *testing.T) {
 	}
 
 	// Add a rule to the store (as would happen via CLI or Telegram).
-	db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}, Source: "manual"})
+	_, _ = db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}, Source: "manual"})
 
 	// Simulate SIGHUP reload: recompile from store and swap.
 	srv.ReloadMu().Lock()
@@ -502,7 +502,7 @@ func TestReadVaultConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// No vault config set explicitly. Typed config has "age" as default.
 	cfg, err := readVaultConfig(db)
@@ -517,7 +517,7 @@ func TestReadVaultConfig(t *testing.T) {
 	vprov := "hashicorp"
 	vaddr := "https://vault.example.com:8200"
 	vmount := "secret"
-	db.UpdateConfig(store.ConfigUpdate{
+	_ = db.UpdateConfig(store.ConfigUpdate{
 		VaultProvider:      &vprov,
 		VaultHashicorpAddr: &vaddr,
 		VaultHashicorpMount: &vmount,
@@ -545,7 +545,7 @@ func TestReadBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Empty store should return empty bindings.
 	bindings, err := readBindings(db)
@@ -557,12 +557,12 @@ func TestReadBindings(t *testing.T) {
 	}
 
 	// Add bindings.
-	db.AddBinding("api.example.com", "my_key", store.BindingOpts{
+	_, _ = db.AddBinding("api.example.com", "my_key", store.BindingOpts{
 		Ports:    []int{443},
 		Header:   "Authorization",
 		Template: "Bearer {value}",
 	})
-	db.AddBinding("github.com", "gh_key", store.BindingOpts{
+	_, _ = db.AddBinding("github.com", "gh_key", store.BindingOpts{
 		Ports:     []int{22},
 		Protocols: []string{"ssh"},
 	})
@@ -591,7 +591,7 @@ func TestStoreIsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	empty, err := db.IsEmpty()
 	if err != nil {
@@ -603,7 +603,7 @@ func TestStoreIsEmpty(t *testing.T) {
 
 	// Config changes don't affect emptiness (typed singleton always exists).
 	// Adding a rule makes it non-empty.
-	db.AddRule("allow", store.RuleOpts{Destination: "example.com"})
+	_, _ = db.AddRule("allow", store.RuleOpts{Destination: "example.com"})
 
 	empty, err = db.IsEmpty()
 	if err != nil {

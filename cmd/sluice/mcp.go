@@ -52,14 +52,14 @@ func handleMCPGateway(args []string) error {
 	auditPath := fs.String("audit", "", "path to audit log file (optional)")
 	telegramToken := fs.String("telegram-token", os.Getenv("TELEGRAM_BOT_TOKEN"), "Telegram bot token")
 	telegramChatIDStr := fs.String("telegram-chat-id", os.Getenv("TELEGRAM_CHAT_ID"), "Telegram chat ID for approvals")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	// Open the SQLite store.
 	db, err := store.New(*dbPath)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// If --config is specified and the DB is empty, auto-import the TOML file as seed.
 	if *configPath != "" {
@@ -118,7 +118,7 @@ func handleMCPGateway(args []string) error {
 		if err != nil {
 			return fmt.Errorf("open audit log: %w", err)
 		}
-		defer logger.Close()
+		defer func() { _ = logger.Close() }()
 	}
 
 	// Optional Telegram approval channel and broker.
@@ -223,7 +223,7 @@ func handleMCPAdd(args []string) error {
 	argsStr := fs.String("args", "", "comma-separated arguments for the command")
 	envStr := fs.String("env", "", "comma-separated KEY=VAL environment variables")
 	timeout := fs.Int("timeout", 120, "upstream timeout in seconds")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	if fs.NArg() == 0 || *command == "" {
 		fmt.Println("usage: sluice mcp add <name> --command <cmd> [--args \"arg1,arg2\"] [--env \"KEY=VAL,...\"] [--timeout 120]")
@@ -255,7 +255,7 @@ func handleMCPAdd(args []string) error {
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	id, err := db.AddMCPUpstream(name, *command, store.MCPUpstreamOpts{
 		Args:       cmdArgs,
@@ -272,13 +272,13 @@ func handleMCPAdd(args []string) error {
 func handleMCPList(args []string) error {
 	fs := flag.NewFlagSet("mcp list", flag.ExitOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	db, err := store.New(*dbPath)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	upstreams, err := db.ListMCPUpstreams()
 	if err != nil {
@@ -320,7 +320,7 @@ func handleMCPList(args []string) error {
 func handleMCPRemove(args []string) error {
 	fs := flag.NewFlagSet("mcp remove", flag.ExitOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	if fs.NArg() == 0 {
 		fmt.Println("usage: sluice mcp remove <name>")
@@ -332,7 +332,7 @@ func handleMCPRemove(args []string) error {
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	deleted, err := db.RemoveMCPUpstream(name)
 	if err != nil {

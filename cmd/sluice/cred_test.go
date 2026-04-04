@@ -25,7 +25,7 @@ func setupVaultDB(t *testing.T, dir string) string {
 	if err := db.UpdateConfig(store.ConfigUpdate{VaultDir: &dir}); err != nil {
 		t.Fatalf("set vault_dir: %v", err)
 	}
-	db.Close()
+	_ = db.Close()
 	return dbPath
 }
 
@@ -44,7 +44,7 @@ func TestHandleCredAdd(t *testing.T) {
 	if _, err := w.Write([]byte("my-secret-value\n")); err != nil {
 		t.Fatal(err)
 	}
-	w.Close()
+	_ = w.Close()
 	defer func() { os.Stdin = oldStdin }()
 
 	// Capture stdout.
@@ -58,9 +58,9 @@ func TestHandleCredAdd(t *testing.T) {
 
 	handleCredCommand([]string{"add", "--db", dbPath, "test_key"})
 
-	outW.Close()
+	_ = outW.Close()
 	var buf bytes.Buffer
-	io.Copy(&buf, outR)
+	_, _ = io.Copy(&buf, outR)
 	os.Stdout = oldStdout
 
 	output := buf.String()
@@ -110,9 +110,9 @@ func TestHandleCredList(t *testing.T) {
 
 	handleCredCommand([]string{"list", "--db", dbPath})
 
-	outW.Close()
+	_ = outW.Close()
 	var buf bytes.Buffer
-	io.Copy(&buf, outR)
+	_, _ = io.Copy(&buf, outR)
 	os.Stdout = oldStdout
 
 	output := buf.String()
@@ -148,9 +148,9 @@ func TestHandleCredRemove(t *testing.T) {
 
 	handleCredCommand([]string{"remove", "--db", dbPath, "to_remove"})
 
-	outW.Close()
+	_ = outW.Close()
 	var buf bytes.Buffer
-	io.Copy(&buf, outR)
+	_, _ = io.Copy(&buf, outR)
 	os.Stdout = oldStdout
 
 	output := buf.String()
@@ -192,9 +192,9 @@ func TestHandleCredListEmpty(t *testing.T) {
 
 	handleCredCommand([]string{"list", "--db", dbPath})
 
-	outW.Close()
+	_ = outW.Close()
 	var buf bytes.Buffer
-	io.Copy(&buf, outR)
+	_, _ = io.Copy(&buf, outR)
 	os.Stdout = oldStdout
 
 	output := strings.TrimSpace(buf.String())
@@ -286,9 +286,9 @@ func TestHandleCredRemoveNonexistent(t *testing.T) {
 
 	handleCredCommand([]string{"remove", "--db", dbPath, "does_not_exist"})
 
-	outW.Close()
+	_ = outW.Close()
 	var buf bytes.Buffer
-	io.Copy(&buf, outR)
+	_, _ = io.Copy(&buf, outR)
 	os.Stdout = oldStdout
 
 	output := buf.String()
@@ -313,7 +313,7 @@ func TestHandleCredAddWithDestination(t *testing.T) {
 	if _, err := w.Write([]byte("sk-ant-abc123\n")); err != nil {
 		t.Fatal(err)
 	}
-	w.Close()
+	_ = w.Close()
 	defer func() { os.Stdin = oldStdin }()
 
 	// Capture stdout.
@@ -334,9 +334,9 @@ func TestHandleCredAddWithDestination(t *testing.T) {
 		"anthropic_key",
 	})
 
-	outW.Close()
+	_ = outW.Close()
 	var buf bytes.Buffer
-	io.Copy(&buf, outR)
+	_, _ = io.Copy(&buf, outR)
 	os.Stdout = oldStdout
 
 	output := buf.String()
@@ -369,7 +369,7 @@ func TestHandleCredAddWithDestination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	rules, err := db.ListRules(store.RuleFilter{Verdict: "allow"})
 	if err != nil {
@@ -421,7 +421,7 @@ func TestHandleCredAddWithTemplate(t *testing.T) {
 	if _, err := w.Write([]byte("ghp_abc123\n")); err != nil {
 		t.Fatal(err)
 	}
-	w.Close()
+	_ = w.Close()
 	defer func() { os.Stdin = oldStdin }()
 
 	oldStdout := os.Stdout
@@ -442,16 +442,16 @@ func TestHandleCredAddWithTemplate(t *testing.T) {
 		"github_token",
 	})
 
-	outW.Close()
+	_ = outW.Close()
 	var buf bytes.Buffer
-	io.Copy(&buf, outR)
+	_, _ = io.Copy(&buf, outR)
 	os.Stdout = oldStdout
 
 	db, err := store.New(dbPath)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	bindings, err := db.ListBindings()
 	if err != nil {
@@ -492,7 +492,7 @@ func TestHandleCredListWithBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	// Capture stdout.
 	oldStdout := os.Stdout
@@ -505,9 +505,9 @@ func TestHandleCredListWithBindings(t *testing.T) {
 
 	handleCredCommand([]string{"list", "--db", dbPath})
 
-	outW.Close()
+	_ = outW.Close()
 	var buf bytes.Buffer
-	io.Copy(&buf, outR)
+	_, _ = io.Copy(&buf, outR)
 	os.Stdout = oldStdout
 
 	output := buf.String()
@@ -568,7 +568,7 @@ func TestHandleCredRemoveWithBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	// Capture stdout.
 	oldStdout := os.Stdout
@@ -581,9 +581,9 @@ func TestHandleCredRemoveWithBindings(t *testing.T) {
 
 	handleCredCommand([]string{"remove", "--db", dbPath, "cleanup_key"})
 
-	outW.Close()
+	_ = outW.Close()
 	var buf bytes.Buffer
-	io.Copy(&buf, outR)
+	_, _ = io.Copy(&buf, outR)
 	os.Stdout = oldStdout
 
 	output := buf.String()
@@ -613,7 +613,7 @@ func TestHandleCredRemoveWithBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	rules, err := db.ListRules(store.RuleFilter{})
 	if err != nil {
@@ -652,7 +652,7 @@ func TestHandleCredAddThenRemoveIntegrated(t *testing.T) {
 	if _, err := w.Write([]byte("real-secret\n")); err != nil {
 		t.Fatal(err)
 	}
-	w.Close()
+	_ = w.Close()
 
 	oldStdout := os.Stdout
 	outR, outW, err := os.Pipe()
@@ -671,9 +671,9 @@ func TestHandleCredAddThenRemoveIntegrated(t *testing.T) {
 		"integrated_key",
 	})
 
-	outW.Close()
+	_ = outW.Close()
 	var buf bytes.Buffer
-	io.Copy(&buf, outR)
+	_, _ = io.Copy(&buf, outR)
 	os.Stdout = oldStdout
 	os.Stdin = oldStdin
 
@@ -701,7 +701,7 @@ func TestHandleCredAddThenRemoveIntegrated(t *testing.T) {
 	if len(bindings[0].Ports) != 2 || bindings[0].Ports[0] != 443 || bindings[0].Ports[1] != 8443 {
 		t.Errorf("binding ports = %v, want [443, 8443]", bindings[0].Ports)
 	}
-	db.Close()
+	_ = db.Close()
 
 	// Step 2: Remove credential.
 	outR, outW, err = os.Pipe()
@@ -712,9 +712,9 @@ func TestHandleCredAddThenRemoveIntegrated(t *testing.T) {
 
 	handleCredCommand([]string{"remove", "--db", dbPath, "integrated_key"})
 
-	outW.Close()
+	_ = outW.Close()
 	buf.Reset()
-	io.Copy(&buf, outR)
+	_, _ = io.Copy(&buf, outR)
 	os.Stdout = oldStdout
 
 	// Verify everything was cleaned up.
@@ -722,7 +722,7 @@ func TestHandleCredAddThenRemoveIntegrated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen store: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	rules, err = db.ListRules(store.RuleFilter{})
 	if err != nil {

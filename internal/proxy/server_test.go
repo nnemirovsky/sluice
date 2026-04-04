@@ -59,15 +59,15 @@ func TestProxyAllowsAllowedConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echo.Close()
+	defer func() { _ = echo.Close() }()
 	go func() {
 		for {
 			conn, err := echo.Accept()
 			if err != nil {
 				return
 			}
-			conn.Write([]byte("hello"))
-			conn.Close()
+			_, _ = conn.Write([]byte("hello"))
+			_ = conn.Close()
 		}
 	}()
 
@@ -91,8 +91,8 @@ destination = "127.0.0.1"
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ListenAndServe()
-	defer srv.Close()
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
 
 	// Connect through SOCKS5 proxy
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
@@ -104,7 +104,7 @@ destination = "127.0.0.1"
 	if err != nil {
 		t.Fatalf("dial through proxy: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	buf := make([]byte, 5)
 	n, err := conn.Read(buf)
@@ -125,15 +125,15 @@ func TestProxyAllowsFQDNConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echo.Close()
+	defer func() { _ = echo.Close() }()
 	go func() {
 		for {
 			conn, err := echo.Accept()
 			if err != nil {
 				return
 			}
-			conn.Write([]byte("hello"))
-			conn.Close()
+			_, _ = conn.Write([]byte("hello"))
+			_ = conn.Close()
 		}
 	}()
 
@@ -168,8 +168,8 @@ destination = "::1"
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ListenAndServe()
-	defer srv.Close()
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -180,7 +180,7 @@ destination = "::1"
 	if err != nil {
 		t.Fatalf("FQDN connection through proxy should be allowed: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	buf := make([]byte, 5)
 	n, err := conn.Read(buf)
@@ -208,8 +208,8 @@ default = "deny"
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ListenAndServe()
-	defer srv.Close()
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -233,15 +233,15 @@ func TestProxyDeniesFQDNResolvingToAskIP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echo.Close()
+	defer func() { _ = echo.Close() }()
 	go func() {
 		for {
 			conn, err := echo.Accept()
 			if err != nil {
 				return
 			}
-			conn.Write([]byte("hello"))
-			conn.Close()
+			_, _ = conn.Write([]byte("hello"))
+			_ = conn.Close()
 		}
 	}()
 
@@ -272,8 +272,8 @@ destination = "::1"
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ListenAndServe()
-	defer srv.Close()
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -297,15 +297,15 @@ func TestProxyDeniesFQDNResolvingToPrivateIP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echo.Close()
+	defer func() { _ = echo.Close() }()
 	go func() {
 		for {
 			conn, err := echo.Accept()
 			if err != nil {
 				return
 			}
-			conn.Write([]byte("hello"))
-			conn.Close()
+			_, _ = conn.Write([]byte("hello"))
+			_ = conn.Close()
 		}
 	}()
 
@@ -331,8 +331,8 @@ destination = "localhost"
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ListenAndServe()
-	defer srv.Close()
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -355,15 +355,15 @@ func TestProxyAllowsFQDNToPrivateIPWithDefaultAllow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echo.Close()
+	defer func() { _ = echo.Close() }()
 	go func() {
 		for {
 			conn, err := echo.Accept()
 			if err != nil {
 				return
 			}
-			conn.Write([]byte("hello"))
-			conn.Close()
+			_, _ = conn.Write([]byte("hello"))
+			_ = conn.Close()
 		}
 	}()
 
@@ -384,8 +384,8 @@ default = "allow"
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ListenAndServe()
-	defer srv.Close()
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -396,7 +396,7 @@ default = "allow"
 	if err != nil {
 		t.Fatalf("FQDN to private IP with default=allow should succeed: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	buf := make([]byte, 5)
 	n, err := conn.Read(buf)
@@ -427,8 +427,8 @@ destination = "127.0.0.1"
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ListenAndServe()
-	defer srv.Close()
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -446,15 +446,15 @@ func TestProxyAskWithBrokerAllowOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echo.Close()
+	defer func() { _ = echo.Close() }()
 	go func() {
 		for {
 			conn, err := echo.Accept()
 			if err != nil {
 				return
 			}
-			conn.Write([]byte("hello"))
-			conn.Close()
+			_, _ = conn.Write([]byte("hello"))
+			_ = conn.Close()
 		}
 	}()
 
@@ -479,8 +479,8 @@ destination = "127.0.0.1"
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ListenAndServe()
-	defer srv.Close()
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -491,7 +491,7 @@ destination = "127.0.0.1"
 	if err != nil {
 		t.Fatalf("expected ask+approve to allow connection: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	buf := make([]byte, 5)
 	n, err := conn.Read(buf)
@@ -525,8 +525,8 @@ destination = "127.0.0.1"
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ListenAndServe()
-	defer srv.Close()
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -544,15 +544,15 @@ func TestProxyAskWithBrokerAlwaysAllow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echo.Close()
+	defer func() { _ = echo.Close() }()
 	go func() {
 		for {
 			conn, err := echo.Accept()
 			if err != nil {
 				return
 			}
-			conn.Write([]byte("hello"))
-			conn.Close()
+			_, _ = conn.Write([]byte("hello"))
+			_ = conn.Close()
 		}
 	}()
 
@@ -577,8 +577,8 @@ destination = "127.0.0.1"
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ListenAndServe()
-	defer srv.Close()
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -590,7 +590,7 @@ destination = "127.0.0.1"
 	if err != nil {
 		t.Fatalf("expected always-allow to permit connection: %v", err)
 	}
-	conn.Close()
+	_ = conn.Close()
 
 	// Wait briefly for dynamic rule to take effect
 	time.Sleep(10 * time.Millisecond)
@@ -600,7 +600,7 @@ destination = "127.0.0.1"
 	if err != nil {
 		t.Fatalf("expected dynamic allow rule to permit second connection: %v", err)
 	}
-	defer conn2.Close()
+	defer func() { _ = conn2.Close() }()
 
 	buf := make([]byte, 5)
 	n, err := conn2.Read(buf)
@@ -635,8 +635,8 @@ destination = "127.0.0.1"
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ListenAndServe()
-	defer srv.Close()
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
 
 	// No one responds to the approval request, so it should timeout
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
@@ -656,7 +656,7 @@ func TestGracefulShutdownDrainsInFlight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer slowEcho.Close()
+	defer func() { _ = slowEcho.Close() }()
 	go func() {
 		for {
 			conn, err := slowEcho.Accept()
@@ -664,9 +664,9 @@ func TestGracefulShutdownDrainsInFlight(t *testing.T) {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				time.Sleep(200 * time.Millisecond)
-				c.Write([]byte("done"))
+				_, _ = c.Write([]byte("done"))
 			}(conn)
 		}
 	}()
@@ -686,7 +686,7 @@ default = "allow"
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ListenAndServe()
+	go func() { _ = srv.ListenAndServe() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -716,7 +716,7 @@ default = "allow"
 	if string(buf[:n]) != "done" {
 		t.Errorf("expected 'done', got %q", string(buf[:n]))
 	}
-	conn.Close()
+	_ = conn.Close()
 
 	// Shutdown should complete without timeout error.
 	if err := <-shutdownDone; err != nil {
@@ -730,7 +730,7 @@ func TestGracefulShutdownTimesOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer hangForever.Close()
+	defer func() { _ = hangForever.Close() }()
 	go func() {
 		for {
 			conn, err := hangForever.Accept()
@@ -740,8 +740,8 @@ func TestGracefulShutdownTimesOut(t *testing.T) {
 			// Hold open until the test cleans up.
 			go func(c net.Conn) {
 				buf := make([]byte, 1)
-				c.Read(buf)
-				c.Close()
+				_, _ = c.Read(buf)
+				_ = c.Close()
 			}(conn)
 		}
 	}()
@@ -761,7 +761,7 @@ default = "allow"
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ListenAndServe()
+	go func() { _ = srv.ListenAndServe() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -773,7 +773,7 @@ default = "allow"
 	if err != nil {
 		t.Fatalf("dial through proxy: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Graceful shutdown with a very short timeout should fail.
 	err = srv.GracefulShutdown(50 * time.Millisecond)
@@ -798,7 +798,7 @@ default = "allow"
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ListenAndServe()
+	go func() { _ = srv.ListenAndServe() }()
 
 	addr := srv.Addr()
 

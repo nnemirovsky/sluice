@@ -260,7 +260,7 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 								r.engine.Store(newEng)
 							}
 						} else {
-							if err := r.engine.Load().AddDynamicAllow(dest, port); err != nil {
+							if err := r.engine.Load().AddDynamicAllow(dest, port); err != nil { //nolint:staticcheck // backward compat fallback when no store
 								log.Printf("[WARN] failed to add dynamic allow rule for %s:%d: %v", dest, port, err)
 							}
 						}
@@ -354,7 +354,7 @@ func New(cfg Config) (*Server, error) {
 			// When bindings exist (resolver is set), injection infrastructure
 			// is required. Hard-fail so the operator fixes the issue.
 			if cfg.Resolver != nil {
-				ln.Close()
+				_ = ln.Close()
 				return nil, injErr
 			}
 			// No bindings yet. Degrade to policy-only mode so network
@@ -380,9 +380,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	socksServer, err := socks5.New(socksCfg)
 	if err != nil {
-		ln.Close()
+		_ = ln.Close()
 		if srv.injectorLn != nil {
-			srv.injectorLn.Close()
+			_ = srv.injectorLn.Close()
 		}
 		return nil, fmt.Errorf("socks5: %w", err)
 	}
@@ -433,7 +433,7 @@ func (s *Server) setupInjection(cfg Config, mainLn net.Listener) error {
 	// SSH jump host for credential-injected SSH connections.
 	hostKey, hkErr := GenerateSSHHostKey()
 	if hkErr != nil {
-		injLn.Close()
+		_ = injLn.Close()
 		s.injectorLn = nil
 		s.injector = nil
 		return fmt.Errorf("generate SSH host key: %w", hkErr)
@@ -551,6 +551,41 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 		}
 	}
 
+	// Route unbound HTTP/HTTPS through the injector when available so
+	// phantom tokens are stripped from requests to hosts without bindings.
+	// Without this, requests bypassing the binding-match block above
+	// would go direct and leak SLUICE_PHANTOM:* tokens upstream.
+	if s.injector != nil {
+		_, portStr, _ := net.SplitHostPort(addr)
+		port, _ := strconv.Atoi(portStr)
+		proto := DetectProtocol(port)
+		if proto == ProtoHTTP || proto == ProtoHTTPS {
+			fqdn, _ := ctx.Value(ctxKeyFQDN).(string)
+			if fqdn == "" {
+				host, _, _ := net.SplitHostPort(addr)
+				fqdn = host
+			}
+			ips := []string{}
+			if ip, _, err := net.SplitHostPort(addr); err == nil {
+				ips = append(ips, ip)
+			}
+			if fallbacks, ok := ctx.Value(ctxKeyFallbackAddrs).([]net.IP); ok {
+				for _, ip := range fallbacks {
+					ips = append(ips, ip.String())
+				}
+			}
+			pinID := generatePinID()
+			s.injector.PinIPs(pinID, ips)
+			conn, err := dialThroughInjector(s.injectorLn.Addr().String(), fqdn, port, s.injector.authToken, pinID)
+			if err != nil {
+				s.injector.UnpinIPs(pinID)
+				// Fall through to direct connection below.
+			} else {
+				return &pinnedConn{Conn: conn, injector: s.injector, pinID: pinID}, nil
+			}
+		}
+	}
+
 	// No credential binding or unsupported protocol: direct connection.
 	d := &net.Dialer{Timeout: connectTimeout}
 	conn, err := d.DialContext(ctx, network, addr)
@@ -589,19 +624,19 @@ func dialThroughInjector(injectorAddr, host string, port int, authToken, pinID s
 	target := net.JoinHostPort(host, strconv.Itoa(port))
 	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\nX-Sluice-Auth: %s\r\nX-Sluice-Pin: %s\r\n\r\n", target, target, authToken, pinID)
 	if _, wErr := io.WriteString(conn, req); wErr != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("send CONNECT: %w", wErr)
 	}
 
 	br := bufio.NewReader(conn)
 	resp, rErr := http.ReadResponse(br, &http.Request{Method: "CONNECT"})
 	if rErr != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("read CONNECT response: %w", rErr)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("CONNECT rejected: %s", resp.Status)
 	}
 
@@ -673,20 +708,20 @@ func dialWithHandler(handler func(net.Conn, chan<- error)) (net.Conn, error) {
 	}
 	ch := make(chan acceptResult, 1)
 	go func() {
-		defer ln.Close()
+		defer func() { _ = ln.Close() }()
 		c, aErr := ln.Accept()
 		ch <- acceptResult{c, aErr}
 	}()
 
 	socksEnd, dErr := net.DialTimeout("tcp", ln.Addr().String(), 5*time.Second)
 	if dErr != nil {
-		ln.Close()
+		_ = ln.Close()
 		return nil, fmt.Errorf("dial handler: %w", dErr)
 	}
 
 	result := <-ch
 	if result.err != nil {
-		socksEnd.Close()
+		_ = socksEnd.Close()
 		return nil, fmt.Errorf("accept handler: %w", result.err)
 	}
 
@@ -694,7 +729,7 @@ func dialWithHandler(handler func(net.Conn, chan<- error)) (net.Conn, error) {
 	go handler(result.conn, ready)
 
 	if setupErr := <-ready; setupErr != nil {
-		socksEnd.Close()
+		_ = socksEnd.Close()
 		return nil, fmt.Errorf("handler setup: %w", setupErr)
 	}
 	return socksEnd, nil
@@ -768,7 +803,7 @@ func (s *Server) IsListening() bool {
 func (s *Server) Close() error {
 	s.closed.Store(true)
 	if s.injectorLn != nil {
-		s.injectorLn.Close()
+		_ = s.injectorLn.Close()
 	}
 	return s.listener.Close()
 }
@@ -780,9 +815,9 @@ func (s *Server) Close() error {
 func (s *Server) GracefulShutdown(timeout time.Duration) error {
 	s.closed.Store(true)
 	// Stop accepting new connections.
-	s.listener.Close()
+	_ = s.listener.Close()
 	if s.injectorLn != nil {
-		s.injectorLn.Close()
+		_ = s.injectorLn.Close()
 	}
 
 	// Wait for in-flight connections to complete, bounded by timeout.

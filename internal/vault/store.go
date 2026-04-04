@@ -88,14 +88,14 @@ func loadOrCreateIdentity(path string) (*age.X25519Identity, error) {
 	// won the race). The winner's file is fully written before being
 	// linked, so the loser can safely read it.
 	if linkErr := os.Link(tmpPath, path); linkErr != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		if os.IsExist(linkErr) {
 			// Another process created the file first. Read their key.
 			return loadOrCreateIdentity(path)
 		}
 		return nil, fmt.Errorf("create identity file: %w", linkErr)
 	}
-	os.Remove(tmpPath)
+	_ = os.Remove(tmpPath)
 	return id, nil
 }
 
@@ -142,15 +142,15 @@ func (s *Store) Add(name, value string) ([]byte, error) {
 		return nil, fmt.Errorf("write temp: %w", err)
 	}
 	if err := tmpFile.Close(); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("close temp: %w", err)
 	}
 	if err := os.Chmod(tmpPath, 0600); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("chmod temp: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("rename temp: %w", err)
 	}
 	return ciphertext, nil
@@ -239,15 +239,15 @@ func (s *Store) WriteRawCredential(name string, data []byte) error {
 		return fmt.Errorf("write temp: %w", err)
 	}
 	if err := tmpFile.Close(); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close temp: %w", err)
 	}
 	if err := os.Chmod(tmpPath, 0600); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("chmod temp: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename temp: %w", err)
 	}
 	return nil

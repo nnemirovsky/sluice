@@ -35,7 +35,7 @@ func newTestServer(t *testing.T) (*SocketClient, *http.ServeMux, func()) {
 	client := NewSocketClient(sock)
 	return client, mux, func() {
 		_ = srv.Close()
-		os.RemoveAll(dir)
+		_ = os.RemoveAll(dir)
 	}
 }
 

@@ -76,7 +76,7 @@ func TestPhantomSwapInHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -132,7 +132,7 @@ func TestPhantomSwapInBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -185,7 +185,7 @@ func TestHeaderInjectionViaBindingHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -236,7 +236,7 @@ func TestHeaderInjectionWithTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -279,7 +279,7 @@ func TestNoInjectionWithoutBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -340,7 +340,7 @@ func TestMITMHTTPS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -383,6 +383,60 @@ func TestPhantomToken(t *testing.T) {
 	token := PhantomToken("my_api_key")
 	if token != "SLUICE_PHANTOM:my_api_key" {
 		t.Errorf("unexpected phantom token: %s", token)
+	}
+}
+
+func TestPhantomStripHyphenatedCredentialName(t *testing.T) {
+	var mu sync.Mutex
+	var receivedBody string
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		receivedBody = string(body)
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer backend.Close()
+
+	// No bindings. Hyphenated credential name must be fully stripped.
+	inj, store := setupTestInjector(t, nil)
+	if _, err := store.Add("my-api-key", "real-value"); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyServer := httptest.NewServer(inj.Proxy)
+	defer proxyServer.Close()
+
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+
+	phantom := PhantomToken("my-api-key")
+	bodyStr := `{"token": "` + phantom + `"}`
+	req, _ := http.NewRequest("POST", backend.URL+"/test", strings.NewReader(bodyStr))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if strings.Contains(receivedBody, "SLUICE_PHANTOM") {
+		t.Error("phantom token prefix leaked in body")
+	}
+	if strings.Contains(receivedBody, "-api-key") {
+		t.Error("partial phantom token suffix leaked in body")
+	}
+	expected := `{"token": ""}`
+	if receivedBody != expected {
+		t.Errorf("body: expected %q, got %q", expected, receivedBody)
 	}
 }
 
@@ -429,7 +483,7 @@ func TestGlobalPhantomReplacementWithoutBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -437,7 +491,9 @@ func TestGlobalPhantomReplacementWithoutBinding(t *testing.T) {
 	if strings.Contains(receivedBody, phantom) {
 		t.Error("phantom token leaked in body to unbound host")
 	}
-	expected := `{"token": "sk-real-secret-12345"}`
+	// Unbound phantom tokens are stripped (not replaced with real values)
+	// to prevent cross-credential exfiltration.
+	expected := `{"token": ""}`
 	if receivedBody != expected {
 		t.Errorf("body: expected %q, got %q", expected, receivedBody)
 	}
@@ -446,8 +502,8 @@ func TestGlobalPhantomReplacementWithoutBinding(t *testing.T) {
 	if strings.Contains(customHeader, phantom) {
 		t.Error("phantom token leaked in header to unbound host")
 	}
-	if customHeader != "prefix-sk-real-secret-12345-suffix" {
-		t.Errorf("header: expected %q, got %q", "prefix-sk-real-secret-12345-suffix", customHeader)
+	if customHeader != "prefix--suffix" {
+		t.Errorf("header: expected %q, got %q", "prefix--suffix", customHeader)
 	}
 }
 
@@ -506,7 +562,7 @@ func TestBindingHeaderInjectionAndGlobalPhantomReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -517,24 +573,155 @@ func TestBindingHeaderInjectionAndGlobalPhantomReplacement(t *testing.T) {
 		t.Errorf("X-Api-Key: expected %q, got %q", "Bearer sk-real-secret-12345", apiKey)
 	}
 
-	// Verify global phantom replacement in body.
+	// Verify bound phantom replaced in body, unbound phantom stripped.
 	if strings.Contains(receivedBody, phantomAPI) {
 		t.Error("api_key phantom leaked in body")
 	}
 	if strings.Contains(receivedBody, phantomOther) {
 		t.Error("other_key phantom leaked in body")
 	}
-	expectedBody := `{"key": "sk-real-secret-12345", "other": "other-real-value"}`
+	// Bound credential (api_key) is replaced with real value.
+	// Unbound credential (other_key) is stripped to prevent cross-credential
+	// exfiltration to unintended destinations.
+	expectedBody := `{"key": "sk-real-secret-12345", "other": ""}`
 	if receivedBody != expectedBody {
 		t.Errorf("body: expected %q, got %q", expectedBody, receivedBody)
 	}
 
-	// Verify global phantom replacement in header.
+	// Verify unbound phantom stripped in header (not replaced with real value).
 	refHeader := receivedHeaders.Get("X-Ref")
 	if strings.Contains(refHeader, phantomOther) {
 		t.Error("other_key phantom leaked in X-Ref header")
 	}
-	if refHeader != "other-real-value" {
-		t.Errorf("X-Ref: expected %q, got %q", "other-real-value", refHeader)
+	if refHeader != "" {
+		t.Errorf("X-Ref: expected empty (stripped), got %q", refHeader)
+	}
+}
+
+func TestPhantomPrefixMatchOrdering(t *testing.T) {
+	// Verify that SLUICE_PHANTOM:api_key does not corrupt
+	// SLUICE_PHANTOM:api_key_v2 via substring match.
+	var mu sync.Mutex
+	var receivedBody string
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		receivedBody = string(body)
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	bindings := []vault.Binding{
+		{Destination: backendURL.Hostname(), Credential: "api_key"},
+		{Destination: backendURL.Hostname(), Credential: "api_key_v2"},
+	}
+
+	inj, store := setupTestInjector(t, bindings)
+	if _, err := store.Add("api_key", "secret-v1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Add("api_key_v2", "secret-v2"); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyServer := httptest.NewServer(inj.Proxy)
+	defer proxyServer.Close()
+
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+
+	phantomV1 := PhantomToken("api_key")
+	phantomV2 := PhantomToken("api_key_v2")
+
+	bodyStr := `{"v1": "` + phantomV1 + `", "v2": "` + phantomV2 + `"}`
+	req, _ := http.NewRequest("POST", backend.URL+"/test", strings.NewReader(bodyStr))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	expected := `{"v1": "secret-v1", "v2": "secret-v2"}`
+	if receivedBody != expected {
+		t.Errorf("body: expected %q, got %q", expected, receivedBody)
+	}
+}
+
+func TestPhantomReplacementInURLQuery(t *testing.T) {
+	var mu sync.Mutex
+	var receivedQuery string
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		receivedQuery = r.URL.RawQuery
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	bindings := []vault.Binding{{
+		Destination: backendURL.Hostname(),
+		Credential:  "api_key",
+	}}
+
+	inj, store := setupTestInjector(t, bindings)
+	if _, err := store.Add("api_key", "sk-real-secret-12345"); err != nil {
+		t.Fatal(err)
+	}
+	// Unbound credential that should be stripped in URL.
+	if _, err := store.Add("other_key", "other-real-value"); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyServer := httptest.NewServer(inj.Proxy)
+	defer proxyServer.Close()
+
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+
+	phantomAPI := PhantomToken("api_key")
+	phantomOther := PhantomToken("other_key")
+
+	// Bound phantom in query: replaced with real value.
+	// Unbound phantom in query: stripped.
+	targetURL := backend.URL + "/test?token=" + phantomAPI + "&other=" + phantomOther
+	req, _ := http.NewRequest("GET", targetURL, nil)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if strings.Contains(receivedQuery, "SLUICE_PHANTOM") {
+		t.Errorf("phantom token leaked in URL query: %s", receivedQuery)
+	}
+	// Bound phantom should be replaced with real value.
+	if !strings.Contains(receivedQuery, "sk-real-secret-12345") {
+		t.Errorf("bound phantom not replaced in query: %s", receivedQuery)
+	}
+	// Unbound phantom should be stripped (empty).
+	expectedQ := "token=sk-real-secret-12345&other="
+	if receivedQuery != expectedQ {
+		t.Errorf("query: expected %q, got %q", expectedQ, receivedQuery)
 	}
 }

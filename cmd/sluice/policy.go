@@ -42,13 +42,13 @@ func handlePolicyList(args []string) {
 	fs := flag.NewFlagSet("policy list", flag.ExitOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
 	verdict := fs.String("verdict", "", "filter by verdict (allow, deny, ask)")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	db, err := store.New(*dbPath)
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	rules, err := db.ListRules(store.RuleFilter{Verdict: *verdict})
 	if err != nil {
@@ -104,7 +104,7 @@ func handlePolicyAdd(args []string) {
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
 	portsStr := fs.String("ports", "", "comma-separated port list (e.g. 443,80)")
 	note := fs.String("name", "", "human-readable name")
-	fs.Parse(args[1:])
+	_ = fs.Parse(args[1:])
 
 	if fs.NArg() == 0 {
 		fmt.Println("usage: sluice policy add <allow|deny|ask> <destination> [--ports 443,80] [--name \"reason\"]")
@@ -135,7 +135,7 @@ func handlePolicyAdd(args []string) {
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	id, err := db.AddRule(verdict, store.RuleOpts{Destination: destination, Ports: ports, Name: *note})
 	if err != nil {
@@ -147,7 +147,7 @@ func handlePolicyAdd(args []string) {
 func handlePolicyRemove(args []string) {
 	fs := flag.NewFlagSet("policy remove", flag.ExitOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	if fs.NArg() == 0 {
 		fmt.Println("usage: sluice policy remove <id>")
@@ -163,7 +163,7 @@ func handlePolicyRemove(args []string) {
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	deleted, err := db.RemoveRule(id)
 	if err != nil {
@@ -179,7 +179,7 @@ func handlePolicyRemove(args []string) {
 func handlePolicyImport(args []string) {
 	fs := flag.NewFlagSet("policy import", flag.ExitOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	if fs.NArg() == 0 {
 		fmt.Println("usage: sluice policy import <path.toml>")
@@ -196,7 +196,7 @@ func handlePolicyImport(args []string) {
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	result, err := db.ImportTOML(data)
 	if err != nil {
@@ -214,13 +214,13 @@ func handlePolicyImport(args []string) {
 func handlePolicyExport(args []string) {
 	fs := flag.NewFlagSet("policy export", flag.ExitOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	db, err := store.New(*dbPath)
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Config section.
 	cfg, err := db.GetConfig()

@@ -22,7 +22,7 @@ func newTestStore(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -38,18 +38,6 @@ func newTestHandlerWithStore(t *testing.T, s *store.Store, broker *channel.Broke
 	ptr.Store(eng)
 	h := NewCommandHandler(ptr, new(sync.Mutex), auditPath)
 	h.SetStore(s)
-	if broker != nil {
-		h.SetBroker(broker)
-	}
-	return h
-}
-
-// newTestHandler creates a CommandHandler backed by the given engine for tests
-// (without a store, for backward compatibility with tests that don't need persistence).
-func newTestHandler(eng *policy.Engine, broker *channel.Broker, auditPath string) *CommandHandler {
-	ptr := new(atomic.Pointer[policy.Engine])
-	ptr.Store(eng)
-	h := NewCommandHandler(ptr, new(sync.Mutex), auditPath)
 	if broker != nil {
 		h.SetBroker(broker)
 	}
@@ -101,8 +89,8 @@ func TestParseCommand(t *testing.T) {
 
 func TestHandlePolicyShow(t *testing.T) {
 	s := newTestStore(t)
-	s.AddRule("allow", store.RuleOpts{Destination: "api.anthropic.com", Ports: []int{443}})
-	s.AddRule("deny", store.RuleOpts{Destination: "evil.com"})
+	_, _ = s.AddRule("allow", store.RuleOpts{Destination: "api.anthropic.com", Ports: []int{443}})
+	_, _ = s.AddRule("deny", store.RuleOpts{Destination: "evil.com"})
 
 	handler := newTestHandlerWithStore(t, s, nil, "")
 	result := handler.Handle(&Command{Name: "policy", Args: []string{"show"}})
@@ -234,7 +222,7 @@ func TestHandlePolicyRemoveInvalidID(t *testing.T) {
 
 func TestHandleStatus(t *testing.T) {
 	s := newTestStore(t)
-	s.AddRule("allow", store.RuleOpts{Destination: "example.com"})
+	_, _ = s.AddRule("allow", store.RuleOpts{Destination: "example.com"})
 
 	// Create a channel.Broker for PendingCount.
 	broker := channel.NewBroker(nil)

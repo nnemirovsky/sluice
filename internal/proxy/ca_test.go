@@ -155,7 +155,7 @@ func TestIsCACertExpiring_FileNotFound(t *testing.T) {
 func TestIsCACertExpiring_InvalidPEM(t *testing.T) {
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "bad.pem")
-	os.WriteFile(certPath, []byte("not a pem file"), 0644)
+	_ = os.WriteFile(certPath, []byte("not a pem file"), 0644)
 
 	_, err := IsCACertExpiring(certPath, 30*24*time.Hour)
 	if err == nil {

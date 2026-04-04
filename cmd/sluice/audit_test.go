@@ -31,7 +31,7 @@ func TestHandleAuditVerifyValid(t *testing.T) {
 			t.Fatalf("log event %d: %v", i, err)
 		}
 	}
-	logger.Close()
+	_ = logger.Close()
 
 	// Capture stdout.
 	oldStdout := os.Stdout
@@ -44,9 +44,9 @@ func TestHandleAuditVerifyValid(t *testing.T) {
 
 	handleAuditVerify(logPath)
 
-	outW.Close()
+	_ = outW.Close()
 	var buf bytes.Buffer
-	io.Copy(&buf, outR)
+	_, _ = io.Copy(&buf, outR)
 	os.Stdout = oldStdout
 
 	output := buf.String()
@@ -77,7 +77,7 @@ func TestHandleAuditVerifyBroken(t *testing.T) {
 	if err := logger.Log(audit.Event{Destination: "b.com", Verdict: "deny"}); err != nil {
 		t.Fatal(err)
 	}
-	logger.Close()
+	_ = logger.Close()
 
 	// Tamper with the file: corrupt the second line's prev_hash.
 	data, err := os.ReadFile(logPath)
@@ -161,7 +161,7 @@ func TestHandleAuditVerifyDefaultPath(t *testing.T) {
 	if err := logger.Log(audit.Event{Destination: "x.com", Verdict: "allow"}); err != nil {
 		t.Fatal(err)
 	}
-	logger.Close()
+	_ = logger.Close()
 
 	// handleAuditVerify uses the path directly, so call it with the explicit
 	// default path to validate parsing works correctly.
@@ -175,9 +175,9 @@ func TestHandleAuditVerifyDefaultPath(t *testing.T) {
 
 	handleAuditVerify(logPath)
 
-	outW.Close()
+	_ = outW.Close()
 	var buf bytes.Buffer
-	io.Copy(&buf, outR)
+	_, _ = io.Copy(&buf, outR)
 	os.Stdout = oldStdout
 
 	output := buf.String()

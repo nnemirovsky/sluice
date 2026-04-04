@@ -192,7 +192,7 @@ func (c *SocketClient) StartContainer(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// 204 = started, 304 = already running.
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotModified {

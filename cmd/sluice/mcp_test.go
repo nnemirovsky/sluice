@@ -19,7 +19,7 @@ func TestMCPUpstreamFromStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Add two upstreams.
 	_, err = db.AddMCPUpstream("github", "github-mcp-server", store.MCPUpstreamOpts{
@@ -86,7 +86,7 @@ func TestMCPUpstreamFromStoreEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	rows, err := db.ListMCPUpstreams()
 	if err != nil {
@@ -103,7 +103,7 @@ func TestMCPUpstreamWithEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	_, err = db.AddMCPUpstream("custom", "custom-server", store.MCPUpstreamOpts{
 		Env: map[string]string{
@@ -139,13 +139,13 @@ func TestMCPToolPolicyFromStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	dvTP := "ask"
-	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvTP})
-	db.AddRule("allow", store.RuleOpts{Tool: "github__list_*", Name: "Read-only GitHub operations"})
-	db.AddRule("deny", store.RuleOpts{Tool: "exec__*", Name: "Block all exec"})
-	db.AddRule("ask", store.RuleOpts{Tool: "filesystem__write_file", Name: "File writes need approval"})
+	_ = db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvTP})
+	_, _ = db.AddRule("allow", store.RuleOpts{Tool: "github__list_*", Name: "Read-only GitHub operations"})
+	_, _ = db.AddRule("deny", store.RuleOpts{Tool: "exec__*", Name: "Block all exec"})
+	_, _ = db.AddRule("ask", store.RuleOpts{Tool: "filesystem__write_file", Name: "File writes need approval"})
 
 	eng, err := policy.LoadFromStore(db)
 	if err != nil {
@@ -228,7 +228,7 @@ func TestHandleMCPAddAndList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	upstreams, err := db.ListMCPUpstreams()
 	if err != nil {
@@ -270,7 +270,7 @@ func TestHandleMCPAddWithEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	upstreams, err := db.ListMCPUpstreams()
 	if err != nil {
@@ -355,7 +355,7 @@ func TestHandleMCPRemove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	upstreams, err := db.ListMCPUpstreams()
 	if err != nil {
@@ -401,7 +401,7 @@ func TestMCPGatewayFromStoreSeeded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	tomlData := `[policy]
 default = "deny"
@@ -493,8 +493,8 @@ func TestHandleMCPGatewayNoUpstreams(t *testing.T) {
 		t.Fatal(err)
 	}
 	dvMCP := "deny"
-	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvMCP})
-	db.Close()
+	_ = db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvMCP})
+	_ = db.Close()
 
 	if os.Getenv("TEST_MCP_SUBPROCESS") == "no_upstreams" {
 		// Replace stdin with a pipe that is immediately closed on the
@@ -504,7 +504,7 @@ func TestHandleMCPGatewayNoUpstreams(t *testing.T) {
 			fmt.Fprintf(os.Stderr, "os.Pipe: %v\n", pipeErr)
 			os.Exit(1)
 		}
-		w.Close()
+		_ = w.Close()
 		os.Stdin = r
 		err := handleMCPGateway([]string{"--db", os.Getenv("TEST_DB_PATH")})
 		if err != nil {
@@ -536,8 +536,8 @@ func TestHandleMCPGatewayInvalidChatID(t *testing.T) {
 		t.Fatal(err)
 	}
 	dvMCP2 := "deny"
-	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvMCP2})
-	db.Close()
+	_ = db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvMCP2})
+	_ = db.Close()
 
 	if os.Getenv("TEST_MCP_SUBPROCESS") == "invalid_chat_id" {
 		err := handleMCPGateway([]string{
@@ -585,15 +585,15 @@ func TestMCPGatewayStoreBackedUpstreams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Add upstreams with various options.
-	db.AddMCPUpstream("github", "npx", store.MCPUpstreamOpts{
+	_, _ = db.AddMCPUpstream("github", "npx", store.MCPUpstreamOpts{
 		Args:       []string{"-y", "@mcp/server-github"},
 		Env:        map[string]string{"GITHUB_TOKEN": "ghp_test"},
 		TimeoutSec: 60,
 	})
-	db.AddMCPUpstream("fs", "fs-server", store.MCPUpstreamOpts{
+	_, _ = db.AddMCPUpstream("fs", "fs-server", store.MCPUpstreamOpts{
 		Args: []string{"--root", "/tmp"},
 	})
 

@@ -67,7 +67,7 @@ func (s *testIMAPServer) handle(conn net.Conn) {
 			_, _ = fmt.Fprintf(conn, "%s OK LOGOUT completed\r\n", tag)
 			return
 		} else {
-			fmt.Fprintf(conn, "%s BAD Unknown command\r\n", tag)
+			_, _ = fmt.Fprintf(conn, "%s BAD Unknown command\r\n", tag)
 		}
 	}
 }
@@ -105,7 +105,7 @@ func startTestSMTPServer(t *testing.T) (*testSMTPServer, net.Listener) {
 
 func (s *testSMTPServer) handle(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
-	fmt.Fprintf(conn, "220 smtp.test.local ESMTP\r\n")
+	_, _ = fmt.Fprintf(conn, "220 smtp.test.local ESMTP\r\n")
 
 	reader := bufio.NewReader(conn)
 	for {
@@ -117,7 +117,7 @@ func (s *testSMTPServer) handle(conn net.Conn) {
 		upper := strings.ToUpper(trimmed)
 
 		if strings.HasPrefix(upper, "EHLO") || strings.HasPrefix(upper, "HELO") {
-			fmt.Fprintf(conn, "250-smtp.test.local\r\n250 AUTH PLAIN LOGIN\r\n")
+			_, _ = fmt.Fprintf(conn, "250-smtp.test.local\r\n250 AUTH PLAIN LOGIN\r\n")
 		} else if strings.HasPrefix(upper, "AUTH PLAIN ") {
 			parts := strings.SplitN(trimmed, " ", 3)
 			if len(parts) == 3 {
@@ -126,16 +126,16 @@ func (s *testSMTPServer) handle(conn net.Conn) {
 					s.mu.Lock()
 					s.authData = decoded
 					s.mu.Unlock()
-					fmt.Fprintf(conn, "235 2.7.0 Authentication successful\r\n")
+					_, _ = fmt.Fprintf(conn, "235 2.7.0 Authentication successful\r\n")
 				} else {
-					fmt.Fprintf(conn, "535 5.7.8 Authentication failed\r\n")
+					_, _ = fmt.Fprintf(conn, "535 5.7.8 Authentication failed\r\n")
 				}
 			}
 		} else if strings.HasPrefix(upper, "QUIT") {
-			fmt.Fprintf(conn, "221 Bye\r\n")
+			_, _ = fmt.Fprintf(conn, "221 Bye\r\n")
 			return
 		} else {
-			fmt.Fprintf(conn, "500 Unknown command\r\n")
+			_, _ = fmt.Fprintf(conn, "500 Unknown command\r\n")
 		}
 	}
 }
@@ -186,7 +186,7 @@ func TestIMAPAuthSwap(t *testing.T) {
 	}
 
 	// Send LOGIN with phantom token.
-	fmt.Fprintf(agentConn, "A001 LOGIN testuser %s\r\n", phantom)
+	_, _ = fmt.Fprintf(agentConn, "A001 LOGIN testuser %s\r\n", phantom)
 
 	// Read LOGIN response.
 	resp, err := reader.ReadString('\n')
@@ -198,7 +198,7 @@ func TestIMAPAuthSwap(t *testing.T) {
 	}
 
 	// Disconnect.
-	fmt.Fprintf(agentConn, "A002 LOGOUT\r\n")
+	_, _ = fmt.Fprintf(agentConn, "A002 LOGOUT\r\n")
 	_, _ = reader.ReadString('\n') // read LOGOUT response
 	_ = agentConn.Close()
 	<-errCh
@@ -253,7 +253,7 @@ func TestSMTPAuthPlainSwap(t *testing.T) {
 	}
 
 	// Send EHLO.
-	fmt.Fprintf(agentConn, "EHLO test.local\r\n")
+	_, _ = fmt.Fprintf(agentConn, "EHLO test.local\r\n")
 	// Read multi-line EHLO response.
 	for {
 		line, err := reader.ReadString('\n')
@@ -269,7 +269,7 @@ func TestSMTPAuthPlainSwap(t *testing.T) {
 	// Build AUTH PLAIN with phantom. AUTH PLAIN format: \0username\0password
 	plainData := "\x00testuser\x00" + phantom
 	b64 := base64.StdEncoding.EncodeToString([]byte(plainData))
-	fmt.Fprintf(agentConn, "AUTH PLAIN %s\r\n", b64)
+	_, _ = fmt.Fprintf(agentConn, "AUTH PLAIN %s\r\n", b64)
 
 	// Read auth response.
 	authResp, err := reader.ReadString('\n')
@@ -281,7 +281,7 @@ func TestSMTPAuthPlainSwap(t *testing.T) {
 	}
 
 	// Disconnect.
-	fmt.Fprintf(agentConn, "QUIT\r\n")
+	_, _ = fmt.Fprintf(agentConn, "QUIT\r\n")
 	_, _ = reader.ReadString('\n') // read QUIT response
 	_ = agentConn.Close()
 	<-errCh
@@ -330,7 +330,7 @@ func startTestSMTPLoginServer(t *testing.T) (*testSMTPLoginServer, net.Listener)
 
 func (s *testSMTPLoginServer) handle(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
-	fmt.Fprintf(conn, "220 smtp.test.local ESMTP\r\n")
+	_, _ = fmt.Fprintf(conn, "220 smtp.test.local ESMTP\r\n")
 
 	reader := bufio.NewReader(conn)
 	for {
@@ -342,10 +342,10 @@ func (s *testSMTPLoginServer) handle(conn net.Conn) {
 		upper := strings.ToUpper(trimmed)
 
 		if strings.HasPrefix(upper, "EHLO") || strings.HasPrefix(upper, "HELO") {
-			fmt.Fprintf(conn, "250-smtp.test.local\r\n250 AUTH PLAIN LOGIN\r\n")
+			_, _ = fmt.Fprintf(conn, "250-smtp.test.local\r\n250 AUTH PLAIN LOGIN\r\n")
 		} else if upper == "AUTH LOGIN" || strings.HasPrefix(upper, "AUTH LOGIN ") {
 			// Send username prompt.
-			fmt.Fprintf(conn, "334 VXNlcm5hbWU6\r\n")
+			_, _ = fmt.Fprintf(conn, "334 VXNlcm5hbWU6\r\n")
 			userLine, err := reader.ReadString('\n')
 			if err != nil {
 				return
@@ -354,7 +354,7 @@ func (s *testSMTPLoginServer) handle(conn net.Conn) {
 			userBytes, _ := base64.StdEncoding.DecodeString(userB64)
 
 			// Send password prompt.
-			fmt.Fprintf(conn, "334 UGFzc3dvcmQ6\r\n")
+			_, _ = fmt.Fprintf(conn, "334 UGFzc3dvcmQ6\r\n")
 			passLine, err := reader.ReadString('\n')
 			if err != nil {
 				return
@@ -366,12 +366,12 @@ func (s *testSMTPLoginServer) handle(conn net.Conn) {
 			s.username = string(userBytes)
 			s.password = string(passBytes)
 			s.mu.Unlock()
-			fmt.Fprintf(conn, "235 2.7.0 Authentication successful\r\n")
+			_, _ = fmt.Fprintf(conn, "235 2.7.0 Authentication successful\r\n")
 		} else if strings.HasPrefix(upper, "QUIT") {
-			fmt.Fprintf(conn, "221 Bye\r\n")
+			_, _ = fmt.Fprintf(conn, "221 Bye\r\n")
 			return
 		} else {
-			fmt.Fprintf(conn, "500 Unknown command\r\n")
+			_, _ = fmt.Fprintf(conn, "500 Unknown command\r\n")
 		}
 	}
 }
@@ -421,7 +421,7 @@ func TestSMTPAuthLoginSwap(t *testing.T) {
 	}
 
 	// EHLO.
-	fmt.Fprintf(agentConn, "EHLO test.local\r\n")
+	_, _ = fmt.Fprintf(agentConn, "EHLO test.local\r\n")
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -433,7 +433,7 @@ func TestSMTPAuthLoginSwap(t *testing.T) {
 	}
 
 	// Send AUTH LOGIN.
-	fmt.Fprintf(agentConn, "AUTH LOGIN\r\n")
+	_, _ = fmt.Fprintf(agentConn, "AUTH LOGIN\r\n")
 
 	// Read 334 username prompt.
 	prompt1, err := reader.ReadString('\n')
@@ -445,7 +445,7 @@ func TestSMTPAuthLoginSwap(t *testing.T) {
 	}
 
 	// Send base64 username (no phantom, just a plain username).
-	fmt.Fprintf(agentConn, "%s\r\n", base64.StdEncoding.EncodeToString([]byte("testuser")))
+	_, _ = fmt.Fprintf(agentConn, "%s\r\n", base64.StdEncoding.EncodeToString([]byte("testuser")))
 
 	// Read 334 password prompt.
 	prompt2, err := reader.ReadString('\n')
@@ -457,7 +457,7 @@ func TestSMTPAuthLoginSwap(t *testing.T) {
 	}
 
 	// Send base64 password WITH phantom token.
-	fmt.Fprintf(agentConn, "%s\r\n", base64.StdEncoding.EncodeToString([]byte(phantom)))
+	_, _ = fmt.Fprintf(agentConn, "%s\r\n", base64.StdEncoding.EncodeToString([]byte(phantom)))
 
 	// Read auth response.
 	authResp, err := reader.ReadString('\n')
@@ -469,7 +469,7 @@ func TestSMTPAuthLoginSwap(t *testing.T) {
 	}
 
 	// Disconnect.
-	fmt.Fprintf(agentConn, "QUIT\r\n")
+	_, _ = fmt.Fprintf(agentConn, "QUIT\r\n")
 	_, _ = reader.ReadString('\n')
 	_ = agentConn.Close()
 	<-errCh
@@ -581,8 +581,8 @@ func startTestSMTPRejectAuthServer(t *testing.T) (*testSMTPRejectAuthServer, net
 }
 
 func (s *testSMTPRejectAuthServer) handle(conn net.Conn) {
-	defer conn.Close()
-	fmt.Fprintf(conn, "220 smtp.test.local ESMTP\r\n")
+	defer func() { _ = conn.Close() }()
+	_, _ = fmt.Fprintf(conn, "220 smtp.test.local ESMTP\r\n")
 
 	reader := bufio.NewReader(conn)
 	for {
@@ -594,12 +594,12 @@ func (s *testSMTPRejectAuthServer) handle(conn net.Conn) {
 		upper := strings.ToUpper(trimmed)
 
 		if strings.HasPrefix(upper, "EHLO") || strings.HasPrefix(upper, "HELO") {
-			fmt.Fprintf(conn, "250 OK\r\n")
+			_, _ = fmt.Fprintf(conn, "250 OK\r\n")
 		} else if upper == "AUTH PLAIN" {
 			// Reject AUTH PLAIN (server does not support it).
-			fmt.Fprintf(conn, "504 Unrecognized authentication type\r\n")
+			_, _ = fmt.Fprintf(conn, "504 Unrecognized authentication type\r\n")
 		} else if strings.HasPrefix(upper, "QUIT") {
-			fmt.Fprintf(conn, "221 Bye\r\n")
+			_, _ = fmt.Fprintf(conn, "221 Bye\r\n")
 			return
 		} else {
 			// Capture any other line (this is where the malicious
@@ -607,7 +607,7 @@ func (s *testSMTPRejectAuthServer) handle(conn net.Conn) {
 			s.mu.Lock()
 			s.capturedLine = trimmed
 			s.mu.Unlock()
-			fmt.Fprintf(conn, "500 Unknown command\r\n")
+			_, _ = fmt.Fprintf(conn, "500 Unknown command\r\n")
 		}
 	}
 }
@@ -634,7 +634,7 @@ func TestAuthContinuationRequiresServerPrompt(t *testing.T) {
 	}
 
 	srv, ln := startTestSMTPRejectAuthServer(t)
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	binding := vault.Binding{
 		Credential: "exfil_test",
@@ -662,7 +662,7 @@ func TestAuthContinuationRequiresServerPrompt(t *testing.T) {
 	}
 
 	// Send EHLO.
-	fmt.Fprintf(agentConn, "EHLO test.local\r\n")
+	_, _ = fmt.Fprintf(agentConn, "EHLO test.local\r\n")
 	ehloResp, err := reader.ReadString('\n')
 	if err != nil {
 		t.Fatalf("read EHLO response: %v", err)
@@ -672,7 +672,7 @@ func TestAuthContinuationRequiresServerPrompt(t *testing.T) {
 	}
 
 	// Send AUTH PLAIN (continuation mode, no inline data).
-	fmt.Fprintf(agentConn, "AUTH PLAIN\r\n")
+	_, _ = fmt.Fprintf(agentConn, "AUTH PLAIN\r\n")
 
 	// Read server response: should be 504 (rejected), NOT 334.
 	authResp, err := reader.ReadString('\n')
@@ -688,7 +688,7 @@ func TestAuthContinuationRequiresServerPrompt(t *testing.T) {
 	// malicious client sends phantom data anyway.
 	plainData := "\x00user\x00" + phantom
 	b64 := base64.StdEncoding.EncodeToString([]byte(plainData))
-	fmt.Fprintf(agentConn, "%s\r\n", b64)
+	_, _ = fmt.Fprintf(agentConn, "%s\r\n", b64)
 
 	// Read the server's response to the base64 line.
 	_, err = reader.ReadString('\n')
@@ -697,9 +697,9 @@ func TestAuthContinuationRequiresServerPrompt(t *testing.T) {
 	}
 
 	// Disconnect.
-	fmt.Fprintf(agentConn, "QUIT\r\n")
-	reader.ReadString('\n')
-	agentConn.Close()
+	_, _ = fmt.Fprintf(agentConn, "QUIT\r\n")
+	_, _ = reader.ReadString('\n')
+	_ = agentConn.Close()
 	<-errCh
 
 	// The server should have received the base64 line UNCHANGED.
@@ -727,7 +727,7 @@ func TestIMAPVaultIntegrityAfterAuth(t *testing.T) {
 	}
 
 	_, ln := startTestIMAPServer(t)
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	binding := vault.Binding{
 		Credential: "imap_zero",
@@ -746,12 +746,12 @@ func TestIMAPVaultIntegrityAfterAuth(t *testing.T) {
 	phantom := PhantomToken("imap_zero")
 	reader := bufio.NewReader(agentConn)
 
-	reader.ReadString('\n') // greeting
-	fmt.Fprintf(agentConn, "A001 LOGIN user %s\r\n", phantom)
-	reader.ReadString('\n') // LOGIN OK
-	fmt.Fprintf(agentConn, "A002 LOGOUT\r\n")
-	reader.ReadString('\n') // LOGOUT OK
-	agentConn.Close()
+	_, _ = reader.ReadString('\n') // greeting
+	_, _ = fmt.Fprintf(agentConn, "A001 LOGIN user %s\r\n", phantom)
+	_, _ = reader.ReadString('\n') // LOGIN OK
+	_, _ = fmt.Fprintf(agentConn, "A002 LOGOUT\r\n")
+	_, _ = reader.ReadString('\n') // LOGOUT OK
+	_ = agentConn.Close()
 	<-errCh
 
 	// The vault's encrypted credential is unaffected by in-memory zeroing.
@@ -799,7 +799,7 @@ func TestIMAPImplicitTLSAuthSwap(t *testing.T) {
 	// Start a plain IMAP server (simulating the upstream after the proxy
 	// has established its own TLS connection to the real server).
 	imapSrv, plainLn := startTestIMAPServer(t)
-	defer plainLn.Close()
+	defer func() { _ = plainLn.Close() }()
 
 	agentConn, proxyConn := tcpConnPair(t)
 
@@ -829,7 +829,7 @@ func TestIMAPImplicitTLSAuthSwap(t *testing.T) {
 
 		upstreamConn, err := net.Dial("tcp", plainLn.Addr().String())
 		if err != nil {
-			agentTLS.Close()
+			_ = agentTLS.Close()
 			errCh <- err
 			return
 		}
@@ -852,7 +852,7 @@ func TestIMAPImplicitTLSAuthSwap(t *testing.T) {
 					break
 				}
 			}
-			agentTLS.Close()
+			_ = agentTLS.Close()
 			close(done)
 		}()
 
@@ -869,7 +869,7 @@ func TestIMAPImplicitTLSAuthSwap(t *testing.T) {
 				break
 			}
 		}
-		upstreamConn.Close()
+		_ = upstreamConn.Close()
 		<-done
 		errCh <- nil
 	}()
@@ -890,7 +890,7 @@ func TestIMAPImplicitTLSAuthSwap(t *testing.T) {
 	}
 
 	phantom := PhantomToken("imaps_pass")
-	fmt.Fprintf(tlsClient, "A001 LOGIN testuser %s\r\n", phantom)
+	_, _ = fmt.Fprintf(tlsClient, "A001 LOGIN testuser %s\r\n", phantom)
 
 	resp, err := reader.ReadString('\n')
 	if err != nil {
@@ -900,10 +900,10 @@ func TestIMAPImplicitTLSAuthSwap(t *testing.T) {
 		t.Fatalf("LOGIN failed: %q", resp)
 	}
 
-	fmt.Fprintf(tlsClient, "A002 LOGOUT\r\n")
-	reader.ReadString('\n')
-	tlsClient.Close()
-	agentConn.Close()
+	_, _ = fmt.Fprintf(tlsClient, "A002 LOGOUT\r\n")
+	_, _ = reader.ReadString('\n')
+	_ = tlsClient.Close()
+	_ = agentConn.Close()
 
 	if err := <-errCh; err != nil {
 		t.Fatalf("proxy error: %v", err)

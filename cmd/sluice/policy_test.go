@@ -15,7 +15,7 @@ func TestPolicyListEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	rules, err := db.ListRules(store.RuleFilter{})
 	if err != nil {
@@ -32,7 +32,7 @@ func TestPolicyAddAndList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Add allow rule.
 	id1, err := db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443, 80}, Name: "API access"})
@@ -105,7 +105,7 @@ func TestPolicyRemove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	id, err := db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}})
 	if err != nil {
@@ -146,7 +146,7 @@ func TestPolicyImportFromTOML(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	tomlData := `[policy]
 default = "deny"
@@ -222,34 +222,34 @@ func TestPolicyExportRoundTrip(t *testing.T) {
 	// Populate the store.
 	dv := "deny"
 	ts := 120
-	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dv, TimeoutSec: &ts})
-	db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}, Name: "API"})
-	db.AddRule("deny", store.RuleOpts{Destination: "evil.example.com"})
-	db.AddRule("allow", store.RuleOpts{Tool: "github__list_*"})
-	db.AddRule("deny", store.RuleOpts{Tool: "exec__*", Name: "blocked"})
-	db.AddBinding("api.example.com", "my_key", store.BindingOpts{
+	_ = db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dv, TimeoutSec: &ts})
+	_, _ = db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}, Name: "API"})
+	_, _ = db.AddRule("deny", store.RuleOpts{Destination: "evil.example.com"})
+	_, _ = db.AddRule("allow", store.RuleOpts{Tool: "github__list_*"})
+	_, _ = db.AddRule("deny", store.RuleOpts{Tool: "exec__*", Name: "blocked"})
+	_, _ = db.AddBinding("api.example.com", "my_key", store.BindingOpts{
 		Ports:    []int{443},
 		Header:   "Authorization",
 		Template: "Bearer {value}",
 	})
-	db.AddMCPUpstream("github", "npx", store.MCPUpstreamOpts{
+	_, _ = db.AddMCPUpstream("github", "npx", store.MCPUpstreamOpts{
 		Args:       []string{"-y", "@mcp/server-github"},
 		TimeoutSec: 60,
 	})
-	db.AddRule("deny", store.RuleOpts{Pattern: "(?i)(sk-[a-zA-Z0-9_-]{20,})", Name: "api_key_leak"})
-	db.AddRule("redact", store.RuleOpts{
+	_, _ = db.AddRule("deny", store.RuleOpts{Pattern: "(?i)(sk-[a-zA-Z0-9_-]{20,})", Name: "api_key_leak"})
+	_, _ = db.AddRule("redact", store.RuleOpts{
 		Pattern:     "(?i)(sk-[a-zA-Z0-9_-]{20,})",
 		Name:        "api_key_in_response",
 		Replacement: "[REDACTED]",
 	})
-	db.Close()
+	_ = db.Close()
 
 	// Re-open and export to verify the data is readable.
 	db2, err := store.New(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db2.Close()
+	defer func() { _ = db2.Close() }()
 
 	// Verify all data is present by reading it back.
 	rules, _ := db2.ListRules(store.RuleFilter{Type: "network"})
@@ -304,7 +304,7 @@ ports = [443]
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	data, err := os.ReadFile(tomlPath)
 	if err != nil {
@@ -331,7 +331,7 @@ func TestPolicyAddInvalidVerdict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	_, err = db.AddRule("invalid", store.RuleOpts{Destination: "example.com"})
 	if err == nil {
@@ -345,7 +345,7 @@ func TestPolicyAddWithAllVerdicts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	for _, v := range []string{"allow", "deny", "ask"} {
 		id, err := db.AddRule(v, store.RuleOpts{Destination: v + ".example.com", Ports: []int{443}, Name: v + " rule"})
@@ -372,7 +372,7 @@ func TestPolicyImportMalformedTOML(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	_, err = db.ImportTOML([]byte("this is not valid toml [[["))
 	if err == nil {
@@ -392,15 +392,15 @@ func TestPolicyExportContainsExpectedSections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	dvs := "deny"
 	tss := 60
-	db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvs, TimeoutSec: &tss})
-	db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}, Name: "API"})
-	db.AddRule("deny", store.RuleOpts{Destination: "evil.example.com"})
-	db.AddRule("allow", store.RuleOpts{Tool: "github__list_*"})
-	db.AddBinding("api.example.com", "my_key", store.BindingOpts{
+	_ = db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dvs, TimeoutSec: &tss})
+	_, _ = db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}, Name: "API"})
+	_, _ = db.AddRule("deny", store.RuleOpts{Destination: "evil.example.com"})
+	_, _ = db.AddRule("allow", store.RuleOpts{Tool: "github__list_*"})
+	_, _ = db.AddBinding("api.example.com", "my_key", store.BindingOpts{
 		Ports:  []int{443},
 		Header: "Authorization",
 	})
@@ -436,7 +436,7 @@ func TestPolicyWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Add.
 	id, err := db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}, Name: "test"})
@@ -501,7 +501,7 @@ func TestPolicyImportExistingFixtures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer db.Close()
+			defer func() { _ = db.Close() }()
 
 			_, err = db.ImportTOML(data)
 			if err != nil {
@@ -522,7 +522,7 @@ func TestPolicyImportExampleConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	result, err := db.ImportTOML(data)
 	if err != nil {

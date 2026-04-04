@@ -129,6 +129,42 @@ func (r *BindingResolver) ResolveProtocolHint(dest string, port int) (string, bo
 	return "", false
 }
 
+// CredentialsForDestination returns all unique credential names from bindings
+// matching the given destination, port, and protocol. Used by the injector to
+// scope phantom token replacement to bound credentials only, preventing
+// cross-credential exfiltration to unintended destinations.
+func (r *BindingResolver) CredentialsForDestination(dest string, port int, proto string) []string {
+	var creds []string
+	seen := make(map[string]bool)
+	for _, cb := range r.bindings {
+		if !cb.glob.Match(dest) {
+			continue
+		}
+		if len(cb.ports) > 0 && !cb.ports[port] {
+			continue
+		}
+		// Match protocol: if binding specifies protocols, require a match.
+		// Bindings without protocols are protocol-agnostic (match any).
+		if proto != "" && len(cb.binding.Protocols) > 0 {
+			matched := false
+			for _, bp := range cb.binding.Protocols {
+				if bp == proto {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		if !seen[cb.binding.Credential] {
+			seen[cb.binding.Credential] = true
+			creds = append(creds, cb.binding.Credential)
+		}
+	}
+	return creds
+}
+
 // FormatValue applies the binding's template to a secret value.
 // If no template is set, the raw secret is returned.
 func (b Binding) FormatValue(secret string) string {

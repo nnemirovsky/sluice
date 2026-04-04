@@ -92,7 +92,7 @@ func (h *SSHJumpHost) resolveHostKeyCallback() (ssh.HostKeyCallback, error) {
 //  5. Accept the agent's SSH connection with no authentication
 //  6. Relay SSH channels between agent and upstream
 func (h *SSHJumpHost) HandleConnection(agentConn net.Conn, dialAddrs []string, hostAddr string, binding vault.Binding, ready chan<- error) error {
-	defer agentConn.Close()
+	defer func() { _ = agentConn.Close() }()
 
 	// signalErr sends an error on ready (if non-nil) to report setup
 	// failure to the SOCKS5 layer before returning.
@@ -139,7 +139,7 @@ func (h *SSHJumpHost) HandleConnection(agentConn net.Conn, dialAddrs []string, h
 
 	hostKeyCallback, hkErr := h.resolveHostKeyCallback()
 	if hkErr != nil {
-		upstreamTCP.Close()
+		_ = upstreamTCP.Close()
 		return signalErr(fmt.Errorf("SSH host key verification: %w", hkErr))
 	}
 
@@ -151,10 +151,10 @@ func (h *SSHJumpHost) HandleConnection(agentConn net.Conn, dialAddrs []string, h
 		HostKeyCallback: hostKeyCallback,
 	})
 	if err != nil {
-		upstreamTCP.Close()
+		_ = upstreamTCP.Close()
 		return signalErr(fmt.Errorf("SSH handshake with %s: %w", hostAddr, err))
 	}
-	defer upstreamSSH.Close()
+	defer func() { _ = upstreamSSH.Close() }()
 
 	log.Printf("[SSH] authenticated to %s as %q via credential %q", hostAddr, username, binding.Credential)
 
@@ -172,7 +172,7 @@ func (h *SSHJumpHost) HandleConnection(agentConn net.Conn, dialAddrs []string, h
 	if err != nil {
 		return fmt.Errorf("agent SSH handshake: %w", err)
 	}
-	defer agentSSH.Close()
+	defer func() { _ = agentSSH.Close() }()
 
 	// Relay global requests bidirectionally.
 	go sshForwardGlobalRequests(agentReqs, upstreamSSH)
@@ -194,12 +194,12 @@ func sshForwardGlobalRequests(reqs <-chan *ssh.Request, dst ssh.Conn) {
 		ok, payload, err := dst.SendRequest(req.Type, req.WantReply, req.Payload)
 		if err != nil {
 			if req.WantReply {
-				req.Reply(false, nil)
+				_ = req.Reply(false, nil)
 			}
 			continue
 		}
 		if req.WantReply {
-			req.Reply(ok, payload)
+			_ = req.Reply(ok, payload)
 		}
 	}
 }
@@ -226,9 +226,9 @@ func sshHandleChannel(newChan ssh.NewChannel, dst ssh.Conn) {
 	dstChan, dstReqs, err := dst.OpenChannel(newChan.ChannelType(), newChan.ExtraData())
 	if err != nil {
 		if openErr, ok := err.(*ssh.OpenChannelError); ok {
-			newChan.Reject(openErr.Reason, openErr.Message)
+			_ = newChan.Reject(openErr.Reason, openErr.Message)
 		} else {
-			newChan.Reject(ssh.ConnectionFailed, err.Error())
+			_ = newChan.Reject(ssh.ConnectionFailed, err.Error())
 		}
 		return
 	}
@@ -236,7 +236,7 @@ func sshHandleChannel(newChan ssh.NewChannel, dst ssh.Conn) {
 	srcChan, srcReqs, err := newChan.Accept()
 	if err != nil {
 		go ssh.DiscardRequests(dstReqs)
-		dstChan.Close()
+		_ = dstChan.Close()
 		return
 	}
 
@@ -256,19 +256,19 @@ func sshHandleChannel(newChan ssh.NewChannel, dst ssh.Conn) {
 	// CloseWrite signals EOF to the remote side so processes reading
 	// stdin until EOF (cat, sort, piped input) terminate properly.
 	go func() {
-		io.Copy(dstChan, srcChan)
-		dstChan.CloseWrite()
+		_, _ = io.Copy(dstChan, srcChan)
+		_ = dstChan.CloseWrite()
 	}()
 	go func() {
-		io.Copy(srcChan, dstChan)
-		srcChan.CloseWrite()
+		_, _ = io.Copy(srcChan, dstChan)
+		_ = srcChan.CloseWrite()
 		upstreamDone <- struct{}{}
 	}()
 
 	// Relay stderr bidirectionally.
-	go io.Copy(dstChan.Stderr(), srcChan.Stderr())
+	go func() { _, _ = io.Copy(dstChan.Stderr(), srcChan.Stderr()) }()
 	go func() {
-		io.Copy(srcChan.Stderr(), dstChan.Stderr())
+		_, _ = io.Copy(srcChan.Stderr(), dstChan.Stderr())
 		upstreamDone <- struct{}{}
 	}()
 
@@ -280,8 +280,8 @@ func sshHandleChannel(newChan ssh.NewChannel, dst ssh.Conn) {
 
 	// Close both channels. The agent's session receives the channel
 	// close and Session.Wait() can return.
-	srcChan.Close()
-	dstChan.Close()
+	_ = srcChan.Close()
+	_ = dstChan.Close()
 }
 
 // sshForwardChannelRequests forwards per-channel SSH requests from src to dst.
@@ -290,12 +290,12 @@ func sshForwardChannelRequests(reqs <-chan *ssh.Request, dst ssh.Channel) {
 		ok, err := dst.SendRequest(req.Type, req.WantReply, req.Payload)
 		if err != nil {
 			if req.WantReply {
-				req.Reply(false, nil)
+				_ = req.Reply(false, nil)
 			}
 			continue
 		}
 		if req.WantReply {
-			req.Reply(ok, nil)
+			_ = req.Reply(ok, nil)
 		}
 	}
 }

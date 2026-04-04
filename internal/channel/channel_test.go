@@ -305,7 +305,7 @@ func TestBrokerPendingLimitExceeded(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			broker.Request("example.com", 443, 2*time.Second)
+			_, _ = broker.Request("example.com", 443, 2*time.Second)
 		}()
 	}
 	// Wait until all 3 are registered as waiters.
@@ -511,7 +511,7 @@ func TestBrokerCancelAllCallsCancelOnChannels(t *testing.T) {
 
 	// Send a request that blocks.
 	go func() {
-		broker.Request("test.com", 443, 5*time.Second)
+		_, _ = broker.Request("test.com", 443, 5*time.Second)
 	}()
 
 	// Wait for it to register.
@@ -593,7 +593,7 @@ func TestBrokerHasWaiterAndTimedOut(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		broker.Request("test.com", 443, 50*time.Millisecond)
+		_, _ = broker.Request("test.com", 443, 50*time.Millisecond)
 		close(done)
 	}()
 

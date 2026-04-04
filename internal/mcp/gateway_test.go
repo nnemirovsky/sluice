@@ -765,7 +765,7 @@ func TestGatewayAuditLogging(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create audit logger: %v", err)
 	}
-	defer auditLogger.Close()
+	defer func() { _ = auditLogger.Close() }()
 
 	script := writeMockServer(t)
 	tp, err := NewToolPolicy([]policy.ToolRule{

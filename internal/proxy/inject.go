@@ -8,6 +8,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"regexp"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -16,6 +18,16 @@ import (
 	"github.com/elazarl/goproxy"
 	"github.com/nemirovsky/sluice/internal/vault"
 )
+
+// phantomPrefix is the byte prefix for all phantom tokens, used for quick
+// detection before applying the more expensive regex strip.
+var phantomPrefix = []byte("SLUICE_PHANTOM:")
+
+// phantomStripRe is a last-resort regex for stripping phantom tokens when
+// provider.List() cannot enumerate all credential names. It matches word
+// characters and dots but not hyphens to avoid consuming surrounding text.
+// The primary strip path uses exact matching via provider.List().
+var phantomStripRe = regexp.MustCompile(`SLUICE_PHANTOM:[\w.\-]+`)
 
 // PhantomToken returns the placeholder token for a credential name.
 // Agents use this token in requests. The MITM proxy replaces it with
@@ -201,12 +213,13 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 		}
 	}
 
-	// 2. Global phantom replacement: replace ALL known phantom tokens
-	// in headers and body regardless of binding match. This prevents
-	// phantom tokens from leaking to any upstream.
-	names, err := inj.provider.List()
-	if err != nil || len(names) == 0 {
-		return r, nil
+	// 2. Scoped phantom replacement: replace phantom tokens only for
+	// credentials bound to this destination. Strip any remaining phantom
+	// tokens to prevent leakage without enabling cross-credential
+	// exfiltration to unintended destinations.
+	var boundCreds []string
+	if res := inj.resolver.Load(); res != nil {
+		boundCreds = res.CredentialsForDestination(host, port, proto)
 	}
 
 	type phantomPair struct {
@@ -214,9 +227,10 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 		secret  vault.SecureBytes
 	}
 	var pairs []phantomPair
-	for _, name := range names {
+	for _, name := range boundCreds {
 		secret, err := inj.provider.Get(name)
 		if err != nil {
+			log.Printf("[INJECT] credential %q lookup failed: %v", name, err)
 			continue
 		}
 		pairs = append(pairs, phantomPair{
@@ -224,16 +238,22 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 			secret:  secret,
 		})
 	}
-	if len(pairs) == 0 {
-		return r, nil
-	}
+	// Sort by phantom length descending so longer tokens (e.g.
+	// SLUICE_PHANTOM:api_key_v2) are replaced before shorter prefixes
+	// (e.g. SLUICE_PHANTOM:api_key) that would otherwise corrupt them
+	// via substring match in bytes.ReplaceAll.
+	sort.Slice(pairs, func(i, j int) bool {
+		return len(pairs[i].phantom) > len(pairs[j].phantom)
+	})
+
 	defer func() {
 		for i := range pairs {
 			pairs[i].secret.Release()
 		}
 	}()
 
-	// Replace phantom tokens in all request headers.
+	// Replace bound phantom tokens in headers, then strip any remaining
+	// unbound phantom tokens so they never reach upstream servers.
 	for key, vals := range r.Header {
 		for i, v := range vals {
 			vb := []byte(v)
@@ -244,13 +264,19 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 					changed = true
 				}
 			}
+			if bytes.Contains(vb, phantomPrefix) {
+				vb = inj.stripUnboundPhantoms(vb)
+				changed = true
+				log.Printf("[INJECT] stripped unbound phantom token from header %q for %s:%d", key, host, port)
+			}
 			if changed {
 				r.Header[key][i] = string(vb)
 			}
 		}
 	}
 
-	// Replace phantom tokens in the request body.
+	// Replace bound phantom tokens in the request body, then strip
+	// any remaining unbound phantom tokens.
 	if r.Body != nil && r.Body != http.NoBody {
 		body, readErr := io.ReadAll(r.Body)
 		_ = r.Body.Close()
@@ -258,16 +284,83 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 			log.Printf("[INJECT] body read error for %s:%d: %v", host, port, readErr)
 			return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusBadGateway, "request body read error")
 		}
+		changed := false
 		for _, p := range pairs {
 			if bytes.Contains(body, p.phantom) {
 				body = bytes.ReplaceAll(body, p.phantom, p.secret.Bytes())
+				changed = true
 			}
 		}
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		r.ContentLength = int64(len(body))
+		if bytes.Contains(body, phantomPrefix) {
+			body = inj.stripUnboundPhantoms(body)
+			changed = true
+			log.Printf("[INJECT] stripped unbound phantom token from body for %s:%d", host, port)
+		}
+		if changed {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			r.ContentLength = int64(len(body))
+		} else {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		}
+	}
+
+	// Replace bound phantom tokens in the URL query and path, then strip
+	// any remaining unbound phantom tokens. SDKs rarely put credentials in
+	// URLs, but the safety-net philosophy requires covering all request data.
+	if rawQ := r.URL.RawQuery; bytes.Contains([]byte(rawQ), phantomPrefix) {
+		qb := []byte(rawQ)
+		for _, p := range pairs {
+			if bytes.Contains(qb, p.phantom) {
+				qb = bytes.ReplaceAll(qb, p.phantom, p.secret.Bytes())
+			}
+		}
+		if bytes.Contains(qb, phantomPrefix) {
+			qb = inj.stripUnboundPhantoms(qb)
+			log.Printf("[INJECT] stripped unbound phantom token from URL query for %s:%d", host, port)
+		}
+		r.URL.RawQuery = string(qb)
+	}
+	if rawP := r.URL.Path; bytes.Contains([]byte(rawP), phantomPrefix) {
+		pb := []byte(rawP)
+		for _, p := range pairs {
+			if bytes.Contains(pb, p.phantom) {
+				pb = bytes.ReplaceAll(pb, p.phantom, p.secret.Bytes())
+			}
+		}
+		if bytes.Contains(pb, phantomPrefix) {
+			pb = inj.stripUnboundPhantoms(pb)
+			log.Printf("[INJECT] stripped unbound phantom token from URL path for %s:%d", host, port)
+		}
+		r.URL.Path = string(pb)
+		r.URL.RawPath = ""
 	}
 
 	return r, nil
+}
+
+// stripUnboundPhantoms removes phantom tokens from data using exact matching
+// via provider.List() first, then falls back to regex for any remaining tokens
+// from providers that don't support listing. Exact matching handles credential
+// names with hyphens and other characters that the regex can't safely match.
+func (inj *Injector) stripUnboundPhantoms(data []byte) []byte {
+	names, _ := inj.provider.List()
+	// Sort by name length descending so longer phantom tokens are stripped
+	// before shorter prefixes that could corrupt them via substring match.
+	sort.Slice(names, func(i, j int) bool {
+		return len(names[i]) > len(names[j])
+	})
+	for _, name := range names {
+		phantom := []byte(PhantomToken(name))
+		if bytes.Contains(data, phantom) {
+			data = bytes.ReplaceAll(data, phantom, nil)
+		}
+	}
+	// Last-resort regex strip for phantom tokens from providers that
+	// don't support List() (e.g. env provider).
+	if bytes.Contains(data, phantomPrefix) {
+		data = phantomStripRe.ReplaceAll(data, nil)
+	}
+	return data
 }
 
 func portFromRequest(r *http.Request) int {

@@ -25,7 +25,7 @@ func tcpConnPair(t *testing.T) (client, server net.Conn) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	done := make(chan net.Conn, 1)
 	go func() {
@@ -110,16 +110,16 @@ func startTestSSHServer(t *testing.T, authorizedKey ssh.PublicKey) net.Listener 
 func serveTestSSHConn(conn net.Conn, config *ssh.ServerConfig) {
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, config)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return
 	}
-	defer sshConn.Close()
+	defer func() { _ = sshConn.Close() }()
 
 	go ssh.DiscardRequests(reqs)
 
 	for newChan := range chans {
 		if newChan.ChannelType() != "session" {
-			newChan.Reject(ssh.UnknownChannelType, "unsupported channel type")
+			_ = newChan.Reject(ssh.UnknownChannelType, "unsupported channel type")
 			continue
 		}
 		ch, reqs, err := newChan.Accept()
@@ -127,19 +127,19 @@ func serveTestSSHConn(conn net.Conn, config *ssh.ServerConfig) {
 			continue
 		}
 		go func(ch ssh.Channel, reqs <-chan *ssh.Request) {
-			defer ch.Close()
+			defer func() { _ = ch.Close() }()
 			for req := range reqs {
 				switch req.Type {
 				case "exec":
 					if req.WantReply {
-						req.Reply(true, nil)
+						_ = req.Reply(true, nil)
 					}
-					ch.Write([]byte("hello from ssh"))
-					ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
+					_, _ = ch.Write([]byte("hello from ssh"))
+					_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
 					return
 				default:
 					if req.WantReply {
-						req.Reply(false, nil)
+						_ = req.Reply(false, nil)
 					}
 				}
 			}
@@ -163,7 +163,7 @@ func TestSSHJumpHostInjectsKey(t *testing.T) {
 
 	// Start test SSH server that only accepts our public key.
 	sshServer := startTestSSHServer(t, pubKey)
-	defer sshServer.Close()
+	defer func() { _ = sshServer.Close() }()
 
 	// Generate host key for the proxy's SSH server side.
 	proxyHostKey, err := GenerateSSHHostKey()
@@ -218,8 +218,8 @@ func TestSSHJumpHostInjectsKey(t *testing.T) {
 		t.Errorf("expected 'hello from ssh', got %q", string(output))
 	}
 
-	client.Close()
-	agentSSH.Close()
+	_ = client.Close()
+	_ = agentSSH.Close()
 }
 
 func TestSSHJumpHostMissingCredential(t *testing.T) {
@@ -238,7 +238,7 @@ func TestSSHJumpHostMissingCredential(t *testing.T) {
 	jumpHost.HostKeyCallback = ssh.InsecureIgnoreHostKey()
 
 	agentConn, proxyConn := tcpConnPair(t)
-	defer agentConn.Close()
+	defer func() { _ = agentConn.Close() }()
 
 	binding := vault.Binding{
 		Credential: "nonexistent",
@@ -269,7 +269,7 @@ func TestSSHJumpHostBadKey(t *testing.T) {
 
 	// Start server that only accepts the first key.
 	sshServer := startTestSSHServer(t, pubKey)
-	defer sshServer.Close()
+	defer func() { _ = sshServer.Close() }()
 
 	proxyHostKey, err := GenerateSSHHostKey()
 	if err != nil {
@@ -285,7 +285,7 @@ func TestSSHJumpHostBadKey(t *testing.T) {
 	jumpHost.HostKeyCallback = ssh.InsecureIgnoreHostKey()
 
 	agentConn, proxyConn := tcpConnPair(t)
-	defer agentConn.Close()
+	defer func() { _ = agentConn.Close() }()
 
 	// HandleConnection should fail because the upstream rejects our key.
 	ready := make(chan error, 1)
@@ -308,7 +308,7 @@ func TestSSHVaultIntegrityAfterHandshake(t *testing.T) {
 	}
 
 	sshServer := startTestSSHServer(t, pubKey)
-	defer sshServer.Close()
+	defer func() { _ = sshServer.Close() }()
 
 	proxyHostKey, err := GenerateSSHHostKey()
 	if err != nil {
@@ -349,9 +349,9 @@ func TestSSHVaultIntegrityAfterHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open session: %v", err)
 	}
-	session.Output("test")
-	client.Close()
-	agentSSH.Close()
+	_, _ = session.Output("test")
+	_ = client.Close()
+	_ = agentSSH.Close()
 
 	// Wait for HandleConnection to return.
 	<-errCh

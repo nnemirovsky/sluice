@@ -96,7 +96,7 @@ func LoadOrCreateCA(dir string) (tls.Certificate, *x509.Certificate, error) {
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsCert.Certificate[0]})
 	if writeErr := atomicWriteFile(certPath, certPEM, 0644); writeErr != nil {
-		os.Remove(keyPath)
+		_ = os.Remove(keyPath)
 		return tls.Certificate{}, nil, fmt.Errorf("write CA cert: %w", writeErr)
 	}
 
@@ -115,16 +115,16 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	tmpPath := tmp.Name()
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return err
 	}
 	if err := tmp.Chmod(perm); err != nil {
 		_ = tmp.Close()
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return err
 	}
 	return os.Rename(tmpPath, path)

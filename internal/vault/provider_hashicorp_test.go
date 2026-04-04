@@ -19,21 +19,21 @@ func newMockVaultServer(t *testing.T, secrets map[string]map[string]string, list
 		if (r.Method == http.MethodPut || r.Method == http.MethodPost) && strings.HasSuffix(r.URL.Path, "/v1/auth/approle/login") {
 			if approleToken == "" {
 				w.WriteHeader(http.StatusForbidden)
-				json.NewEncoder(w).Encode(map[string]interface{}{
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"errors": []string{"permission denied"},
 				})
 				return
 			}
 			var body map[string]string
-			json.NewDecoder(r.Body).Decode(&body)
+			_ = json.NewDecoder(r.Body).Decode(&body)
 			if body["role_id"] == "" || body["secret_id"] == "" {
 				w.WriteHeader(http.StatusBadRequest)
-				json.NewEncoder(w).Encode(map[string]interface{}{
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"errors": []string{"missing role_id or secret_id"},
 				})
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"auth": map[string]interface{}{
 					"client_token": approleToken,
 					"policies":     []string{"default"},
@@ -46,7 +46,7 @@ func newMockVaultServer(t *testing.T, secrets map[string]map[string]string, list
 		token := r.Header.Get("X-Vault-Token")
 		if token == "" {
 			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"errors": []string{"missing client token"},
 			})
 			return
@@ -66,7 +66,7 @@ func newMockVaultServer(t *testing.T, secrets map[string]map[string]string, list
 				for i, k := range keys {
 					ikeys[i] = k
 				}
-				json.NewEncoder(w).Encode(map[string]interface{}{
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"data": map[string]interface{}{
 						"keys": ikeys,
 					},
@@ -74,7 +74,7 @@ func newMockVaultServer(t *testing.T, secrets map[string]map[string]string, list
 				return
 			}
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"errors": []string{},
 			})
 			return
@@ -88,7 +88,7 @@ func newMockVaultServer(t *testing.T, secrets map[string]map[string]string, list
 				for k, v := range data {
 					idata[k] = v
 				}
-				json.NewEncoder(w).Encode(map[string]interface{}{
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"data": map[string]interface{}{
 						"data": idata,
 						"metadata": map[string]interface{}{
@@ -99,7 +99,7 @@ func newMockVaultServer(t *testing.T, secrets map[string]map[string]string, list
 				return
 			}
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"errors": []string{},
 			})
 			return

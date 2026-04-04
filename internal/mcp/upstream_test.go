@@ -116,7 +116,7 @@ func TestUpstreamCallTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartUpstream: %v", err)
 	}
-	defer u.Stop()
+	defer func() { _ = u.Stop() }()
 
 	if err := u.Initialize(); err != nil {
 		t.Fatalf("Initialize: %v", err)
@@ -187,7 +187,7 @@ func TestUpstreamCustomTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartUpstream: %v", err)
 	}
-	defer u.Stop()
+	defer func() { _ = u.Stop() }()
 
 	if u.timeout != 30*time.Second {
 		t.Errorf("expected timeout 30s, got %v", u.timeout)
@@ -211,7 +211,7 @@ func TestUpstreamDefaultTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartUpstream: %v", err)
 	}
-	defer u.Stop()
+	defer func() { _ = u.Stop() }()
 
 	if u.timeout != defaultUpstreamTimeout {
 		t.Errorf("expected default timeout %v, got %v", defaultUpstreamTimeout, u.timeout)
@@ -231,7 +231,7 @@ func TestUpstreamZeroTimeoutUsesDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartUpstream: %v", err)
 	}
-	defer u.Stop()
+	defer func() { _ = u.Stop() }()
 
 	if u.timeout != defaultUpstreamTimeout {
 		t.Errorf("expected default timeout %v for TimeoutSec=0, got %v", defaultUpstreamTimeout, u.timeout)

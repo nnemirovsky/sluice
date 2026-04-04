@@ -34,7 +34,7 @@ go test ./... -v -timeout 30s
 - `internal/proxy/server.go` - SOCKS5 server wrapping `armon/go-socks5` with policy enforcement
 - `internal/proxy/protocol.go` - Port-based protocol detection (HTTP, HTTPS, SSH, IMAP, SMTP, generic)
 - `internal/proxy/ca.go` - Self-signed CA generation and persistence for HTTPS MITM
-- `internal/proxy/inject.go` - HTTPS MITM credential injector using goproxy with global phantom token replacement in all MITMed traffic
+- `internal/proxy/inject.go` - HTTPS MITM credential injector using goproxy with scoped phantom token replacement and unbound token stripping
 - `internal/proxy/ssh.go` - SSH jump host with vault key injection and bidirectional channel relay
 - `internal/proxy/mail.go` - IMAP/SMTP AUTH command proxy with phantom token replacement (including base64)
 - `internal/policy/engine.go` - Policy compilation of glob patterns and evaluation (LoadFromBytes for backward compat)
@@ -341,7 +341,7 @@ Credential vault: `Store` manages age-encrypted files in `~/.sluice/credentials/
 
 Binding resolution: `BindingResolver` compiles destination glob patterns (reusing `policy.CompileGlob`) and resolves `(host, port)` to a `Binding`. Bindings specify the credential name, header, template (`Bearer {value}`), and protocols (JSON array).
 
-HTTPS credential injection: `Injector` wraps `goproxy` as an in-process MITM proxy. `LoadOrCreateCA` generates a self-signed ECDSA P-256 CA persisted to disk. Per-host certificates are generated at interception time. All authenticated HTTPS connections are MITMed (not just those with bindings) so phantom tokens can never leak to any upstream. Binding-specific header injection handles configured credential headers. A second global pass replaces ALL known phantom tokens (`SLUICE_PHANTOM:<name>`) in ALL request headers and body regardless of binding match, acting as a safety net against leaks to unexpected destinations. `SecureBytes.Release()` zeroes credentials immediately after injection.
+HTTPS credential injection: `Injector` wraps `goproxy` as an in-process MITM proxy. `LoadOrCreateCA` generates a self-signed ECDSA P-256 CA persisted to disk. Per-host certificates are generated at interception time. All authenticated HTTPS connections are MITMed (not just those with bindings) so phantom tokens can never leak to any upstream. Binding-specific header injection handles configured credential headers. Scoped phantom replacement replaces phantom tokens only for credentials bound to the destination, preventing cross-credential exfiltration to unintended destinations. Any remaining unbound phantom tokens are stripped (replaced with empty bytes) as a safety net. `SecureBytes.Release()` zeroes credentials immediately after injection.
 
 SSH credential injection: `SSHJumpHost` accepts the agent's SSH connection with no authentication (`NoClientAuth`), decrypts the SSH private key from the vault, authenticates to the upstream server, and relays SSH channels/requests bidirectionally. `Binding.Template` holds the SSH username (defaults to "root").
 
@@ -553,28 +553,33 @@ don't reject them.
 ### In-process credential injection (the entire logic)
 
 ```go
-// internal/proxy/inject.go
-func injectCredentials(req *http.Request, bindings []PhantomBinding) {
+// internal/proxy/inject.go (simplified)
+func handleRequest(req *http.Request, host string, port int, proto string) {
     // 1. Binding-specific header injection
-    for _, b := range bindings {
-        real := vault.Get(b.Name) // returns SecureBytes
-        // Set configured header with template formatting
-        real.Release()
+    binding := resolver.ResolveForProtocol(host, port, proto)
+    secret := vault.Get(binding.Credential)
+    req.Header.Set(binding.Header, binding.FormatValue(secret.String()))
+    secret.Release()
+
+    // 2. Scoped phantom replacement (bound credentials only)
+    boundCreds := resolver.CredentialsForDestination(host, port, proto)
+    for _, name := range boundCreds {
+        phantom := PhantomToken(name)
+        secret := vault.Get(name)
+        // Replace phantom with real value in headers and body
+        secret.Release()
     }
 
-    // 2. Global phantom replacement (ALL MITMed traffic)
-    names, _ := provider.List()
-    for _, name := range names {
-        phantom := PhantomToken(name)
-        secret, _ := provider.Get(name)
-        // Replace in ALL headers and body regardless of binding match
-        secret.Release() // zero credential memory immediately
-    }
+    // 3. Strip unbound phantom tokens (safety net)
+    // Prevents leakage without enabling cross-credential exfiltration
+    stripUnboundPhantoms(headers, body)
 }
 ```
 
-Two-pass injection: first sets binding-specific headers, then replaces all
-known phantom tokens in all traffic as a safety net. No API knowledge needed.
+Three-pass injection: first sets binding-specific headers, then replaces
+bound phantom tokens with real values, then strips any remaining unbound
+phantom tokens. Credentials are only injected into traffic destined for
+their bound destinations, preventing cross-credential exfiltration.
 
 ### Non-HTTP protocols
 
