@@ -1142,3 +1142,164 @@ func TestListChannels(t *testing.T) {
 		t.Errorf("unexpected default channel: %+v", channels[0])
 	}
 }
+
+// --- Migration 000002: webhook channel columns ---
+
+func TestWebhookColumnsExist(t *testing.T) {
+	s := newTestStore(t)
+	// The migration should have added webhook_url and webhook_secret columns.
+	// Verify by inserting a channel with webhook fields.
+	id, err := s.AddChannel(1, true, AddChannelOpts{
+		WebhookURL:    "https://example.com/webhook",
+		WebhookSecret: "secret123",
+	})
+	if err != nil {
+		t.Fatalf("add channel with webhook: %v", err)
+	}
+	ch, err := s.GetChannel(id)
+	if err != nil {
+		t.Fatalf("get channel: %v", err)
+	}
+	if ch.WebhookURL != "https://example.com/webhook" {
+		t.Errorf("webhook_url = %q, want %q", ch.WebhookURL, "https://example.com/webhook")
+	}
+	if ch.WebhookSecret != "secret123" {
+		t.Errorf("webhook_secret = %q, want %q", ch.WebhookSecret, "secret123")
+	}
+}
+
+func TestDefaultChannelHasEmptyWebhookFields(t *testing.T) {
+	s := newTestStore(t)
+	ch, err := s.GetChannel(1)
+	if err != nil {
+		t.Fatalf("get channel: %v", err)
+	}
+	if ch.WebhookURL != "" {
+		t.Errorf("default channel webhook_url = %q, want empty", ch.WebhookURL)
+	}
+	if ch.WebhookSecret != "" {
+		t.Errorf("default channel webhook_secret = %q, want empty", ch.WebhookSecret)
+	}
+}
+
+func TestChannelUpdateWebhookFields(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.AddChannel(1, true, AddChannelOpts{
+		WebhookURL: "https://old.example.com/hook",
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	newURL := "https://new.example.com/hook"
+	newSecret := "newsecret"
+	if err := s.UpdateChannel(id, ChannelUpdate{
+		WebhookURL:    &newURL,
+		WebhookSecret: &newSecret,
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	ch, _ := s.GetChannel(id)
+	if ch.WebhookURL != newURL {
+		t.Errorf("webhook_url = %q, want %q", ch.WebhookURL, newURL)
+	}
+	if ch.WebhookSecret != newSecret {
+		t.Errorf("webhook_secret = %q, want %q", ch.WebhookSecret, newSecret)
+	}
+}
+
+func TestRemoveChannel(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.AddChannel(1, true)
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	deleted, err := s.RemoveChannel(id)
+	if err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if !deleted {
+		t.Error("expected deletion")
+	}
+
+	ch, _ := s.GetChannel(id)
+	if ch != nil {
+		t.Error("channel should be gone after removal")
+	}
+}
+
+func TestRemoveChannelNonExistent(t *testing.T) {
+	s := newTestStore(t)
+	deleted, err := s.RemoveChannel(999)
+	if err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if deleted {
+		t.Error("should not have deleted non-existent channel")
+	}
+}
+
+func TestCountEnabledChannels(t *testing.T) {
+	s := newTestStore(t)
+	// Default has 1 enabled (Telegram).
+	count, err := s.CountEnabledChannels()
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("count = %d, want 1", count)
+	}
+
+	// Add another enabled channel.
+	_, _ = s.AddChannel(1, true, AddChannelOpts{WebhookURL: "https://example.com/hook"})
+	count, _ = s.CountEnabledChannels()
+	if count != 2 {
+		t.Errorf("count = %d, want 2", count)
+	}
+
+	// Add a disabled channel.
+	_, _ = s.AddChannel(1, false)
+	count, _ = s.CountEnabledChannels()
+	if count != 2 {
+		t.Errorf("count = %d, want 2 (disabled channel should not count)", count)
+	}
+}
+
+func TestListChannelsWithWebhookFields(t *testing.T) {
+	s := newTestStore(t)
+	_, _ = s.AddChannel(1, true, AddChannelOpts{
+		WebhookURL:    "https://example.com/hook",
+		WebhookSecret: "s3cret",
+	})
+
+	channels, err := s.ListChannels()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(channels) != 2 {
+		t.Fatalf("expected 2 channels, got %d", len(channels))
+	}
+
+	httpCh := channels[1]
+	if httpCh.WebhookURL != "https://example.com/hook" {
+		t.Errorf("webhook_url = %q", httpCh.WebhookURL)
+	}
+	if httpCh.WebhookSecret != "s3cret" {
+		t.Errorf("webhook_secret = %q", httpCh.WebhookSecret)
+	}
+}
+
+func TestAddChannelWithoutOpts(t *testing.T) {
+	s := newTestStore(t)
+	// Verify that the variadic opts parameter works when omitted.
+	id, err := s.AddChannel(0, true)
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	ch, _ := s.GetChannel(id)
+	if ch.WebhookURL != "" || ch.WebhookSecret != "" {
+		t.Error("channel without opts should have empty webhook fields")
+	}
+}

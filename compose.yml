@@ -11,6 +11,10 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - SLUICE_AGENT_CONTAINER=openclaw
+      # Set SLUICE_API_TOKEN to enable the REST API on :3000/api/*.
+      # All /api/* endpoints require this bearer token for auth.
+      # If unset, the API returns 403 on all /api/* routes.
+      - SLUICE_API_TOKEN=${SLUICE_API_TOKEN:-}
     group_add:
       - "${DOCKER_GID:-0}"
     volumes:

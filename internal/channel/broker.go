@@ -237,6 +237,17 @@ func (b *Broker) PendingCount() int {
 	return len(b.waiters)
 }
 
+// PendingRequests returns a snapshot of all pending approval requests.
+func (b *Broker) PendingRequests() []ApprovalRequest {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	reqs := make([]ApprovalRequest, 0, len(b.waiters))
+	for _, w := range b.waiters {
+		reqs = append(reqs, w.req)
+	}
+	return reqs
+}
+
 // HasWaiter reports whether a request ID still has an active waiter.
 func (b *Broker) HasWaiter(id string) bool {
 	b.mu.Lock()

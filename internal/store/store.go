@@ -605,24 +605,29 @@ func (s *Store) ListMCPUpstreams() ([]MCPUpstreamRow, error) {
 
 // Channel represents a row in the channels table.
 type Channel struct {
-	ID        int64
-	Type      int
-	Enabled   bool
-	CreatedAt string
+	ID            int64
+	Type          int
+	Enabled       bool
+	WebhookURL    string
+	WebhookSecret string
+	CreatedAt     string
 }
 
 // ChannelUpdate holds optional fields for UpdateChannel. Only non-nil fields are written.
 type ChannelUpdate struct {
-	Enabled *bool
+	Enabled       *bool
+	WebhookURL    *string
+	WebhookSecret *string
 }
 
 // GetChannel returns a channel by ID.
 func (s *Store) GetChannel(id int64) (*Channel, error) {
 	var ch Channel
 	var enabled int
+	var webhookURL, webhookSecret sql.NullString
 	err := s.db.QueryRow(
-		"SELECT id, type, enabled, created_at FROM channels WHERE id = ?", id,
-	).Scan(&ch.ID, &ch.Type, &enabled, &ch.CreatedAt)
+		"SELECT id, type, enabled, webhook_url, webhook_secret, created_at FROM channels WHERE id = ?", id,
+	).Scan(&ch.ID, &ch.Type, &enabled, &webhookURL, &webhookSecret, &ch.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -630,6 +635,8 @@ func (s *Store) GetChannel(id int64) (*Channel, error) {
 		return nil, fmt.Errorf("get channel %d: %w", id, err)
 	}
 	ch.Enabled = enabled == 1
+	ch.WebhookURL = webhookURL.String
+	ch.WebhookSecret = webhookSecret.String
 	return &ch, nil
 }
 
@@ -645,6 +652,14 @@ func (s *Store) UpdateChannel(id int64, u ChannelUpdate) error {
 			args = append(args, 0)
 		}
 	}
+	if u.WebhookURL != nil {
+		setClauses = append(setClauses, "webhook_url = ?")
+		args = append(args, nilIfEmpty(*u.WebhookURL))
+	}
+	if u.WebhookSecret != nil {
+		setClauses = append(setClauses, "webhook_secret = ?")
+		args = append(args, nilIfEmpty(*u.WebhookSecret))
+	}
 	if len(setClauses) == 0 {
 		return nil
 	}
@@ -656,9 +671,36 @@ func (s *Store) UpdateChannel(id int64, u ChannelUpdate) error {
 	return nil
 }
 
+// AddChannelOpts holds optional fields for AddChannel.
+type AddChannelOpts struct {
+	WebhookURL    string
+	WebhookSecret string
+}
+
+// AddChannel inserts a new channel row with the given type and enabled state.
+func (s *Store) AddChannel(chType int, enabled bool, opts ...AddChannelOpts) (int64, error) {
+	enabledInt := 0
+	if enabled {
+		enabledInt = 1
+	}
+	var webhookURL, webhookSecret *string
+	if len(opts) > 0 {
+		webhookURL = nilIfEmpty(opts[0].WebhookURL)
+		webhookSecret = nilIfEmpty(opts[0].WebhookSecret)
+	}
+	res, err := s.db.Exec(
+		"INSERT INTO channels (type, enabled, webhook_url, webhook_secret) VALUES (?, ?, ?, ?)",
+		chType, enabledInt, webhookURL, webhookSecret,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("add channel: %w", err)
+	}
+	return res.LastInsertId()
+}
+
 // ListChannels returns all channels.
 func (s *Store) ListChannels() ([]Channel, error) {
-	rows, err := s.db.Query("SELECT id, type, enabled, created_at FROM channels ORDER BY id")
+	rows, err := s.db.Query("SELECT id, type, enabled, webhook_url, webhook_secret, created_at FROM channels ORDER BY id")
 	if err != nil {
 		return nil, fmt.Errorf("list channels: %w", err)
 	}
@@ -668,13 +710,36 @@ func (s *Store) ListChannels() ([]Channel, error) {
 	for rows.Next() {
 		var ch Channel
 		var enabled int
-		if err := rows.Scan(&ch.ID, &ch.Type, &enabled, &ch.CreatedAt); err != nil {
+		var webhookURL, webhookSecret sql.NullString
+		if err := rows.Scan(&ch.ID, &ch.Type, &enabled, &webhookURL, &webhookSecret, &ch.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan channel: %w", err)
 		}
 		ch.Enabled = enabled == 1
+		ch.WebhookURL = webhookURL.String
+		ch.WebhookSecret = webhookSecret.String
 		channels = append(channels, ch)
 	}
 	return channels, rows.Err()
+}
+
+// RemoveChannel deletes a channel by ID. Returns true if a row was deleted.
+func (s *Store) RemoveChannel(id int64) (bool, error) {
+	res, err := s.db.Exec("DELETE FROM channels WHERE id = ?", id)
+	if err != nil {
+		return false, fmt.Errorf("delete channel: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// CountEnabledChannels returns the number of enabled channels.
+func (s *Store) CountEnabledChannels() (int, error) {
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM channels WHERE enabled = 1").Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count enabled channels: %w", err)
+	}
+	return count, nil
 }
 
 // --- Exists helpers ---
@@ -733,6 +798,16 @@ func (s *Store) RemoveRulesBySource(source string) (int64, error) {
 	res, err := s.db.Exec("DELETE FROM rules WHERE source = ?", source)
 	if err != nil {
 		return 0, fmt.Errorf("delete rules by source: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// RemoveRulesByName deletes all rules matching a name.
+// Returns the number deleted.
+func (s *Store) RemoveRulesByName(name string) (int64, error) {
+	res, err := s.db.Exec("DELETE FROM rules WHERE name = ?", name)
+	if err != nil {
+		return 0, fmt.Errorf("delete rules by name: %w", err)
 	}
 	return res.RowsAffected()
 }

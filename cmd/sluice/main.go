@@ -14,8 +14,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nemirovsky/sluice/internal/api"
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/channel"
+	httpchannel "github.com/nemirovsky/sluice/internal/channel/http"
 	"github.com/nemirovsky/sluice/internal/docker"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
@@ -44,6 +46,9 @@ func main() {
 			return
 		case "audit":
 			handleAuditCommand(os.Args[2:])
+			return
+		case "channel":
+			handleChannelCommand(os.Args[2:])
 			return
 		}
 	}
@@ -108,20 +113,24 @@ func main() {
 	}
 	defer func() { _ = logger.Close() }()
 
-	// Parse Telegram chat ID early so we can set up the channel.
-	// Check the store-backed channel enabled flag first so that a disabled
-	// channel skips env var parsing entirely (avoids fatal on malformed
-	// TELEGRAM_CHAT_ID when the channel is disabled in the store).
+	// Read all channels from the store and prepare for instantiation.
 	var broker *channel.Broker
-	var telegramChatID int64
 	var tgChannel *telegram.TelegramChannel
-	telegramEnabled := false
 
+	storeChannels, chListErr := db.ListChannels()
+	if chListErr != nil {
+		log.Printf("WARNING: failed to read channels from store: %v", chListErr)
+	}
+
+	// Check Telegram channel state in store.
+	var telegramChatID int64
+	telegramEnabled := false
 	telegramStoreDisabled := false
-	if ch, chErr := db.GetChannel(1); chErr != nil {
-		log.Printf("WARNING: failed to read channel state from store: %v", chErr)
-	} else if ch != nil && !ch.Enabled {
-		telegramStoreDisabled = true
+	for _, sCh := range storeChannels {
+		if sCh.Type == int(channel.ChannelTelegram) && !sCh.Enabled {
+			telegramStoreDisabled = true
+			break
+		}
 	}
 
 	if telegramStoreDisabled {
@@ -227,7 +236,9 @@ func main() {
 		log.Fatalf("start proxy: %v", err)
 	}
 
-	// Set up the Telegram channel and channel.Broker.
+	// Instantiate all enabled channels (Telegram and/or HTTP).
+	var allChannels []channel.Channel
+
 	if telegramEnabled {
 		var channelErr error
 		tgChannel, channelErr = telegram.NewTelegramChannel(telegram.ChannelConfig{
@@ -245,25 +256,78 @@ func main() {
 		if channelErr != nil {
 			log.Fatalf("telegram channel: %v", channelErr)
 		}
+		allChannels = append(allChannels, tgChannel)
+	}
 
-		broker = channel.NewBroker([]channel.Channel{tgChannel})
-		tgChannel.SetBroker(broker)
+	// Instantiate HTTP channels from the store.
+	var httpChannels []*httpchannel.HTTPChannel
+	for _, sCh := range storeChannels {
+		if sCh.Type != int(channel.ChannelHTTP) || !sCh.Enabled {
+			continue
+		}
+		if sCh.WebhookURL == "" {
+			log.Printf("WARNING: HTTP channel [%d] has no webhook_url, skipping", sCh.ID)
+			continue
+		}
+		hc, hcErr := httpchannel.NewHTTPChannel(httpchannel.Config{
+			WebhookURL:    sCh.WebhookURL,
+			WebhookSecret: sCh.WebhookSecret,
+		})
+		if hcErr != nil {
+			log.Printf("WARNING: HTTP channel [%d]: %v, skipping", sCh.ID, hcErr)
+			continue
+		}
+		httpChannels = append(httpChannels, hc)
+		allChannels = append(allChannels, hc)
+		log.Printf("HTTP webhook channel [%d] configured: %s", sCh.ID, sCh.WebhookURL)
+	}
+
+	if len(allChannels) > 0 {
+		broker = channel.NewBroker(allChannels)
+
+		// Wire broker references.
+		if tgChannel != nil {
+			tgChannel.SetBroker(broker)
+		}
+		for _, hc := range httpChannels {
+			hc.SetBroker(broker)
+		}
 
 		// Update the proxy's broker reference now that it's created.
 		srv.SetBroker(broker)
 
-		if err := tgChannel.Start(); err != nil {
-			log.Fatalf("start telegram channel: %v", err)
+		// Start all channels.
+		if tgChannel != nil {
+			if err := tgChannel.Start(); err != nil {
+				log.Fatalf("start telegram channel: %v", err)
+			}
+			defer tgChannel.Stop()
+			log.Printf("telegram approval channel started")
 		}
-		defer tgChannel.Stop()
-		log.Printf("telegram approval channel started")
+		for _, hc := range httpChannels {
+			if err := hc.Start(); err != nil {
+				log.Printf("WARNING: failed to start HTTP channel: %v", err)
+			}
+			defer hc.Stop()
+		}
+	} else {
+		log.Printf("no approval channels configured (ask rules will auto-deny)")
 	}
 
-	// Start health check HTTP server on :3000 (or --health-addr).
-	healthLn, healthSrv := startHealthServer(*healthAddr, srv)
+	// Start HTTP server with health check and REST API on :3000 (or --health-addr).
+	apiServer := api.NewServer(db, broker, srv, *auditPath)
+	apiServer.SetEnginePtr(srv.EnginePtr(), srv.ReloadMu())
+	apiServer.SetResolverPtr(srv.ResolverPtr())
+	if vaultStore != nil {
+		apiServer.SetVault(vaultStore)
+	}
+	if dockerMgr != nil {
+		apiServer.SetDockerManager(dockerMgr, *phantomDir)
+	}
+	healthLn, healthSrv := startAPIServer(*healthAddr, apiServer, db)
 	if healthLn != nil {
 		defer func() { _ = healthSrv.Close() }()
-		log.Printf("health check server listening on %s", healthLn.Addr())
+		log.Printf("HTTP API server listening on %s", healthLn.Addr())
 	}
 
 	log.Printf("sluice SOCKS5 proxy listening on %s", srv.Addr())
@@ -447,28 +511,29 @@ func resolveDockerSocket(explicit string) (string, error) {
 	return raw, nil
 }
 
-// startHealthServer starts a minimal HTTP server serving /healthz.
-func startHealthServer(addr string, srv *proxy.Server) (net.Listener, *http.Server) {
+// startAPIServer starts the HTTP server with the generated chi router.
+// It serves both /healthz (no auth) and /api/* (bearer auth + channel gate).
+func startAPIServer(addr string, apiSrv *api.Server, st *store.Store) (net.Listener, *http.Server) {
 	if addr == "" {
 		return nil, nil
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Printf("WARNING: failed to start health server on %s: %v", addr, err)
+		log.Printf("WARNING: failed to start API server on %s: %v", addr, err)
 		return nil, nil
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		if srv.IsListening() {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ok"))
-		} else {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte("not ready"))
-		}
+	// oapi-codegen wraps handlers bottom-up: last middleware in the slice
+	// becomes the outermost layer. List channel gate first, then auth, so
+	// the request hits auth before the channel gate. This ensures bad tokens
+	// get 401 before the channel gate reveals whether HTTP channel is enabled.
+	handler := api.HandlerWithOptions(apiSrv, api.ChiServerOptions{
+		Middlewares: []api.MiddlewareFunc{
+			api.ChannelGateMiddleware(st),
+			api.BearerAuthMiddleware,
+		},
 	})
 	httpSrv := &http.Server{
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go httpSrv.Serve(ln) //nolint:errcheck

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nemirovsky/sluice/internal/api"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
 	"github.com/nemirovsky/sluice/internal/store"
@@ -213,7 +214,8 @@ func TestHealthzEndpoint(t *testing.T) {
 		t.Fatalf("create server: %v", err)
 	}
 
-	healthLn, healthSrv := startHealthServer("127.0.0.1:0", srv)
+	apiSrv := api.NewServer(db, nil, srv, "")
+	healthLn, healthSrv := startAPIServer("127.0.0.1:0", apiSrv, db)
 	if healthLn == nil {
 		t.Fatal("health server listener is nil")
 	}

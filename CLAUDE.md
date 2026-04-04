@@ -1,12 +1,12 @@
 # Sluice - CLAUDE.md
 
-Credential-injecting approval proxy for AI agents. Two layers of governance: MCP-level (semantic tool control) and network-level (all-protocol interception). Asks for human approval via Telegram, injects credentials, and forwards.
+Credential-injecting approval proxy for AI agents. Two layers of governance: MCP-level (semantic tool control) and network-level (all-protocol interception). Asks for human approval via Telegram or HTTP webhook, injects credentials, and forwards. Three management surfaces: CLI, Telegram bot, and REST API.
 
 ## Problem
 
 No existing tool combines:
 1. Credential/secret isolation from the AI agent
-2. Per-request human approval/deny via Telegram
+2. Per-request human approval/deny via Telegram or HTTP webhook
 3. All-protocol interception (HTTP, HTTPS, SSH, IMAP, SMTP, etc.)
 4. MCP-level governance (tool names, arguments, per-action policy)
 5. Audit logging of every connection and tool call
@@ -26,11 +26,14 @@ go test ./... -v -timeout 30s
 - `cmd/sluice/cert.go` - CLI subcommand handler for CA certificate generation (`cert generate`)
 - `cmd/sluice/mcp.go` - CLI subcommand handler for MCP gateway mode and upstream management (add/list/remove)
 - `cmd/sluice/policy.go` - CLI subcommand handler for policy management (list/add/remove/import/export)
+- `cmd/sluice/channel.go` - CLI subcommand handler for channel management (list/add/update/remove)
 - `internal/store/store.go` - SQLite-backed policy store for all runtime state (unified rules, typed config singleton, bindings, channels, MCP upstreams)
 - `internal/store/import.go` - TOML import into SQLite store with merge semantics (skip duplicates)
 - `internal/store/migrate.go` - golang-migrate integration with embedded SQL files
 - `internal/store/migrations/000001_init.up.sql` - Initial schema migration (rules, config, bindings, mcp_upstreams, channels)
 - `internal/store/migrations/000001_init.down.sql` - Rollback for initial schema
+- `internal/store/migrations/000002_webhook_channel.up.sql` - Add webhook_url and webhook_secret columns to channels table
+- `internal/store/migrations/000002_webhook_channel.down.sql` - Rollback for webhook channel columns
 - `internal/proxy/server.go` - SOCKS5 server wrapping `armon/go-socks5` with policy enforcement
 - `internal/proxy/protocol.go` - Port-based protocol detection (HTTP, HTTPS, SSH, IMAP, SMTP, generic)
 - `internal/proxy/ca.go` - Self-signed CA generation and persistence for HTTPS MITM
@@ -58,11 +61,19 @@ go test ./... -v -timeout 30s
 - `internal/audit/verify.go` - Hash chain verification (walks log file, reports broken links)
 - `internal/channel/channel.go` - Channel interface, ChannelType enum (Telegram=0, HTTP=1), ApprovalRequest/Response/Command types
 - `internal/channel/broker.go` - Channel-agnostic approval broker with broadcast-and-first-wins, rate limiting, cross-channel cancellation
+- `internal/channel/http/http.go` - HTTP webhook channel implementing channel.Channel interface with HMAC-SHA256 signed delivery
+- `internal/channel/http/http_test.go` - Tests for HTTP webhook channel (sync/async paths, retry, timeout)
 - `internal/telegram/approval.go` - TelegramChannel implementing channel.Channel interface
 - `internal/telegram/bot.go` - Telegram message formatting utilities and token sanitization
 - `internal/telegram/commands.go` - Telegram admin commands (/policy, /cred, /status, /audit, /help) backed by SQLite store
 - `internal/docker/manager.go` - Docker container manager for credential hot-reload via shared volume + docker exec, with restart fallback
 - `internal/docker/socket_client.go` - Docker socket HTTP client for container lifecycle and exec operations
+- `api/openapi.yaml` - OpenAPI 3.0 spec defining the full REST API surface (source of truth for code generation)
+- `internal/api/config.yaml` - oapi-codegen configuration (chi-server, models, embedded-spec)
+- `internal/api/generate.go` - go:generate directive for oapi-codegen
+- `internal/api/api.gen.go` - Generated types, server interface, and chi router (do not edit manually)
+- `internal/api/server.go` - Hand-written handler implementations satisfying generated ServerInterface
+- `internal/api/server_test.go` - Handler tests using httptest
 - `Dockerfile` - Multi-stage build for Sluice container
 - `compose.yml` - Three-container setup (sluice + tun2proxy + openclaw) with shared phantom volume
 - `compose.dev.yml` - Development compose with build-from-source
@@ -153,6 +164,7 @@ sockets, etc.).
 | **tun2proxy** | Routes ALL TCP through TUN to SOCKS5 | Existing `ghcr.io/tun2proxy/tun2proxy` |
 | **Sluice SOCKS5 Proxy** | Network-level policy + HTTPS MITM + credential injection | Custom Go, single binary |
 | **Sluice MCP Gateway** | Semantic tool governance (stdio + HTTP) | Custom Go, same binary |
+| **Sluice REST API** | HTTP management surface + webhook approval channel | Same binary, chi router from OpenAPI spec |
 | **Sluice Telegram Bot** | Approval UX + credential/config management | Same binary |
 | **Vault** | Encrypted credential storage + phantom token mapping | age-encrypted files (default), pluggable providers |
 | **Docker Socket** | Restart OpenClaw container with updated phantom env vars | Mounted from host |
@@ -314,12 +326,80 @@ sluice cred remove <name>           # removes credential + associated binding + 
 
 When `--destination` is provided, `sluice cred add` also creates an allow rule and binding in the store.
 
+### Channel management
+
+```
+sluice channel list                                              # list all channels with status
+sluice channel add --type http --url <webhook_url> [--secret s]  # add HTTP webhook channel
+sluice channel update <id> --enabled true|false                  # enable/disable channel
+sluice channel remove <id>                                       # remove channel
+```
+
 ### Other subcommands
 
 ```
 sluice cert generate                # generate CA certificate for HTTPS MITM
 sluice audit verify                 # verify audit log hash chain integrity
 ```
+
+## REST API
+
+Sluice exposes a REST API on the same HTTP server as `/healthz` (default `:3000`, configurable via `--health-addr`). The API is defined spec-first in `api/openapi.yaml` and code-generated via `oapi-codegen`.
+
+### Authentication
+
+All `/api/*` endpoints require a bearer token set via `SLUICE_API_TOKEN` env var:
+
+```
+Authorization: Bearer <token>
+```
+
+If `SLUICE_API_TOKEN` is not set, all `/api/*` endpoints return 403. `/healthz` requires no auth.
+
+### API gating
+
+API routes return 403 with `{"error": "HTTP channel is not enabled", "code": "channel_disabled"}` when no HTTP channel (type=1) is enabled in the channels table. `/healthz` is always active regardless. Auth check runs before channel check so invalid tokens never reveal channel state.
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | /healthz | Health check (no auth) |
+| GET | /api/status | Proxy stats, pending count, channel statuses |
+| GET | /api/approvals | List pending approval requests |
+| POST | /api/approvals/{id}/resolve | Resolve approval with verdict |
+| GET | /api/rules | List rules (?verdict=, ?type=network/tool/pattern) |
+| POST | /api/rules | Add rule |
+| DELETE | /api/rules/{id} | Remove rule |
+| POST | /api/rules/import | Import TOML config (multipart upload) |
+| GET | /api/rules/export | Export rules as TOML |
+| GET | /api/config | Get typed config singleton |
+| PATCH | /api/config | Partial config update |
+| GET | /api/credentials | List credential names |
+| POST | /api/credentials | Add credential (optionally with binding + allow rule) |
+| DELETE | /api/credentials/{name} | Remove credential + associated bindings/rules |
+| GET | /api/bindings | List bindings |
+| POST | /api/bindings | Add binding |
+| DELETE | /api/bindings/{id} | Remove binding |
+| GET | /api/mcp/upstreams | List MCP upstreams |
+| POST | /api/mcp/upstreams | Add MCP upstream |
+| DELETE | /api/mcp/upstreams/{name} | Remove MCP upstream |
+| GET | /api/audit/recent | Recent audit entries (?limit=) |
+| GET | /api/audit/verify | Verify audit hash chain |
+| GET | /api/channels | List channels |
+| PATCH | /api/channels/{id} | Update channel config |
+
+### Code generation workflow
+
+```
+1. Edit api/openapi.yaml (source of truth)
+2. Run: make generate (or go generate ./internal/api/)
+3. oapi-codegen generates types, ServerInterface, and chi router in api.gen.go
+4. Implement/update handler methods in server.go
+5. Compile and test
+```
+
+Do not edit `internal/api/api.gen.go` manually. Always regenerate from the spec.
 
 ## Implementation Details
 
@@ -330,6 +410,8 @@ Policy engine: `LoadFromStore(s *store.Store)` reads all rules from SQLite and c
 Proxy integration: `policyRuleSet` implements the `socks5.RuleSet` interface. Protocol detection stores results in context for future credential injection. The binding resolver is stored as an `atomic.Pointer[vault.BindingResolver]` so it can be hot-swapped on SIGHUP or after Telegram/CLI credential mutations. `Server.StoreResolver()` and `Server.ResolverPtr()` provide the swap and shared-access interfaces.
 
 Channel abstraction: `internal/channel/channel.go` defines the `Channel` interface and `ChannelType` enum (ChannelTelegram=0, ChannelHTTP=1). `Channel` has methods for non-blocking `RequestApproval`, `CancelApproval`, `Commands()`, `Notify`, and lifecycle (`Start`/`Stop`). `internal/channel/broker.go` defines the `Broker` which coordinates approval flow across multiple enabled channels. Approval requests are broadcast to all channels and the first `Resolve()` call wins. Other channels get `CancelApproval()` for cleanup. Rate limiting prevents approval queue flooding: `MaxPendingRequests` (default 50) caps concurrent pending approvals, and per-destination rate limits (5 requests/minute) prevent a single target from monopolizing the queue. Requests exceeding limits are auto-denied.
+
+HTTP webhook channel: `internal/channel/http/http.go` implements `HTTPChannel` satisfying the `channel.Channel` interface. On `RequestApproval`, it POSTs a JSON payload to the configured `webhook_url` with an `X-Sluice-Signature` header containing an HMAC-SHA256 signature of the body (using `webhook_secret`). Two response paths: sync (200 with `{"verdict": "allow|deny"}` in the body resolves immediately) and async (202 Accepted, waits for callback via `POST /api/approvals/{id}/resolve`). Delivery uses 3 retries with exponential backoff. `CancelApproval` sends a cancellation notification to the webhook. `Commands()` returns nil (webhooks do not support incoming commands). Channel configuration is stored in the `channels` table with `type=1` (ChannelHTTP), `webhook_url`, and `webhook_secret` columns added by migration 000002.
 
 Telegram channel: `internal/telegram/approval.go` implements `TelegramChannel` satisfying the `channel.Channel` interface. When `policyRuleSet.Allow()` encounters an Ask verdict, it calls `broker.Request()` which blocks until a channel resolves the request or the timeout expires. The Telegram channel sends an inline keyboard message and calls `broker.Resolve()` when the user responds. "Always Allow" writes to the SQLite store with source="approval", then recompiles the Engine and atomically swaps it. `CouldBeAllowed(dest, includeAsk)` takes an `includeAsk` parameter: when true (broker configured), Ask-matching destinations are resolved via DNS so the approval flow can proceed; when false (no broker), Ask rules are treated as Deny at the DNS stage to prevent leaking queries. Telegram env var names are hardcoded: `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (no config-based indirection).
 
@@ -349,7 +431,7 @@ Mail credential injection: `MailProxy` intercepts IMAP LOGIN and SMTP AUTH PLAIN
 
 Docker integration: Three-container architecture (sluice + tun2proxy + openclaw) with `network_mode: "service:tun2proxy"` routing all openclaw traffic through sluice's SOCKS5 proxy. `docker.Manager` wraps a `ContainerClient` interface with `ExecInContainer` for docker exec and standard container lifecycle methods. On credential mutation via Telegram `/cred` commands or CLI, `credMutationComplete` regenerates phantom environment variables using `GeneratePhantomEnv` and calls `Manager.ReloadSecrets`. Hot reload writes each phantom token as a file in a shared `sluice-phantoms` volume (e.g. `/phantoms/ANTHROPIC_API_KEY`) then runs `docker exec openclaw openclaw secrets reload`. If exec fails (agent image does not support reload), it falls back to `RestartWithEnv` which recreates the container with updated env vars. `BotConfig.Vault` and `BotConfig.DockerMgr` wire the vault and Docker manager into Telegram command handling. The sluice entrypoint generates a CA cert and copies it to a shared volume so openclaw can trust HTTPS MITM certificates via `SSL_CERT_FILE`.
 
-Health check: A minimal HTTP server on `127.0.0.1:3000` (configurable via `--health-addr`) serves `/healthz`, returning 200 when the SOCKS5 proxy is listening. The Dockerfile includes a `HEALTHCHECK` directive using `wget` against this endpoint. compose.yml uses `service_healthy` conditions to sequence startup: tun2proxy waits for sluice, openclaw waits for tun2proxy.
+Health check and REST API: The HTTP server on `127.0.0.1:3000` (configurable via `--health-addr`) serves both `/healthz` and the full REST API. The generated chi router from `api/openapi.yaml` handles all routes. `/healthz` returns 200 when the SOCKS5 proxy is listening (no auth required). All `/api/*` routes require bearer token auth via `SLUICE_API_TOKEN` env var and an enabled HTTP channel. The Dockerfile includes a `HEALTHCHECK` directive using `wget` against `/healthz`. compose.yml uses `service_healthy` conditions to sequence startup: tun2proxy waits for sluice, openclaw waits for tun2proxy.
 
 Graceful shutdown: On SIGINT/SIGTERM, the proxy stops accepting new connections and drains in-flight connections up to `--shutdown-timeout` (default 10s). Pending approval requests are auto-denied via `channel.Broker.CancelAll()` with a "shutting down" reason. The audit logger is closed after all connections drain.
 
@@ -613,6 +695,9 @@ See `compose.yml` in the repo root. Key features:
 - `lukechampine.com/blake3` - Blake3 hashing for tamper-evident audit chain
 - `github.com/hashicorp/vault/api` - HashiCorp Vault client for external secret management (KV v2, AppRole auth)
 - `github.com/golang-migrate/migrate/v4` - Schema migration framework with embedded SQL files
+- `github.com/go-chi/chi/v5` - HTTP router used by oapi-codegen generated code
+- `github.com/oapi-codegen/runtime` - Runtime helpers for oapi-codegen generated server
+- `github.com/oapi-codegen/oapi-codegen/v2` - OpenAPI spec to Go code generator (dev tool only)
 
 ## Estimated Scope
 
@@ -628,7 +713,9 @@ See `compose.yml` in the repo root. Key features:
 | Policy CLI (list/add/remove/import/export) | ~200 | Unified control plane |
 | Content inspection (tool args + responses) | ~200 | Regex patterns for secrets/PII |
 | Audit logger | ~200 | JSON lines, blake3 hash chains, chain verification CLI |
-| **Total custom code** | **~2950** | Single Go binary |
+| REST API (OpenAPI + handlers) | ~600 | Generated chi router + hand-written handlers |
+| HTTP webhook channel | ~200 | HMAC-signed delivery, sync/async approval paths |
+| **Total custom code** | **~3750** | Single Go binary |
 | Docker setup + tun2proxy | Config only | compose.yml |
 
 ## Future: Apple Container Support (last-mile, requires research)

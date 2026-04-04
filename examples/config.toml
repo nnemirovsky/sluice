@@ -110,6 +110,20 @@ credential = "openai_api_key"
 header = "Authorization"
 template = "Bearer {value}"
 
+# --- Channels ---
+# Channels deliver approval requests and receive responses. Multiple channels
+# can be enabled simultaneously (first response wins, others get cancelled).
+#
+# HTTP webhook channel: delivers approvals via HTTP POST with HMAC-SHA256
+# signature. Supports sync (200 with verdict in body) and async (202, then
+# callback to POST /api/approvals/:id/resolve) response paths.
+#
+# To add an HTTP channel via CLI:
+#   sluice channel add --type http --url https://example.com/sluice/webhook --secret my-hmac-secret
+#
+# To enable the REST API, set SLUICE_API_TOKEN env var and enable an HTTP channel.
+# All /api/* endpoints require bearer token auth and an enabled HTTP channel.
+
 # --- MCP upstream servers ---
 # Each upstream is spawned as a child process by the MCP gateway.
 # timeout_sec sets the per-upstream request timeout (default: 120s).

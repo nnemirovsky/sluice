@@ -89,16 +89,16 @@ Define the full API surface in OpenAPI 3.0 YAML. Set up oapi-codegen with chi-se
 /api/status                     GET    -- proxy stats
 ```
 
-- [ ] Write `api/openapi.yaml` with all endpoints, request/response schemas, bearer auth security scheme. `/healthz` has no security. All `/api/*` require bearerAuth.
-- [ ] Define schemas for all request/response types: Rule, Config, Binding, MCPUpstream, Channel, ApprovalRequest, Credential, AuditEntry, VerifyResult, ImportResult, StatusResponse
-- [ ] Create `internal/api/config.yaml` with oapi-codegen config (package: api, chi-server: true, models: true, embedded-spec: true)
-- [ ] Create `internal/api/generate.go` with `//go:generate oapi-codegen --config config.yaml ../../api/openapi.yaml`
-- [ ] Add oapi-codegen, chi, kin-openapi, oapi-codegen/runtime dependencies to go.mod
-- [ ] Run `go generate ./internal/api/` to produce `api.gen.go`
-- [ ] Add `generate` target to Makefile: `cd internal/api && oapi-codegen --config config.yaml ../../api/openapi.yaml`
-- [ ] Add `lint-api` target to Makefile: `npx @redocly/cli lint api/openapi.yaml`
-- [ ] Verify generated code compiles: `go build ./internal/api/`
-- [ ] Run tests: `go test ./... -v -timeout 30s`
+- [x] Write `api/openapi.yaml` with all endpoints, request/response schemas, bearer auth security scheme. `/healthz` has no security. All `/api/*` require bearerAuth.
+- [x] Define schemas for all request/response types: Rule, Config, Binding, MCPUpstream, Channel, ApprovalRequest, Credential, AuditEntry, VerifyResult, ImportResult, StatusResponse
+- [x] Create `internal/api/config.yaml` with oapi-codegen config (package: api, chi-server: true, models: true, embedded-spec: true)
+- [x] Create `internal/api/generate.go` with `//go:generate oapi-codegen --config config.yaml ../../api/openapi.yaml`
+- [x] Add oapi-codegen, chi, kin-openapi, oapi-codegen/runtime dependencies to go.mod
+- [x] Run `go generate ./internal/api/` to produce `api.gen.go`
+- [x] Add `generate` target to Makefile: `cd internal/api && oapi-codegen --config config.yaml ../../api/openapi.yaml`
+- [x] Add `lint-api` target to Makefile: `npx @redocly/cli lint api/openapi.yaml`
+- [x] Verify generated code compiles: `go build ./internal/api/`
+- [x] Run tests: `go test ./... -v -timeout 30s`
 
 ### Task 2: Implement approval and status handlers
 
@@ -109,17 +109,17 @@ Implement the generated server interface for approval and status endpoints. Thes
 - Create: `internal/api/server_test.go`
 - Modify: `cmd/sluice/main.go` (mount generated chi router on health server)
 
-- [ ] Create `Server` struct in `internal/api/server.go` holding references to store, broker, vault, audit path, proxy server
-- [ ] Implement `GetHealthz` handler (returns 200 ok when proxy is listening)
-- [ ] Implement `GetApiApprovals` handler (returns pending approval requests from broker)
-- [ ] Implement `PostApiApprovalsIdResolve` handler (calls broker.Resolve with verdict)
-- [ ] Implement `GetApiStatus` handler (proxy listening state, pending count, channel statuses)
-- [ ] Add bearer token auth middleware using `SLUICE_API_TOKEN` env var. If not set, all `/api/*` return 403.
-- [ ] Gate API routes: `/api/*` returns 403 `{"error": "HTTP channel is not enabled", "code": "channel_disabled"}` when no channels row has type=1 (HTTP) and enabled=1. `/healthz` always active regardless. Auth check (401/403 `unauthorized`) runs before channel check so bad tokens never reveal channel state.
-- [ ] Mount the generated chi handler on the existing health check server in main.go (replace simple `/healthz` mux)
-- [ ] Write tests for each handler using httptest
-- [ ] Write tests for auth middleware (valid/missing/wrong token, disabled API)
-- [ ] Run tests: `go test ./internal/api/ -v -timeout 30s`
+- [x] Create `Server` struct in `internal/api/server.go` holding references to store, broker, vault, audit path, proxy server
+- [x] Implement `GetHealthz` handler (returns 200 ok when proxy is listening)
+- [x] Implement `GetApiApprovals` handler (returns pending approval requests from broker)
+- [x] Implement `PostApiApprovalsIdResolve` handler (calls broker.Resolve with verdict)
+- [x] Implement `GetApiStatus` handler (proxy listening state, pending count, channel statuses)
+- [x] Add bearer token auth middleware using `SLUICE_API_TOKEN` env var. If not set, all `/api/*` return 403.
+- [x] Gate API routes: `/api/*` returns 403 `{"error": "HTTP channel is not enabled", "code": "channel_disabled"}` when no channels row has type=1 (HTTP) and enabled=1. `/healthz` always active regardless. Auth check (401/403 `unauthorized`) runs before channel check so bad tokens never reveal channel state.
+- [x] Mount the generated chi handler on the existing health check server in main.go (replace simple `/healthz` mux)
+- [x] Write tests for each handler using httptest
+- [x] Write tests for auth middleware (valid/missing/wrong token, disabled API)
+- [x] Run tests: `go test ./internal/api/ -v -timeout 30s`
 
 ### Task 3: Implement rule management handlers
 
@@ -127,15 +127,15 @@ Implement the generated server interface for approval and status endpoints. Thes
 - Modify: `internal/api/server.go`
 - Modify: `internal/api/server_test.go`
 
-- [ ] Implement `GetApiRules` with query param filtering (?verdict=, ?type=network|tool|pattern)
-- [ ] Implement `PostApiRules` accepting generated request type, calls store.AddRule, recompiles engine
-- [ ] Implement `DeleteApiRulesId` calls store.RemoveRule, recompiles engine
-- [ ] Implement `PostApiRulesImport` accepting multipart TOML file upload, calls store.ImportTOML
-- [ ] Implement `GetApiRulesExport` returning TOML representation
-- [ ] Implement `GetApiConfig` returning typed config as generated response type
-- [ ] Implement `PatchApiConfig` accepting partial update, calls store.UpdateConfig, recompiles engine
-- [ ] Write tests for each handler (success + error cases)
-- [ ] Run tests: `go test ./internal/api/ -v -timeout 30s`
+- [x] Implement `GetApiRules` with query param filtering (?verdict=, ?type=network|tool|pattern)
+- [x] Implement `PostApiRules` accepting generated request type, calls store.AddRule, recompiles engine
+- [x] Implement `DeleteApiRulesId` calls store.RemoveRule, recompiles engine
+- [x] Implement `PostApiRulesImport` accepting multipart TOML file upload, calls store.ImportTOML
+- [x] Implement `GetApiRulesExport` returning TOML representation
+- [x] Implement `GetApiConfig` returning typed config as generated response type
+- [x] Implement `PatchApiConfig` accepting partial update, calls store.UpdateConfig, recompiles engine
+- [x] Write tests for each handler (success + error cases)
+- [x] Run tests: `go test ./internal/api/ -v -timeout 30s`
 
 ### Task 4: Implement credential, binding, MCP, audit, and channel handlers
 
@@ -143,16 +143,16 @@ Implement the generated server interface for approval and status endpoints. Thes
 - Modify: `internal/api/server.go`
 - Modify: `internal/api/server_test.go`
 
-- [ ] Implement `GetApiCredentials` (list names via vault.Store.List)
-- [ ] Implement `PostApiCredentials` (add to vault, optionally create binding + allow rule, trigger phantom regen + hot reload)
-- [ ] Implement `DeleteApiCredentialsName` (remove credential + associated bindings/rules)
-- [ ] Implement binding CRUD handlers (GetApiBindings, PostApiBindings, DeleteApiBindingsId)
-- [ ] Implement MCP upstream CRUD handlers (GetApiMcpUpstreams, PostApiMcpUpstreams, DeleteApiMcpUpstreamsName)
-- [ ] Implement `GetApiAuditRecent` (read last N lines from audit log, ?limit= param)
-- [ ] Implement `GetApiAuditVerify` (call audit.VerifyChain, return result)
-- [ ] Implement `GetApiChannels` and `PatchApiChannelsId` for channel management
-- [ ] Write tests for all handlers
-- [ ] Run tests: `go test ./internal/api/ -v -timeout 30s`
+- [x] Implement `GetApiCredentials` (list names via vault.Store.List)
+- [x] Implement `PostApiCredentials` (add to vault, optionally create binding + allow rule, trigger phantom regen + hot reload)
+- [x] Implement `DeleteApiCredentialsName` (remove credential + associated bindings/rules)
+- [x] Implement binding CRUD handlers (GetApiBindings, PostApiBindings, DeleteApiBindingsId)
+- [x] Implement MCP upstream CRUD handlers (GetApiMcpUpstreams, PostApiMcpUpstreams, DeleteApiMcpUpstreamsName)
+- [x] Implement `GetApiAuditRecent` (read last N lines from audit log, ?limit= param)
+- [x] Implement `GetApiAuditVerify` (call audit.VerifyChain, return result)
+- [x] Implement `GetApiChannels` and `PatchApiChannelsId` for channel management
+- [x] Write tests for all handlers
+- [x] Run tests: `go test ./internal/api/ -v -timeout 30s`
 
 ### Task 5: Implement HTTP Channel
 
@@ -171,19 +171,19 @@ Create the HTTP Channel implementation satisfying `channel.Channel` from Plan 9.
 3b. Async: 202 Accepted -> waits for callback to POST /api/approvals/:id/resolve
 ```
 
-- [ ] Add `ChannelHTTP ChannelType = 1` to enum in channel.go
-- [ ] Create `HTTPChannel` struct implementing `channel.Channel`
-- [ ] Implement `RequestApproval`: POST to webhook_url with HMAC-SHA256 signature. Parse sync response or wait for async callback.
-- [ ] Implement `CancelApproval`, `CancelAll`: POST cancellation notification, auto-deny pending requests
-- [ ] Implement `Commands() <-chan channel.Command`: return nil (webhook doesn't support incoming commands)
-- [ ] Implement `Notify`: POST notification to webhook_url (fire and forget)
-- [ ] Implement `Type()`: return ChannelHTTP
-- [ ] Add retry logic: 3 attempts with exponential backoff for delivery failures
-- [ ] Write tests with httptest mock server for webhook target
-- [ ] Write tests for sync response path
-- [ ] Write tests for async callback path
-- [ ] Write tests for retry and timeout
-- [ ] Run tests: `go test ./internal/channel/webhook/ -v -timeout 30s`
+- [x] Add `ChannelHTTP ChannelType = 1` to enum in channel.go
+- [x] Create `HTTPChannel` struct implementing `channel.Channel`
+- [x] Implement `RequestApproval`: POST to webhook_url with HMAC-SHA256 signature. Parse sync response or wait for async callback.
+- [x] Implement `CancelApproval`, `CancelAll`: POST cancellation notification, auto-deny pending requests
+- [x] Implement `Commands() <-chan channel.Command`: return nil (webhook doesn't support incoming commands)
+- [x] Implement `Notify`: POST notification to webhook_url (fire and forget)
+- [x] Implement `Type()`: return ChannelHTTP
+- [x] Add retry logic: 3 attempts with exponential backoff for delivery failures
+- [x] Write tests with httptest mock server for webhook target
+- [x] Write tests for sync response path
+- [x] Write tests for async callback path
+- [x] Write tests for retry and timeout
+- [x] Run tests: `go test ./internal/channel/http/ -v -timeout 30s`
 
 ### Task 6: Add webhook config migration and channel wiring
 
@@ -199,45 +199,45 @@ ALTER TABLE channels ADD COLUMN webhook_url TEXT;
 ALTER TABLE channels ADD COLUMN webhook_secret TEXT;
 ```
 
-- [ ] Create migration 000002 adding webhook_url and webhook_secret columns to channels table
-- [ ] Update Channel CRUD in store.go for new columns
-- [ ] In main.go, read ALL enabled channels from store. Instantiate each by type (Telegram or HTTP). Pass all to `channel.NewBroker(channels)`.
-- [ ] Support multiple channels simultaneously: Telegram (row 1, type=0) + HTTP (row 2, type=1) can both be enabled
-- [ ] Add `sluice channel list`, `sluice channel add --type http --url <url> [--secret <secret>]`, `sluice channel update <id> --enabled true/false`, `sluice channel remove <id>` CLI
-- [ ] Wire HTTP channel's async resolve path to the API's approval resolve endpoint (Task 2)
-- [ ] Write tests for migration
-- [ ] Write tests for multi-channel instantiation (both Telegram + HTTP enabled)
-- [ ] Write tests for approval broadcast across both channels with first-response-wins
-- [ ] Run tests: `go test ./... -v -timeout 30s`
+- [x] Create migration 000002 adding webhook_url and webhook_secret columns to channels table
+- [x] Update Channel CRUD in store.go for new columns
+- [x] In main.go, read ALL enabled channels from store. Instantiate each by type (Telegram or HTTP). Pass all to `channel.NewBroker(channels)`.
+- [x] Support multiple channels simultaneously: Telegram (row 1, type=0) + HTTP (row 2, type=1) can both be enabled
+- [x] Add `sluice channel list`, `sluice channel add --type http --url <url> [--secret <secret>]`, `sluice channel update <id> --enabled true/false`, `sluice channel remove <id>` CLI
+- [x] Wire HTTP channel's async resolve path to the API's approval resolve endpoint (Task 2)
+- [x] Write tests for migration
+- [x] Write tests for multi-channel instantiation (both Telegram + HTTP enabled)
+- [x] Write tests for approval broadcast across both channels with first-response-wins
+- [x] Run tests: `go test ./... -v -timeout 30s`
 
 ### Task 7: Verify acceptance criteria
 
-- [ ] Verify `go generate ./internal/api/` produces valid code from OpenAPI spec
-- [ ] Verify all REST API endpoints work with bearer token auth
-- [ ] Verify API returns 403 when SLUICE_API_TOKEN is not set
-- [ ] Verify API routes return 403 with `{"error": "HTTP channel is not enabled", "code": "channel_disabled"}` when HTTP channel is disabled
-- [ ] Verify `/healthz` stays active even when HTTP channel is disabled
-- [ ] Verify HTTP channel delivers approvals via HTTP POST with HMAC signature
-- [ ] Verify sync response path (verdict in webhook response body)
-- [ ] Verify async callback path (202 + POST /api/approvals/:id/resolve)
-- [ ] Verify multi-channel: Telegram + HTTP both enabled, approval broadcast to both, first response wins
-- [ ] Verify cross-channel cancellation: Telegram approves, HTTP prompt gets cancelled (and vice versa)
-- [ ] Verify `sluice channel add --type http --url https://...` creates new channel row
-- [ ] Verify `sluice channel list` shows all channels with status
-- [ ] Verify `sluice channel remove <id>` removes channel (cannot remove last enabled channel)
-- [ ] Verify policy CRUD via API writes to store and recompiles engine
-- [ ] Verify credential management via API triggers phantom regen + hot reload
-- [ ] Run full test suite: `go test ./... -v -timeout 60s -race`
-- [ ] Run linter: `go vet ./...`
+- [x] Verify `go generate ./internal/api/` produces valid code from OpenAPI spec
+- [x] Verify all REST API endpoints work with bearer token auth
+- [x] Verify API returns 403 when SLUICE_API_TOKEN is not set
+- [x] Verify API routes return 403 with `{"error": "HTTP channel is not enabled", "code": "channel_disabled"}` when HTTP channel is disabled
+- [x] Verify `/healthz` stays active even when HTTP channel is disabled
+- [x] Verify HTTP channel delivers approvals via HTTP POST with HMAC signature
+- [x] Verify sync response path (verdict in webhook response body)
+- [x] Verify async callback path (202 + POST /api/approvals/:id/resolve)
+- [x] Verify multi-channel: Telegram + HTTP both enabled, approval broadcast to both, first response wins
+- [x] Verify cross-channel cancellation: Telegram approves, HTTP prompt gets cancelled (and vice versa)
+- [x] Verify `sluice channel add --type http --url https://...` creates new channel row
+- [x] Verify `sluice channel list` shows all channels with status
+- [x] Verify `sluice channel remove <id>` removes channel (cannot remove last enabled channel)
+- [x] Verify policy CRUD via API writes to store and recompiles engine
+- [x] Verify credential management via API triggers phantom regen + hot reload
+- [x] Run full test suite: `go test ./... -v -timeout 60s -race`
+- [x] Run linter: `go vet ./...`
 
 ### Task 8: [Final] Update documentation
 
-- [ ] Update CLAUDE.md: document REST API, OpenAPI spec location, code generation workflow
-- [ ] Update CLAUDE.md: document HTTP channel type and configuration
-- [ ] Update CONTRIBUTING.md: add API development workflow (edit spec -> generate -> implement)
-- [ ] Add API development section to Makefile help
-- [ ] Update examples/config.toml: add HTTP channel example (commented)
-- [ ] Update compose.yml: document SLUICE_API_TOKEN env var
+- [x] Update CLAUDE.md: document REST API, OpenAPI spec location, code generation workflow
+- [x] Update CLAUDE.md: document HTTP channel type and configuration
+- [x] Update CONTRIBUTING.md: add API development workflow (edit spec -> generate -> implement)
+- [x] Add API development section to Makefile help
+- [x] Update examples/config.toml: add HTTP channel example (commented)
+- [x] Update compose.yml: document SLUICE_API_TOKEN env var
 
 ## Technical Details
 
