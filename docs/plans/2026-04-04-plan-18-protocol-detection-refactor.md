@@ -126,18 +126,18 @@ SMTP and IMAP servers send a banner before the client speaks. Detection requires
 
 ### Task 4: Verify acceptance criteria
 
-- [ ] Verify Protocol type is integer throughout the codebase (no string comparisons remain)
-- [ ] Verify Protocol.String() returns correct display names for all values
-- [ ] Verify ParseProtocol handles all known protocol names and returns error for unknown
-- [ ] Verify HTTPS on non-standard port (8000) is detected and gets MITM credential injection
-- [ ] Verify SSH on non-standard port (2222) is detected and gets jump host injection
-- [ ] Verify HTTP on non-standard port (9090) is detected correctly
-- [ ] Verify SMTP/IMAP on non-standard ports detected via server banner
-- [ ] Verify standard-port detection still works (no regression)
-- [ ] Verify store serializes protocols as integers in DB
-- [ ] Verify TOML import parses protocol strings ("https") into integers
-- [ ] Run full test suite: `go test ./... -v -timeout 60s -race`
-- [ ] Run linter: `go vet ./...`
+- [x] Verify Protocol type is integer throughout the codebase (no string comparisons remain)
+- [x] Verify Protocol.String() returns correct display names for all values
+- [x] Verify ParseProtocol handles all known protocol names and returns error for unknown
+- [x] Verify HTTPS on non-standard port (8000) is detected and gets MITM credential injection
+- [x] Verify SSH on non-standard port (2222) is detected and gets jump host injection
+- [x] Verify HTTP on non-standard port (9090) is detected correctly
+- [x] Verify SMTP/IMAP on non-standard ports detected via server banner
+- [x] Verify standard-port detection still works (no regression)
+- [x] Verify store serializes protocols as integers in DB
+- [x] Verify TOML import parses protocol strings ("https") into integers
+- [x] Run full test suite: `go test ./... -v -timeout 60s -race`
+- [x] Run linter: `go vet ./...`
 
 ### Task 5: [Final] Update documentation
 
