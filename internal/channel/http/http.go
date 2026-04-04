@@ -121,7 +121,6 @@ func (h *HTTPChannel) RequestApproval(ctx context.Context, req channel.ApprovalR
 func (h *HTTPChannel) deliverApproval(req channel.ApprovalRequest) {
 	if h.broker != nil && !h.broker.HasWaiter(req.ID) {
 		h.pending.Delete(req.ID)
-		h.broker.ClearTimedOut(req.ID)
 		return
 	}
 

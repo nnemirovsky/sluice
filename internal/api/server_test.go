@@ -1900,9 +1900,13 @@ func TestGetApiChannels(t *testing.T) {
 
 func TestPatchApiChannels_Disable(t *testing.T) {
 	st := newTestStore(t)
+	// Add two HTTP channels so one can be disabled without triggering the guard.
 	chID, err := st.AddChannel(int(channel.ChannelHTTP), true)
 	if err != nil {
 		t.Fatalf("add channel: %v", err)
+	}
+	if _, err := st.AddChannel(int(channel.ChannelHTTP), true); err != nil {
+		t.Fatalf("add second channel: %v", err)
 	}
 	srv := api.NewServer(st, nil, nil, "")
 
@@ -1935,6 +1939,38 @@ func TestPatchApiChannels_Disable(t *testing.T) {
 	}
 	if stored.Enabled {
 		t.Error("expected stored channel to be disabled")
+	}
+}
+
+func TestPatchApiChannels_DisableLastHTTPBlocked(t *testing.T) {
+	st := newTestStore(t)
+	chID, err := st.AddChannel(int(channel.ChannelHTTP), true)
+	if err != nil {
+		t.Fatalf("add channel: %v", err)
+	}
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"enabled": false}`
+	req := httptest.NewRequest("PATCH", fmt.Sprintf("/api/channels/%d", chID), strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify channel is still enabled in store.
+	stored, err := st.GetChannel(chID)
+	if err != nil {
+		t.Fatalf("get channel: %v", err)
+	}
+	if !stored.Enabled {
+		t.Error("expected stored channel to still be enabled")
 	}
 }
 

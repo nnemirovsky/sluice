@@ -222,7 +222,11 @@ func (s *Server) PostApiApprovalsIdResolve(w http.ResponseWriter, r *http.Reques
 	}
 
 	if !s.broker.Resolve(id, resp) {
-		writeError(w, http.StatusNotFound, "approval request not found or already resolved", "")
+		if s.broker.WasTimedOut(id) {
+			writeError(w, http.StatusConflict, "approval already resolved or timed out", "")
+		} else {
+			writeError(w, http.StatusNotFound, "approval request not found", "")
+		}
 		return
 	}
 
@@ -969,10 +973,19 @@ func (s *Server) PostApiBindings(w http.ResponseWriter, r *http.Request) {
 		opts.Protocols = *req.Protocols
 	}
 
+	if s.reloadMu != nil {
+		s.reloadMu.Lock()
+		defer s.reloadMu.Unlock()
+	}
+
 	id, err := s.store.AddBinding(req.Destination, req.Credential, opts)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "")
 		return
+	}
+
+	if err := s.rebuildResolver(); err != nil {
+		log.Printf("[WARN] rebuild resolver after binding add failed: %v", err)
 	}
 
 	// Read back the binding.
@@ -998,6 +1011,11 @@ func (s *Server) PostApiBindings(w http.ResponseWriter, r *http.Request) {
 
 // DeleteApiBindingsId removes a credential binding.
 func (s *Server) DeleteApiBindingsId(w http.ResponseWriter, r *http.Request, id int64) {
+	if s.reloadMu != nil {
+		s.reloadMu.Lock()
+		defer s.reloadMu.Unlock()
+	}
+
 	deleted, err := s.store.RemoveBinding(id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to remove binding", "")
@@ -1007,6 +1025,11 @@ func (s *Server) DeleteApiBindingsId(w http.ResponseWriter, r *http.Request, id 
 		writeError(w, http.StatusNotFound, "binding not found", "")
 		return
 	}
+
+	if err := s.rebuildResolver(); err != nil {
+		log.Printf("[WARN] rebuild resolver after binding remove failed: %v", err)
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1214,6 +1237,25 @@ func (s *Server) PatchApiChannelsId(w http.ResponseWriter, r *http.Request, id i
 	if ch == nil {
 		writeError(w, http.StatusNotFound, "channel not found", "")
 		return
+	}
+
+	// Prevent disabling the last enabled HTTP channel (would lock out the API).
+	if req.Enabled != nil && !*req.Enabled && ch.Type == int(channel.ChannelHTTP) && ch.Enabled {
+		channels, err := s.store.ListChannels()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to check channels", "")
+			return
+		}
+		httpEnabled := 0
+		for _, c := range channels {
+			if c.Type == int(channel.ChannelHTTP) && c.Enabled {
+				httpEnabled++
+			}
+		}
+		if httpEnabled <= 1 {
+			writeError(w, http.StatusConflict, "cannot disable the last enabled HTTP channel", "")
+			return
+		}
 	}
 
 	update := store.ChannelUpdate{
