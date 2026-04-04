@@ -668,6 +668,9 @@ func (s *Server) GetApiRulesExport(w http.ResponseWriter, r *http.Request) {
 		buf.WriteString("[[mcp_upstream]]\n")
 		fmt.Fprintf(&buf, "name = %q\n", u.Name)
 		fmt.Fprintf(&buf, "command = %q\n", u.Command)
+		if u.Transport != "" && u.Transport != "stdio" {
+			fmt.Fprintf(&buf, "transport = %q\n", u.Transport)
+		}
 		if len(u.Args) > 0 {
 			argsJSON, _ := json.Marshal(u.Args)
 			fmt.Fprintf(&buf, "args = %s\n", string(argsJSON))
@@ -1079,6 +1082,9 @@ func (s *Server) PostApiMcpUpstreams(w http.ResponseWriter, r *http.Request) {
 	if req.TimeoutSec != nil {
 		opts.TimeoutSec = *req.TimeoutSec
 	}
+	if req.Transport != nil {
+		opts.Transport = *req.Transport
+	}
 
 	id, err := s.store.AddMCPUpstream(req.Name, req.Command, opts)
 	if err != nil {
@@ -1099,6 +1105,7 @@ func (s *Server) PostApiMcpUpstreams(w http.ResponseWriter, r *http.Request) {
 	for _, u := range rows {
 		if u.ID == id {
 			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Sluice-Warning", "restart the MCP gateway for the new upstream to take effect")
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(storeMCPUpstreamToAPI(u))
 			return
@@ -1107,6 +1114,7 @@ func (s *Server) PostApiMcpUpstreams(w http.ResponseWriter, r *http.Request) {
 
 	// Fallback.
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Sluice-Warning", "restart the MCP gateway for the new upstream to take effect")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(MCPUpstream{Id: id, Name: req.Name, Command: req.Command})
 }
@@ -1122,6 +1130,7 @@ func (s *Server) DeleteApiMcpUpstreamsName(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusNotFound, "upstream not found", "")
 		return
 	}
+	w.Header().Set("X-Sluice-Warning", "restart the MCP gateway for the removal to take effect")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1384,6 +1393,9 @@ func storeMCPUpstreamToAPI(u store.MCPUpstreamRow) MCPUpstream {
 		Id:      u.ID,
 		Name:    u.Name,
 		Command: u.Command,
+	}
+	if u.Transport != "" {
+		upstream.Transport = &u.Transport
 	}
 	if len(u.Args) > 0 {
 		upstream.Args = &u.Args

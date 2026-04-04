@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,8 +22,9 @@ type MCPHTTPHandler struct {
 }
 
 type mcpSession struct {
-	id        string
-	createdAt time.Time
+	id             string
+	createdAt      time.Time
+	lastAccessedAt atomic.Int64 // UnixNano; atomic for concurrent read/write safety
 }
 
 // NewMCPHTTPHandler creates an HTTP handler that serves the MCP protocol
@@ -74,10 +76,12 @@ func (h *MCPHTTPHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Mcp-Session-Id header required", http.StatusBadRequest)
 		return
 	} else {
-		if _, ok := h.sessions.Load(sessionID); !ok {
+		v, ok := h.sessions.Load(sessionID)
+		if !ok {
 			http.Error(w, "Invalid or expired session", http.StatusNotFound)
 			return
 		}
+		v.(*mcpSession).lastAccessedAt.Store(time.Now().UnixNano())
 		w.Header().Set("Mcp-Session-Id", sessionID)
 	}
 
@@ -157,20 +161,24 @@ func (h *MCPHTTPHandler) newSession() *mcpSession {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	id := hex.EncodeToString(b)
-	sess := &mcpSession{id: id, createdAt: time.Now()}
+	now := time.Now()
+	sess := &mcpSession{id: id, createdAt: now}
+	sess.lastAccessedAt.Store(now.UnixNano())
 	h.sessions.Store(id, sess)
 	return sess
 }
 
-// pruneOldestSession removes the session with the earliest createdAt time.
+// pruneOldestSession removes the session with the earliest lastAccessedAt
+// time so that active sessions survive while idle ones are evicted.
 func (h *MCPHTTPHandler) pruneOldestSession() {
 	var oldestID string
-	var oldestTime time.Time
+	var oldestNano int64
 	h.sessions.Range(func(key, value interface{}) bool {
 		sess := value.(*mcpSession)
-		if oldestID == "" || sess.createdAt.Before(oldestTime) {
+		accessedAt := sess.lastAccessedAt.Load()
+		if oldestID == "" || accessedAt < oldestNano {
 			oldestID = key.(string)
-			oldestTime = sess.createdAt
+			oldestNano = accessedAt
 		}
 		return true
 	})

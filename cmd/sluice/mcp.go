@@ -300,6 +300,7 @@ func handleMCPAdd(args []string) error {
 		return fmt.Errorf("add upstream: %w", err)
 	}
 	fmt.Printf("added MCP upstream %q [%d] (transport: %s, command: %s)\n", name, id, *transport, *command)
+	fmt.Println("NOTE: if the MCP gateway is running, restart sluice for the new upstream to take effect")
 
 	// Best-effort: write mcp-servers.json so the agent picks up the MCP
 	// gateway on next reload/restart. Only if phantom-dir is detectable.
@@ -392,6 +393,7 @@ func handleMCPRemove(args []string) error {
 		os.Exit(1)
 	}
 	fmt.Printf("removed MCP upstream %q\n", name)
+	fmt.Println("NOTE: if the MCP gateway is running, restart sluice for the removal to take effect")
 
 	// Best-effort: update mcp-servers.json.
 	if dir := os.Getenv("SLUICE_PHANTOM_DIR"); dir != "" {
