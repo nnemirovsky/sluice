@@ -21,6 +21,7 @@ type Event struct {
 	PrevHash    string `json:"prev_hash"`
 	Destination string `json:"destination"`
 	Port        int    `json:"port,omitempty"`
+	Protocol    string `json:"protocol,omitempty"`
 	Verdict     string `json:"verdict"`
 	Reason      string `json:"reason,omitempty"`
 	Tool        string `json:"tool,omitempty"`

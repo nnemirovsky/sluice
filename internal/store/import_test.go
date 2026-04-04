@@ -464,14 +464,16 @@ func TestImportTOMLExampleConfigFile(t *testing.T) {
 	// The example config has:
 	// - 3 network allow rules (anthropic, openai, telegram)
 	// - 2 network deny rules (metadata endpoints)
+	// - 1 UDP deny rule (block all UDP by default)
+	// - 1 UDP/DNS allow rule (Google DNS)
 	// - 2 tool allow rules (github list/get)
 	// - 4 tool ask rules (github create/update/delete, filesystem write)
 	// - 1 tool deny rule (exec)
 	// - 1 content deny rule (api key pattern)
 	// - 1 redact rule (api key in responses)
-	// Total: 14 rules
-	if res.RulesInserted != 14 {
-		t.Errorf("expected 14 rules inserted, got %d", res.RulesInserted)
+	// Total: 16 rules
+	if res.RulesInserted != 16 {
+		t.Errorf("expected 16 rules inserted, got %d", res.RulesInserted)
 	}
 	if res.BindingsInserted != 2 {
 		t.Errorf("expected 2 bindings, got %d inserted", res.BindingsInserted)

@@ -18,7 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/armon/go-socks5"
+	"github.com/things-go/go-socks5"
+	"github.com/things-go/go-socks5/statute"
 
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/channel"
@@ -41,30 +42,38 @@ const connectTimeout = 30 * time.Second
 
 // Config holds configuration for creating a new SOCKS5 proxy server.
 type Config struct {
-	ListenAddr string
-	Policy     *policy.Engine
-	Audit      *audit.FileLogger
-	Broker     *channel.Broker
-	Provider   vault.Provider           // nil = no credential injection
-	Resolver   *vault.BindingResolver   // nil = no credential injection
-	VaultDir   string                   // CA cert storage dir (defaults to ~/.sluice)
-	Store      *store.Store             // nil = in-memory only (no persistence)
+	ListenAddr    string
+	Policy        *policy.Engine
+	Audit         *audit.FileLogger
+	Broker        *channel.Broker
+	Provider      vault.Provider           // nil = no credential injection
+	Resolver      *vault.BindingResolver   // nil = no credential injection
+	VaultDir      string                   // CA cert storage dir (defaults to ~/.sluice)
+	Store         *store.Store             // nil = in-memory only (no persistence)
+	WSBlockRules    []WSBlockRuleConfig      // WebSocket content deny rules
+	WSRedactRules   []WSRedactRuleConfig     // WebSocket content redact rules
+	QUICBlockRules  []QUICBlockRuleConfig    // QUIC/HTTP3 content deny rules
+	QUICRedactRules []QUICRedactRuleConfig   // QUIC/HTTP3 content redact rules
+	DNSResolver     string                   // upstream DNS resolver for intercepted queries (default: 8.8.8.8:53)
 }
 
 // Server wraps a SOCKS5 server with policy enforcement and audit logging.
 type Server struct {
-	listener    net.Listener
-	socks       *socks5.Server
-	rules       *policyRuleSet
-	dnsResolver *policyResolver
-	injector    *Injector
-	injectorLn  net.Listener
-	sshJump     *SSHJumpHost
-	mailProxy   *MailProxy
-	resolver    atomic.Pointer[vault.BindingResolver]
-	closed      atomic.Bool
-	serving     atomic.Bool
-	activeConns sync.WaitGroup
+	listener       net.Listener
+	socks          *socks5.Server
+	rules          *policyRuleSet
+	dnsResolver    *policyResolver
+	injector       *Injector
+	injectorLn     net.Listener
+	sshJump        *SSHJumpHost
+	mailProxy      *MailProxy
+	udpRelay       *UDPRelay
+	dnsInterceptor *DNSInterceptor
+	quicProxy      *QUICProxy
+	resolver       atomic.Pointer[vault.BindingResolver]
+	closed         atomic.Bool
+	serving        atomic.Bool
+	activeConns    sync.WaitGroup
 }
 
 type contextKey string
@@ -180,10 +189,11 @@ type policyRuleSet struct {
 }
 
 func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context.Context, bool) {
-	// BIND and ASSOCIATE are not implemented. Return true so go-socks5
-	// reaches its own handler and sends the correct commandNotSupported
-	// reply instead of ruleFailure.
-	if req.Command != socks5.ConnectCommand {
+	// BIND is not implemented; ASSOCIATE is handled by go-socks5's built-in
+	// UDP relay. Return true for both so go-socks5 reaches its own handler
+	// instead of sending ruleFailure. Per-datagram policy enforcement for
+	// UDP ASSOCIATE will be added via a custom associate handler.
+	if req.Command != statute.CommandConnect {
 		return ctx, true
 	}
 
@@ -373,20 +383,16 @@ func New(cfg Config) (*Server, error) {
 	srv.rules = rules
 	srv.dnsResolver = dnsRes
 
-	socksCfg := &socks5.Config{
-		Rules:    rules,
-		Resolver: dnsRes,
-		Dial:     srv.dial,
-	}
-	socksServer, err := socks5.New(socksCfg)
-	if err != nil {
-		_ = ln.Close()
-		if srv.injectorLn != nil {
-			_ = srv.injectorLn.Close()
-		}
-		return nil, fmt.Errorf("socks5: %w", err)
-	}
-	srv.socks = socksServer
+	// Create UDP relay and DNS interceptor for UDP ASSOCIATE sessions.
+	srv.udpRelay = NewUDPRelay(enginePtr, cfg.Audit)
+	srv.dnsInterceptor = NewDNSInterceptor(enginePtr, cfg.Audit, cfg.DNSResolver)
+
+	srv.socks = socks5.NewServer(
+		socks5.WithRule(rules),
+		socks5.WithResolver(dnsRes),
+		socks5.WithDial(srv.dial),
+		socks5.WithAssociateHandle(srv.handleAssociate),
+	)
 
 	return srv, nil
 }
@@ -422,7 +428,20 @@ func (s *Server) setupInjection(cfg Config, mainLn net.Listener) error {
 	}
 	authToken := hex.EncodeToString(tokenBytes)
 
-	s.injector = NewInjector(cfg.Provider, &s.resolver, caCert, authToken)
+	// Create WebSocket proxy for frame-level inspection when configured.
+	var wsProxy *WSProxy
+	if len(cfg.WSBlockRules) > 0 || len(cfg.WSRedactRules) > 0 {
+		var wsErr error
+		wsProxy, wsErr = NewWSProxy(cfg.Provider, &s.resolver, cfg.WSBlockRules, cfg.WSRedactRules)
+		if wsErr != nil {
+			return fmt.Errorf("create ws proxy: %w", wsErr)
+		}
+	} else {
+		// Create WSProxy with empty rules for phantom token replacement.
+		wsProxy, _ = NewWSProxy(cfg.Provider, &s.resolver, nil, nil)
+	}
+
+	s.injector = NewInjector(cfg.Provider, &s.resolver, caCert, authToken, wsProxy)
 	injLn, injErr := net.Listen("tcp", "127.0.0.1:0")
 	if injErr != nil {
 		return fmt.Errorf("injector listener: %w", injErr)
@@ -443,6 +462,19 @@ func (s *Server) setupInjection(cfg Config, mainLn net.Listener) error {
 	// Mail proxy for IMAP/SMTP credential injection. Pass the CA cert
 	// so implicit TLS ports (993, 465) can be handled via TLS MITM.
 	s.mailProxy = NewMailProxy(cfg.Provider, &caCert)
+
+	// QUIC proxy for HTTP/3 MITM credential injection over UDP.
+	qp, qpErr := NewQUICProxy(caCert, cfg.Provider, &s.resolver, cfg.Audit, cfg.QUICBlockRules, cfg.QUICRedactRules)
+	if qpErr != nil {
+		log.Printf("QUIC proxy disabled: %v", qpErr)
+	} else {
+		s.quicProxy = qp
+		go func() {
+			if listenErr := qp.ListenAndServe("127.0.0.1:0"); listenErr != nil {
+				log.Printf("[QUIC] listener stopped: %v", listenErr)
+			}
+		}()
+	}
 
 	log.Printf("credential injection enabled (%s)", cfg.Provider.Name())
 	return nil
@@ -648,6 +680,341 @@ func dialThroughInjector(injectorAddr, host string, port int, authToken, pinID s
 	return conn, nil
 }
 
+// handleAssociate is the custom SOCKS5 UDP ASSOCIATE handler registered via
+// WithAssociateHandle. It creates a UDP listener, replies with its address,
+// then dispatches datagrams to the DNSInterceptor (port 53) or UDPRelay
+// (all other ports). The handler blocks until the TCP control connection
+// closes, at which point all UDP sessions are cleaned up.
+func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request *socks5.Request) error {
+	// Bind a UDP listener on the same IP as the TCP connection.
+	tcpAddr, ok := request.LocalAddr.(*net.TCPAddr)
+	if !ok {
+		if err := socks5.SendReply(writer, statute.RepServerFailure, nil); err != nil {
+			return fmt.Errorf("send reply: %w", err)
+		}
+		return fmt.Errorf("local address is not TCP: %T", request.LocalAddr)
+	}
+	udpAddr := &net.UDPAddr{IP: tcpAddr.IP, Port: 0}
+	bindLn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		if err := socks5.SendReply(writer, statute.RepServerFailure, nil); err != nil {
+			return fmt.Errorf("send reply: %w", err)
+		}
+		return fmt.Errorf("listen udp: %w", err)
+	}
+
+	// Tell the client where to send UDP datagrams.
+	if err := socks5.SendReply(writer, statute.RepSuccess, bindLn.LocalAddr()); err != nil {
+		bindLn.Close()
+		return fmt.Errorf("send reply: %w", err)
+	}
+
+	// Track upstream UDP sessions for non-DNS traffic.
+	var mu sync.Mutex
+	sessions := make(map[string]*udpSession)
+
+	// Ensure bindLn is closed exactly once regardless of which goroutine
+	// exits first (dispatch loop vs TCP control connection reader).
+	var closeBindOnce sync.Once
+	closeBind := func() { closeBindOnce.Do(func() { bindLn.Close() }) }
+
+	// Start the datagram dispatch loop in a goroutine.
+	go func() {
+		defer func() {
+			mu.Lock()
+			for _, sess := range sessions {
+				if s.quicProxy != nil {
+					s.quicProxy.UnregisterExpectedHost(sess.upstream.LocalAddr().String())
+				}
+				sess.upstream.Close()
+			}
+			mu.Unlock()
+			closeBind()
+		}()
+
+		buf := make([]byte, 65535)
+		for {
+			bindLn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+			n, srcAddr, readErr := bindLn.ReadFrom(buf)
+			if readErr != nil {
+				if ne, ok := readErr.(net.Error); ok && ne.Timeout() {
+					// Clean up expired sessions on timeout.
+					mu.Lock()
+					now := time.Now()
+					for key, sess := range sessions {
+						if now.Sub(sess.lastSeen) > udpSessionTimeout {
+							if s.quicProxy != nil {
+								s.quicProxy.UnregisterExpectedHost(sess.upstream.LocalAddr().String())
+							}
+							sess.upstream.Close()
+							delete(sessions, key)
+						}
+					}
+					mu.Unlock()
+					continue
+				}
+				return
+			}
+
+			// Validate that the source matches the ASSOCIATE request's client.
+			clientAddr, clientOK := request.RemoteAddr.(*net.TCPAddr)
+			if !clientOK {
+				continue
+			}
+			udpSrc, srcOK := srcAddr.(*net.UDPAddr)
+			if !srcOK {
+				continue
+			}
+			// Per RFC 1928: if the client specified 0.0.0.0:0, accept from any
+			// source IP that matches the TCP client.
+			if !request.DestAddr.IP.IsUnspecified() && !request.DestAddr.IP.Equal(udpSrc.IP) {
+				continue
+			}
+			if request.DestAddr.Port != 0 && request.DestAddr.Port != udpSrc.Port {
+				continue
+			}
+			// Also verify the source IP matches the TCP control connection's
+			// remote IP to prevent other hosts from injecting datagrams.
+			if !clientAddr.IP.Equal(udpSrc.IP) {
+				continue
+			}
+
+			dest, port, payload, parseErr := ParseSOCKS5UDPHeader(buf[:n])
+			if parseErr != nil {
+				log.Printf("[UDP] invalid datagram from %s: %v", srcAddr, parseErr)
+				continue
+			}
+
+			// DNS interception: port 53 traffic goes to the DNS interceptor.
+			if port == 53 && s.dnsInterceptor != nil {
+				resp, dnsErr := s.dnsInterceptor.HandleQuery(payload)
+				if dnsErr != nil {
+					log.Printf("[DNS] query handling error: %v", dnsErr)
+					continue
+				}
+				// Wrap DNS response in SOCKS5 UDP header.
+				dstIP := net.ParseIP(dest)
+				if dstIP == nil {
+					// Domain name destination: resolve for response header.
+					addrs, resolveErr := net.LookupIP(dest)
+					if resolveErr != nil || len(addrs) == 0 {
+						log.Printf("[DNS] cannot resolve %s for response header: %v", dest, resolveErr)
+						continue
+					}
+					dstIP = addrs[0]
+				}
+				respDatagram := BuildSOCKS5UDPResponse(dstIP, port, resp)
+				if _, writeErr := bindLn.WriteTo(respDatagram, srcAddr); writeErr != nil {
+					log.Printf("[DNS] write response to client: %v", writeErr)
+				}
+				continue
+			}
+
+			// QUIC interception: route packets to QUICProxy for HTTP/3 MITM
+			// credential injection. Check existing sessions first so
+			// short-header packets (used after handshake) are routed
+			// correctly. Only use IsQUICPacket to decide whether to
+			// CREATE a new session (it only matches long-header initials).
+			if s.quicProxy != nil && isHTTPSPort(port) {
+				sessionKey := "quic:" + dest + ":" + strconv.Itoa(port)
+				mu.Lock()
+				sess, exists := sessions[sessionKey]
+				if exists {
+					sess.lastSeen = time.Now()
+				}
+				mu.Unlock()
+
+				if exists {
+					quicAddr := s.quicProxy.Addr()
+					if quicAddr == nil {
+						log.Printf("[QUIC] proxy not ready, dropping datagram for %s:%d", dest, port)
+						continue
+					}
+					if _, writeErr := sess.upstream.WriteTo(payload, quicAddr); writeErr != nil {
+						log.Printf("[QUIC] write to proxy: %v", writeErr)
+					}
+					continue
+				}
+
+				if IsQUICPacket(payload) {
+					quicAddr := s.quicProxy.Addr()
+					if quicAddr != nil {
+						// Evaluate policy using QUIC-specific matching so rules
+						// with protocols = ["quic"] are honored.
+						verdict := s.udpRelay.engine.Load().EvaluateQUIC(dest, port)
+						if verdict != policy.Allow {
+							if s.udpRelay.audit != nil {
+								if logErr := s.udpRelay.audit.Log(audit.Event{
+									Destination: dest,
+									Port:        port,
+									Protocol:    "quic",
+									Verdict:     "deny",
+									Reason:      "quic denied by policy",
+								}); logErr != nil {
+									log.Printf("audit log write error: %v", logErr)
+								}
+							}
+							continue
+						}
+
+						upstream, listenErr := net.ListenPacket("udp", "127.0.0.1:0")
+						if listenErr != nil {
+							log.Printf("[QUIC] create upstream for %s: %v", sessionKey, listenErr)
+							continue
+						}
+						// Register expected host so the QUIC proxy can verify
+						// that the TLS SNI matches the policy-checked destination.
+						s.quicProxy.RegisterExpectedHost(upstream.LocalAddr().String(), dest, port)
+						mu.Lock()
+						sess = &udpSession{upstream: upstream, lastSeen: time.Now()}
+						sessions[sessionKey] = sess
+						mu.Unlock()
+						// Use the original destination for SOCKS5 response headers
+						// since the QUIC proxy is local and its address would be
+						// meaningless to the client.
+						origDst := &net.UDPAddr{IP: net.ParseIP(dest), Port: port}
+						if origDst.IP == nil {
+							// Domain destination: resolve for response header.
+							addrs, resolveErr := net.LookupIP(dest)
+							if resolveErr == nil && len(addrs) > 0 {
+								origDst.IP = addrs[0]
+							} else {
+								origDst.IP = net.IPv4zero
+							}
+						}
+						go s.relayQUICResponses(upstream, bindLn, srcAddr, origDst)
+
+						if _, writeErr := sess.upstream.WriteTo(payload, quicAddr); writeErr != nil {
+							log.Printf("[QUIC] write to proxy: %v", writeErr)
+						}
+						continue
+					}
+					// QUICProxy not yet listening, fall through to normal UDP handling.
+				}
+			}
+
+			// General UDP: evaluate policy via UDPRelay.
+			verdict := s.udpRelay.evaluateUDP(dest, port)
+			if verdict != policy.Allow {
+				if s.udpRelay.audit != nil {
+					if logErr := s.udpRelay.audit.Log(audit.Event{
+						Destination: dest,
+						Port:        port,
+						Protocol:    "udp",
+						Verdict:     "deny",
+						Reason:      "udp denied",
+					}); logErr != nil {
+						log.Printf("audit log write error: %v", logErr)
+					}
+				}
+				continue
+			}
+
+			// Relay allowed datagram to upstream.
+			dstAddr, resolveErr := net.ResolveUDPAddr("udp", net.JoinHostPort(dest, strconv.Itoa(port)))
+			if resolveErr != nil {
+				log.Printf("[UDP] resolve %s:%d: %v", dest, port, resolveErr)
+				continue
+			}
+
+			sessionKey := dstAddr.String()
+			mu.Lock()
+			sess, exists := sessions[sessionKey]
+			if !exists {
+				upstream, listenErr := net.ListenPacket("udp", ":0")
+				if listenErr != nil {
+					mu.Unlock()
+					log.Printf("[UDP] create upstream for %s: %v", sessionKey, listenErr)
+					continue
+				}
+				sess = &udpSession{upstream: upstream, lastSeen: time.Now()}
+				sessions[sessionKey] = sess
+				// Start a goroutine to relay responses from upstream back to client.
+				go s.relayUDPResponses(upstream, bindLn, srcAddr)
+			} else {
+				sess.lastSeen = time.Now()
+			}
+			mu.Unlock()
+
+			if _, writeErr := sess.upstream.WriteTo(payload, dstAddr); writeErr != nil {
+				log.Printf("[UDP] write to %s: %v", sessionKey, writeErr)
+			}
+
+			if s.udpRelay.audit != nil {
+				if logErr := s.udpRelay.audit.Log(audit.Event{
+					Destination: dest,
+					Port:        port,
+					Protocol:    "udp",
+					Verdict:     "allow",
+				}); logErr != nil {
+					log.Printf("audit log write error: %v", logErr)
+				}
+			}
+		}
+	}()
+
+	// Block on the TCP control connection. When it closes, closeBind
+	// causes the dispatch goroutine's ReadFrom to return an error,
+	// exiting the loop and running its deferred cleanup.
+	tcpBuf := make([]byte, 1)
+	for {
+		if _, err := request.Reader.Read(tcpBuf); err != nil {
+			closeBind()
+			return nil
+		}
+	}
+}
+
+// relayUDPResponses reads response datagrams from an upstream connection and
+// wraps them in SOCKS5 UDP headers before sending to the client.
+func (s *Server) relayUDPResponses(upstream net.PacketConn, relay *net.UDPConn, clientAddr net.Addr) {
+	buf := make([]byte, 65535)
+	for {
+		upstream.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		n, srcAddr, err := upstream.ReadFrom(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			return
+		}
+		udpAddr, ok := srcAddr.(*net.UDPAddr)
+		if !ok {
+			continue
+		}
+		resp := BuildSOCKS5UDPResponse(udpAddr.IP, udpAddr.Port, buf[:n])
+		if _, writeErr := relay.WriteTo(resp, clientAddr); writeErr != nil {
+			log.Printf("[UDP] write response to client: %v", writeErr)
+		}
+	}
+}
+
+// relayQUICResponses reads response datagrams from a QUIC proxy upstream and
+// wraps them in SOCKS5 UDP headers using the original destination address
+// (not the local QUIC proxy address) before sending to the client.
+func (s *Server) relayQUICResponses(upstream net.PacketConn, relay *net.UDPConn, clientAddr net.Addr, originalDst *net.UDPAddr) {
+	buf := make([]byte, 65535)
+	for {
+		upstream.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		n, _, err := upstream.ReadFrom(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			return
+		}
+		resp := BuildSOCKS5UDPResponse(originalDst.IP, originalDst.Port, buf[:n])
+		if _, writeErr := relay.WriteTo(resp, clientAddr); writeErr != nil {
+			log.Printf("[QUIC] write response to client: %v", writeErr)
+		}
+	}
+}
+
+// isHTTPSPort returns true for ports commonly used by HTTPS/HTTP3.
+func isHTTPSPort(port int) bool {
+	return port == 443 || port == 8443
+}
+
 // generatePinID returns a random hex string used to key per-connection
 // pinned IPs in the injector. Each SOCKS5 connection gets its own pin ID
 // so concurrent connections to the same host do not interfere.
@@ -752,6 +1119,39 @@ func (s *Server) StoreEngine(eng *policy.Engine) {
 	s.rules.engine.Store(eng)
 }
 
+// UpdateInspectRules recompiles content inspection rules from the engine and
+// atomically swaps them into the WebSocket and QUIC proxies. Call this after
+// StoreEngine so SIGHUP-reloaded block/redact patterns take effect for
+// in-flight WebSocket and QUIC connections.
+func (s *Server) UpdateInspectRules(eng *policy.Engine) {
+	var wsBlock []WSBlockRuleConfig
+	var wsRedact []WSRedactRuleConfig
+	for _, r := range eng.InspectBlockRules {
+		wsBlock = append(wsBlock, WSBlockRuleConfig{Pattern: r.Pattern, Name: r.Name})
+	}
+	for _, r := range eng.InspectRedactRules {
+		wsRedact = append(wsRedact, WSRedactRuleConfig{Pattern: r.Pattern, Replacement: r.Replacement, Name: r.Name})
+	}
+	if s.injector != nil && s.injector.wsProxy != nil {
+		if err := s.injector.wsProxy.UpdateRules(wsBlock, wsRedact); err != nil {
+			log.Printf("update ws inspect rules: %v", err)
+		}
+	}
+	if s.quicProxy != nil {
+		var quicBlock []QUICBlockRuleConfig
+		var quicRedact []QUICRedactRuleConfig
+		for _, r := range eng.InspectBlockRules {
+			quicBlock = append(quicBlock, QUICBlockRuleConfig{Pattern: r.Pattern, Name: r.Name})
+		}
+		for _, r := range eng.InspectRedactRules {
+			quicRedact = append(quicRedact, QUICRedactRuleConfig{Pattern: r.Pattern, Replacement: r.Replacement, Name: r.Name})
+		}
+		if err := s.quicProxy.UpdateRules(quicBlock, quicRedact); err != nil {
+			log.Printf("update quic inspect rules: %v", err)
+		}
+	}
+}
+
 // StoreResolver atomically stores a new binding resolver. The caller must
 // hold ReloadMu() when concurrent mutations are possible. The injector
 // shares the same atomic pointer so both the dial function and MITM proxy
@@ -805,6 +1205,9 @@ func (s *Server) Close() error {
 	if s.injectorLn != nil {
 		_ = s.injectorLn.Close()
 	}
+	if s.quicProxy != nil {
+		_ = s.quicProxy.Close()
+	}
 	return s.listener.Close()
 }
 
@@ -818,6 +1221,9 @@ func (s *Server) GracefulShutdown(timeout time.Duration) error {
 	_ = s.listener.Close()
 	if s.injectorLn != nil {
 		_ = s.injectorLn.Close()
+	}
+	if s.quicProxy != nil {
+		_ = s.quicProxy.Close()
 	}
 
 	// Wait for in-flight connections to complete, bounded by timeout.

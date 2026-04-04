@@ -5,7 +5,6 @@ go 1.26.1
 require (
 	filippo.io/age v1.3.1
 	github.com/BurntSushi/toml v1.6.0
-	github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5
 	github.com/elazarl/goproxy v1.8.3
 	github.com/getkin/kin-openapi v0.134.0
 	github.com/go-chi/chi/v5 v5.2.5
@@ -13,6 +12,8 @@ require (
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/hashicorp/vault/api v1.23.0
 	github.com/oapi-codegen/runtime v1.3.1
+	github.com/quic-go/quic-go v0.59.0
+	github.com/things-go/go-socks5 v0.1.1
 	golang.org/x/crypto v0.49.0
 	golang.org/x/net v0.52.0
 	golang.org/x/term v0.41.0
@@ -49,6 +50,7 @@ require (
 	github.com/oasdiff/yaml v0.0.0-20260313112342-a3ea61cb4d4c // indirect
 	github.com/oasdiff/yaml3 v0.0.0-20260224194419-61cd415a242b // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
+	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/ryanuber/go-glob v1.0.0 // indirect
 	github.com/woodsbury/decimal128 v1.3.0 // indirect

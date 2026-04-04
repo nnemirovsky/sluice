@@ -25,16 +25,17 @@ import (
 
 // ChannelConfig holds configuration for creating a TelegramChannel.
 type ChannelConfig struct {
-	Token       string
-	ChatID      int64
-	EnginePtr   *atomic.Pointer[policy.Engine]
-	ResolverPtr *atomic.Pointer[vault.BindingResolver]
-	ReloadMu    *sync.Mutex
-	AuditPath   string
-	Vault       *vault.Store
-	DockerMgr   *docker.Manager
-	Store       *store.Store
-	PhantomDir  string
+	Token         string
+	ChatID        int64
+	EnginePtr     *atomic.Pointer[policy.Engine]
+	ResolverPtr   *atomic.Pointer[vault.BindingResolver]
+	ReloadMu      *sync.Mutex
+	AuditPath     string
+	Vault         *vault.Store
+	DockerMgr     *docker.Manager
+	Store         *store.Store
+	PhantomDir    string
+	OnEngineSwap  func(eng *policy.Engine) // called after policy mutations to update dependent state
 }
 
 // TelegramChannel implements channel.Channel for Telegram bot interaction.
@@ -85,6 +86,9 @@ func NewTelegramChannel(cfg ChannelConfig) (*TelegramChannel, error) {
 	}
 	if cfg.ResolverPtr != nil {
 		cmdHandler.SetResolverPtr(cfg.ResolverPtr)
+	}
+	if cfg.OnEngineSwap != nil {
+		cmdHandler.SetOnEngineSwap(cfg.OnEngineSwap)
 	}
 
 	tc.commands = cmdHandler

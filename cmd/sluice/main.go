@@ -64,6 +64,7 @@ func main() {
 	dockerSocket := flag.String("docker-socket", "", "Docker socket path (auto-detects from DOCKER_HOST or /var/run/docker.sock)")
 	dockerContainer := flag.String("docker-container", envDefault("SLUICE_AGENT_CONTAINER", "openclaw"), "Docker container name for auto-restart on credential changes")
 	phantomDir := flag.String("phantom-dir", "", "shared volume path for phantom token files (enables hot-reload)")
+	dnsResolver := flag.String("dns-resolver", "", "upstream DNS resolver address for DNS interception (default: 8.8.8.8:53)")
 	flag.Parse()
 
 	// Open the SQLite store.
@@ -222,15 +223,35 @@ func main() {
 
 	// Create the proxy first so the bot can share its engine pointer and
 	// reload mutex.
+	// Convert policy engine inspect rules to protocol-specific config structs
+	// so WebSocket and QUIC content inspection is active in production.
+	var wsBlockRules []proxy.WSBlockRuleConfig
+	var wsRedactRules []proxy.WSRedactRuleConfig
+	var quicBlockRules []proxy.QUICBlockRuleConfig
+	var quicRedactRules []proxy.QUICRedactRuleConfig
+	for _, r := range eng.InspectBlockRules {
+		wsBlockRules = append(wsBlockRules, proxy.WSBlockRuleConfig{Pattern: r.Pattern, Name: r.Name})
+		quicBlockRules = append(quicBlockRules, proxy.QUICBlockRuleConfig{Pattern: r.Pattern, Name: r.Name})
+	}
+	for _, r := range eng.InspectRedactRules {
+		wsRedactRules = append(wsRedactRules, proxy.WSRedactRuleConfig{Pattern: r.Pattern, Replacement: r.Replacement, Name: r.Name})
+		quicRedactRules = append(quicRedactRules, proxy.QUICRedactRuleConfig{Pattern: r.Pattern, Replacement: r.Replacement, Name: r.Name})
+	}
+
 	srv, err := proxy.New(proxy.Config{
-		ListenAddr: *listenAddr,
-		Policy:     eng,
-		Audit:      logger,
-		Broker:     broker, // nil until channel setup below
-		Provider:   provider,
-		Resolver:   bindingResolver,
-		VaultDir:   vaultCfg.Dir,
-		Store:      db,
+		ListenAddr:      *listenAddr,
+		Policy:          eng,
+		Audit:           logger,
+		Broker:          broker, // nil until channel setup below
+		Provider:        provider,
+		Resolver:        bindingResolver,
+		VaultDir:        vaultCfg.Dir,
+		Store:           db,
+		DNSResolver:     *dnsResolver,
+		WSBlockRules:    wsBlockRules,
+		WSRedactRules:   wsRedactRules,
+		QUICBlockRules:  quicBlockRules,
+		QUICRedactRules: quicRedactRules,
 	})
 	if err != nil {
 		log.Fatalf("start proxy: %v", err)
@@ -242,16 +263,17 @@ func main() {
 	if telegramEnabled {
 		var channelErr error
 		tgChannel, channelErr = telegram.NewTelegramChannel(telegram.ChannelConfig{
-			Token:       *telegramToken,
-			ChatID:      telegramChatID,
-			EnginePtr:   srv.EnginePtr(),
-			ResolverPtr: srv.ResolverPtr(),
-			ReloadMu:    srv.ReloadMu(),
-			AuditPath:   *auditPath,
-			Vault:       vaultStore,
-			DockerMgr:   dockerMgr,
-			Store:       db,
-			PhantomDir:  *phantomDir,
+			Token:        *telegramToken,
+			ChatID:       telegramChatID,
+			EnginePtr:    srv.EnginePtr(),
+			ResolverPtr:  srv.ResolverPtr(),
+			ReloadMu:     srv.ReloadMu(),
+			AuditPath:    *auditPath,
+			Vault:        vaultStore,
+			DockerMgr:    dockerMgr,
+			Store:        db,
+			PhantomDir:   *phantomDir,
+			OnEngineSwap: srv.UpdateInspectRules,
 		})
 		if channelErr != nil {
 			log.Fatalf("telegram channel: %v", channelErr)
@@ -362,6 +384,7 @@ func main() {
 			log.Printf("reloaded policy: %d allow, %d deny, %d ask rules (default: %s)",
 				len(newEng.AllowRules), len(newEng.DenyRules), len(newEng.AskRules), newEng.Default)
 			srv.StoreEngine(newEng)
+			srv.UpdateInspectRules(newEng)
 
 			// Rebuild binding resolver so credential injection picks up
 			// bindings added via CLI or Telegram since last reload.

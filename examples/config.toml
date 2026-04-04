@@ -56,6 +56,20 @@ destination = "169.254.169.254"
 [[deny]]
 destination = "100.100.100.200"
 
+# --- UDP rules ---
+# Block all UDP by default (safe: legitimate API traffic uses TCP)
+[[deny]]
+destination = "*"
+protocols = ["udp"]
+name = "block all UDP by default"
+
+# Allow Google DNS over UDP
+[[allow]]
+destination = "dns.google"
+ports = [53]
+protocols = ["udp", "dns"]
+name = "allow Google DNS"
+
 # --- Tool rules (tool field) ---
 
 [[allow]]
@@ -82,6 +96,9 @@ tool = "filesystem__write_*"
 tool = "exec__*"
 
 # --- Content inspection: deny rules (pattern field) ---
+# Content rules apply across all protocols (HTTP, WebSocket, QUIC, etc.).
+# In WebSocket frames, deny patterns close the connection. In HTTP/QUIC
+# responses, redact patterns replace matched content before forwarding.
 
 [[deny]]
 pattern = "(?i)(sk-[a-zA-Z0-9_-]{20,})"

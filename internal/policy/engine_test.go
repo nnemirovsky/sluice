@@ -896,6 +896,88 @@ func TestLoadFromStoreWithProtocols(t *testing.T) {
 	}
 }
 
+func TestEvaluateWithProtocol(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "echo.example.com"
+ports = [443]
+protocols = ["wss"]
+
+[[allow]]
+destination = "grpc.example.com"
+ports = [443]
+protocols = ["grpc"]
+
+[[deny]]
+destination = "*.example.com"
+protocols = ["ws"]
+
+[[allow]]
+destination = "dns.google"
+ports = [53]
+protocols = ["dns"]
+
+[[deny]]
+destination = "*"
+protocols = ["quic"]
+name = "block all quic"
+
+[[allow]]
+destination = "api.example.com"
+ports = [443]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		dest  string
+		port  int
+		proto string
+		want  Verdict
+	}{
+		// WSS rule matches when proto="wss"
+		{"wss_match", "echo.example.com", 443, "wss", Allow},
+		// Same dest+port without explicit proto falls back to portToProtocol (https) which does not match wss rule
+		{"wss_no_proto", "echo.example.com", 443, "", Deny},
+		// gRPC rule matches when proto="grpc"
+		{"grpc_match", "grpc.example.com", 443, "grpc", Allow},
+		// gRPC dest without proto falls back to https (no grpc rule matches https)
+		{"grpc_no_proto", "grpc.example.com", 443, "", Deny},
+		// WS deny rule
+		{"ws_deny", "any.example.com", 80, "ws", Deny},
+		// DNS allow rule on port 53
+		{"dns_allow", "dns.google", 53, "dns", Allow},
+		// DNS also works without explicit proto since portToProtocol(53) = "dns"
+		{"dns_port_based", "dns.google", 53, "", Allow},
+		// QUIC deny rule
+		{"quic_deny", "cdn.example.com", 443, "quic", Deny},
+		// Non-protocol-scoped allow rule works with port-based detection
+		{"plain_https", "api.example.com", 443, "", Allow},
+		// Non-protocol-scoped allow rule also works with explicit proto
+		{"plain_https_explicit", "api.example.com", 443, "https", Allow},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := eng.EvaluateWithProtocol(tt.dest, tt.port, tt.proto)
+			if got != tt.want {
+				t.Errorf("EvaluateWithProtocol(%q, %d, %q) = %v, want %v",
+					tt.dest, tt.port, tt.proto, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPortToProtocolDNS(t *testing.T) {
+	if got := portToProtocol(53); got != "dns" {
+		t.Errorf("portToProtocol(53) = %q, want %q", got, "dns")
+	}
+}
+
 func TestLoadFromStoreValidate(t *testing.T) {
 	s, err := store.New(":memory:")
 	if err != nil {
@@ -915,5 +997,126 @@ func TestLoadFromStoreValidate(t *testing.T) {
 	var nilEng *Engine
 	if err := nilEng.Validate(); err == nil {
 		t.Error("expected error for nil engine")
+	}
+}
+
+func TestEvaluateQUIC(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "quic-only.example.com"
+ports = [443]
+protocols = ["quic"]
+
+[[allow]]
+destination = "udp-only.example.com"
+ports = [443]
+protocols = ["udp"]
+
+[[deny]]
+destination = "blocked.example.com"
+protocols = ["quic"]
+
+[[allow]]
+destination = "blocked.example.com"
+ports = [443]
+protocols = ["udp"]
+
+[[deny]]
+destination = "*"
+protocols = ["udp"]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		dest string
+		port int
+		want Verdict
+	}{
+		// protocols = ["quic"] matches via EvaluateQUIC even with blanket UDP deny
+		{"quic_protocol_match", "quic-only.example.com", 443, Allow},
+		// protocols = ["udp"] is now blocked by blanket UDP deny
+		{"udp_blanket_deny", "udp-only.example.com", 443, Deny},
+		// quic deny takes priority even with udp allow
+		{"quic_deny_priority", "blocked.example.com", 443, Deny},
+		// unknown host is denied by default
+		{"default_deny", "unknown.example.com", 443, Deny},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := eng.EvaluateQUIC(tt.dest, tt.port)
+			if got != tt.want {
+				t.Errorf("EvaluateQUIC(%q, %d) = %v, want %v",
+					tt.dest, tt.port, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEvaluateQUIC_UDPFallback(t *testing.T) {
+	// Without a blanket UDP deny, UDP allow rules still work as fallback.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "udp-allowed.example.com"
+ports = [443]
+protocols = ["udp"]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	got := eng.EvaluateQUIC("udp-allowed.example.com", 443)
+	if got != Allow {
+		t.Errorf("EvaluateQUIC with UDP allow fallback = %v, want Allow", got)
+	}
+}
+
+func TestEvaluateUDP_UnscopedRulesIgnored(t *testing.T) {
+	// Rules without explicit protocols must NOT match EvaluateUDP or
+	// EvaluateQUIC. This prevents TCP-intended allow rules from
+	// inadvertently allowing UDP/QUIC traffic.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "api.anthropic.com"
+ports = [443]
+
+[[allow]]
+destination = "udp-ok.example.com"
+ports = [443]
+protocols = ["udp"]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// Unscoped allow rule must NOT allow UDP traffic.
+	if got := eng.EvaluateUDP("api.anthropic.com", 443); got != Deny {
+		t.Errorf("EvaluateUDP(unscoped allow) = %v, want Deny", got)
+	}
+
+	// Unscoped allow rule must NOT allow QUIC traffic.
+	if got := eng.EvaluateQUIC("api.anthropic.com", 443); got != Deny {
+		t.Errorf("EvaluateQUIC(unscoped allow) = %v, want Deny", got)
+	}
+
+	// Explicitly scoped UDP rule must still work.
+	if got := eng.EvaluateUDP("udp-ok.example.com", 443); got != Allow {
+		t.Errorf("EvaluateUDP(scoped allow) = %v, want Allow", got)
+	}
+
+	// Regular Evaluate must still allow unscoped rules.
+	if got := eng.Evaluate("api.anthropic.com", 443); got != Allow {
+		t.Errorf("Evaluate(unscoped allow) = %v, want Allow", got)
 	}
 }

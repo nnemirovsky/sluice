@@ -31,6 +31,8 @@ func portToProtocol(port int) string {
 		return "imap"
 	case 25, 587, 465:
 		return "smtp"
+	case 53:
+		return "dns"
 	default:
 		return ""
 	}
@@ -282,6 +284,37 @@ func (e *Engine) compile() error {
 }
 
 func matchRules(rules []compiledRule, dest string, port int) bool {
+	return matchRulesWithProto(rules, dest, port, "")
+}
+
+// matchRulesStrictProto matches rules that explicitly include the given
+// protocol in their protocols field. Rules without a protocols field are NOT
+// matched. Used by EvaluateUDP and EvaluateQUIC where only protocol-explicit
+// rules should apply, preventing unscoped TCP rules from inadvertently
+// allowing UDP/QUIC traffic.
+func matchRulesStrictProto(rules []compiledRule, dest string, port int, proto string) bool {
+	for _, r := range rules {
+		if !r.glob.Match(dest) {
+			continue
+		}
+		if len(r.ports) > 0 && !r.ports[port] {
+			continue
+		}
+		// Require explicit protocol match. Rules without a protocols field
+		// are skipped to prevent TCP-intended rules from matching UDP/QUIC.
+		if len(r.protocols) == 0 || !r.protocols[proto] {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// matchRulesWithProto checks compiled rules against a destination, port, and
+// optional explicit protocol. When proto is non-empty it takes precedence over
+// the port-based heuristic, allowing header-detected protocols (ws, wss, grpc)
+// and packet-detected protocols (quic) to match protocol-scoped rules.
+func matchRulesWithProto(rules []compiledRule, dest string, port int, proto string) bool {
 	for _, r := range rules {
 		if !r.glob.Match(dest) {
 			continue
@@ -290,8 +323,11 @@ func matchRules(rules []compiledRule, dest string, port int) bool {
 			continue
 		}
 		if len(r.protocols) > 0 {
-			proto := portToProtocol(port)
-			if proto == "" || !r.protocols[proto] {
+			effective := proto
+			if effective == "" {
+				effective = portToProtocol(port)
+			}
+			if effective == "" || !r.protocols[effective] {
 				continue
 			}
 		}
@@ -544,20 +580,80 @@ func (e *Engine) Validate() error {
 // Evaluate checks a destination and port against the compiled policy rules.
 // Deny rules are checked first, then allow, then ask. Falls back to default.
 func (e *Engine) Evaluate(dest string, port int) Verdict {
+	return e.EvaluateWithProtocol(dest, port, "")
+}
+
+// EvaluateWithProtocol checks a destination, port, and explicit protocol
+// against the compiled policy rules. The proto parameter overrides port-based
+// protocol detection, allowing header-detected protocols (ws, wss, grpc) and
+// packet-detected protocols (dns, quic) to match protocol-scoped rules.
+// Pass "" to fall back to port-based detection (same as Evaluate).
+func (e *Engine) EvaluateWithProtocol(dest string, port int, proto string) Verdict {
 	dest = normalizeDestination(dest)
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.compiled == nil {
 		return e.Default
 	}
-	if matchRules(e.compiled.denyRules, dest, port) {
+	if matchRulesWithProto(e.compiled.denyRules, dest, port, proto) {
 		return Deny
 	}
-	if matchRules(e.compiled.allowRules, dest, port) {
+	if matchRulesWithProto(e.compiled.allowRules, dest, port, proto) {
 		return Allow
 	}
-	if matchRules(e.compiled.askRules, dest, port) {
+	if matchRulesWithProto(e.compiled.askRules, dest, port, proto) {
 		return Ask
 	}
 	return e.Default
+}
+
+// EvaluateUDP checks a destination and port with UDP-specific semantics.
+// Only explicit allow rules produce an Allow verdict. Deny rules take priority
+// as usual. Ask rules and the engine default verdict are treated as Deny
+// because per-packet approval is impractical. This implements the UDP
+// default-deny strategy where UDP traffic requires an explicit allow rule.
+func (e *Engine) EvaluateUDP(dest string, port int) Verdict {
+	dest = normalizeDestination(dest)
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.compiled == nil {
+		return Deny
+	}
+	if matchRulesStrictProto(e.compiled.denyRules, dest, port, "udp") {
+		return Deny
+	}
+	if matchRulesStrictProto(e.compiled.allowRules, dest, port, "udp") {
+		return Allow
+	}
+	return Deny
+}
+
+// EvaluateQUIC checks a destination and port with QUIC-specific semantics.
+// Uses the same default-deny strategy as EvaluateUDP (ask is treated as deny).
+// QUIC-specific rules are evaluated first (deny then allow). If no QUIC rule
+// matches, falls back to EvaluateUDP. This ensures a QUIC allow rule can
+// override a blanket UDP deny (e.g. deny * protocols=["udp"]).
+func (e *Engine) EvaluateQUIC(dest string, port int) Verdict {
+	dest = normalizeDestination(dest)
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.compiled == nil {
+		return Deny
+	}
+	// Check QUIC-specific deny rules first.
+	if matchRulesStrictProto(e.compiled.denyRules, dest, port, "quic") {
+		return Deny
+	}
+	// Check QUIC-specific allow rules.
+	if matchRulesStrictProto(e.compiled.allowRules, dest, port, "quic") {
+		return Allow
+	}
+	// No QUIC-specific rule matched. Fall back to UDP evaluation.
+	if matchRulesStrictProto(e.compiled.denyRules, dest, port, "udp") {
+		return Deny
+	}
+	if matchRulesStrictProto(e.compiled.allowRules, dest, port, "udp") {
+		return Allow
+	}
+	return Deny
 }

@@ -1,9 +1,13 @@
 package proxy
 
 import (
+	"bufio"
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,11 +15,22 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/nemirovsky/sluice/internal/vault"
 )
 
 func setupTestInjector(t *testing.T, bindings []vault.Binding) (*Injector, *vault.Store) {
+	t.Helper()
+	return setupTestInjectorWithWS(t, bindings, nil, nil)
+}
+
+func setupTestInjectorWithWS(
+	t *testing.T,
+	bindings []vault.Binding,
+	blockRules []WSBlockRuleConfig,
+	redactRules []WSRedactRuleConfig,
+) (*Injector, *vault.Store) {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := vault.NewStore(dir)
@@ -32,7 +47,18 @@ func setupTestInjector(t *testing.T, bindings []vault.Binding) (*Injector, *vaul
 	}
 	var resolverPtr atomic.Pointer[vault.BindingResolver]
 	resolverPtr.Store(resolver)
-	return NewInjector(store, &resolverPtr, caCert, ""), store
+
+	var wsProxy *WSProxy
+	if blockRules != nil || redactRules != nil {
+		wsProxy, err = NewWSProxy(store, &resolverPtr, blockRules, redactRules)
+		if err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		wsProxy, _ = NewWSProxy(store, &resolverPtr, nil, nil)
+	}
+
+	return NewInjector(store, &resolverPtr, caCert, "", wsProxy), store
 }
 
 func TestPhantomSwapInHeaders(t *testing.T) {
@@ -724,4 +750,252 @@ func TestPhantomReplacementInURLQuery(t *testing.T) {
 	if receivedQuery != expectedQ {
 		t.Errorf("query: expected %q, got %q", expectedQ, receivedQuery)
 	}
+}
+
+// wsEchoServer creates an httptest.Server that accepts WebSocket upgrades
+// via manual hijacking and echoes text frames. The receivedPayloads channel
+// receives unmasked payloads of text frames the server reads.
+func wsEchoServer(t *testing.T, receivedPayloads chan<- string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "hijack not supported", 500)
+			return
+		}
+		conn, bufrw, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		// Write 101 Switching Protocols response.
+		bufrw.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
+		bufrw.WriteString("Upgrade: websocket\r\n")
+		bufrw.WriteString("Connection: Upgrade\r\n")
+		bufrw.WriteString("\r\n")
+		bufrw.Flush()
+
+		for {
+			frame, readErr := ReadFrame(conn)
+			if readErr != nil {
+				return
+			}
+			if frame.Opcode == OpcodeClose {
+				sendCloseFrame(conn, 1000, "bye")
+				return
+			}
+			if frame.Opcode == OpcodeText {
+				payload := frame.UnmaskedPayload()
+				if receivedPayloads != nil {
+					receivedPayloads <- string(payload)
+				}
+				// Echo the payload back.
+				resp := &Frame{FIN: true, Opcode: OpcodeText}
+				resp.SetPayload(payload)
+				if writeErr := WriteFrame(conn, resp); writeErr != nil {
+					return
+				}
+			}
+		}
+	}))
+}
+
+// wsClientUpgrade connects to the proxy as an HTTP forward proxy client,
+// sends a WebSocket upgrade request to the given backend URL, reads the
+// 101 response, and returns the raw connection for frame-level I/O.
+func wsClientUpgrade(t *testing.T, proxyAddr, backendURL string) net.Conn {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+
+	u, _ := url.Parse(backendURL)
+	req := fmt.Sprintf(
+		"GET %s/ws HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+		backendURL, u.Host,
+	)
+	if _, wErr := conn.Write([]byte(req)); wErr != nil {
+		conn.Close()
+		t.Fatalf("write upgrade request: %v", wErr)
+	}
+
+	br := bufio.NewReader(conn)
+	resp, rErr := http.ReadResponse(br, &http.Request{Method: "GET"})
+	if rErr != nil {
+		conn.Close()
+		t.Fatalf("read upgrade response: %v", rErr)
+	}
+	if resp.StatusCode != 101 {
+		conn.Close()
+		t.Fatalf("expected 101, got %d", resp.StatusCode)
+	}
+
+	// Wrap the connection so reads go through the buffered reader
+	// (which may have consumed bytes past the HTTP headers).
+	if br.Buffered() > 0 {
+		return &bufferedConn{Reader: br, Conn: conn}
+	}
+
+	// Brief pause so goproxy finishes hijacking the server-side connection
+	// and starts its WebSocket relay goroutines. Without this, frame data
+	// sent immediately can be consumed by Go's http.Server bufio.Reader
+	// and lost when goproxy discards the bufio.ReadWriter from Hijack().
+	time.Sleep(50 * time.Millisecond)
+
+	return conn
+}
+
+func TestWSMITM_PhantomTokenReplacement(t *testing.T) {
+	received := make(chan string, 1)
+	backend := wsEchoServer(t, received)
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	bindings := []vault.Binding{{
+		Destination: backendURL.Hostname(),
+		Credential:  "api_key",
+	}}
+
+	inj, store := setupTestInjectorWithWS(t, bindings, nil, nil)
+	if _, err := store.Add("api_key", "sk-real-secret-12345"); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyServer := httptest.NewServer(inj.Proxy)
+	defer proxyServer.Close()
+
+	proxyAddr := proxyServer.Listener.Addr().String()
+	wsConn := wsClientUpgrade(t, proxyAddr, backend.URL)
+	defer wsConn.Close()
+
+	// Send text frame with phantom token.
+	phantom := PhantomToken("api_key")
+	msg := `{"authorization": "` + phantom + `"}`
+	sendFrame := &Frame{FIN: true, Opcode: OpcodeText, Masked: true, MaskKey: [4]byte{0x12, 0x34, 0x56, 0x78}}
+	sendFrame.SetPayload([]byte(msg))
+	if err := WriteFrame(wsConn, sendFrame); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+
+	// Verify upstream received the real credential (not phantom).
+	select {
+	case payload := <-received:
+		if strings.Contains(payload, "SLUICE_PHANTOM") {
+			t.Error("phantom token was not replaced in WebSocket text frame")
+		}
+		expected := `{"authorization": "sk-real-secret-12345"}`
+		if payload != expected {
+			t.Errorf("upstream received %q, want %q", payload, expected)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for upstream to receive frame")
+	}
+
+	// Read the echo response from upstream (through the proxy).
+	wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	respFrame, err := ReadFrame(wsConn)
+	if err != nil {
+		t.Fatalf("read echo frame: %v", err)
+	}
+	if respFrame.Opcode != OpcodeText {
+		t.Errorf("expected text frame echo, got opcode %d", respFrame.Opcode)
+	}
+
+	// Clean up.
+	sendCloseFrame(wsConn, 1000, "done")
+}
+
+func TestWSMITM_ContentRedaction(t *testing.T) {
+	// Backend that sends a text frame containing a sensitive API key.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "hijack not supported", 500)
+			return
+		}
+		conn, bufrw, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		bufrw.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
+		bufrw.WriteString("Upgrade: websocket\r\n")
+		bufrw.WriteString("Connection: Upgrade\r\n")
+		bufrw.WriteString("\r\n")
+		bufrw.Flush()
+
+		// Wait for the client's initial frame (handshake confirmation).
+		frame, readErr := ReadFrame(conn)
+		if readErr != nil {
+			return
+		}
+		_ = frame
+
+		// Send a response containing a sensitive API key.
+		respMsg := `{"api_key": "sk-abcdefghijklmnopqrstuvwxyz12345"}`
+		resp := &Frame{FIN: true, Opcode: OpcodeText}
+		resp.SetPayload([]byte(respMsg))
+		WriteFrame(conn, resp)
+
+		// Wait for close.
+		for {
+			f, err := ReadFrame(conn)
+			if err != nil || f.Opcode == OpcodeClose {
+				sendCloseFrame(conn, 1000, "bye")
+				return
+			}
+		}
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+
+	inj, _ := setupTestInjectorWithWS(t, nil,
+		nil,
+		[]WSRedactRuleConfig{{
+			Pattern:     `sk-[a-zA-Z0-9_-]{20,}`,
+			Replacement: "[REDACTED_API_KEY]",
+			Name:        "api key in response",
+		}},
+	)
+	// Ensure the proxy is not nil even without bindings.
+	_ = backendURL
+
+	proxyServer := httptest.NewServer(inj.Proxy)
+	defer proxyServer.Close()
+
+	proxyAddr := proxyServer.Listener.Addr().String()
+	wsConn := wsClientUpgrade(t, proxyAddr, backend.URL)
+	defer wsConn.Close()
+
+	// Send a text frame to trigger the backend's response.
+	initFrame := &Frame{FIN: true, Opcode: OpcodeText, Masked: true, MaskKey: [4]byte{0xAA, 0xBB, 0xCC, 0xDD}}
+	initFrame.SetPayload([]byte("hello"))
+	if err := WriteFrame(wsConn, initFrame); err != nil {
+		t.Fatalf("write init frame: %v", err)
+	}
+
+	// Read the response frame. The API key should be redacted.
+	wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	respFrame, err := ReadFrame(wsConn)
+	if err != nil {
+		t.Fatalf("read response frame: %v", err)
+	}
+	if respFrame.Opcode != OpcodeText {
+		t.Errorf("expected text frame, got opcode %d", respFrame.Opcode)
+	}
+
+	payload := string(respFrame.UnmaskedPayload())
+	if strings.Contains(payload, "sk-abcdefghijklmnopqrstuvwxyz12345") {
+		t.Error("API key was not redacted in WebSocket response frame")
+	}
+	expected := `{"api_key": "[REDACTED_API_KEY]"}`
+	if !bytes.Equal([]byte(payload), []byte(expected)) {
+		t.Errorf("payload: got %q, want %q", payload, expected)
+	}
+
+	sendCloseFrame(wsConn, 1000, "done")
 }
