@@ -524,9 +524,6 @@ func newTestAppleManager(t *testing.T) (*AppleManager, *mockRunner, string) {
 		CLI:           cli,
 		ContainerName: "openclaw",
 		Image:         "openclaw/openclaw:latest",
-		Volumes: []VolumeMount{
-			{HostPath: tmpDir, GuestPath: "/phantoms"},
-		},
 	})
 
 	return mgr, runner, tmpDir

@@ -195,7 +195,6 @@ type AppleManager struct {
 	cli           *AppleCLI
 	containerName string
 	image         string
-	volumes       []VolumeMount
 }
 
 // AppleManagerConfig holds configuration for creating an AppleManager.
@@ -203,7 +202,6 @@ type AppleManagerConfig struct {
 	CLI           *AppleCLI
 	ContainerName string
 	Image         string
-	Volumes       []VolumeMount
 }
 
 // NewAppleManager creates a new AppleManager from the given config.
@@ -212,7 +210,6 @@ func NewAppleManager(cfg AppleManagerConfig) *AppleManager {
 		cli:           cfg.CLI,
 		containerName: cfg.ContainerName,
 		image:         cfg.Image,
-		volumes:       cfg.Volumes,
 	}
 }
 

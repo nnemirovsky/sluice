@@ -174,7 +174,7 @@ setup() {
 # Sluice pf anchor: redirect Apple Container VM traffic
 # Bridge: $BRIDGE_IFACE, Subnet: $VM_SUBNET, TUN: $TUN_IFACE
 
-pass in on $BRIDGE_IFACE route-to ($TUN_IFACE $TUN_GATEWAY) from $VM_SUBNET to any
+pass in on $BRIDGE_IFACE route-to ($TUN_IFACE $TUN_GATEWAY) proto tcp from $VM_SUBNET to any
 pass out on $BRIDGE_IFACE from any to $VM_SUBNET
 EOF
 
