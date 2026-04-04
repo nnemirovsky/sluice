@@ -31,6 +31,8 @@ func portToProtocol(port int) string {
 		return "imap"
 	case 25, 587, 465:
 		return "smtp"
+	case 5223:
+		return "apns"
 	default:
 		return ""
 	}

@@ -29,9 +29,6 @@ make test   # all unit tests
 
 ### macOS-specific tests
 
-Some tests require macOS and are guarded with build tags:
-
-- `//go:build darwin` -- tests that depend on macOS APIs or the Apple Container `container` CLI
 - Apple Container integration tests (`internal/container/`) use mock `CommandRunner` by default and run on all platforms
 - Full integration tests requiring a real Apple Container runtime are manual (see `docs/apple-container-quickstart.md`)
 
