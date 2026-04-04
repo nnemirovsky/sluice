@@ -262,22 +262,22 @@ Connect QUIC handler to UDP relay. Update Docker compose for UDP routing.
 
 ### Task 12: Verify acceptance criteria
 
-- [ ] Verify `ws`/`wss` protocols detected from upgrade headers
-- [ ] Verify `grpc` protocol detected from content-type header
-- [ ] Verify phantom tokens in WebSocket text frames are replaced
-- [ ] Verify binary frames pass through unmodified
-- [ ] Verify content deny/redact rules work on WebSocket frames
-- [ ] Verify UDP packets from agent are intercepted (not bypassing)
-- [ ] Verify default-deny for UDP
-- [ ] Verify DNS queries logged with domain name
-- [ ] Verify denied DNS domains return NXDOMAIN
-- [ ] Verify QUIC packets detected in UDP relay
-- [ ] Verify QUIC connections terminated with sluice's CA certificate
-- [ ] Verify HTTP/3 requests have phantom tokens replaced
-- [ ] Verify `protocols = ["quic"]` in rules matches QUIC traffic
-- [ ] Verify tun2proxy routes both TCP and UDP through sluice
-- [ ] Run full test suite: `go test ./... -v -timeout 60s -race`
-- [ ] Run linter: `go vet ./...`
+- [x] Verify `ws`/`wss` protocols detected from upgrade headers
+- [x] Verify `grpc` protocol detected from content-type header
+- [x] Verify phantom tokens in WebSocket text frames are replaced
+- [x] Verify binary frames pass through unmodified
+- [x] Verify content deny/redact rules work on WebSocket frames
+- [x] Verify UDP packets from agent are intercepted (not bypassing)
+- [x] Verify default-deny for UDP
+- [x] Verify DNS queries logged with domain name
+- [x] Verify denied DNS domains return NXDOMAIN
+- [x] Verify QUIC packets detected in UDP relay
+- [x] Verify QUIC connections terminated with sluice's CA certificate
+- [x] Verify HTTP/3 requests have phantom tokens replaced
+- [x] Verify `protocols = ["quic"]` in rules matches QUIC traffic
+- [x] Verify tun2proxy routes both TCP and UDP through sluice
+- [x] Run full test suite: `go test ./... -v -timeout 60s -race`
+- [x] Run linter: `go vet ./...`
 
 ### Task 13: [Final] Update documentation
 
