@@ -149,6 +149,7 @@ func (h *SSHJumpHost) HandleConnection(agentConn net.Conn, dialAddrs []string, h
 		User:            username,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		HostKeyCallback: hostKeyCallback,
+		Timeout:         connectTimeout,
 	})
 	if err != nil {
 		_ = upstreamTCP.Close()

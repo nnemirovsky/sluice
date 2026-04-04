@@ -1,6 +1,7 @@
 // Package store provides a SQLite-backed policy store for runtime state.
-// All policy rules, tool rules, inspect rules, config, bindings, and MCP
-// upstreams are persisted in a single SQLite database.
+// All policy rules (unified: network, tool, and content inspection), typed
+// config, bindings, channels, and MCP upstreams are persisted in a single
+// SQLite database.
 package store
 
 import (
@@ -367,6 +368,12 @@ func (s *Store) UpdateConfig(u ConfigUpdate) error {
 	var args []any
 
 	if u.DefaultVerdict != nil {
+		switch *u.DefaultVerdict {
+		case "allow", "deny", "ask":
+			// valid
+		default:
+			return fmt.Errorf("invalid default_verdict %q: must be allow, deny, or ask", *u.DefaultVerdict)
+		}
 		setClauses = append(setClauses, "default_verdict = ?")
 		args = append(args, *u.DefaultVerdict)
 	}

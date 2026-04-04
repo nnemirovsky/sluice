@@ -352,15 +352,24 @@ name = "Block SSNs"
 	}
 
 	// Verify DB has no duplicates.
-	rules, _ := s.ListRules(RuleFilter{Type: "network"})
+	rules, err := s.ListRules(RuleFilter{Type: "network"})
+	if err != nil {
+		t.Fatalf("ListRules(network): %v", err)
+	}
 	if len(rules) != 1 {
 		t.Errorf("expected 1 network rule total, got %d", len(rules))
 	}
-	toolRules, _ := s.ListRules(RuleFilter{Type: "tool"})
+	toolRules, err := s.ListRules(RuleFilter{Type: "tool"})
+	if err != nil {
+		t.Fatalf("ListRules(tool): %v", err)
+	}
 	if len(toolRules) != 1 {
 		t.Errorf("expected 1 tool rule total, got %d", len(toolRules))
 	}
-	patternRules, _ := s.ListRules(RuleFilter{Type: "pattern"})
+	patternRules, err := s.ListRules(RuleFilter{Type: "pattern"})
+	if err != nil {
+		t.Fatalf("ListRules(pattern): %v", err)
+	}
 	if len(patternRules) != 1 {
 		t.Errorf("expected 1 pattern rule total, got %d", len(patternRules))
 	}
@@ -403,7 +412,10 @@ ports = [443]
 	}
 
 	// Original data should still be there.
-	rules, _ := s.ListRules(RuleFilter{Type: "network"})
+	rules, err := s.ListRules(RuleFilter{Type: "network"})
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
 	if len(rules) != 1 {
 		t.Errorf("expected 1 rule (no partial write), got %d", len(rules))
 	}
@@ -470,7 +482,10 @@ func TestImportTOMLExampleConfigFile(t *testing.T) {
 	}
 
 	// Verify config.
-	cfg, _ := s.GetConfig()
+	cfg, err := s.GetConfig()
+	if err != nil {
+		t.Fatalf("GetConfig: %v", err)
+	}
 	if cfg.DefaultVerdict != "ask" {
 		t.Errorf("expected default_verdict 'ask', got %q", cfg.DefaultVerdict)
 	}
@@ -498,7 +513,10 @@ name = "Git SSH access"
 		t.Fatalf("expected 1 rule inserted, got %d", res.RulesInserted)
 	}
 
-	rules, _ := s.ListRules(RuleFilter{Type: "network"})
+	rules, err := s.ListRules(RuleFilter{Type: "network"})
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
 	if len(rules) != 1 {
 		t.Fatalf("expected 1 rule, got %d", len(rules))
 	}
@@ -535,7 +553,10 @@ GITHUB_TOKEN = "phantom-token-abc123"
 		t.Errorf("expected 1 upstream inserted, got %d", res.UpstreamsInserted)
 	}
 
-	ups, _ := s.ListMCPUpstreams()
+	ups, err := s.ListMCPUpstreams()
+	if err != nil {
+		t.Fatalf("ListMCPUpstreams: %v", err)
+	}
 	if len(ups) != 1 {
 		t.Fatalf("expected 1 upstream, got %d", len(ups))
 	}
@@ -608,15 +629,24 @@ name = "password redact"
 	}
 
 	// Verify each type.
-	network, _ := s.ListRules(RuleFilter{Type: "network"})
+	network, err := s.ListRules(RuleFilter{Type: "network"})
+	if err != nil {
+		t.Fatalf("ListRules(network): %v", err)
+	}
 	if len(network) != 1 {
 		t.Errorf("expected 1 network rule, got %d", len(network))
 	}
-	tools, _ := s.ListRules(RuleFilter{Type: "tool"})
+	tools, err := s.ListRules(RuleFilter{Type: "tool"})
+	if err != nil {
+		t.Fatalf("ListRules(tool): %v", err)
+	}
 	if len(tools) != 1 {
 		t.Errorf("expected 1 tool rule, got %d", len(tools))
 	}
-	patterns, _ := s.ListRules(RuleFilter{Type: "pattern"})
+	patterns, err := s.ListRules(RuleFilter{Type: "pattern"})
+	if err != nil {
+		t.Fatalf("ListRules(pattern): %v", err)
+	}
 	if len(patterns) != 2 {
 		t.Errorf("expected 2 pattern rules, got %d", len(patterns))
 	}
@@ -641,7 +671,10 @@ protocols = ["ssh"]
 		t.Errorf("expected 1 binding inserted, got %d", res.BindingsInserted)
 	}
 
-	bindings, _ := s.ListBindings()
+	bindings, err := s.ListBindings()
+	if err != nil {
+		t.Fatalf("ListBindings: %v", err)
+	}
 	if len(bindings) != 1 {
 		t.Fatalf("expected 1 binding, got %d", len(bindings))
 	}
