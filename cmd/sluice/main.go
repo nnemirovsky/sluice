@@ -66,7 +66,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// If --config is specified and the DB is empty, auto-import the TOML file as seed.
 	if *configPath != "" {
@@ -106,7 +106,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("open audit log: %v", err)
 	}
-	defer logger.Close()
+	defer func() { _ = logger.Close() }()
 
 	// Parse Telegram chat ID early so we can set up the channel.
 	// Check the store-backed channel enabled flag first so that a disabled
@@ -181,7 +181,17 @@ func main() {
 	// Telegram /cred commands can add/remove/rotate credentials.
 	var vaultStore *vault.Store
 	if provider != nil {
-		vaultStore, _ = provider.(*vault.Store)
+		switch p := provider.(type) {
+		case *vault.Store:
+			vaultStore = p
+		case *vault.ChainProvider:
+			for _, inner := range p.Providers() {
+				if s, ok := inner.(*vault.Store); ok {
+					vaultStore = s
+					break
+				}
+			}
+		}
 	}
 
 	// Docker container manager for auto-restart on credential changes.
@@ -252,7 +262,7 @@ func main() {
 	// Start health check HTTP server on :3000 (or --health-addr).
 	healthLn, healthSrv := startHealthServer(*healthAddr, srv)
 	if healthLn != nil {
-		defer healthSrv.Close()
+		defer func() { _ = healthSrv.Close() }()
 		log.Printf("health check server listening on %s", healthLn.Addr())
 	}
 
@@ -451,10 +461,10 @@ func startHealthServer(addr string, srv *proxy.Server) (net.Listener, *http.Serv
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if srv.IsListening() {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("ok"))
+			_, _ = w.Write([]byte("ok"))
 		} else {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte("not ready"))
+			_, _ = w.Write([]byte("not ready"))
 		}
 	})
 	httpSrv := &http.Server{

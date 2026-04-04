@@ -338,11 +338,12 @@ func (tc *TelegramChannel) handleMessage(msg *tgbotapi.Message) {
 	}
 
 	if utf8.RuneCountInString(response) > telegramMaxMessage {
-		// Truncate at a valid UTF-8 rune boundary to avoid splitting
-		// multi-byte characters, which Telegram would reject.
-		cut := telegramMaxMessage
-		for cut > 0 && !utf8.RuneStart(response[cut]) {
-			cut--
+		// Find the byte offset of the telegramMaxMessage-th rune so
+		// we truncate at the correct character count, not byte count.
+		cut := 0
+		for i := 0; i < telegramMaxMessage; i++ {
+			_, size := utf8.DecodeRuneInString(response[cut:])
+			cut += size
 		}
 		response = response[:cut] + "\n\n(truncated)"
 	}

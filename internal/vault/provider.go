@@ -117,3 +117,7 @@ func (c *ChainProvider) List() ([]string, error) {
 }
 
 func (c *ChainProvider) Name() string { return "chain" }
+
+// Providers returns the inner providers for inspection (e.g. extracting
+// the age Store for credential management).
+func (c *ChainProvider) Providers() []Provider { return c.providers }
