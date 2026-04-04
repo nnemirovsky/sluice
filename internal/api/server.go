@@ -845,7 +845,11 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if _, _, err := s.store.AddRuleAndBinding("allow", ruleOpts, req.Name, bindingOpts); err != nil {
-			writeError(w, http.StatusBadRequest, "credential stored but rule/binding creation failed: "+err.Error(), "")
+			// Roll back the vault credential to keep state consistent and allow retries.
+			if rmErr := s.vault.Remove(req.Name); rmErr != nil {
+				log.Printf("[WARN] failed to clean up credential %q after rule/binding failure: %v", req.Name, rmErr)
+			}
+			writeError(w, http.StatusBadRequest, "failed to create rule/binding: "+err.Error(), "")
 			return
 		}
 
