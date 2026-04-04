@@ -584,6 +584,7 @@ type MCPUpstreamRow struct {
 	Args       []string
 	Env        map[string]string
 	TimeoutSec int
+	Transport  string
 	CreatedAt  string
 }
 
@@ -592,6 +593,7 @@ type MCPUpstreamOpts struct {
 	Args       []string
 	Env        map[string]string
 	TimeoutSec int
+	Transport  string // "stdio" (default), "http", or "websocket"
 }
 
 // AddMCPUpstream inserts an MCP upstream and returns its ID.
@@ -602,6 +604,14 @@ func (s *Store) AddMCPUpstream(name, command string, opts MCPUpstreamOpts) (int6
 	timeoutSec := opts.TimeoutSec
 	if timeoutSec == 0 {
 		timeoutSec = 120
+	}
+	transport := opts.Transport
+	if transport == "" {
+		transport = "stdio"
+	}
+	validTransports := map[string]bool{"stdio": true, "http": true, "websocket": true}
+	if !validTransports[transport] {
+		return 0, fmt.Errorf("invalid transport %q: must be stdio, http, or websocket", transport)
 	}
 	var argsJSON, envJSON *string
 	if len(opts.Args) > 0 {
@@ -615,8 +625,8 @@ func (s *Store) AddMCPUpstream(name, command string, opts MCPUpstreamOpts) (int6
 		envJSON = &e
 	}
 	res, err := s.db.Exec(
-		`INSERT INTO mcp_upstreams (name, command, args, env, timeout_sec) VALUES (?, ?, ?, ?, ?)`,
-		name, command, argsJSON, envJSON, timeoutSec,
+		`INSERT INTO mcp_upstreams (name, command, args, env, timeout_sec, transport) VALUES (?, ?, ?, ?, ?, ?)`,
+		name, command, argsJSON, envJSON, timeoutSec, transport,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint") {
@@ -640,7 +650,7 @@ func (s *Store) RemoveMCPUpstream(name string) (bool, error) {
 // ListMCPUpstreams returns all MCP upstreams.
 func (s *Store) ListMCPUpstreams() ([]MCPUpstreamRow, error) {
 	rows, err := s.db.Query(
-		"SELECT id, name, command, args, env, timeout_sec, created_at FROM mcp_upstreams ORDER BY id",
+		"SELECT id, name, command, args, env, timeout_sec, transport, created_at FROM mcp_upstreams ORDER BY id",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list upstreams: %w", err)
@@ -651,7 +661,7 @@ func (s *Store) ListMCPUpstreams() ([]MCPUpstreamRow, error) {
 	for rows.Next() {
 		var u MCPUpstreamRow
 		var argsJSON, envJSON sql.NullString
-		if err := rows.Scan(&u.ID, &u.Name, &u.Command, &argsJSON, &envJSON, &u.TimeoutSec, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Name, &u.Command, &argsJSON, &envJSON, &u.TimeoutSec, &u.Transport, &u.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan upstream: %w", err)
 		}
 		if argsJSON.Valid {

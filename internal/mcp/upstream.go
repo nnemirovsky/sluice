@@ -15,6 +15,18 @@ import (
 	"time"
 )
 
+// Transport type constants for MCP upstream connections.
+const (
+	TransportStdio = "stdio"     // child process (default)
+	TransportHTTP  = "http"      // Streamable HTTP client
+	TransportWS    = "websocket" // WebSocket client
+)
+
+// ValidTransport returns true if t is a recognized transport type.
+func ValidTransport(t string) bool {
+	return t == TransportStdio || t == TransportHTTP || t == TransportWS
+}
+
 // UpstreamConfig describes how to launch an upstream MCP server process.
 type UpstreamConfig struct {
 	Name       string
@@ -22,6 +34,7 @@ type UpstreamConfig struct {
 	Args       []string
 	Env        map[string]string
 	TimeoutSec int
+	Transport  string // "stdio" (default), "http", or "websocket"
 }
 
 // Upstream manages a running upstream MCP server process. Communication

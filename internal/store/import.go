@@ -60,6 +60,7 @@ type importMCPUpstream struct {
 	Args       []string          `toml:"args"`
 	Env        map[string]string `toml:"env"`
 	TimeoutSec int               `toml:"timeout_sec"`
+	Transport  string            `toml:"transport"`
 }
 
 type importPolicyConfig struct {
@@ -487,6 +488,15 @@ func insertUpstreamIfNew(tx *sql.Tx, u importMCPUpstream) (bool, error) {
 		return false, fmt.Errorf("MCP upstream %q has empty command", u.Name)
 	}
 
+	transport := u.Transport
+	if transport == "" {
+		transport = "stdio"
+	}
+	validTransports := map[string]bool{"stdio": true, "http": true, "websocket": true}
+	if !validTransports[transport] {
+		return false, fmt.Errorf("MCP upstream %q: invalid transport %q (must be stdio, http, or websocket)", u.Name, transport)
+	}
+
 	var count int
 	err := tx.QueryRow(
 		"SELECT COUNT(*) FROM mcp_upstreams WHERE name = ?",
@@ -516,8 +526,8 @@ func insertUpstreamIfNew(tx *sql.Tx, u importMCPUpstream) (bool, error) {
 	}
 
 	if _, err := tx.Exec(
-		`INSERT INTO mcp_upstreams (name, command, args, env, timeout_sec) VALUES (?, ?, ?, ?, ?)`,
-		u.Name, u.Command, argsJSON, envJSON, timeoutSec,
+		`INSERT INTO mcp_upstreams (name, command, args, env, timeout_sec, transport) VALUES (?, ?, ?, ?, ?, ?)`,
+		u.Name, u.Command, argsJSON, envJSON, timeoutSec, transport,
 	); err != nil {
 		return false, fmt.Errorf("insert upstream %q: %w", u.Name, err)
 	}

@@ -100,6 +100,7 @@ func handleMCPGateway(args []string) error {
 			Args:       r.Args,
 			Env:        r.Env,
 			TimeoutSec: r.TimeoutSec,
+			Transport:  r.Transport,
 		}
 	}
 
@@ -219,20 +220,25 @@ func handleMCPGateway(args []string) error {
 func handleMCPAdd(args []string) error {
 	fs := flag.NewFlagSet("mcp add", flag.ExitOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	command := fs.String("command", "", "command to run the MCP server")
+	command := fs.String("command", "", "command to run (stdio) or URL (http/websocket)")
 	argsStr := fs.String("args", "", "comma-separated arguments for the command")
 	envStr := fs.String("env", "", "comma-separated KEY=VAL environment variables")
 	timeout := fs.Int("timeout", 120, "upstream timeout in seconds")
+	transport := fs.String("transport", "stdio", "transport type: stdio, http, or websocket")
 	_ = fs.Parse(args)
 
 	if fs.NArg() == 0 || *command == "" {
-		fmt.Println("usage: sluice mcp add <name> --command <cmd> [--args \"arg1,arg2\"] [--env \"KEY=VAL,...\"] [--timeout 120]")
+		fmt.Println("usage: sluice mcp add <name> --command <cmd> [--transport stdio|http|websocket] [--args \"arg1,arg2\"] [--env \"KEY=VAL,...\"] [--timeout 120]")
 		os.Exit(1)
 	}
 	name := fs.Arg(0)
 
 	if err := mcp.ValidateUpstreamName(name); err != nil {
 		return fmt.Errorf("invalid upstream name: %w", err)
+	}
+
+	if !mcp.ValidTransport(*transport) {
+		return fmt.Errorf("invalid transport %q: must be stdio, http, or websocket", *transport)
 	}
 
 	var cmdArgs []string
@@ -261,11 +267,12 @@ func handleMCPAdd(args []string) error {
 		Args:       cmdArgs,
 		Env:        env,
 		TimeoutSec: *timeout,
+		Transport:  *transport,
 	})
 	if err != nil {
 		return fmt.Errorf("add upstream: %w", err)
 	}
-	fmt.Printf("added MCP upstream %q [%d] (command: %s)\n", name, id, *command)
+	fmt.Printf("added MCP upstream %q [%d] (transport: %s, command: %s)\n", name, id, *transport, *command)
 	return nil
 }
 
@@ -291,6 +298,10 @@ func handleMCPList(args []string) error {
 	}
 
 	for _, u := range upstreams {
+		transportStr := ""
+		if u.Transport != "" && u.Transport != "stdio" {
+			transportStr = " transport=" + u.Transport
+		}
 		argsStr := ""
 		if len(u.Args) > 0 {
 			argsStr = " args=" + strings.Join(u.Args, ",")
@@ -312,7 +323,7 @@ func handleMCPList(args []string) error {
 		if u.TimeoutSec != 120 {
 			timeoutStr = fmt.Sprintf(" timeout=%ds", u.TimeoutSec)
 		}
-		fmt.Printf("[%d] %s command=%s%s%s%s\n", u.ID, u.Name, u.Command, argsStr, envStr, timeoutStr)
+		fmt.Printf("[%d] %s command=%s%s%s%s%s\n", u.ID, u.Name, u.Command, transportStr, argsStr, envStr, timeoutStr)
 	}
 	return nil
 }

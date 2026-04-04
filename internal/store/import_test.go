@@ -825,6 +825,83 @@ vault = "sluice-creds"
 	}
 }
 
+func TestImportTOMLMCPUpstreamTransport(t *testing.T) {
+	s := newTestStore(t)
+
+	data := []byte(`
+[policy]
+default = "ask"
+
+[[mcp_upstream]]
+name = "local-fs"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+
+[[mcp_upstream]]
+name = "remote-github"
+transport = "http"
+command = "https://mcp.github.com/v1"
+timeout_sec = 60
+
+[[mcp_upstream]]
+name = "realtime"
+transport = "websocket"
+command = "wss://mcp.example.com/ws"
+timeout_sec = 30
+`)
+
+	res, err := s.ImportTOML(data)
+	if err != nil {
+		t.Fatalf("ImportTOML: %v", err)
+	}
+	if res.UpstreamsInserted != 3 {
+		t.Errorf("expected 3 upstreams inserted, got %d", res.UpstreamsInserted)
+	}
+
+	ups, err := s.ListMCPUpstreams()
+	if err != nil {
+		t.Fatalf("ListMCPUpstreams: %v", err)
+	}
+	if len(ups) != 3 {
+		t.Fatalf("expected 3 upstreams, got %d", len(ups))
+	}
+
+	// First upstream: no transport specified, should default to stdio.
+	if ups[0].Name != "local-fs" || ups[0].Transport != "stdio" {
+		t.Errorf("upstream[0]: name=%q transport=%q, want local-fs/stdio", ups[0].Name, ups[0].Transport)
+	}
+	// Second upstream: explicit http transport.
+	if ups[1].Name != "remote-github" || ups[1].Transport != "http" {
+		t.Errorf("upstream[1]: name=%q transport=%q, want remote-github/http", ups[1].Name, ups[1].Transport)
+	}
+	if ups[1].Command != "https://mcp.github.com/v1" {
+		t.Errorf("upstream[1] command = %q", ups[1].Command)
+	}
+	if ups[1].TimeoutSec != 60 {
+		t.Errorf("upstream[1] timeout = %d, want 60", ups[1].TimeoutSec)
+	}
+	// Third upstream: explicit websocket transport.
+	if ups[2].Name != "realtime" || ups[2].Transport != "websocket" {
+		t.Errorf("upstream[2]: name=%q transport=%q, want realtime/websocket", ups[2].Name, ups[2].Transport)
+	}
+}
+
+func TestImportTOMLMCPUpstreamInvalidTransport(t *testing.T) {
+	s := newTestStore(t)
+
+	data := []byte(`
+[[mcp_upstream]]
+name = "bad"
+transport = "grpc"
+command = "https://example.com"
+`)
+
+	_, err := s.ImportTOML(data)
+	if err == nil {
+		t.Fatal("expected error for invalid transport")
+	}
+}
+
 func TestImportTOMLBindingWithProtocols(t *testing.T) {
 	s := newTestStore(t)
 

@@ -69,13 +69,13 @@ const (
 )
 ```
 
-- [ ] Add `transport` column to `mcp_upstreams` table (default "stdio") via migration 000003
-- [ ] Add `Transport string` field to `UpstreamConfig` and `MCPUpstreamRow`
-- [ ] Update `AddMCPUpstream`, `ListMCPUpstreams` for new column
-- [ ] Update TOML import to parse `transport` field from `[[mcp_upstream]]`
-- [ ] Update `sluice mcp add` CLI to accept `--transport stdio|http|websocket` (default stdio)
-- [ ] Write tests for transport field CRUD
-- [ ] Run tests: `go test ./internal/store/ -v -timeout 30s`
+- [x] Add `transport` column to `mcp_upstreams` table (default "stdio") via migration 000003
+- [x] Add `Transport string` field to `UpstreamConfig` and `MCPUpstreamRow`
+- [x] Update `AddMCPUpstream`, `ListMCPUpstreams` for new column
+- [x] Update TOML import to parse `transport` field from `[[mcp_upstream]]`
+- [x] Update `sluice mcp add` CLI to accept `--transport stdio|http|websocket` (default stdio)
+- [x] Write tests for transport field CRUD
+- [x] Run tests: `go test ./internal/store/ -v -timeout 30s`
 
 ### Task 2: Streamable HTTP upstream client
 
