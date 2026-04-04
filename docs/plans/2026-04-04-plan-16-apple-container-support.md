@@ -90,12 +90,12 @@ type ContainerManager interface {
 }
 ```
 
-- [ ] Create `internal/container/types.go` with `Runtime` enum, `ContainerManager` interface, and `ContainerStatus` struct
-- [ ] Refactor `internal/docker/manager.go` to implement `container.ContainerManager`
-- [ ] Update `cmd/sluice/main.go` to use `container.ContainerManager` interface instead of `*docker.Manager`
-- [ ] Update all callers (Telegram commands, etc.) to use the interface
-- [ ] Write tests verifying Docker manager satisfies the interface
-- [ ] Run tests: `go test ./... -v -timeout 30s`
+- [x] Create `internal/container/types.go` with `Runtime` enum, `ContainerManager` interface, and `ContainerStatus` struct
+- [x] Refactor `internal/docker/manager.go` to implement `container.ContainerManager`
+- [x] Update `cmd/sluice/main.go` to use `container.ContainerManager` interface instead of `*docker.Manager`
+- [x] Update all callers (Telegram commands, etc.) to use the interface
+- [x] Write tests verifying Docker manager satisfies the interface
+- [x] Run tests: `go test ./... -v -timeout 30s`
 
 ### Task 2: Apple Container CLI wrapper
 

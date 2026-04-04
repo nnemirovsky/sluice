@@ -16,6 +16,7 @@ import (
 
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/channel"
+	"github.com/nemirovsky/sluice/internal/container"
 	"github.com/nemirovsky/sluice/internal/docker"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
@@ -194,8 +195,8 @@ func main() {
 		}
 	}
 
-	// Docker container manager for auto-restart on credential changes.
-	var dockerMgr *docker.Manager
+	// Container manager for auto-restart on credential changes.
+	var containerMgr container.ContainerManager
 	if vaultStore != nil {
 		sock, sockErr := resolveDockerSocket(*dockerSocket)
 		if sockErr != nil {
@@ -203,7 +204,7 @@ func main() {
 		} else if sock != "" {
 			if fi, statErr := os.Stat(sock); statErr == nil && fi.Mode().Type() == os.ModeSocket {
 				client := docker.NewSocketClient(sock)
-				dockerMgr = docker.NewManager(client, *dockerContainer)
+				containerMgr = docker.NewManager(client, *dockerContainer)
 				log.Printf("docker manager enabled: socket=%s, container=%s", sock, *dockerContainer)
 			} else if *dockerSocket != "" {
 				log.Printf("WARNING: --docker-socket %q not found or not a socket; container auto-restart disabled", *dockerSocket)
@@ -238,7 +239,7 @@ func main() {
 			ReloadMu:    srv.ReloadMu(),
 			AuditPath:   *auditPath,
 			Vault:       vaultStore,
-			DockerMgr:   dockerMgr,
+			ContainerMgr: containerMgr,
 			Store:       db,
 			PhantomDir:  *phantomDir,
 		})

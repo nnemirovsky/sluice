@@ -17,7 +17,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/nemirovsky/sluice/internal/channel"
-	"github.com/nemirovsky/sluice/internal/docker"
+	"github.com/nemirovsky/sluice/internal/container"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
@@ -32,7 +32,7 @@ type ChannelConfig struct {
 	ReloadMu    *sync.Mutex
 	AuditPath   string
 	Vault       *vault.Store
-	DockerMgr   *docker.Manager
+	ContainerMgr container.ContainerManager
 	Store       *store.Store
 	PhantomDir  string
 }
@@ -77,8 +77,8 @@ func NewTelegramChannel(cfg ChannelConfig) (*TelegramChannel, error) {
 	if cfg.Vault != nil {
 		cmdHandler.SetVault(cfg.Vault)
 	}
-	if cfg.DockerMgr != nil {
-		cmdHandler.SetDockerManager(cfg.DockerMgr)
+	if cfg.ContainerMgr != nil {
+		cmdHandler.SetContainerManager(cfg.ContainerMgr)
 	}
 	if cfg.PhantomDir != "" {
 		cmdHandler.SetPhantomDir(cfg.PhantomDir)
