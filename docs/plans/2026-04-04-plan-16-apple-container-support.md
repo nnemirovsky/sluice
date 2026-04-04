@@ -105,16 +105,16 @@ Wrap the `container` CLI for managing Apple Container micro-VMs.
 - Create: `internal/container/apple.go`
 - Create: `internal/container/apple_test.go`
 
-- [ ] Implement `AppleManager` struct wrapping `container` CLI via `os/exec`
-- [ ] Implement `container run -e KEY=VAL -v /host:/guest <image>` for starting VMs
-- [ ] Implement `container exec <name> <cmd>` for running commands inside VMs
-- [ ] Implement `container stop <name>` and `container rm <name>`
-- [ ] Implement `container inspect <name>` parsing JSON output for status, IP address, mounts
-- [ ] Implement `container ls` for listing running VMs
-- [ ] Check if `container` binary exists on creation (return clear error if not installed)
-- [ ] Write tests with mock exec (capture commands, return canned responses)
-- [ ] Write tests for error cases (binary not found, VM not running, exec failure)
-- [ ] Run tests: `go test ./internal/container/ -v -timeout 30s`
+- [x] Implement `AppleManager` struct wrapping `container` CLI via `os/exec`
+- [x] Implement `container run -e KEY=VAL -v /host:/guest <image>` for starting VMs
+- [x] Implement `container exec <name> <cmd>` for running commands inside VMs
+- [x] Implement `container stop <name>` and `container rm <name>`
+- [x] Implement `container inspect <name>` parsing JSON output for status, IP address, mounts
+- [x] Implement `container ls` for listing running VMs
+- [x] Check if `container` binary exists on creation (return clear error if not installed)
+- [x] Write tests with mock exec (capture commands, return canned responses)
+- [x] Write tests for error cases (binary not found, VM not running, exec failure)
+- [x] Run tests: `go test ./internal/container/ -v -timeout 30s`
 
 ### Task 3: Implement ContainerManager for Apple Container
 

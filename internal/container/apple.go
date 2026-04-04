@@ -1,0 +1,186 @@
+package container
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os/exec"
+	"strings"
+)
+
+// CommandRunner abstracts os/exec for testability.
+type CommandRunner interface {
+	Run(ctx context.Context, name string, args ...string) ([]byte, error)
+}
+
+// ExecRunner runs commands via os/exec.
+type ExecRunner struct{}
+
+// Run executes a command and returns combined stdout. Returns an error
+// containing stderr if the command fails.
+func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
+}
+
+// AppleCLI wraps the macOS `container` CLI for managing Apple Container
+// micro-VMs. It provides low-level operations that AppleManager (Task 3)
+// will wire into the ContainerManager interface.
+type AppleCLI struct {
+	bin    string // path to container binary
+	runner CommandRunner
+}
+
+// NewAppleCLI creates a new AppleCLI. Returns an error if the container
+// binary is not found in PATH.
+func NewAppleCLI(runner CommandRunner) (*AppleCLI, error) {
+	return NewAppleCLIWithBin("container", runner)
+}
+
+// NewAppleCLIWithBin creates a new AppleCLI using the specified binary path.
+// Returns an error if the binary does not exist.
+func NewAppleCLIWithBin(bin string, runner CommandRunner) (*AppleCLI, error) {
+	if runner == nil {
+		runner = ExecRunner{}
+	}
+
+	// Verify the binary exists by running --version.
+	_, err := runner.Run(context.Background(), bin, "--version")
+	if err != nil {
+		return nil, fmt.Errorf("container binary %q not found or not working: %w", bin, err)
+	}
+
+	return &AppleCLI{bin: bin, runner: runner}, nil
+}
+
+// RunConfig holds parameters for starting a new Apple Container VM.
+type RunConfig struct {
+	Name    string
+	Image   string
+	Env     map[string]string
+	Volumes []VolumeMount
+}
+
+// VolumeMount describes a host-to-guest volume mount.
+type VolumeMount struct {
+	HostPath  string
+	GuestPath string
+	ReadOnly  bool
+}
+
+// Run starts a new Apple Container VM with the given configuration.
+func (c *AppleCLI) Run(ctx context.Context, cfg RunConfig) error {
+	args := []string{"run", "--name", cfg.Name}
+	for k, v := range cfg.Env {
+		args = append(args, "-e", k+"="+v)
+	}
+	for _, vol := range cfg.Volumes {
+		mount := vol.HostPath + ":" + vol.GuestPath
+		if vol.ReadOnly {
+			mount += ":ro"
+		}
+		args = append(args, "-v", mount)
+	}
+	args = append(args, cfg.Image)
+	_, err := c.runner.Run(ctx, c.bin, args...)
+	return err
+}
+
+// Exec runs a command inside a running VM.
+func (c *AppleCLI) Exec(ctx context.Context, name string, cmd []string) ([]byte, error) {
+	args := append([]string{"exec", name}, cmd...)
+	return c.runner.Run(ctx, c.bin, args...)
+}
+
+// Stop stops a running VM.
+func (c *AppleCLI) Stop(ctx context.Context, name string) error {
+	_, err := c.runner.Run(ctx, c.bin, "stop", name)
+	return err
+}
+
+// Remove removes a stopped VM.
+func (c *AppleCLI) Remove(ctx context.Context, name string) error {
+	_, err := c.runner.Run(ctx, c.bin, "rm", name)
+	return err
+}
+
+// VMInfo holds parsed output from `container inspect`.
+type VMInfo struct {
+	Name    string   `json:"Name"`
+	ID      string   `json:"Id"`
+	Image   string   `json:"Image"`
+	State   VMState  `json:"State"`
+	Network VMNet    `json:"NetworkSettings"`
+	Mounts  []VMBind `json:"Mounts"`
+	Env     []string `json:"Env"`
+}
+
+// VMState holds VM running state.
+type VMState struct {
+	Status  string `json:"Status"`
+	Running bool   `json:"Running"`
+}
+
+// VMNet holds VM network settings.
+type VMNet struct {
+	IPAddress string `json:"IPAddress"`
+}
+
+// VMBind holds a volume mount from inspect output.
+type VMBind struct {
+	Source      string `json:"Source"`
+	Destination string `json:"Destination"`
+	ReadOnly    bool   `json:"RO"`
+}
+
+// Inspect returns information about a VM by name.
+func (c *AppleCLI) Inspect(ctx context.Context, name string) (VMInfo, error) {
+	out, err := c.runner.Run(ctx, c.bin, "inspect", name)
+	if err != nil {
+		return VMInfo{}, err
+	}
+
+	// container inspect returns a JSON array with one element.
+	var infos []VMInfo
+	if err := json.Unmarshal(out, &infos); err != nil {
+		return VMInfo{}, fmt.Errorf("parse inspect output: %w", err)
+	}
+	if len(infos) == 0 {
+		return VMInfo{}, errors.New("inspect returned empty result")
+	}
+	return infos[0], nil
+}
+
+// VMListEntry holds a single entry from `container ls` output.
+type VMListEntry struct {
+	Name  string `json:"Name"`
+	ID    string `json:"Id"`
+	Image string `json:"Image"`
+	State string `json:"State"`
+}
+
+// List returns all VMs visible to `container ls`.
+func (c *AppleCLI) List(ctx context.Context) ([]VMListEntry, error) {
+	out, err := c.runner.Run(ctx, c.bin, "ls", "--format", "json")
+	if err != nil {
+		return nil, err
+	}
+
+	if len(bytes.TrimSpace(out)) == 0 {
+		return nil, nil
+	}
+
+	var entries []VMListEntry
+	if err := json.Unmarshal(out, &entries); err != nil {
+		return nil, fmt.Errorf("parse ls output: %w", err)
+	}
+	return entries, nil
+}
