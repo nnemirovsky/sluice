@@ -15,10 +15,14 @@
 default = "ask"
 timeout_sec = 120
 
-# Vault configuration (age-encrypted credential store)
-# For age-encrypted local vault:
+# Vault configuration (credential provider)
+# For age-encrypted local vault (default):
 [vault]
 provider = "age"
+
+# For chain provider (try multiple backends in order, first hit wins):
+# [vault]
+# providers = ["1password", "age"]
 
 # For HashiCorp Vault (uncomment and configure):
 # [vault]
@@ -32,6 +36,36 @@ provider = "age"
 # # auth = "approle"
 # # role_id_env = "VAULT_ROLE_ID"
 # # secret_id_env = "VAULT_SECRET_ID"
+
+# For 1Password (uncomment and configure):
+# Auth via OP_SERVICE_ACCOUNT_TOKEN env var
+# [vault]
+# provider = "1password"
+# [vault.1password]
+# vault = "sluice-credentials"              # 1Password vault name
+# field = "credential"                      # item field to read (default: "credential")
+
+# For Bitwarden Secrets Manager (uncomment and configure):
+# Auth via BWS_ACCESS_TOKEN env var. Requires bws CLI installed.
+# [vault]
+# provider = "bitwarden"
+# [vault.bitwarden]
+# org_id = "your-org-uuid"
+
+# For KeePass .kdbx file (uncomment and configure):
+# Auth via KEEPASS_PASSWORD env var
+# [vault]
+# provider = "keepass"
+# [vault.keepass]
+# path = "/path/to/credentials.kdbx"
+# key_file = "/path/to/keyfile"             # optional
+
+# For Gopass (uncomment and configure):
+# Requires gopass CLI installed. Uses age or GPG for decryption.
+# [vault]
+# provider = "gopass"
+# [vault.gopass]
+# store = "~/.local/share/gopass/stores/root"  # optional, uses gopass default
 
 # --- Network rules (destination field) ---
 

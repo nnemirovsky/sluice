@@ -301,6 +301,14 @@ type Config struct {
 	VaultHashicorpSecretID    string
 	VaultHashicorpRoleIDEnv   string
 	VaultHashicorpSecretIDEnv string
+	Vault1PasswordToken       string
+	Vault1PasswordVault       string
+	Vault1PasswordField       string
+	VaultBitwardenToken       string
+	VaultBitwardenOrgID       string
+	VaultKeePassPath          string
+	VaultKeePassKeyFile       string
+	VaultGopassStore          string
 }
 
 // ConfigUpdate holds optional fields for UpdateConfig. Only non-nil fields are written.
@@ -319,6 +327,14 @@ type ConfigUpdate struct {
 	VaultHashicorpSecretID    *string
 	VaultHashicorpRoleIDEnv   *string
 	VaultHashicorpSecretIDEnv *string
+	Vault1PasswordToken       *string
+	Vault1PasswordVault       *string
+	Vault1PasswordField       *string
+	VaultBitwardenToken       *string
+	VaultBitwardenOrgID       *string
+	VaultKeePassPath          *string
+	VaultKeePassKeyFile       *string
+	VaultGopassStore          *string
 }
 
 // GetConfig reads the typed singleton config row.
@@ -327,13 +343,21 @@ func (s *Store) GetConfig() (*Config, error) {
 	var vaultDir, vaultProviders sql.NullString
 	var hcAddr, hcMount, hcPrefix, hcAuth, hcToken sql.NullString
 	var hcRoleID, hcSecretID, hcRoleIDEnv, hcSecretIDEnv sql.NullString
+	var opToken, opVault, opField sql.NullString
+	var bwToken, bwOrgID sql.NullString
+	var kpPath, kpKeyFile sql.NullString
+	var gpStore sql.NullString
 
 	err := s.db.QueryRow(`SELECT default_verdict, timeout_sec, vault_provider,
 		vault_dir, vault_providers,
 		vault_hashicorp_addr, vault_hashicorp_mount, vault_hashicorp_prefix,
 		vault_hashicorp_auth, vault_hashicorp_token,
 		vault_hashicorp_role_id, vault_hashicorp_secret_id,
-		vault_hashicorp_role_id_env, vault_hashicorp_secret_id_env
+		vault_hashicorp_role_id_env, vault_hashicorp_secret_id_env,
+		vault_1password_token, vault_1password_vault, vault_1password_field,
+		vault_bitwarden_token, vault_bitwarden_org_id,
+		vault_keepass_path, vault_keepass_key_file,
+		vault_gopass_store
 		FROM config WHERE id = 1`).Scan(
 		&cfg.DefaultVerdict, &cfg.TimeoutSec, &cfg.VaultProvider,
 		&vaultDir, &vaultProviders,
@@ -341,6 +365,10 @@ func (s *Store) GetConfig() (*Config, error) {
 		&hcAuth, &hcToken,
 		&hcRoleID, &hcSecretID,
 		&hcRoleIDEnv, &hcSecretIDEnv,
+		&opToken, &opVault, &opField,
+		&bwToken, &bwOrgID,
+		&kpPath, &kpKeyFile,
+		&gpStore,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get config: %w", err)
@@ -358,6 +386,14 @@ func (s *Store) GetConfig() (*Config, error) {
 	cfg.VaultHashicorpSecretID = hcSecretID.String
 	cfg.VaultHashicorpRoleIDEnv = hcRoleIDEnv.String
 	cfg.VaultHashicorpSecretIDEnv = hcSecretIDEnv.String
+	cfg.Vault1PasswordToken = opToken.String
+	cfg.Vault1PasswordVault = opVault.String
+	cfg.Vault1PasswordField = opField.String
+	cfg.VaultBitwardenToken = bwToken.String
+	cfg.VaultBitwardenOrgID = bwOrgID.String
+	cfg.VaultKeePassPath = kpPath.String
+	cfg.VaultKeePassKeyFile = kpKeyFile.String
+	cfg.VaultGopassStore = gpStore.String
 	return &cfg, nil
 }
 
@@ -433,6 +469,38 @@ func (s *Store) UpdateConfig(u ConfigUpdate) error {
 	if u.VaultHashicorpSecretIDEnv != nil {
 		setClauses = append(setClauses, "vault_hashicorp_secret_id_env = ?")
 		args = append(args, nilIfEmpty(*u.VaultHashicorpSecretIDEnv))
+	}
+	if u.Vault1PasswordToken != nil {
+		setClauses = append(setClauses, "vault_1password_token = ?")
+		args = append(args, nilIfEmpty(*u.Vault1PasswordToken))
+	}
+	if u.Vault1PasswordVault != nil {
+		setClauses = append(setClauses, "vault_1password_vault = ?")
+		args = append(args, nilIfEmpty(*u.Vault1PasswordVault))
+	}
+	if u.Vault1PasswordField != nil {
+		setClauses = append(setClauses, "vault_1password_field = ?")
+		args = append(args, nilIfEmpty(*u.Vault1PasswordField))
+	}
+	if u.VaultBitwardenToken != nil {
+		setClauses = append(setClauses, "vault_bitwarden_token = ?")
+		args = append(args, nilIfEmpty(*u.VaultBitwardenToken))
+	}
+	if u.VaultBitwardenOrgID != nil {
+		setClauses = append(setClauses, "vault_bitwarden_org_id = ?")
+		args = append(args, nilIfEmpty(*u.VaultBitwardenOrgID))
+	}
+	if u.VaultKeePassPath != nil {
+		setClauses = append(setClauses, "vault_keepass_path = ?")
+		args = append(args, nilIfEmpty(*u.VaultKeePassPath))
+	}
+	if u.VaultKeePassKeyFile != nil {
+		setClauses = append(setClauses, "vault_keepass_key_file = ?")
+		args = append(args, nilIfEmpty(*u.VaultKeePassKeyFile))
+	}
+	if u.VaultGopassStore != nil {
+		setClauses = append(setClauses, "vault_gopass_store = ?")
+		args = append(args, nilIfEmpty(*u.VaultGopassStore))
 	}
 	if len(setClauses) == 0 {
 		return nil

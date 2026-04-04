@@ -24,10 +24,14 @@ type Provider interface {
 // VaultConfig controls which credential provider is used and how it's
 // configured. Populated from the SQLite store's config table.
 type VaultConfig struct {
-	Provider  string
-	Providers []string
-	Dir       string
-	HashiCorp HashiCorpConfig
+	Provider    string
+	Providers   []string
+	Dir         string
+	HashiCorp   HashiCorpConfig
+	OnePassword OnePasswordConfig
+	Bitwarden   BitwardenConfig
+	KeePass     KeePassConfig
+	Gopass      GopassConfig
 }
 
 // NewProviderFromConfig creates a Provider (or ChainProvider) based on config.
@@ -68,6 +72,14 @@ func newSingleProvider(name string, cfg VaultConfig) (Provider, error) {
 		return &EnvProvider{}, nil
 	case "hashicorp":
 		return NewHashiCorpProvider(cfg.HashiCorp)
+	case "1password":
+		return NewOnePasswordProvider(cfg.OnePassword.Token, cfg.OnePassword.Vault, cfg.OnePassword.Field)
+	case "bitwarden":
+		return NewBitwardenProvider(cfg.Bitwarden.Token, cfg.Bitwarden.OrgID)
+	case "keepass":
+		return NewKeePassProvider(cfg.KeePass.Path, cfg.KeePass.Password, cfg.KeePass.KeyFilePath)
+	case "gopass":
+		return NewGopassProvider(cfg.Gopass.StorePath)
 	default:
 		return nil, fmt.Errorf("unknown provider: %q", name)
 	}

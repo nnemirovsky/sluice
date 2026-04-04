@@ -257,7 +257,7 @@ func handlePolicyExport(args []string) {
 		fmt.Println()
 	}
 
-	// Warn if sensitive HashiCorp values exist but are excluded from export.
+	// Warn if sensitive token values exist but are excluded from export.
 	for _, val := range []struct {
 		v    string
 		name string
@@ -265,6 +265,8 @@ func handlePolicyExport(args []string) {
 		{cfg.VaultHashicorpToken, "vault_hashicorp_token"},
 		{cfg.VaultHashicorpRoleID, "vault_hashicorp_role_id"},
 		{cfg.VaultHashicorpSecretID, "vault_hashicorp_secret_id"},
+		{cfg.Vault1PasswordToken, "vault_1password_token"},
+		{cfg.VaultBitwardenToken, "vault_bitwarden_token"},
 	} {
 		if val.v != "" {
 			fmt.Fprintf(os.Stderr, "warning: %s excluded from export (use env var indirection instead)\n", val.name)
@@ -293,6 +295,52 @@ func handlePolicyExport(args []string) {
 		for _, line := range hcLines {
 			fmt.Println(line)
 		}
+		fmt.Println()
+	}
+
+	// Vault 1Password sub-section (token excluded above).
+	var opLines []string
+	if cfg.Vault1PasswordVault != "" {
+		opLines = append(opLines, fmt.Sprintf("vault = %q", cfg.Vault1PasswordVault))
+	}
+	if cfg.Vault1PasswordField != "" {
+		opLines = append(opLines, fmt.Sprintf("field = %q", cfg.Vault1PasswordField))
+	}
+	if len(opLines) > 0 {
+		fmt.Println("[vault.1password]")
+		for _, line := range opLines {
+			fmt.Println(line)
+		}
+		fmt.Println()
+	}
+
+	// Vault Bitwarden sub-section (token excluded above).
+	if cfg.VaultBitwardenOrgID != "" {
+		fmt.Println("[vault.bitwarden]")
+		fmt.Printf("org_id = %q\n", cfg.VaultBitwardenOrgID)
+		fmt.Println()
+	}
+
+	// Vault KeePass sub-section.
+	var kpLines []string
+	if cfg.VaultKeePassPath != "" {
+		kpLines = append(kpLines, fmt.Sprintf("path = %q", cfg.VaultKeePassPath))
+	}
+	if cfg.VaultKeePassKeyFile != "" {
+		kpLines = append(kpLines, fmt.Sprintf("key_file = %q", cfg.VaultKeePassKeyFile))
+	}
+	if len(kpLines) > 0 {
+		fmt.Println("[vault.keepass]")
+		for _, line := range kpLines {
+			fmt.Println(line)
+		}
+		fmt.Println()
+	}
+
+	// Vault Gopass sub-section.
+	if cfg.VaultGopassStore != "" {
+		fmt.Println("[vault.gopass]")
+		fmt.Printf("store = %q\n", cfg.VaultGopassStore)
 		fmt.Println()
 	}
 

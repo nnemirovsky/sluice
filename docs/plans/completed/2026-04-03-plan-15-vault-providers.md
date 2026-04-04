@@ -86,11 +86,11 @@ ALTER TABLE config ADD COLUMN vault_keepass_key_file TEXT;
 ALTER TABLE config ADD COLUMN vault_gopass_store TEXT;
 ```
 
-- [ ] Create migration 000004 adding vault provider config columns
-- [ ] Update `Config` struct with new typed fields
-- [ ] Update `GetConfig` and `UpdateConfig` for new columns
-- [ ] Write tests for migration and config CRUD with new fields
-- [ ] Run tests: `go test ./internal/store/ -v -timeout 30s`
+- [x] Create migration 000004 adding vault provider config columns
+- [x] Update `Config` struct with new typed fields
+- [x] Update `GetConfig` and `UpdateConfig` for new columns
+- [x] Write tests for migration and config CRUD with new fields
+- [x] Run tests: `go test ./internal/store/ -v -timeout 30s`
 
 ### Task 2: 1Password provider via official Go SDK
 
@@ -104,15 +104,15 @@ ALTER TABLE config ADD COLUMN vault_gopass_store TEXT;
 
 **Mapping:** Sluice credential name -> 1Password item name. `Get("anthropic_api_key")` resolves to `op://<vault>/anthropic_api_key/credential` (or a configurable field).
 
-- [ ] Add `github.com/1password/onepassword-sdk-go` dependency
-- [ ] Implement `OnePasswordProvider` struct with `NewOnePasswordProvider(token, vaultName string)`
-- [ ] Implement `Get(name)`: resolve `op://<vault>/<name>/credential` via SDK. Return as `SecureBytes`.
-- [ ] Implement `List()`: list items in the configured vault via SDK
-- [ ] Implement `Name()`: return "1password"
-- [ ] Support configurable field name (default "credential", overridable for items with non-standard field names)
-- [ ] Write tests with mock (the SDK supports a mock client or use httptest to mock the 1Password API)
-- [ ] Write tests for error cases (item not found, auth failure, network error)
-- [ ] Run tests: `go test ./internal/vault/ -v -timeout 30s`
+- [x] Add `github.com/1password/onepassword-sdk-go` dependency
+- [x] Implement `OnePasswordProvider` struct with `NewOnePasswordProvider(token, vaultName string)`
+- [x] Implement `Get(name)`: resolve `op://<vault>/<name>/credential` via SDK. Return as `SecureBytes`.
+- [x] Implement `List()`: list items in the configured vault via SDK
+- [x] Implement `Name()`: return "1password"
+- [x] Support configurable field name (default "credential", overridable for items with non-standard field names)
+- [x] Write tests with mock (the SDK supports a mock client or use httptest to mock the 1Password API)
+- [x] Write tests for error cases (item not found, auth failure, network error)
+- [x] Run tests: `go test ./internal/vault/ -v -timeout 30s`
 
 ### Task 3: Bitwarden Secrets Manager provider
 
@@ -126,15 +126,15 @@ Bitwarden Secrets Manager (BWS) is a dedicated machine-to-machine product with a
 
 **Mapping:** Sluice credential name -> BWS secret name. Secrets are stored as key-value pairs in BWS projects.
 
-- [ ] Add `github.com/bitwarden/sdk-go` dependency
-- [ ] Implement `BitwardenProvider` struct with `NewBitwardenProvider(token, orgID string)`
-- [ ] Implement `Get(name)`: list secrets, find by name, return value as `SecureBytes`
-- [ ] Implement `List()`: list all secret names in the configured organization
-- [ ] Implement `Name()`: return "bitwarden"
-- [ ] Cache the secret list briefly (30s TTL) to avoid repeated API calls on rapid Get sequences
-- [ ] Write tests with mock HTTP server simulating BWS API responses
-- [ ] Write tests for error cases (secret not found, auth failure)
-- [ ] Run tests: `go test ./internal/vault/ -v -timeout 30s`
+- [x] Add `github.com/bitwarden/sdk-go` dependency (skipped: SDK requires CGO via native C library; used bws CLI wrapper instead to maintain pure Go)
+- [x] Implement `BitwardenProvider` struct with `NewBitwardenProvider(token, orgID string)`
+- [x] Implement `Get(name)`: list secrets, find by name, return value as `SecureBytes`
+- [x] Implement `List()`: list all secret names in the configured organization
+- [x] Implement `Name()`: return "bitwarden"
+- [x] Cache the secret list briefly (30s TTL) to avoid repeated API calls on rapid Get sequences
+- [x] Write tests with mock HTTP server simulating BWS API responses
+- [x] Write tests for error cases (secret not found, auth failure)
+- [x] Run tests: `go test ./internal/vault/ -v -timeout 30s`
 
 ### Task 4: KeePass (.kdbx) file provider
 
@@ -148,17 +148,17 @@ Read credentials directly from a KeePass database file. Pure Go, no external dae
 
 **Mapping:** Sluice credential name -> KeePass entry title. `Get("anthropic_api_key")` finds the entry titled "anthropic_api_key" and returns its password field.
 
-- [ ] Add `github.com/tobischo/gokeepasslib/v3` dependency
-- [ ] Implement `KeePassProvider` struct with `NewKeePassProvider(dbPath, password, keyFilePath string)`
-- [ ] On creation: open and decrypt the .kdbx file, build an in-memory index of entry titles -> passwords
-- [ ] Implement `Get(name)`: look up entry by title, return password as `SecureBytes`
-- [ ] Implement `List()`: return all entry titles
-- [ ] Implement `Name()`: return "keepass"
-- [ ] Support searching in all groups (not just root)
-- [ ] Re-read the file on `Get` if the file modification time changed (supports external KeePass edits)
-- [ ] Write tests with temp .kdbx files created using the library
-- [ ] Write tests for error cases (wrong password, missing file, entry not found)
-- [ ] Run tests: `go test ./internal/vault/ -v -timeout 30s`
+- [x] Add `github.com/tobischo/gokeepasslib/v3` dependency
+- [x] Implement `KeePassProvider` struct with `NewKeePassProvider(dbPath, password, keyFilePath string)`
+- [x] On creation: open and decrypt the .kdbx file, build an in-memory index of entry titles -> passwords
+- [x] Implement `Get(name)`: look up entry by title, return password as `SecureBytes`
+- [x] Implement `List()`: return all entry titles
+- [x] Implement `Name()`: return "keepass"
+- [x] Support searching in all groups (not just root)
+- [x] Re-read the file on `Get` if the file modification time changed (supports external KeePass edits)
+- [x] Write tests with temp .kdbx files created using the library
+- [x] Write tests for error cases (wrong password, missing file, entry not found)
+- [x] Run tests: `go test ./internal/vault/ -v -timeout 30s`
 
 ### Task 5: Gopass provider
 
@@ -172,14 +172,14 @@ Gopass is the modern Go rewrite of pass (password-store.org). Supports age encry
 
 **Approach:** Shell out to `gopass show <name>` CLI. This is simpler and more maintainable than importing gopass internals. The CLI handles all decryption.
 
-- [ ] Implement `GopassProvider` struct with `NewGopassProvider(storePath string)` (storePath optional, defaults to `~/.local/share/gopass/stores/root`)
-- [ ] Implement `Get(name)`: run `gopass show -o <name>` (output only, no meta), capture stdout as `SecureBytes`
-- [ ] Implement `List()`: run `gopass ls --flat`, parse output
-- [ ] Implement `Name()`: return "gopass"
-- [ ] Handle case where `gopass` binary is not installed (return clear error on provider creation)
-- [ ] Write tests with a temp gopass store (initialize with `gopass init` in temp dir)
-- [ ] Write tests for error cases (gopass not installed, entry not found)
-- [ ] Run tests: `go test ./internal/vault/ -v -timeout 30s`
+- [x] Implement `GopassProvider` struct with `NewGopassProvider(storePath string)` (storePath optional, defaults to `~/.local/share/gopass/stores/root`)
+- [x] Implement `Get(name)`: run `gopass show -o <name>` (output only, no meta), capture stdout as `SecureBytes`
+- [x] Implement `List()`: run `gopass ls --flat`, parse output
+- [x] Implement `Name()`: return "gopass"
+- [x] Handle case where `gopass` binary is not installed (return clear error on provider creation)
+- [x] Write tests with a temp gopass store (initialize with `gopass init` in temp dir)
+- [x] Write tests for error cases (gopass not installed, entry not found)
+- [x] Run tests: `go test ./internal/vault/ -v -timeout 30s`
 
 ### Task 6: Wire providers into factory and config
 
@@ -190,33 +190,33 @@ Update the provider factory to support new provider types. Update config TOML im
 - Modify: `internal/store/import.go` (TOML import for new vault config)
 - Modify: `internal/vault/provider_test.go`
 
-- [ ] Add `"1password"`, `"bitwarden"`, `"keepass"`, `"gopass"` cases to `NewProviderFromConfig`
-- [ ] Read provider-specific config from the typed config table
-- [ ] Support chain provider: `vault_providers = ["1password", "age"]` tries 1Password first, falls back to local age vault
-- [ ] Update TOML import to parse new vault config sections
-- [ ] Write tests for factory with each new provider type
-- [ ] Write tests for chain provider with mixed backends
-- [ ] Run tests: `go test ./internal/vault/ -v -timeout 30s`
+- [x] Add `"1password"`, `"bitwarden"`, `"keepass"`, `"gopass"` cases to `NewProviderFromConfig`
+- [x] Read provider-specific config from the typed config table
+- [x] Support chain provider: `vault_providers = ["1password", "age"]` tries 1Password first, falls back to local age vault
+- [x] Update TOML import to parse new vault config sections
+- [x] Write tests for factory with each new provider type
+- [x] Write tests for chain provider with mixed backends
+- [x] Run tests: `go test ./internal/vault/ -v -timeout 30s`
 
 ### Task 7: Verify acceptance criteria
 
-- [ ] Verify 1Password provider retrieves secrets via Service Account token
-- [ ] Verify Bitwarden BWS provider retrieves secrets via access token
-- [ ] Verify KeePass provider reads credentials from .kdbx file
-- [ ] Verify Gopass provider retrieves secrets via CLI
-- [ ] Verify chain provider falls through (first provider that has the secret wins)
-- [ ] Verify phantom token generation works with all provider backends
-- [ ] Verify MITM credential injection works regardless of provider backend
-- [ ] Verify `vault_provider = "1password"` in config.toml seeds correctly
-- [ ] Run full test suite: `go test ./... -v -timeout 60s -race`
-- [ ] Run linter: `go vet ./...`
+- [x] Verify 1Password provider retrieves secrets via Service Account token
+- [x] Verify Bitwarden BWS provider retrieves secrets via access token
+- [x] Verify KeePass provider reads credentials from .kdbx file
+- [x] Verify Gopass provider retrieves secrets via CLI
+- [x] Verify chain provider falls through (first provider that has the secret wins)
+- [x] Verify phantom token generation works with all provider backends
+- [x] Verify MITM credential injection works regardless of provider backend
+- [x] Verify `vault_provider = "1password"` in config.toml seeds correctly
+- [x] Run full test suite: `go test ./... -v -timeout 60s -race`
+- [x] Run linter: `go vet ./...`
 
 ### Task 8: [Final] Update documentation
 
-- [ ] Update CLAUDE.md: document all vault providers (age, env, hashicorp, 1password, bitwarden, keepass, gopass)
-- [ ] Update CLAUDE.md: document provider chain configuration
-- [ ] Update examples/config.toml: add commented examples for each provider
-- [ ] Update CONTRIBUTING.md: note how to add new vault providers (implement Provider interface)
+- [x] Update CLAUDE.md: document all vault providers (age, env, hashicorp, 1password, bitwarden, keepass, gopass)
+- [x] Update CLAUDE.md: document provider chain configuration
+- [x] Update examples/config.toml: add commented examples for each provider
+- [x] Update CONTRIBUTING.md: note how to add new vault providers (implement Provider interface)
 
 ## Technical Details
 

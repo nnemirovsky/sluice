@@ -69,10 +69,38 @@ type importPolicyConfig struct {
 
 // importVaultConfig is the TOML representation of the [vault] section.
 type importVaultConfig struct {
-	Provider  string                `toml:"provider"`
-	Providers []string              `toml:"providers"`
-	Dir       string                `toml:"dir"`
-	HashiCorp importHashiCorpConfig `toml:"hashicorp"`
+	Provider    string                   `toml:"provider"`
+	Providers   []string                 `toml:"providers"`
+	Dir         string                   `toml:"dir"`
+	HashiCorp   importHashiCorpConfig    `toml:"hashicorp"`
+	OnePassword importOnePasswordConfig  `toml:"1password"`
+	Bitwarden   importBitwardenConfig    `toml:"bitwarden"`
+	KeePass     importKeePassConfig      `toml:"keepass"`
+	Gopass      importGopassConfig       `toml:"gopass"`
+}
+
+// importOnePasswordConfig is the TOML representation of [vault.1password].
+type importOnePasswordConfig struct {
+	Token string `toml:"token"`
+	Vault string `toml:"vault"`
+	Field string `toml:"field"`
+}
+
+// importBitwardenConfig is the TOML representation of [vault.bitwarden].
+type importBitwardenConfig struct {
+	Token string `toml:"token"`
+	OrgID string `toml:"org_id"`
+}
+
+// importKeePassConfig is the TOML representation of [vault.keepass].
+type importKeePassConfig struct {
+	Path    string `toml:"path"`
+	KeyFile string `toml:"key_file"`
+}
+
+// importGopassConfig is the TOML representation of [vault.gopass].
+type importGopassConfig struct {
+	Store string `toml:"store"`
 }
 
 // importHashiCorpConfig is the TOML representation of [vault.hashicorp].
@@ -191,6 +219,14 @@ func (s *Store) ImportTOML(data []byte) (*ImportResult, error) {
 		{"vault_hashicorp_secret_id", f.Vault.HashiCorp.SecretID},
 		{"vault_hashicorp_role_id_env", f.Vault.HashiCorp.RoleIDEnv},
 		{"vault_hashicorp_secret_id_env", f.Vault.HashiCorp.SecretIDEnv},
+		{"vault_1password_token", f.Vault.OnePassword.Token},
+		{"vault_1password_vault", f.Vault.OnePassword.Vault},
+		{"vault_1password_field", f.Vault.OnePassword.Field},
+		{"vault_bitwarden_token", f.Vault.Bitwarden.Token},
+		{"vault_bitwarden_org_id", f.Vault.Bitwarden.OrgID},
+		{"vault_keepass_path", f.Vault.KeePass.Path},
+		{"vault_keepass_key_file", f.Vault.KeePass.KeyFile},
+		{"vault_gopass_store", f.Vault.Gopass.Store},
 	}
 	if len(f.Vault.Providers) > 0 {
 		b, _ := json.Marshal(f.Vault.Providers)
@@ -504,6 +540,14 @@ var validConfigColumns = map[string]bool{
 	"vault_hashicorp_secret_id":     true,
 	"vault_hashicorp_role_id_env":   true,
 	"vault_hashicorp_secret_id_env": true,
+	"vault_1password_token":         true,
+	"vault_1password_vault":         true,
+	"vault_1password_field":         true,
+	"vault_bitwarden_token":         true,
+	"vault_bitwarden_org_id":        true,
+	"vault_keepass_path":            true,
+	"vault_keepass_key_file":        true,
+	"vault_gopass_store":            true,
 }
 
 // updateConfigColumn updates a single column in the typed config singleton row.

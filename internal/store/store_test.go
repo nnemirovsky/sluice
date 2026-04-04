@@ -600,6 +600,150 @@ func TestConfigUpdateNoOp(t *testing.T) {
 	}
 }
 
+func TestConfigVaultProviderDefaults(t *testing.T) {
+	s := newTestStore(t)
+	cfg, err := s.GetConfig()
+	if err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	// New provider columns should all default to empty.
+	if cfg.Vault1PasswordToken != "" {
+		t.Errorf("vault_1password_token = %q, want empty", cfg.Vault1PasswordToken)
+	}
+	if cfg.Vault1PasswordVault != "" {
+		t.Errorf("vault_1password_vault = %q, want empty", cfg.Vault1PasswordVault)
+	}
+	if cfg.VaultBitwardenToken != "" {
+		t.Errorf("vault_bitwarden_token = %q, want empty", cfg.VaultBitwardenToken)
+	}
+	if cfg.VaultBitwardenOrgID != "" {
+		t.Errorf("vault_bitwarden_org_id = %q, want empty", cfg.VaultBitwardenOrgID)
+	}
+	if cfg.VaultKeePassPath != "" {
+		t.Errorf("vault_keepass_path = %q, want empty", cfg.VaultKeePassPath)
+	}
+	if cfg.VaultKeePassKeyFile != "" {
+		t.Errorf("vault_keepass_key_file = %q, want empty", cfg.VaultKeePassKeyFile)
+	}
+	if cfg.VaultGopassStore != "" {
+		t.Errorf("vault_gopass_store = %q, want empty", cfg.VaultGopassStore)
+	}
+}
+
+func TestConfigUpdateVaultProviderFields(t *testing.T) {
+	s := newTestStore(t)
+
+	opToken := "ops_test_token_12345"
+	opVault := "sluice-credentials"
+	bwToken := "bws_test_token_67890"
+	bwOrgID := "org-uuid-abcdef"
+	kpPath := "/data/credentials.kdbx"
+	kpKeyFile := "/data/keyfile.key"
+	gpStore := "/home/user/.local/share/gopass/stores/root"
+
+	err := s.UpdateConfig(ConfigUpdate{
+		Vault1PasswordToken: &opToken,
+		Vault1PasswordVault: &opVault,
+		VaultBitwardenToken: &bwToken,
+		VaultBitwardenOrgID: &bwOrgID,
+		VaultKeePassPath:    &kpPath,
+		VaultKeePassKeyFile: &kpKeyFile,
+		VaultGopassStore:    &gpStore,
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	cfg, err := s.GetConfig()
+	if err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	if cfg.Vault1PasswordToken != opToken {
+		t.Errorf("1password token = %q, want %q", cfg.Vault1PasswordToken, opToken)
+	}
+	if cfg.Vault1PasswordVault != opVault {
+		t.Errorf("1password vault = %q, want %q", cfg.Vault1PasswordVault, opVault)
+	}
+	if cfg.VaultBitwardenToken != bwToken {
+		t.Errorf("bitwarden token = %q, want %q", cfg.VaultBitwardenToken, bwToken)
+	}
+	if cfg.VaultBitwardenOrgID != bwOrgID {
+		t.Errorf("bitwarden org_id = %q, want %q", cfg.VaultBitwardenOrgID, bwOrgID)
+	}
+	if cfg.VaultKeePassPath != kpPath {
+		t.Errorf("keepass path = %q, want %q", cfg.VaultKeePassPath, kpPath)
+	}
+	if cfg.VaultKeePassKeyFile != kpKeyFile {
+		t.Errorf("keepass key_file = %q, want %q", cfg.VaultKeePassKeyFile, kpKeyFile)
+	}
+	if cfg.VaultGopassStore != gpStore {
+		t.Errorf("gopass store = %q, want %q", cfg.VaultGopassStore, gpStore)
+	}
+
+	// Existing fields should be untouched.
+	if cfg.DefaultVerdict != "deny" {
+		t.Errorf("default verdict changed: %q", cfg.DefaultVerdict)
+	}
+	if cfg.VaultProvider != "age" {
+		t.Errorf("vault provider changed: %q", cfg.VaultProvider)
+	}
+}
+
+func TestConfigUpdateVaultProviderPartial(t *testing.T) {
+	s := newTestStore(t)
+
+	// Update only 1Password fields.
+	opToken := "ops_token"
+	opVault := "my-vault"
+	if err := s.UpdateConfig(ConfigUpdate{
+		Vault1PasswordToken: &opToken,
+		Vault1PasswordVault: &opVault,
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	cfg, _ := s.GetConfig()
+	if cfg.Vault1PasswordToken != opToken {
+		t.Errorf("1password token = %q", cfg.Vault1PasswordToken)
+	}
+	if cfg.Vault1PasswordVault != opVault {
+		t.Errorf("1password vault = %q", cfg.Vault1PasswordVault)
+	}
+	// Other new fields should remain empty.
+	if cfg.VaultBitwardenToken != "" {
+		t.Errorf("bitwarden token should be empty: %q", cfg.VaultBitwardenToken)
+	}
+	if cfg.VaultKeePassPath != "" {
+		t.Errorf("keepass path should be empty: %q", cfg.VaultKeePassPath)
+	}
+	if cfg.VaultGopassStore != "" {
+		t.Errorf("gopass store should be empty: %q", cfg.VaultGopassStore)
+	}
+}
+
+func TestConfigUpdateVaultProviderClearFields(t *testing.T) {
+	s := newTestStore(t)
+
+	// Set a value, then clear it by setting to empty string.
+	opToken := "ops_token"
+	if err := s.UpdateConfig(ConfigUpdate{Vault1PasswordToken: &opToken}); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	cfg, _ := s.GetConfig()
+	if cfg.Vault1PasswordToken != opToken {
+		t.Fatalf("expected token set")
+	}
+
+	empty := ""
+	if err := s.UpdateConfig(ConfigUpdate{Vault1PasswordToken: &empty}); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	cfg, _ = s.GetConfig()
+	if cfg.Vault1PasswordToken != "" {
+		t.Errorf("expected token cleared, got %q", cfg.Vault1PasswordToken)
+	}
+}
+
 // --- Binding CRUD ---
 
 func TestBindingCRUD(t *testing.T) {

@@ -468,6 +468,18 @@ func readVaultConfig(db *store.Store) (vault.VaultConfig, error) {
 	vc.HashiCorp.RoleIDEnv = cfg.VaultHashicorpRoleIDEnv
 	vc.HashiCorp.SecretIDEnv = cfg.VaultHashicorpSecretIDEnv
 
+	vc.OnePassword.Token = cfg.Vault1PasswordToken
+	vc.OnePassword.Vault = cfg.Vault1PasswordVault
+	vc.OnePassword.Field = cfg.Vault1PasswordField
+
+	vc.Bitwarden.Token = cfg.VaultBitwardenToken
+	vc.Bitwarden.OrgID = cfg.VaultBitwardenOrgID
+
+	vc.KeePass.Path = cfg.VaultKeePassPath
+	vc.KeePass.KeyFilePath = cfg.VaultKeePassKeyFile
+
+	vc.Gopass.StorePath = cfg.VaultGopassStore
+
 	return vc, nil
 }
 

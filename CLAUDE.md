@@ -52,6 +52,10 @@ go test ./... -v -timeout 30s
 - `internal/vault/provider_age.go` - Age file backend (Store satisfies Provider)
 - `internal/vault/provider_env.go` - Environment variable credential provider
 - `internal/vault/provider_hashicorp.go` - HashiCorp Vault provider with KV v2 support and AppRole auth
+- `internal/vault/provider_1password.go` - 1Password provider via official Go SDK with Service Account token auth
+- `internal/vault/provider_bitwarden.go` - Bitwarden Secrets Manager provider via bws CLI wrapper with access token auth
+- `internal/vault/provider_keepass.go` - KeePass (.kdbx) file provider via gokeepasslib with auto-reload on file change
+- `internal/vault/provider_gopass.go` - Gopass provider via CLI wrapper (gopass show/ls)
 - `internal/mcp/gateway.go` - MCP gateway core with tool policy enforcement and upstream forwarding
 - `internal/mcp/inspect.go` - Content inspection: argument blocking and response redaction using regex rules
 - `internal/mcp/policy.go` - Tool-level policy evaluation using glob patterns (deny/allow/ask priority)
@@ -341,7 +345,17 @@ Telegram commands: `CommandHandler` holds an `atomic.Pointer[policy.Engine]` for
 
 Audit logger is optional. Pass nil in `Config.Audit` and the proxy handles it gracefully. Each JSON line includes a `prev_hash` field containing the blake3 hash of the previous line's raw JSON bytes. The first entry uses blake3("") as the genesis hash. On startup, `NewFileLogger` reads the last line from the existing file (seeking backwards from EOF) to recover the hash chain across restarts. `VerifyChain` walks the log and reports any broken links. The `sluice audit verify` CLI command wraps this for tamper detection.
 
-Credential vault: `Store` manages age-encrypted files in `~/.sluice/credentials/` with an auto-generated X25519 identity. `SecureBytes` wraps decrypted values and zeroes memory on `Release()` (best-effort in Go due to GC and string copies). `Provider` interface abstracts credential sources (age files, env vars, HashiCorp Vault). `NewProviderFromConfig` reads vault configuration from the SQLite store's typed config singleton (fields: VaultProvider, VaultDir, VaultProviders, and HashiCorp-specific fields). TOML `[vault]` and `[vault.hashicorp]` sections are imported into the config table during seed import. `HashiCorpProvider` connects to HashiCorp Vault's KV v2 secrets engine, supporting both token and AppRole authentication. `role_id` and `secret_id` support env var indirection via `role_id_env` and `secret_id_env`. For `addr` and `token`, the Vault SDK reads `VAULT_ADDR` and `VAULT_TOKEN` automatically when not set.
+Credential vault: `Store` manages age-encrypted files in `~/.sluice/credentials/` with an auto-generated X25519 identity. `SecureBytes` wraps decrypted values and zeroes memory on `Release()` (best-effort in Go due to GC and string copies). `Provider` interface abstracts credential sources. `NewProviderFromConfig` reads vault configuration from the SQLite store's typed config singleton and routes to the correct provider. TOML `[vault]` and provider-specific subsections are imported into the config table during seed import. Seven providers are supported:
+
+- **age** (default): Local age-encrypted files in `~/.sluice/credentials/`. Auto-generates X25519 identity on first use. No external dependencies.
+- **env**: Reads credentials from environment variables. Credential name maps directly to env var name (uppercased).
+- **hashicorp**: HashiCorp Vault KV v2 secrets engine. Supports token auth (`VAULT_TOKEN` env var or config) and AppRole auth (`role_id_env`/`secret_id_env` for env var indirection). Config: `[vault.hashicorp]` with `addr`, `mount` (default "secret"), `prefix`.
+- **1password**: 1Password via official Go SDK. Auth via `OP_SERVICE_ACCOUNT_TOKEN` env var or config. Credential name maps to item name in the configured vault. Reads the "credential" field by default (configurable via `field`). Config: `[vault.1password]` with `vault`, `field`.
+- **bitwarden**: Bitwarden Secrets Manager via `bws` CLI wrapper (SDK requires CGO, so CLI is used for pure Go). Auth via `BWS_ACCESS_TOKEN` env var or config. Caches secret list for 30s to reduce API calls. Config: `[vault.bitwarden]` with `org_id`.
+- **keepass**: KeePass .kdbx file via gokeepasslib (pure Go). Auth via `KEEPASS_PASSWORD` env var and optional key file. Builds in-memory index of entry titles to passwords. Auto-reloads when file modification time changes. Searches all groups recursively. Config: `[vault.keepass]` with `path`, `key_file`.
+- **gopass**: Gopass via CLI wrapper (`gopass show -o` / `gopass ls --flat`). Requires `gopass` binary installed. Uses default store path unless overridden. Config: `[vault.gopass]` with `store`.
+
+Chain provider: Set `providers = ["1password", "age"]` in `[vault]` to try multiple providers in order. First provider that has the credential wins. `ChainProvider.List()` merges names from all providers (deduped).
 
 Binding resolution: `BindingResolver` compiles destination glob patterns (reusing `policy.CompileGlob`) and resolves `(host, port)` to a `Binding`. Bindings specify the credential name, header, template (`Bearer {value}`), and protocols (JSON array).
 
@@ -645,6 +659,8 @@ See `compose.yml` in the repo root. Key features:
 - `golang.org/x/term` - Terminal password input for `sluice cred add`
 - `lukechampine.com/blake3` - Blake3 hashing for tamper-evident audit chain
 - `github.com/hashicorp/vault/api` - HashiCorp Vault client for external secret management (KV v2, AppRole auth)
+- `github.com/1password/onepassword-sdk-go` - 1Password SDK for Service Account credential retrieval
+- `github.com/tobischo/gokeepasslib/v3` - Pure Go KeePass .kdbx file reader/writer
 - `github.com/golang-migrate/migrate/v4` - Schema migration framework with embedded SQL files
 - `github.com/quic-go/quic-go` - QUIC/HTTP3 implementation for QUIC MITM proxy
 
@@ -659,7 +675,7 @@ See `compose.yml` in the repo root. Key features:
 | QUIC/HTTP3 MITM | ~250 | quic-go TLS termination, HTTP/3 phantom swap |
 | MCP gateway (stdio + HTTP) | ~500 | Tool interception, upstream management |
 | Credential vault + secure memory | ~300 | age-encrypted, SecureBytes with zeroing |
-| External vault providers | ~200 | HashiCorp Vault, env, provider interface |
+| External vault providers | ~600 | HashiCorp Vault, 1Password, Bitwarden, KeePass, Gopass, env, provider interface |
 | Telegram bot (approval UX) | ~250 | Inline keyboard, callback handling, shared by both layers |
 | SQLite policy store + TOML import | ~400 | Runtime state persistence, seed import |
 | Policy CLI (list/add/remove/import/export) | ~200 | Unified control plane |

@@ -654,6 +654,177 @@ name = "password redact"
 	}
 }
 
+func TestImportTOMLVaultOnePasswordConfig(t *testing.T) {
+	s := newTestStore(t)
+
+	data := []byte(`
+[vault]
+provider = "1password"
+
+[vault.1password]
+token = "ops_test_token_123"
+vault = "my-vault"
+field = "password"
+`)
+
+	res, err := s.ImportTOML(data)
+	if err != nil {
+		t.Fatalf("ImportTOML: %v", err)
+	}
+	if res.ConfigSet != 4 {
+		t.Errorf("expected 4 config values set, got %d", res.ConfigSet)
+	}
+
+	cfg, err := s.GetConfig()
+	if err != nil {
+		t.Fatalf("GetConfig: %v", err)
+	}
+	if cfg.VaultProvider != "1password" {
+		t.Errorf("expected vault_provider '1password', got %q", cfg.VaultProvider)
+	}
+	if cfg.Vault1PasswordToken != "ops_test_token_123" {
+		t.Errorf("expected token, got %q", cfg.Vault1PasswordToken)
+	}
+	if cfg.Vault1PasswordVault != "my-vault" {
+		t.Errorf("expected vault 'my-vault', got %q", cfg.Vault1PasswordVault)
+	}
+	if cfg.Vault1PasswordField != "password" {
+		t.Errorf("expected field 'password', got %q", cfg.Vault1PasswordField)
+	}
+}
+
+func TestImportTOMLVaultBitwardenConfig(t *testing.T) {
+	s := newTestStore(t)
+
+	data := []byte(`
+[vault]
+provider = "bitwarden"
+
+[vault.bitwarden]
+token = "bws_test_token_456"
+org_id = "org-uuid-123"
+`)
+
+	res, err := s.ImportTOML(data)
+	if err != nil {
+		t.Fatalf("ImportTOML: %v", err)
+	}
+	if res.ConfigSet != 3 {
+		t.Errorf("expected 3 config values set, got %d", res.ConfigSet)
+	}
+
+	cfg, err := s.GetConfig()
+	if err != nil {
+		t.Fatalf("GetConfig: %v", err)
+	}
+	if cfg.VaultProvider != "bitwarden" {
+		t.Errorf("expected vault_provider 'bitwarden', got %q", cfg.VaultProvider)
+	}
+	if cfg.VaultBitwardenToken != "bws_test_token_456" {
+		t.Errorf("expected token, got %q", cfg.VaultBitwardenToken)
+	}
+	if cfg.VaultBitwardenOrgID != "org-uuid-123" {
+		t.Errorf("expected org_id, got %q", cfg.VaultBitwardenOrgID)
+	}
+}
+
+func TestImportTOMLVaultKeePassConfig(t *testing.T) {
+	s := newTestStore(t)
+
+	data := []byte(`
+[vault]
+provider = "keepass"
+
+[vault.keepass]
+path = "/data/creds.kdbx"
+key_file = "/data/keyfile.key"
+`)
+
+	res, err := s.ImportTOML(data)
+	if err != nil {
+		t.Fatalf("ImportTOML: %v", err)
+	}
+	if res.ConfigSet != 3 {
+		t.Errorf("expected 3 config values set, got %d", res.ConfigSet)
+	}
+
+	cfg, err := s.GetConfig()
+	if err != nil {
+		t.Fatalf("GetConfig: %v", err)
+	}
+	if cfg.VaultProvider != "keepass" {
+		t.Errorf("expected vault_provider 'keepass', got %q", cfg.VaultProvider)
+	}
+	if cfg.VaultKeePassPath != "/data/creds.kdbx" {
+		t.Errorf("expected path, got %q", cfg.VaultKeePassPath)
+	}
+	if cfg.VaultKeePassKeyFile != "/data/keyfile.key" {
+		t.Errorf("expected key_file, got %q", cfg.VaultKeePassKeyFile)
+	}
+}
+
+func TestImportTOMLVaultGopassConfig(t *testing.T) {
+	s := newTestStore(t)
+
+	data := []byte(`
+[vault]
+provider = "gopass"
+
+[vault.gopass]
+store = "/home/user/.gopass"
+`)
+
+	res, err := s.ImportTOML(data)
+	if err != nil {
+		t.Fatalf("ImportTOML: %v", err)
+	}
+	if res.ConfigSet != 2 {
+		t.Errorf("expected 2 config values set, got %d", res.ConfigSet)
+	}
+
+	cfg, err := s.GetConfig()
+	if err != nil {
+		t.Fatalf("GetConfig: %v", err)
+	}
+	if cfg.VaultProvider != "gopass" {
+		t.Errorf("expected vault_provider 'gopass', got %q", cfg.VaultProvider)
+	}
+	if cfg.VaultGopassStore != "/home/user/.gopass" {
+		t.Errorf("expected store path, got %q", cfg.VaultGopassStore)
+	}
+}
+
+func TestImportTOMLVaultChainProviders(t *testing.T) {
+	s := newTestStore(t)
+
+	data := []byte(`
+[vault]
+providers = ["1password", "age"]
+
+[vault.1password]
+vault = "sluice-creds"
+`)
+
+	res, err := s.ImportTOML(data)
+	if err != nil {
+		t.Fatalf("ImportTOML: %v", err)
+	}
+	if res.ConfigSet != 2 {
+		t.Errorf("expected 2 config values set, got %d", res.ConfigSet)
+	}
+
+	cfg, err := s.GetConfig()
+	if err != nil {
+		t.Fatalf("GetConfig: %v", err)
+	}
+	if len(cfg.VaultProviders) != 2 || cfg.VaultProviders[0] != "1password" || cfg.VaultProviders[1] != "age" {
+		t.Errorf("expected providers [1password, age], got %v", cfg.VaultProviders)
+	}
+	if cfg.Vault1PasswordVault != "sluice-creds" {
+		t.Errorf("expected vault 'sluice-creds', got %q", cfg.Vault1PasswordVault)
+	}
+}
+
 func TestImportTOMLBindingWithProtocols(t *testing.T) {
 	s := newTestStore(t)
 
