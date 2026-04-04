@@ -106,10 +106,9 @@ func isPrivateIP(ip net.IP) bool {
 // return an error so go-socks5 sends a hostUnreachable reply instead of the
 // ruleFailure that would result from failing inside Allow().
 type policyResolver struct {
-	engine     *atomic.Pointer[policy.Engine]
-	audit      *audit.FileLogger
-	broker     *channel.Broker
-	selfBypass map[string]bool // skip CouldBeAllowed check for self addresses
+	engine *atomic.Pointer[policy.Engine]
+	audit  *audit.FileLogger
+	broker *channel.Broker
 }
 
 func (r *policyResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
@@ -405,7 +404,7 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	rules := &policyRuleSet{engine: enginePtr, reloadMu: reloadMu, audit: cfg.Audit, broker: cfg.Broker, store: cfg.Store, selfBypass: bypassSet}
-	dnsRes := &policyResolver{engine: enginePtr, audit: cfg.Audit, broker: cfg.Broker, selfBypass: bypassSet}
+	dnsRes := &policyResolver{engine: enginePtr, audit: cfg.Audit, broker: cfg.Broker}
 	srv.rules = rules
 	srv.dnsResolver = dnsRes
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -335,10 +336,10 @@ func TestResolveVaultEnvMissingCredential(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing vault credential")
 	}
-	if !contains(err.Error(), "nonexistent") {
+	if !strings.Contains(err.Error(), "nonexistent") {
 		t.Errorf("error should mention credential name, got: %v", err)
 	}
-	if !contains(err.Error(), "TOKEN") {
+	if !strings.Contains(err.Error(), "TOKEN") {
 		t.Errorf("error should mention env var name, got: %v", err)
 	}
 }
@@ -379,18 +380,6 @@ func TestResolveVaultEnvEmptyMap(t *testing.T) {
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstr(s, substr))
-}
-
-func containsSubstr(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}
 
 // mockMCPServerEnv echoes environment variables in the tool call response
 // so tests can verify credential injection.

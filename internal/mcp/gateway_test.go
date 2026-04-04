@@ -866,8 +866,8 @@ func TestGatewayMixedTransports(t *testing.T) {
 	// Verify all tools are discovered from all three transports.
 	tools := gw.Tools()
 	names := make(map[string]bool)
-	for _, t := range tools {
-		names[t.Name] = true
+	for _, tool := range tools {
+		names[tool.Name] = true
 	}
 
 	// Stdio mock: greet, add. HTTP mock: search, fetch. WS mock: subscribe, query.

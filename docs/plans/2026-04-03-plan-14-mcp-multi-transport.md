@@ -58,7 +58,7 @@ Allow upstreams to specify their transport type. Default remains stdio for backw
 **Files:**
 - Modify: `internal/mcp/types.go`
 - Modify: `internal/store/store.go` (add transport column to mcp_upstreams)
-- Create migration: `internal/store/migrations/000003_upstream_transport.up.sql`
+- Create migration: `internal/store/migrations/000005_upstream_transport.up.sql`
 
 **Transport types:**
 ```go
@@ -69,7 +69,7 @@ const (
 )
 ```
 
-- [x] Add `transport` column to `mcp_upstreams` table (default "stdio") via migration 000003
+- [x] Add `transport` column to `mcp_upstreams` table (default "stdio") via migration 000005
 - [x] Add `Transport string` field to `UpstreamConfig` and `MCPUpstreamRow`
 - [x] Update `AddMCPUpstream`, `ListMCPUpstreams` for new column
 - [x] Update TOML import to parse `transport` field from `[[mcp_upstream]]`

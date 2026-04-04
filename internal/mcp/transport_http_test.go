@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 )
 
 // mockHTTPMCPServer returns an httptest.Server that behaves as a minimal
@@ -247,10 +248,7 @@ func TestHTTPUpstreamCustomTimeout(t *testing.T) {
 
 	h := NewHTTPUpstream("remote", srv.URL, 30)
 
-	if h.timeout != 30*1e9 {
-		t.Errorf("expected timeout 30s, got %v", h.timeout)
-	}
-	if h.client.Timeout != 30*1e9 {
+	if h.client.Timeout != 30*time.Second {
 		t.Errorf("expected client timeout 30s, got %v", h.client.Timeout)
 	}
 }
@@ -258,8 +256,8 @@ func TestHTTPUpstreamCustomTimeout(t *testing.T) {
 func TestHTTPUpstreamDefaultTimeout(t *testing.T) {
 	h := NewHTTPUpstream("remote", "http://localhost:9999", 0)
 
-	if h.timeout != defaultUpstreamTimeout {
-		t.Errorf("expected default timeout %v, got %v", defaultUpstreamTimeout, h.timeout)
+	if h.client.Timeout != defaultUpstreamTimeout {
+		t.Errorf("expected default timeout %v, got %v", defaultUpstreamTimeout, h.client.Timeout)
 	}
 }
 

@@ -112,7 +112,6 @@ type Upstream struct {
 	done    chan struct{}   // closed by Stop to unblock the scanner goroutine
 	stopOnce sync.Once
 	mu      sync.Mutex
-	tools   []Tool
 	nextID  atomic.Int64
 	timeout time.Duration
 }
@@ -347,8 +346,6 @@ func (u *Upstream) DiscoverTools() ([]Tool, error) {
 	for i := range result.Tools {
 		result.Tools[i].Name = u.name + "__" + result.Tools[i].Name
 	}
-	u.tools = result.Tools
-
 	log.Printf("upstream %s: discovered %d tools", u.name, len(result.Tools))
 	return result.Tools, nil
 }

@@ -19,7 +19,6 @@ type WSUpstream struct {
 	url     string
 	conn    *websocket.Conn
 	mu      sync.Mutex
-	tools   []Tool
 	nextID  atomic.Int64
 	timeout time.Duration
 }
@@ -182,8 +181,6 @@ func (w *WSUpstream) DiscoverTools() ([]Tool, error) {
 	for i := range result.Tools {
 		result.Tools[i].Name = w.name + "__" + result.Tools[i].Name
 	}
-	w.tools = result.Tools
-
 	log.Printf("upstream %s: discovered %d tools via WebSocket", w.name, len(result.Tools))
 	return result.Tools, nil
 }

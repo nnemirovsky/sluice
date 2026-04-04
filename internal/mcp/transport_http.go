@@ -23,9 +23,7 @@ type HTTPUpstream struct {
 	client    *http.Client
 	sessionID string
 	mu        sync.Mutex
-	tools     []Tool
 	nextID    atomic.Int64
-	timeout   time.Duration
 }
 
 // NewHTTPUpstream creates an HTTPUpstream for the given URL and timeout.
@@ -35,10 +33,9 @@ func NewHTTPUpstream(name, url string, timeoutSec int) *HTTPUpstream {
 		timeout = time.Duration(timeoutSec) * time.Second
 	}
 	return &HTTPUpstream{
-		name:    name,
-		url:     url,
-		client:  &http.Client{Timeout: timeout},
-		timeout: timeout,
+		name:   name,
+		url:    url,
+		client: &http.Client{Timeout: timeout},
 	}
 }
 
@@ -241,8 +238,6 @@ func (h *HTTPUpstream) DiscoverTools() ([]Tool, error) {
 	for i := range result.Tools {
 		result.Tools[i].Name = h.name + "__" + result.Tools[i].Name
 	}
-	h.tools = result.Tools
-
 	log.Printf("upstream %s: discovered %d tools via HTTP", h.name, len(result.Tools))
 	return result.Tools, nil
 }

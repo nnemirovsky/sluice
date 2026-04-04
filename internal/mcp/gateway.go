@@ -326,7 +326,7 @@ func (gw *Gateway) RestartUpstream(name string) error {
 	}
 
 	// Rebuild allTools: remove old tools for this upstream and append new ones.
-	filtered := gw.allTools[:0]
+	filtered := make([]Tool, 0, len(gw.allTools))
 	for _, t := range gw.allTools {
 		if !oldTools[t.Name] {
 			filtered = append(filtered, t)

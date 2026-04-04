@@ -395,7 +395,7 @@ func writeMCPServersJSON(phantomDir, sluiceURL string) {
 		return
 	}
 	path := filepath.Join(phantomDir, "mcp-servers.json")
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		log.Printf("WARNING: failed to write %s: %v", path, err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -290,7 +291,8 @@ func (m *AppleManager) RestartWithEnv(ctx context.Context, envUpdates map[string
 func (m *AppleManager) InjectMCPConfig(phantomDir, sluiceURL string) error {
 	mcpConfig := map[string]any{
 		"sluice": map[string]any{
-			"url": sluiceURL,
+			"url":       sluiceURL,
+			"transport": "streamable-http",
 		},
 	}
 
@@ -300,14 +302,17 @@ func (m *AppleManager) InjectMCPConfig(phantomDir, sluiceURL string) error {
 	}
 
 	path := filepath.Join(phantomDir, "mcp-servers.json")
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("write mcp config: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, execErr := m.cli.Exec(ctx, m.containerName, []string{"openclaw", "mcp", "reload"})
-	return execErr
+	if _, execErr := m.cli.Exec(ctx, m.containerName, []string{"openclaw", "mcp", "reload"}); execErr != nil {
+		// Best-effort: agent picks up config on next restart.
+		log.Printf("MCP config written to %s but exec reload failed: %v", path, execErr)
+	}
+	return nil
 }
 
 // Status returns VM health information by running container inspect.

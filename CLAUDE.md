@@ -31,8 +31,8 @@ go test ./... -v -timeout 30s
 - `internal/store/migrate.go` - golang-migrate integration with embedded SQL files
 - `internal/store/migrations/000001_init.up.sql` - Initial schema migration (rules, config, bindings, mcp_upstreams, channels)
 - `internal/store/migrations/000001_init.down.sql` - Rollback for initial schema
-- `internal/store/migrations/000003_upstream_transport.up.sql` - Add transport column to mcp_upstreams table
-- `internal/store/migrations/000003_upstream_transport.down.sql` - Rollback for transport column
+- `internal/store/migrations/000005_upstream_transport.up.sql` - Add transport column to mcp_upstreams table
+- `internal/store/migrations/000005_upstream_transport.down.sql` - Rollback for transport column
 - `internal/proxy/server.go` - SOCKS5 server wrapping `things-go/go-socks5` with TCP and UDP policy enforcement
 - `internal/proxy/protocol.go` - Protocol detection for HTTP, HTTPS, SSH, IMAP, SMTP, WebSocket (ws/wss), gRPC, DNS, QUIC, APNS, and generic
 - `internal/proxy/ca.go` - Self-signed CA generation and persistence for HTTPS MITM
