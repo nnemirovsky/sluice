@@ -1117,7 +1117,9 @@ func (s *Server) PatchApiChannelsId(w http.ResponseWriter, r *http.Request, id i
 	}
 
 	update := store.ChannelUpdate{
-		Enabled: req.Enabled,
+		Enabled:       req.Enabled,
+		WebhookURL:    req.WebhookUrl,
+		WebhookSecret: req.WebhookSecret,
 	}
 
 	if err := s.store.UpdateChannel(id, update); err != nil {
@@ -1259,6 +1261,12 @@ func storeChannelToAPI(ch store.Channel) Channel {
 		Id:      ch.ID,
 		Type:    chType,
 		Enabled: ch.Enabled,
+	}
+	if ch.WebhookURL != "" {
+		apiCh.WebhookUrl = &ch.WebhookURL
+	}
+	if ch.WebhookSecret != "" {
+		apiCh.WebhookSecret = &ch.WebhookSecret
 	}
 	if ch.CreatedAt != "" {
 		if t, err := time.Parse("2006-01-02 15:04:05", ch.CreatedAt); err == nil {

@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -541,6 +542,115 @@ func TestParseVerdict(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("parseVerdict(%q) = %v, want %v", tt.input, got, tt.want)
 		}
+	}
+}
+
+// TestMultiChannelBroadcastWithHTTP verifies that the HTTP channel works alongside
+// another channel in a multi-channel broker setup with first-response-wins.
+func TestMultiChannelBroadcastWithHTTP(t *testing.T) {
+	// Set up an HTTP webhook that returns 202 (async).
+	var webhookCalled atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webhookCalled.Add(1)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	httpCh, _ := NewHTTPChannel(Config{WebhookURL: srv.URL})
+
+	// Create a mock that auto-resolves quickly to simulate Telegram.
+	mockCh := &mockResolveChannel{}
+	broker := channel.NewBroker([]channel.Channel{mockCh, httpCh})
+	httpCh.SetBroker(broker)
+	mockCh.broker = broker
+
+	done := make(chan struct{})
+	var resp channel.Response
+	go func() {
+		defer close(done)
+		resp, _ = broker.Request("api.github.com", 443, 5*time.Second)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+
+	// The mock channel responds first.
+	if resp != channel.ResponseAllowOnce {
+		t.Errorf("got %v, want AllowOnce", resp)
+	}
+	// Both channels should have been notified.
+	if webhookCalled.Load() == 0 {
+		t.Error("HTTP webhook was not called")
+	}
+}
+
+// mockResolveChannel auto-resolves approval requests for multi-channel testing.
+type mockResolveChannel struct {
+	broker *channel.Broker
+}
+
+func (m *mockResolveChannel) RequestApproval(_ context.Context, req channel.ApprovalRequest) error {
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		if m.broker != nil {
+			m.broker.Resolve(req.ID, channel.ResponseAllowOnce)
+		}
+	}()
+	return nil
+}
+
+func (m *mockResolveChannel) CancelApproval(string) error        { return nil }
+func (m *mockResolveChannel) Commands() <-chan channel.Command    { return nil }
+func (m *mockResolveChannel) Notify(context.Context, string) error { return nil }
+func (m *mockResolveChannel) Start() error                        { return nil }
+func (m *mockResolveChannel) Stop()                               {}
+func (m *mockResolveChannel) Type() channel.ChannelType           { return channel.ChannelTelegram }
+
+// TestHTTPChannelFromStoreConfig verifies that an HTTP channel can be created
+// from store channel config (the same flow as main.go).
+func TestHTTPChannelFromStoreConfig(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(WebhookResponse{Verdict: "allow_once"})
+	}))
+	defer srv.Close()
+
+	// Simulate what main.go does: read from store, create channel.
+	webhookURL := srv.URL
+	webhookSecret := "store-secret"
+
+	ch, err := NewHTTPChannel(Config{
+		WebhookURL:    webhookURL,
+		WebhookSecret: webhookSecret,
+	})
+	if err != nil {
+		t.Fatalf("create from store config: %v", err)
+	}
+	if ch.Type() != channel.ChannelHTTP {
+		t.Errorf("type = %v, want HTTP", ch.Type())
+	}
+
+	broker := newTestBroker(ch)
+	ch.SetBroker(broker)
+
+	done := make(chan struct{})
+	var resp channel.Response
+	go func() {
+		defer close(done)
+		resp, _ = broker.Request("test.com", 443, 5*time.Second)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+
+	if resp != channel.ResponseAllowOnce {
+		t.Errorf("got %v, want AllowOnce", resp)
 	}
 }
 

@@ -199,16 +199,16 @@ ALTER TABLE channels ADD COLUMN webhook_url TEXT;
 ALTER TABLE channels ADD COLUMN webhook_secret TEXT;
 ```
 
-- [ ] Create migration 000002 adding webhook_url and webhook_secret columns to channels table
-- [ ] Update Channel CRUD in store.go for new columns
-- [ ] In main.go, read ALL enabled channels from store. Instantiate each by type (Telegram or HTTP). Pass all to `channel.NewBroker(channels)`.
-- [ ] Support multiple channels simultaneously: Telegram (row 1, type=0) + HTTP (row 2, type=1) can both be enabled
-- [ ] Add `sluice channel list`, `sluice channel add --type http --url <url> [--secret <secret>]`, `sluice channel update <id> --enabled true/false`, `sluice channel remove <id>` CLI
-- [ ] Wire HTTP channel's async resolve path to the API's approval resolve endpoint (Task 2)
-- [ ] Write tests for migration
-- [ ] Write tests for multi-channel instantiation (both Telegram + HTTP enabled)
-- [ ] Write tests for approval broadcast across both channels with first-response-wins
-- [ ] Run tests: `go test ./... -v -timeout 30s`
+- [x] Create migration 000002 adding webhook_url and webhook_secret columns to channels table
+- [x] Update Channel CRUD in store.go for new columns
+- [x] In main.go, read ALL enabled channels from store. Instantiate each by type (Telegram or HTTP). Pass all to `channel.NewBroker(channels)`.
+- [x] Support multiple channels simultaneously: Telegram (row 1, type=0) + HTTP (row 2, type=1) can both be enabled
+- [x] Add `sluice channel list`, `sluice channel add --type http --url <url> [--secret <secret>]`, `sluice channel update <id> --enabled true/false`, `sluice channel remove <id>` CLI
+- [x] Wire HTTP channel's async resolve path to the API's approval resolve endpoint (Task 2)
+- [x] Write tests for migration
+- [x] Write tests for multi-channel instantiation (both Telegram + HTTP enabled)
+- [x] Write tests for approval broadcast across both channels with first-response-wins
+- [x] Run tests: `go test ./... -v -timeout 30s`
 
 ### Task 7: Verify acceptance criteria
 

@@ -17,6 +17,7 @@ import (
 	"github.com/nemirovsky/sluice/internal/api"
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/channel"
+	httpchannel "github.com/nemirovsky/sluice/internal/channel/http"
 	"github.com/nemirovsky/sluice/internal/docker"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
@@ -45,6 +46,9 @@ func main() {
 			return
 		case "audit":
 			handleAuditCommand(os.Args[2:])
+			return
+		case "channel":
+			handleChannelCommand(os.Args[2:])
 			return
 		}
 	}
@@ -109,20 +113,24 @@ func main() {
 	}
 	defer func() { _ = logger.Close() }()
 
-	// Parse Telegram chat ID early so we can set up the channel.
-	// Check the store-backed channel enabled flag first so that a disabled
-	// channel skips env var parsing entirely (avoids fatal on malformed
-	// TELEGRAM_CHAT_ID when the channel is disabled in the store).
+	// Read all channels from the store and prepare for instantiation.
 	var broker *channel.Broker
-	var telegramChatID int64
 	var tgChannel *telegram.TelegramChannel
-	telegramEnabled := false
 
+	storeChannels, chListErr := db.ListChannels()
+	if chListErr != nil {
+		log.Printf("WARNING: failed to read channels from store: %v", chListErr)
+	}
+
+	// Check Telegram channel state in store.
+	var telegramChatID int64
+	telegramEnabled := false
 	telegramStoreDisabled := false
-	if ch, chErr := db.GetChannel(1); chErr != nil {
-		log.Printf("WARNING: failed to read channel state from store: %v", chErr)
-	} else if ch != nil && !ch.Enabled {
-		telegramStoreDisabled = true
+	for _, sCh := range storeChannels {
+		if sCh.Type == int(channel.ChannelTelegram) && !sCh.Enabled {
+			telegramStoreDisabled = true
+			break
+		}
 	}
 
 	if telegramStoreDisabled {
@@ -228,7 +236,9 @@ func main() {
 		log.Fatalf("start proxy: %v", err)
 	}
 
-	// Set up the Telegram channel and channel.Broker.
+	// Instantiate all enabled channels (Telegram and/or HTTP).
+	var allChannels []channel.Channel
+
 	if telegramEnabled {
 		var channelErr error
 		tgChannel, channelErr = telegram.NewTelegramChannel(telegram.ChannelConfig{
@@ -246,18 +256,62 @@ func main() {
 		if channelErr != nil {
 			log.Fatalf("telegram channel: %v", channelErr)
 		}
+		allChannels = append(allChannels, tgChannel)
+	}
 
-		broker = channel.NewBroker([]channel.Channel{tgChannel})
-		tgChannel.SetBroker(broker)
+	// Instantiate HTTP channels from the store.
+	var httpChannels []*httpchannel.HTTPChannel
+	for _, sCh := range storeChannels {
+		if sCh.Type != int(channel.ChannelHTTP) || !sCh.Enabled {
+			continue
+		}
+		if sCh.WebhookURL == "" {
+			log.Printf("WARNING: HTTP channel [%d] has no webhook_url, skipping", sCh.ID)
+			continue
+		}
+		hc, hcErr := httpchannel.NewHTTPChannel(httpchannel.Config{
+			WebhookURL:    sCh.WebhookURL,
+			WebhookSecret: sCh.WebhookSecret,
+		})
+		if hcErr != nil {
+			log.Printf("WARNING: HTTP channel [%d]: %v, skipping", sCh.ID, hcErr)
+			continue
+		}
+		httpChannels = append(httpChannels, hc)
+		allChannels = append(allChannels, hc)
+		log.Printf("HTTP webhook channel [%d] configured: %s", sCh.ID, sCh.WebhookURL)
+	}
+
+	if len(allChannels) > 0 {
+		broker = channel.NewBroker(allChannels)
+
+		// Wire broker references.
+		if tgChannel != nil {
+			tgChannel.SetBroker(broker)
+		}
+		for _, hc := range httpChannels {
+			hc.SetBroker(broker)
+		}
 
 		// Update the proxy's broker reference now that it's created.
 		srv.SetBroker(broker)
 
-		if err := tgChannel.Start(); err != nil {
-			log.Fatalf("start telegram channel: %v", err)
+		// Start all channels.
+		if tgChannel != nil {
+			if err := tgChannel.Start(); err != nil {
+				log.Fatalf("start telegram channel: %v", err)
+			}
+			defer tgChannel.Stop()
+			log.Printf("telegram approval channel started")
 		}
-		defer tgChannel.Stop()
-		log.Printf("telegram approval channel started")
+		for _, hc := range httpChannels {
+			if err := hc.Start(); err != nil {
+				log.Printf("WARNING: failed to start HTTP channel: %v", err)
+			}
+			defer hc.Stop()
+		}
+	} else {
+		log.Printf("no approval channels configured (ask rules will auto-deny)")
 	}
 
 	// Start HTTP server with health check and REST API on :3000 (or --health-addr).

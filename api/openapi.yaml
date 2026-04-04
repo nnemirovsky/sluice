@@ -892,6 +892,12 @@ components:
           enum: [telegram, http]
         enabled:
           type: boolean
+        webhook_url:
+          type: string
+          description: Webhook URL for HTTP channels
+        webhook_secret:
+          type: string
+          description: HMAC secret for signing webhook payloads
         created_at:
           type: string
           format: date-time
@@ -901,3 +907,7 @@ components:
       properties:
         enabled:
           type: boolean
+        webhook_url:
+          type: string
+        webhook_secret:
+          type: string
