@@ -1,4 +1,4 @@
-.PHONY: build test test-coverage lint fmt tidy install clean release release-snapshot generate lint-api
+.PHONY: build test test-coverage lint fmt tidy install clean release release-snapshot generate lint-api help
 
 # Build
 build:
@@ -51,3 +51,27 @@ lint-api:
 # Clean
 clean:
 	rm -rf bin/ coverage.out coverage.html dist/
+
+# Help
+help:
+	@echo "Build & Run"
+	@echo "  make build              Build sluice binary"
+	@echo "  make run ARGS='...'     Run with arguments"
+	@echo "  make install            Install to GOPATH"
+	@echo ""
+	@echo "Test & Lint"
+	@echo "  make test               Run all tests"
+	@echo "  make test-coverage      Generate coverage report"
+	@echo "  make lint               Run golangci-lint"
+	@echo "  make fmt                Format with gofumpt"
+	@echo "  make tidy               Run go mod tidy"
+	@echo ""
+	@echo "API Development"
+	@echo "  make generate           Regenerate Go code from api/openapi.yaml"
+	@echo "  make lint-api           Lint OpenAPI spec with Redocly"
+	@echo ""
+	@echo "Release"
+	@echo "  make release-snapshot   Dry run release"
+	@echo "  make release            Build and publish release"
+	@echo ""
+	@echo "  make clean              Remove build artifacts"

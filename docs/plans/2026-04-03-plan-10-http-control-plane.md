@@ -232,12 +232,12 @@ ALTER TABLE channels ADD COLUMN webhook_secret TEXT;
 
 ### Task 8: [Final] Update documentation
 
-- [ ] Update CLAUDE.md: document REST API, OpenAPI spec location, code generation workflow
-- [ ] Update CLAUDE.md: document HTTP channel type and configuration
-- [ ] Update CONTRIBUTING.md: add API development workflow (edit spec -> generate -> implement)
-- [ ] Add API development section to Makefile help
-- [ ] Update examples/config.toml: add HTTP channel example (commented)
-- [ ] Update compose.yml: document SLUICE_API_TOKEN env var
+- [x] Update CLAUDE.md: document REST API, OpenAPI spec location, code generation workflow
+- [x] Update CLAUDE.md: document HTTP channel type and configuration
+- [x] Update CONTRIBUTING.md: add API development workflow (edit spec -> generate -> implement)
+- [x] Add API development section to Makefile help
+- [x] Update examples/config.toml: add HTTP channel example (commented)
+- [x] Update compose.yml: document SLUICE_API_TOKEN env var
 
 ## Technical Details
 
