@@ -74,6 +74,11 @@ func (h *HTTPUpstream) Send(req JSONRPCRequest) (*JSONRPCResponse, error) {
 		h.mu.Unlock()
 	}
 
+	// Notifications (no ID) may receive 202 Accepted per the MCP spec.
+	if resp.StatusCode == http.StatusAccepted && req.ID == nil {
+		return nil, nil
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("upstream %s: HTTP %d: %s", h.name, resp.StatusCode, string(respBody))
@@ -208,10 +213,7 @@ func (h *HTTPUpstream) Initialize() error {
 
 	// Send initialized notification (no response expected).
 	_, err = h.Send(JSONRPCRequest{JSONRPC: "2.0", Method: "notifications/initialized"})
-	// Notifications may return nil response with no error, or the server
-	// may return 202 Accepted. Either way, only propagate actual errors.
 	if err != nil {
-		// Some servers return non-200 for notifications. Log but do not fail.
 		log.Printf("upstream %s: initialized notification: %v", h.name, err)
 	}
 	return nil

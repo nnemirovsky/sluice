@@ -353,6 +353,8 @@ func (gw *Gateway) RestartUpstream(name string) error {
 
 // Stop terminates all upstream server processes.
 func (gw *Gateway) Stop() {
+	gw.mu.Lock()
+	defer gw.mu.Unlock()
 	for name, u := range gw.upstreams {
 		log.Printf("stopping upstream %s", name)
 		_ = u.Stop()

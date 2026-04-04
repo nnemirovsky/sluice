@@ -68,7 +68,7 @@ func (gw *Gateway) handleRequest(req JSONRPCRequest) *JSONRPCResponse {
 		return marshalResult(req.ID, map[string]interface{}{})
 
 	case "tools/list":
-		return marshalResult(req.ID, ListToolsResult{Tools: gw.allTools})
+		return marshalResult(req.ID, ListToolsResult{Tools: gw.Tools()})
 
 	case "tools/call":
 		var params CallToolParams
