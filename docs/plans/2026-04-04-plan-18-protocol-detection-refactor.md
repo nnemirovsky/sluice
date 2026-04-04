@@ -113,16 +113,16 @@ SMTP and IMAP servers send a banner before the client speaks. Detection requires
 - Modify: `internal/proxy/protocol.go`
 - Modify: `internal/proxy/server.go`
 
-- [ ] Implement `DetectFromServerBytes(data []byte) Protocol` that examines the server's first bytes:
+- [x] Implement `DetectFromServerBytes(data []byte) Protocol` that examines the server's first bytes:
   - SMTP: starts with "220 " or "220-" -> ProtoSMTP
   - IMAP: starts with "* OK" -> ProtoIMAP
   - No match: return ProtoGeneric
-- [ ] For connections where port-based guess is SMTP or IMAP: connect to upstream first, peek server banner, confirm protocol, then relay banner to agent
-- [ ] For connections where port-based guess is not a server-first protocol: skip server banner detection (don't add latency to HTTP/SSH connections)
-- [ ] Write tests: SMTP on port 2525 detected via "220 " banner
-- [ ] Write tests: IMAP on port 1143 detected via "* OK" banner
-- [ ] Write tests: non-mail server on port 25 (doesn't send "220") falls back to generic
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] For connections where port-based guess is SMTP or IMAP: connect to upstream first, peek server banner, confirm protocol, then relay banner to agent
+- [x] For connections where port-based guess is not a server-first protocol: skip server banner detection (don't add latency to HTTP/SSH connections)
+- [x] Write tests: SMTP on port 2525 detected via "220 " banner
+- [x] Write tests: IMAP on port 1143 detected via "* OK" banner
+- [x] Write tests: non-mail server on port 25 (doesn't send "220") falls back to generic
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 4: Verify acceptance criteria
 

@@ -202,6 +202,38 @@ func DetectFromClientBytes(data []byte) Protocol {
 	return ProtoGeneric
 }
 
+// IsServerFirstProtocol returns true for protocols where the server sends
+// data before the client (SMTP banner, IMAP greeting). Used to decide whether
+// to attempt server-side banner detection after client-byte detection times out.
+func IsServerFirstProtocol(proto Protocol) bool {
+	return proto == ProtoSMTP || proto == ProtoIMAP
+}
+
+// DetectFromServerBytes examines the first bytes sent by the server after TCP
+// connect to determine the application-layer protocol for server-first
+// protocols. Returns ProtoGeneric when the bytes do not match any known
+// server banner signature.
+func DetectFromServerBytes(data []byte) Protocol {
+	if len(data) == 0 {
+		return ProtoGeneric
+	}
+
+	// SMTP: server sends "220 " or "220-" banner.
+	if len(data) >= 4 {
+		prefix := string(data[:4])
+		if prefix == "220 " || prefix == "220-" {
+			return ProtoSMTP
+		}
+	}
+
+	// IMAP: server sends "* OK" greeting.
+	if len(data) >= 4 && string(data[:4]) == "* OK" {
+		return ProtoIMAP
+	}
+
+	return ProtoGeneric
+}
+
 // IsQUICPacket checks whether a UDP payload is a QUIC Initial packet by
 // verifying the long header form bit, fixed bit, and version field.
 // Supports QUIC v1 (RFC 9000) and QUIC v2 (RFC 9369).

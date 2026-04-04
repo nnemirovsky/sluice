@@ -757,7 +757,77 @@ func (s *Server) handleWithDetection(
 		}
 	}
 
+	// Server-first detection: when no client bytes arrived (timeout),
+	// the remote might be a server-first protocol (SMTP, IMAP). Connect
+	// upstream and peek the server's first bytes to find out.
+	if n == 0 {
+		s.handleServerFirstDetection(peekConn, binding, hostAddr, dialAddrs)
+		return
+	}
+
 	relayDirect(peekConn, dialAddrs)
+}
+
+// serverDetectTimeout bounds how long to wait for the server's first bytes
+// during server-first protocol detection (SMTP banner, IMAP greeting).
+const serverDetectTimeout = 500 * time.Millisecond
+
+// handleServerFirstDetection connects upstream and peeks the server's first
+// bytes to detect server-first protocols (SMTP, IMAP). If a match is found
+// and a binding exists, the connection is routed through the mail proxy.
+// Otherwise, the server's pre-read bytes are relayed and the connection
+// continues as a direct relay.
+func (s *Server) handleServerFirstDetection(
+	agentConn net.Conn,
+	binding *vault.Binding,
+	hostAddr string,
+	dialAddrs []string,
+) {
+	d := &net.Dialer{Timeout: connectTimeout}
+	var upstream net.Conn
+	var err error
+	for _, addr := range dialAddrs {
+		upstream, err = d.Dial("tcp", addr)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return
+	}
+
+	// Peek server's first bytes with a short deadline.
+	serverBuf := make([]byte, 8)
+	upstream.SetReadDeadline(time.Now().Add(serverDetectTimeout))
+	sn, _ := io.ReadFull(upstream, serverBuf)
+	upstream.SetReadDeadline(time.Time{})
+
+	serverProto := DetectFromServerBytes(serverBuf[:sn])
+
+	if serverProto != ProtoGeneric {
+		log.Printf("[DETECT] %s server byte detection -> %s", hostAddr, serverProto)
+	}
+
+	if (serverProto == ProtoIMAP || serverProto == ProtoSMTP) && s.mailProxy != nil && binding != nil {
+		// Close probe connection. The mail proxy establishes its own
+		// upstream connection to manage STARTTLS and AUTH interception.
+		upstream.Close()
+		innerReady := make(chan error, 1)
+		if err := s.mailProxy.HandleConnection(agentConn, dialAddrs, hostAddr, *binding, serverProto, innerReady); err != nil {
+			log.Printf("[MAIL] handler error for %s: %v", hostAddr, err)
+		}
+		return
+	}
+
+	// No server-first protocol match or no mail proxy/binding available.
+	// Relay with pre-read server bytes prepended to the upstream stream.
+	var upstreamReader io.Reader = upstream
+	if sn > 0 {
+		upstreamReader = io.MultiReader(bytes.NewReader(serverBuf[:sn]), upstream)
+	}
+	upConn := &bufferedConn{Reader: upstreamReader, Conn: upstream}
+	defer upstream.Close()
+	bidirectionalRelay(agentConn, upConn)
 }
 
 // relayDirect connects to the first reachable address in dialAddrs and

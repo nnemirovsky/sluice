@@ -438,6 +438,205 @@ func TestTwoPhaseDetection(t *testing.T) {
 	}
 }
 
+func TestDetectFromServerBytes(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		want Protocol
+	}{
+		// SMTP detection
+		{
+			name: "smtp_banner_space",
+			data: []byte("220 mail.example.com ESMTP\r\n"),
+			want: ProtoSMTP,
+		},
+		{
+			name: "smtp_banner_dash",
+			data: []byte("220-mail.example.com ESMTP\r\n"),
+			want: ProtoSMTP,
+		},
+		{
+			name: "smtp_banner_short",
+			data: []byte("220 "),
+			want: ProtoSMTP,
+		},
+		{
+			name: "smtp_on_port_2525",
+			data: []byte("220 smtp.relay.local ready\r\n"),
+			want: ProtoSMTP,
+		},
+		// IMAP detection
+		{
+			name: "imap_greeting",
+			data: []byte("* OK Dovecot ready.\r\n"),
+			want: ProtoIMAP,
+		},
+		{
+			name: "imap_greeting_short",
+			data: []byte("* OK"),
+			want: ProtoIMAP,
+		},
+		{
+			name: "imap_on_port_1143",
+			data: []byte("* OK [CAPABILITY IMAP4rev1] Server ready\r\n"),
+			want: ProtoIMAP,
+		},
+		// No match / generic
+		{
+			name: "non_mail_on_port_25_tls",
+			data: []byte{0x16, 0x03, 0x03, 0x00, 0x05, 0x01, 0x00, 0x00},
+			want: ProtoGeneric,
+		},
+		{
+			name: "non_mail_on_port_25_http",
+			data: []byte("HTTP/1.1 200 OK\r\n"),
+			want: ProtoGeneric,
+		},
+		{
+			name: "binary_data",
+			data: []byte{0x00, 0x01, 0x02, 0x03, 0x04},
+			want: ProtoGeneric,
+		},
+		{
+			name: "empty",
+			data: []byte{},
+			want: ProtoGeneric,
+		},
+		{
+			name: "nil",
+			data: nil,
+			want: ProtoGeneric,
+		},
+		{
+			name: "short_data",
+			data: []byte("220"),
+			want: ProtoGeneric,
+		},
+		{
+			name: "partial_imap",
+			data: []byte("* O"),
+			want: ProtoGeneric,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DetectFromServerBytes(tt.data)
+			if got != tt.want {
+				t.Errorf("DetectFromServerBytes(%q) = %s, want %s", tt.data, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsServerFirstProtocol(t *testing.T) {
+	tests := []struct {
+		proto Protocol
+		want  bool
+	}{
+		{ProtoSMTP, true},
+		{ProtoIMAP, true},
+		{ProtoHTTP, false},
+		{ProtoHTTPS, false},
+		{ProtoSSH, false},
+		{ProtoGeneric, false},
+		{ProtoWS, false},
+		{ProtoGRPC, false},
+		{ProtoDNS, false},
+		{ProtoQUIC, false},
+		{ProtoAPNS, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.proto.String(), func(t *testing.T) {
+			got := IsServerFirstProtocol(tt.proto)
+			if got != tt.want {
+				t.Errorf("IsServerFirstProtocol(%s) = %v, want %v", tt.proto, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServerFirstTwoPhaseDetection(t *testing.T) {
+	// Server-first two-phase detection: port-based guess + server banner.
+	// For server-first protocols, the client sends no bytes, so
+	// DetectFromClientBytes returns ProtoGeneric. The server banner is used
+	// to identify the actual protocol.
+	tests := []struct {
+		name       string
+		port       int
+		serverData []byte
+		wantFinal  Protocol
+	}{
+		{
+			name:       "smtp_on_port_2525",
+			port:       2525,
+			serverData: []byte("220 smtp.relay.local ready\r\n"),
+			wantFinal:  ProtoSMTP,
+		},
+		{
+			name:       "imap_on_port_1143",
+			port:       1143,
+			serverData: []byte("* OK [CAPABILITY IMAP4rev1] Server ready\r\n"),
+			wantFinal:  ProtoIMAP,
+		},
+		{
+			name:       "non_mail_on_port_25",
+			port:       25,
+			serverData: []byte{0x16, 0x03, 0x03, 0x00, 0x05},
+			wantFinal:  ProtoGeneric,
+		},
+		{
+			name:       "smtp_on_standard_port_25",
+			port:       25,
+			serverData: []byte("220 mail.example.com ESMTP\r\n"),
+			wantFinal:  ProtoSMTP,
+		},
+		{
+			name:       "imap_on_standard_port_143",
+			port:       143,
+			serverData: []byte("* OK Dovecot ready.\r\n"),
+			wantFinal:  ProtoIMAP,
+		},
+		{
+			name:       "no_server_data",
+			port:       2525,
+			serverData: []byte{},
+			wantFinal:  ProtoGeneric,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			portGuess := DetectProtocol(tt.port)
+
+			// Simulate: client sends no bytes (server-first protocol).
+			clientDetect := DetectFromClientBytes(nil)
+
+			// Two-phase logic for server-first protocols:
+			// 1. Client detection overrides port guess if specific.
+			// 2. Otherwise try server detection: match overrides port guess.
+			// 3. If port guessed a server-first protocol but server didn't
+			//    confirm, fall back to generic (the server isn't what the
+			//    port suggested).
+			final := portGuess
+			if clientDetect != ProtoGeneric {
+				final = clientDetect
+			} else {
+				serverDetect := DetectFromServerBytes(tt.serverData)
+				if serverDetect != ProtoGeneric {
+					final = serverDetect
+				} else if IsServerFirstProtocol(portGuess) {
+					// Port guessed server-first but banner didn't confirm.
+					final = ProtoGeneric
+				}
+			}
+
+			if final != tt.wantFinal {
+				t.Errorf("server-first two-phase(%d, server=%q) = %s (port=%s), want %s",
+					tt.port, tt.serverData, final, portGuess, tt.wantFinal)
+			}
+		})
+	}
+}
+
 func TestIsQUICPacket(t *testing.T) {
 	tests := []struct {
 		name string
