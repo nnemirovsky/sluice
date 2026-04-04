@@ -231,16 +231,16 @@ Read HTTP/3 requests from agent's QUIC connection. Apply phantom token replaceme
 - Modify: `internal/proxy/quic.go`
 - Modify: `internal/proxy/quic_test.go`
 
-- [ ] Use `quic-go/http3` to create HTTP/3 server handler for agent side
-- [ ] For each HTTP/3 request: read headers and body, apply phantom token replacement (reuse inject.go logic)
-- [ ] Apply content inspection rules (deny patterns in request, redact patterns in response)
-- [ ] Forward request to upstream using `http3.RoundTripper` (QUIC client to real server)
-- [ ] Relay response back to agent with redaction rules applied
-- [ ] Log to audit: destination, port, protocol="quic", verdict
-- [ ] Write test: HTTP/3 request through QUIC MITM, phantom token in header replaced
-- [ ] Write test: denied content pattern blocks the request
-- [ ] Write test: redact pattern modifies the response
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] Use `quic-go/http3` to create HTTP/3 server handler for agent side
+- [x] For each HTTP/3 request: read headers and body, apply phantom token replacement (reuse inject.go logic)
+- [x] Apply content inspection rules (deny patterns in request, redact patterns in response)
+- [x] Forward request to upstream using `http3.RoundTripper` (QUIC client to real server)
+- [x] Relay response back to agent with redaction rules applied
+- [x] Log to audit: destination, port, protocol="quic", verdict
+- [x] Write test: HTTP/3 request through QUIC MITM, phantom token in header replaced
+- [x] Write test: denied content pattern blocks the request
+- [x] Write test: redact pattern modifies the response
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 11: Wire QUIC handler into server and update Docker compose
 
