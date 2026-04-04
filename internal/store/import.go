@@ -136,9 +136,8 @@ type importFile struct {
 //
 // Note: "tcp" and "udp" are transport-level meta-protocols used in policy
 // rules. "udp" is evaluated via EvaluateUDP/EvaluateQUIC in the policy
-// engine. "tcp" is accepted for validation consistency but does not yet
-// have a dedicated evaluation path (TCP connections use Evaluate which
-// resolves to application-level protocols like "http", "https", etc.).
+// engine. "tcp" is evaluated as a meta-protocol in Evaluate/EvaluateWithProtocol,
+// matching any TCP-based connection regardless of application-level protocol.
 var validProtocolNames = map[string]bool{
 	"generic": true,
 	"http":    true,

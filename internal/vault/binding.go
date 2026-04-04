@@ -7,6 +7,34 @@ import (
 	"github.com/nemirovsky/sluice/internal/policy"
 )
 
+// IsMetaProtocol returns true for transport-level meta-protocols (tcp, udp)
+// that match families of specific protocols rather than a single protocol.
+func IsMetaProtocol(proto string) bool {
+	return proto == "tcp" || proto == "udp"
+}
+
+// protoMatchesBinding checks if a caller's detected protocol matches a binding
+// protocol entry, with meta-protocol support. "tcp" in a binding matches any
+// TCP-based protocol (http, https, ssh, ws, wss, grpc, imap, smtp, apns).
+// "udp" in a binding matches any UDP-based protocol (dns, quic).
+func protoMatchesBinding(bindingProto, callerProto string) bool {
+	if bindingProto == callerProto {
+		return true
+	}
+	switch bindingProto {
+	case "tcp":
+		switch callerProto {
+		case "udp", "dns", "quic":
+			return false
+		default:
+			return callerProto != ""
+		}
+	case "udp":
+		return callerProto == "dns" || callerProto == "quic"
+	}
+	return false
+}
+
 // Binding maps a destination pattern to a credential and injection strategy.
 type Binding struct {
 	Destination string
@@ -69,7 +97,8 @@ func (r *BindingResolver) ResolveForProtocol(dest string, port int, proto string
 	if proto == "" {
 		return r.Resolve(dest, port)
 	}
-	var fallback *Binding
+	var metaFallback *Binding
+	var agnosticFallback *Binding
 	for _, cb := range r.bindings {
 		if !cb.glob.Match(dest) {
 			continue
@@ -78,20 +107,28 @@ func (r *BindingResolver) ResolveForProtocol(dest string, port int, proto string
 			continue
 		}
 		if len(cb.binding.Protocols) == 0 {
-			if fallback == nil {
+			if agnosticFallback == nil {
 				b := cb.binding
-				fallback = &b
+				agnosticFallback = &b
 			}
 			continue
 		}
 		for _, bp := range cb.binding.Protocols {
 			if bp == proto {
+				// Exact protocol match wins over meta-protocol.
 				return cb.binding, true
+			}
+			if metaFallback == nil && protoMatchesBinding(bp, proto) {
+				b := cb.binding
+				metaFallback = &b
 			}
 		}
 	}
-	if fallback != nil {
-		return *fallback, true
+	if metaFallback != nil {
+		return *metaFallback, true
+	}
+	if agnosticFallback != nil {
+		return *agnosticFallback, true
 	}
 	return Binding{}, false
 }
@@ -104,6 +141,13 @@ func (r *BindingResolver) ResolveForProtocol(dest string, port int, proto string
 // determine the correct protocol on non-standard ports where port-based
 // detection returns "generic" but a binding carries an explicit protocol
 // annotation.
+//
+// Meta-protocol bindings (protocols=["tcp"] or ["udp"]) are skipped because
+// they match entire protocol families rather than identifying a specific
+// protocol. Without this, a TCP meta-binding would shadow a more specific
+// binding (e.g. protocols=["ssh"]) and prevent the fast path from resolving
+// the exact protocol, forcing the connection onto the timeout-sensitive
+// byte-detection path.
 func (r *BindingResolver) ResolveProtocolHint(dest string, port int) (string, bool) {
 	hint := ""
 	for _, cb := range r.bindings {
@@ -114,9 +158,13 @@ func (r *BindingResolver) ResolveProtocolHint(dest string, port int) (string, bo
 			continue
 		}
 		if len(cb.binding.Protocols) == 1 {
+			p := cb.binding.Protocols[0]
+			if IsMetaProtocol(p) {
+				continue
+			}
 			if hint == "" {
-				hint = cb.binding.Protocols[0]
-			} else if hint != cb.binding.Protocols[0] {
+				hint = p
+			} else if hint != p {
 				// Multiple single-protocol bindings with different
 				// protocols. Ambiguous, so return no hint.
 				return "", false
@@ -148,7 +196,7 @@ func (r *BindingResolver) CredentialsForDestination(dest string, port int, proto
 		if proto != "" && len(cb.binding.Protocols) > 0 {
 			matched := false
 			for _, bp := range cb.binding.Protocols {
-				if bp == proto {
+				if protoMatchesBinding(bp, proto) {
 					matched = true
 					break
 				}

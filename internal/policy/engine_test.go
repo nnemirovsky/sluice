@@ -1120,3 +1120,85 @@ protocols = ["udp"]
 		t.Errorf("Evaluate(unscoped allow) = %v, want Allow", got)
 	}
 }
+
+func TestEvaluate_TCPMetaProtocol(t *testing.T) {
+	// Rules with protocols=["tcp"] should match any TCP-based connection
+	// regardless of the detected application-level protocol, mirroring
+	// how "udp" works in EvaluateUDP/EvaluateQUIC.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "tcp-all.example.com"
+protocols = ["tcp"]
+name = "allow all TCP to this host"
+
+[[deny]]
+destination = "tcp-deny.example.com"
+protocols = ["tcp"]
+name = "deny all TCP to this host"
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		dest  string
+		port  int
+		proto string
+		want  Verdict
+	}{
+		// TCP meta-protocol matches well-known port protocols.
+		{"tcp_allows_https", "tcp-all.example.com", 443, "", Allow},
+		{"tcp_allows_http", "tcp-all.example.com", 80, "", Allow},
+		{"tcp_allows_ssh", "tcp-all.example.com", 22, "", Allow},
+		{"tcp_allows_imap", "tcp-all.example.com", 993, "", Allow},
+		{"tcp_allows_smtp", "tcp-all.example.com", 587, "", Allow},
+
+		// TCP meta-protocol matches explicit protocol overrides.
+		{"tcp_allows_explicit_wss", "tcp-all.example.com", 443, "wss", Allow},
+		{"tcp_allows_explicit_grpc", "tcp-all.example.com", 443, "grpc", Allow},
+		{"tcp_allows_explicit_ws", "tcp-all.example.com", 80, "ws", Allow},
+
+		// TCP meta-protocol matches unknown ports (no portToProtocol match).
+		{"tcp_allows_unknown_port", "tcp-all.example.com", 9999, "", Allow},
+
+		// TCP deny rule takes precedence.
+		{"tcp_denies_https", "tcp-deny.example.com", 443, "", Deny},
+		{"tcp_denies_http", "tcp-deny.example.com", 80, "", Deny},
+		{"tcp_denies_ssh", "tcp-deny.example.com", 22, "", Deny},
+		{"tcp_denies_unknown_port", "tcp-deny.example.com", 9999, "", Deny},
+
+		// TCP meta-protocol must NOT match UDP-family protocols passed
+		// explicitly via EvaluateWithProtocol (e.g. DNS interceptor passes "dns").
+		{"tcp_does_not_match_explicit_dns", "tcp-all.example.com", 53, "dns", Deny},
+		{"tcp_does_not_match_quic", "tcp-all.example.com", 443, "quic", Deny},
+		{"tcp_does_not_match_udp", "tcp-all.example.com", 53, "udp", Deny},
+
+		// TCP CONNECT to port 53 (DNS-over-TCP) without explicit proto
+		// should still be matched by protocols=["tcp"]. The port-based
+		// mapping returns "dns" but proto="" means we are in the TCP
+		// evaluation path, not the UDP DNS interceptor.
+		{"tcp_matches_port53_no_proto", "tcp-all.example.com", 53, "", Allow},
+		{"tcp_denies_port53_no_proto", "tcp-deny.example.com", 53, "", Deny},
+
+		// Unrelated host falls through to default (deny).
+		{"other_host_denied", "other.example.com", 443, "", Deny},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := eng.EvaluateWithProtocol(tt.dest, tt.port, tt.proto)
+			if got != tt.want {
+				t.Errorf("EvaluateWithProtocol(%q, %d, %q) = %v, want %v",
+					tt.dest, tt.port, tt.proto, got, tt.want)
+			}
+		})
+	}
+
+	// TCP meta-protocol must NOT affect UDP evaluation.
+	if got := eng.EvaluateUDP("tcp-all.example.com", 443); got != Deny {
+		t.Errorf("EvaluateUDP should not match tcp rule, got %v, want Deny", got)
+	}
+}
