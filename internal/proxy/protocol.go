@@ -17,6 +17,8 @@ const (
 	ProtoIMAP Protocol = "imap"
 	// ProtoSMTP indicates SMTP mail submission traffic (ports 25, 587, 465).
 	ProtoSMTP Protocol = "smtp"
+	// ProtoAPNS indicates Apple Push Notification Service traffic (port 5223).
+	ProtoAPNS Protocol = "apns"
 	// ProtoGeneric indicates unrecognized traffic on a non-standard port.
 	ProtoGeneric Protocol = "generic"
 )
@@ -35,6 +37,8 @@ func DetectProtocol(port int) Protocol {
 		return ProtoIMAP
 	case 25, 587, 465:
 		return ProtoSMTP
+	case 5223:
+		return ProtoAPNS
 	default:
 		return ProtoGeneric
 	}

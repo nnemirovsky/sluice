@@ -150,15 +150,15 @@ Create a setup script and Go helper to configure macOS pf rules that redirect Ap
 4. All VM traffic goes: bridge100 -> utun3 -> tun2proxy -> SOCKS5 -> sluice
 ```
 
-- [ ] Implement `SetupNetworkRouting(vmIP, sluiceAddr string) error` that generates and loads pf anchor rules
-- [ ] Implement `TeardownNetworkRouting() error` that removes pf rules
-- [ ] Create `scripts/apple-container-setup.sh` for manual setup (detect bridge interface, start tun2proxy, apply pf rules, enable IP forwarding)
-- [ ] Handle `sudo` requirement for pf rules (script must run as root or with sudo)
-- [ ] Detect the bridge interface dynamically (bridge100, bridge101, etc.) from `container inspect` network info
-- [ ] Add `ProtoAPNS Protocol = "apns"` to protocol enum for Apple Push Notification Service (port 5223). Enables rules like `[[allow]] destination = "*.push.apple.com" ports = [5223] protocols = ["apns"]`
-- [ ] Write tests for pf rule generation (verify correct anchor syntax)
-- [ ] Write test for APNS protocol detection on port 5223
-- [ ] Run tests: `go test ./internal/container/ -v -timeout 30s`
+- [x] Implement `SetupNetworkRouting(vmIP, sluiceAddr string) error` that generates and loads pf anchor rules
+- [x] Implement `TeardownNetworkRouting() error` that removes pf rules
+- [x] Create `scripts/apple-container-setup.sh` for manual setup (detect bridge interface, start tun2proxy, apply pf rules, enable IP forwarding)
+- [x] Handle `sudo` requirement for pf rules (script must run as root or with sudo)
+- [x] Detect the bridge interface dynamically (bridge100, bridge101, etc.) from `container inspect` network info
+- [x] Add `ProtoAPNS Protocol = "apns"` to protocol enum for Apple Push Notification Service (port 5223). Enables rules like `[[allow]] destination = "*.push.apple.com" ports = [5223] protocols = ["apns"]`
+- [x] Write tests for pf rule generation (verify correct anchor syntax)
+- [x] Write test for APNS protocol detection on port 5223
+- [x] Run tests: `go test ./internal/container/ -v -timeout 30s`
 
 ### Task 5: CA certificate injection for Apple Container
 
