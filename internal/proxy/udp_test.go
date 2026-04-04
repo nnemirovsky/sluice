@@ -311,9 +311,11 @@ destination = "any-proto.example.com"
 		t.Fatal(err)
 	}
 
-	// Rule without protocols field matches any protocol including UDP.
-	if v := eng.EvaluateUDP("any-proto.example.com", 80); v != policy.Allow {
-		t.Errorf("any-proto.example.com = %v, want Allow (no protocol restriction)", v)
+	// Rules without an explicit protocols field must NOT match UDP
+	// evaluation. This prevents TCP-intended allow rules from
+	// inadvertently allowing UDP traffic.
+	if v := eng.EvaluateUDP("any-proto.example.com", 80); v != policy.Deny {
+		t.Errorf("any-proto.example.com = %v, want Deny (unscoped rules must not match UDP)", v)
 	}
 }
 

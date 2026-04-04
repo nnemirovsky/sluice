@@ -129,6 +129,11 @@ func parseDNSName(data []byte, offset int) (string, int, error) {
 			return "", 0, fmt.Errorf("name extends past packet end at offset %d", offset)
 		}
 
+		// Reject reserved label types (RFC 1035: bits 7-6 = 01 or 10).
+		if data[offset]&0xC0 != 0 && data[offset]&0xC0 != 0xC0 {
+			return "", 0, fmt.Errorf("reserved label type 0x%02x at offset %d", data[offset], offset)
+		}
+
 		// Check for pointer (compression).
 		if data[offset]&0xC0 == 0xC0 {
 			if offset+1 >= len(data) {
@@ -251,8 +256,8 @@ func (d *DNSInterceptor) HandleQuery(query []byte) ([]byte, error) {
 	return d.forwardToResolver(query)
 }
 
-// evaluate checks the DNS domain against the policy engine. Uses EvaluateUDP
-// with protocol override "dns" so dns-specific rules match.
+// evaluate checks the DNS domain against the policy engine. Uses
+// EvaluateWithProtocol with protocol "dns" so dns-specific rules match.
 func (d *DNSInterceptor) evaluate(domain string) policy.Verdict {
 	eng := d.engine.Load()
 	// Use EvaluateWithProtocol with "dns" so protocol-scoped rules match.

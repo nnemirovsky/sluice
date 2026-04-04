@@ -287,6 +287,29 @@ func matchRules(rules []compiledRule, dest string, port int) bool {
 	return matchRulesWithProto(rules, dest, port, "")
 }
 
+// matchRulesStrictProto matches rules that explicitly include the given
+// protocol in their protocols field. Rules without a protocols field are NOT
+// matched. Used by EvaluateUDP and EvaluateQUIC where only protocol-explicit
+// rules should apply, preventing unscoped TCP rules from inadvertently
+// allowing UDP/QUIC traffic.
+func matchRulesStrictProto(rules []compiledRule, dest string, port int, proto string) bool {
+	for _, r := range rules {
+		if !r.glob.Match(dest) {
+			continue
+		}
+		if len(r.ports) > 0 && !r.ports[port] {
+			continue
+		}
+		// Require explicit protocol match. Rules without a protocols field
+		// are skipped to prevent TCP-intended rules from matching UDP/QUIC.
+		if len(r.protocols) == 0 || !r.protocols[proto] {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // matchRulesWithProto checks compiled rules against a destination, port, and
 // optional explicit protocol. When proto is non-empty it takes precedence over
 // the port-based heuristic, allowing header-detected protocols (ws, wss, grpc)
@@ -596,10 +619,10 @@ func (e *Engine) EvaluateUDP(dest string, port int) Verdict {
 	if e.compiled == nil {
 		return Deny
 	}
-	if matchRulesWithProto(e.compiled.denyRules, dest, port, "udp") {
+	if matchRulesStrictProto(e.compiled.denyRules, dest, port, "udp") {
 		return Deny
 	}
-	if matchRulesWithProto(e.compiled.allowRules, dest, port, "udp") {
+	if matchRulesStrictProto(e.compiled.allowRules, dest, port, "udp") {
 		return Allow
 	}
 	return Deny
@@ -618,18 +641,18 @@ func (e *Engine) EvaluateQUIC(dest string, port int) Verdict {
 		return Deny
 	}
 	// Check QUIC-specific deny rules first.
-	if matchRulesWithProto(e.compiled.denyRules, dest, port, "quic") {
+	if matchRulesStrictProto(e.compiled.denyRules, dest, port, "quic") {
 		return Deny
 	}
 	// Check QUIC-specific allow rules.
-	if matchRulesWithProto(e.compiled.allowRules, dest, port, "quic") {
+	if matchRulesStrictProto(e.compiled.allowRules, dest, port, "quic") {
 		return Allow
 	}
 	// No QUIC-specific rule matched. Fall back to UDP evaluation.
-	if matchRulesWithProto(e.compiled.denyRules, dest, port, "udp") {
+	if matchRulesStrictProto(e.compiled.denyRules, dest, port, "udp") {
 		return Deny
 	}
-	if matchRulesWithProto(e.compiled.allowRules, dest, port, "udp") {
+	if matchRulesStrictProto(e.compiled.allowRules, dest, port, "udp") {
 		return Allow
 	}
 	return Deny

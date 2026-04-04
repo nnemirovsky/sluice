@@ -723,6 +723,9 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 		defer func() {
 			mu.Lock()
 			for _, sess := range sessions {
+				if s.quicProxy != nil {
+					s.quicProxy.UnregisterExpectedHost(sess.upstream.LocalAddr().String())
+				}
 				sess.upstream.Close()
 			}
 			mu.Unlock()
@@ -740,6 +743,9 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 					now := time.Now()
 					for key, sess := range sessions {
 						if now.Sub(sess.lastSeen) > udpSessionTimeout {
+							if s.quicProxy != nil {
+								s.quicProxy.UnregisterExpectedHost(sess.upstream.LocalAddr().String())
+							}
 							sess.upstream.Close()
 							delete(sessions, key)
 						}
@@ -856,6 +862,9 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 							log.Printf("[QUIC] create upstream for %s: %v", sessionKey, listenErr)
 							continue
 						}
+						// Register expected host so the QUIC proxy can verify
+						// that the TLS SNI matches the policy-checked destination.
+						s.quicProxy.RegisterExpectedHost(upstream.LocalAddr().String(), dest)
 						mu.Lock()
 						sess = &udpSession{upstream: upstream, lastSeen: time.Now()}
 						sessions[sessionKey] = sess

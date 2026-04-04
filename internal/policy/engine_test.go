@@ -1078,3 +1078,45 @@ protocols = ["udp"]
 		t.Errorf("EvaluateQUIC with UDP allow fallback = %v, want Allow", got)
 	}
 }
+
+func TestEvaluateUDP_UnscopedRulesIgnored(t *testing.T) {
+	// Rules without explicit protocols must NOT match EvaluateUDP or
+	// EvaluateQUIC. This prevents TCP-intended allow rules from
+	// inadvertently allowing UDP/QUIC traffic.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "api.anthropic.com"
+ports = [443]
+
+[[allow]]
+destination = "udp-ok.example.com"
+ports = [443]
+protocols = ["udp"]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// Unscoped allow rule must NOT allow UDP traffic.
+	if got := eng.EvaluateUDP("api.anthropic.com", 443); got != Deny {
+		t.Errorf("EvaluateUDP(unscoped allow) = %v, want Deny", got)
+	}
+
+	// Unscoped allow rule must NOT allow QUIC traffic.
+	if got := eng.EvaluateQUIC("api.anthropic.com", 443); got != Deny {
+		t.Errorf("EvaluateQUIC(unscoped allow) = %v, want Deny", got)
+	}
+
+	// Explicitly scoped UDP rule must still work.
+	if got := eng.EvaluateUDP("udp-ok.example.com", 443); got != Allow {
+		t.Errorf("EvaluateUDP(scoped allow) = %v, want Allow", got)
+	}
+
+	// Regular Evaluate must still allow unscoped rules.
+	if got := eng.Evaluate("api.anthropic.com", 443); got != Allow {
+		t.Errorf("Evaluate(unscoped allow) = %v, want Allow", got)
+	}
+}

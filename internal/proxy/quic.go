@@ -24,8 +24,9 @@ import (
 )
 
 // maxQUICBody limits the request/response body size the QUIC proxy is willing
-// to buffer. 128 MiB is generous for typical API traffic.
-const maxQUICBody = 128 << 20
+// to buffer. 16 MiB is sufficient for typical API traffic while preventing
+// memory exhaustion from concurrent large requests.
+const maxQUICBody = 16 << 20
 
 // QUICBlockRuleConfig defines a content deny rule for QUICProxy construction.
 type QUICBlockRuleConfig struct {
@@ -82,6 +83,11 @@ type QUICProxy struct {
 	// every connection. Certificates have 24h validity, and the cache is
 	// never evicted (host cardinality is bounded by policy allow rules).
 	certCache sync.Map // map[string]tls.Certificate
+
+	// expectedHosts maps UDP source addresses to the SOCKS5 destination
+	// that was policy-checked. handleConnection verifies the TLS SNI
+	// matches the expected host to prevent policy bypass via SNI spoofing.
+	expectedHosts sync.Map // map[string]string
 
 	// mu protects listener lifecycle.
 	mu       sync.Mutex
@@ -183,6 +189,19 @@ func (q *QUICProxy) Addr() net.Addr {
 	return q.addr
 }
 
+// RegisterExpectedHost records that packets arriving from srcAddr should
+// have a TLS SNI matching host. Must be called before forwarding QUIC
+// packets so handleConnection can verify the SNI against the SOCKS5
+// destination that was policy-checked.
+func (q *QUICProxy) RegisterExpectedHost(srcAddr string, host string) {
+	q.expectedHosts.Store(srcAddr, host)
+}
+
+// UnregisterExpectedHost removes the expected host mapping for srcAddr.
+func (q *QUICProxy) UnregisterExpectedHost(srcAddr string) {
+	q.expectedHosts.Delete(srcAddr)
+}
+
 // Close shuts down the QUIC listener and all cached upstream transports.
 func (q *QUICProxy) Close() error {
 	q.mu.Lock()
@@ -269,7 +288,23 @@ func (q *QUICProxy) getOrCreateCert(host string) (tls.Certificate, error) {
 // forwards to the real upstream via an HTTP/3 transport.
 func (q *QUICProxy) handleConnection(conn *quic.Conn) {
 	sni := conn.ConnectionState().TLS.ServerName
-	log.Printf("[QUIC] accepted connection from %s (SNI: %s)", conn.RemoteAddr(), sni)
+	remoteKey := conn.RemoteAddr().String()
+	log.Printf("[QUIC] accepted connection from %s (SNI: %s)", remoteKey, sni)
+
+	// Verify the TLS SNI matches the SOCKS5 destination that was
+	// policy-checked. Without this check, an agent could send QUIC packets
+	// to an allowed destination but set the SNI to a different host,
+	// bypassing policy and potentially exfiltrating credentials.
+	if expected, ok := q.expectedHosts.Load(remoteKey); ok {
+		expectedHost := expected.(string)
+		if sni != expectedHost {
+			log.Printf("[QUIC] SNI mismatch: expected %q, got %q from %s", expectedHost, sni, remoteKey)
+			if err := conn.CloseWithError(0x01, "SNI mismatch"); err != nil {
+				log.Printf("[QUIC] close error: %v", err)
+			}
+			return
+		}
+	}
 
 	handler := q.buildHandler(sni)
 	srv := &http3.Server{
