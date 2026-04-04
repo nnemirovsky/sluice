@@ -394,10 +394,15 @@ func (q *QUICProxy) buildHandler(upstreamHost string, destPort int) http.Handler
 		var reqBody []byte
 		if r.Body != nil && r.Body != http.NoBody {
 			var readErr error
-			reqBody, readErr = io.ReadAll(io.LimitReader(r.Body, maxQUICBody))
+			reqBody, readErr = io.ReadAll(io.LimitReader(r.Body, maxQUICBody+1))
 			_ = r.Body.Close()
 			if readErr != nil {
 				http.Error(w, "request body read error", http.StatusBadGateway)
+				return
+			}
+			if int64(len(reqBody)) > maxQUICBody {
+				log.Printf("[QUIC] request body exceeds %d bytes for %s:%d, rejecting", maxQUICBody, host, port)
+				http.Error(w, "request body exceeds proxy limit", http.StatusRequestEntityTooLarge)
 				return
 			}
 		}
@@ -457,9 +462,14 @@ func (q *QUICProxy) buildHandler(upstreamHost string, destPort int) http.Handler
 		defer resp.Body.Close()
 
 		// Read upstream response body for redaction.
-		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxQUICBody))
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxQUICBody+1))
 		if err != nil {
 			http.Error(w, "upstream response read error", http.StatusBadGateway)
+			return
+		}
+		if int64(len(respBody)) > maxQUICBody {
+			log.Printf("[QUIC] response body exceeds %d bytes from %s:%d, rejecting", maxQUICBody, host, port)
+			http.Error(w, "upstream response exceeds proxy limit", http.StatusBadGateway)
 			return
 		}
 

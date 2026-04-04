@@ -567,11 +567,15 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 	// Limit body size to prevent memory exhaustion from oversized
 	// requests (matches the QUIC proxy's maxQUICBody limit).
 	if r.Body != nil && r.Body != http.NoBody {
-		body, readErr := io.ReadAll(io.LimitReader(r.Body, maxMITMBody))
+		body, readErr := io.ReadAll(io.LimitReader(r.Body, maxMITMBody+1))
 		_ = r.Body.Close()
 		if readErr != nil {
 			log.Printf("[INJECT] body read error for %s:%d: %v", host, port, readErr)
 			return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusBadGateway, "request body read error")
+		}
+		if int64(len(body)) > maxMITMBody {
+			log.Printf("[INJECT] request body exceeds %d bytes for %s:%d, rejecting", maxMITMBody, host, port)
+			return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusRequestEntityTooLarge, "request body exceeds proxy limit")
 		}
 		changed := false
 		for _, p := range pairs {
