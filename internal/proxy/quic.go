@@ -271,16 +271,21 @@ func (q *QUICProxy) buildHandler(upstreamHost string) http.Handler {
 				http.Error(w, "request body read error", http.StatusBadGateway)
 				return
 			}
-			reqBody = q.replacePhantomInBody(reqBody, pairs, host, port)
 		}
 
-		// Check content deny rules on request body.
+		// Check content deny rules BEFORE phantom replacement so patterns
+		// never run against decrypted credentials.
 		for _, rule := range q.blockRules {
 			if rule.re.Match(reqBody) {
 				q.logAudit(host, port, "deny", fmt.Sprintf("blocked by content rule %q", rule.name))
 				http.Error(w, "blocked by content policy", http.StatusForbidden)
 				return
 			}
+		}
+
+		// Replace phantom tokens with real credentials after deny check.
+		if len(reqBody) > 0 {
+			reqBody = q.replacePhantomInBody(reqBody, pairs, host, port)
 		}
 
 		// Build upstream request URL.

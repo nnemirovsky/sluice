@@ -999,3 +999,57 @@ func TestLoadFromStoreValidate(t *testing.T) {
 		t.Error("expected error for nil engine")
 	}
 }
+
+func TestEvaluateQUIC(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "quic-only.example.com"
+ports = [443]
+protocols = ["quic"]
+
+[[allow]]
+destination = "udp-only.example.com"
+ports = [443]
+protocols = ["udp"]
+
+[[deny]]
+destination = "blocked.example.com"
+protocols = ["quic"]
+
+[[allow]]
+destination = "blocked.example.com"
+ports = [443]
+protocols = ["udp"]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		dest string
+		port int
+		want Verdict
+	}{
+		// protocols = ["quic"] matches via EvaluateQUIC
+		{"quic_protocol_match", "quic-only.example.com", 443, Allow},
+		// protocols = ["udp"] also matches via EvaluateQUIC (fallback)
+		{"udp_protocol_match", "udp-only.example.com", 443, Allow},
+		// quic deny takes priority even with udp allow
+		{"quic_deny_priority", "blocked.example.com", 443, Deny},
+		// unknown host is denied by default
+		{"default_deny", "unknown.example.com", 443, Deny},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := eng.EvaluateQUIC(tt.dest, tt.port)
+			if got != tt.want {
+				t.Errorf("EvaluateQUIC(%q, %d) = %v, want %v",
+					tt.dest, tt.port, got, tt.want)
+			}
+		})
+	}
+}

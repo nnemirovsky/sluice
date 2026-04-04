@@ -183,7 +183,7 @@ func (r *UDPRelay) Serve(ctx context.Context, conn net.PacketConn, clientAddr ne
 		mu.Lock()
 		sess, exists := sessions[sessionKey]
 		if !exists {
-			upstream, listenErr := net.ListenPacket("udp", "127.0.0.1:0")
+			upstream, listenErr := net.ListenPacket("udp", ":0")
 			if listenErr != nil {
 				mu.Unlock()
 				log.Printf("[UDP] create upstream for %s: %v", sessionKey, listenErr)

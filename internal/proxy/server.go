@@ -808,10 +808,12 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 				sessionKey := "quic:" + dest + ":" + strconv.Itoa(port)
 				mu.Lock()
 				sess, exists := sessions[sessionKey]
+				if exists {
+					sess.lastSeen = time.Now()
+				}
 				mu.Unlock()
 
 				if exists {
-					sess.lastSeen = time.Now()
 					if _, writeErr := sess.upstream.WriteTo(payload, s.quicProxy.Addr()); writeErr != nil {
 						log.Printf("[QUIC] write to proxy: %v", writeErr)
 					}
@@ -821,8 +823,9 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 				if IsQUICPacket(payload) {
 					quicAddr := s.quicProxy.Addr()
 					if quicAddr != nil {
-						// Evaluate policy before creating a new QUIC session.
-						verdict := s.udpRelay.evaluateUDP(dest, port)
+						// Evaluate policy using QUIC-specific matching so rules
+						// with protocols = ["quic"] are honored.
+						verdict := s.udpRelay.engine.Load().EvaluateQUIC(dest, port)
 						if verdict != policy.Allow {
 							if s.udpRelay.audit != nil {
 								if logErr := s.udpRelay.audit.Log(audit.Event{
@@ -847,7 +850,20 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 						sess = &udpSession{upstream: upstream, lastSeen: time.Now()}
 						sessions[sessionKey] = sess
 						mu.Unlock()
-						go s.relayUDPResponses(upstream, bindLn, srcAddr)
+						// Use the original destination for SOCKS5 response headers
+						// since the QUIC proxy is local and its address would be
+						// meaningless to the client.
+						origDst := &net.UDPAddr{IP: net.ParseIP(dest), Port: port}
+						if origDst.IP == nil {
+							// Domain destination: resolve for response header.
+							addrs, resolveErr := net.LookupIP(dest)
+							if resolveErr == nil && len(addrs) > 0 {
+								origDst.IP = addrs[0]
+							} else {
+								origDst.IP = net.IPv4zero
+							}
+						}
+						go s.relayQUICResponses(upstream, bindLn, srcAddr, origDst)
 
 						if _, writeErr := sess.upstream.WriteTo(payload, quicAddr); writeErr != nil {
 							log.Printf("[QUIC] write to proxy: %v", writeErr)
@@ -886,7 +902,7 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 			mu.Lock()
 			sess, exists := sessions[sessionKey]
 			if !exists {
-				upstream, listenErr := net.ListenPacket("udp", "127.0.0.1:0")
+				upstream, listenErr := net.ListenPacket("udp", ":0")
 				if listenErr != nil {
 					mu.Unlock()
 					log.Printf("[UDP] create upstream for %s: %v", sessionKey, listenErr)
@@ -950,6 +966,27 @@ func (s *Server) relayUDPResponses(upstream net.PacketConn, relay *net.UDPConn, 
 		resp := BuildSOCKS5UDPResponse(udpAddr.IP, udpAddr.Port, buf[:n])
 		if _, writeErr := relay.WriteTo(resp, clientAddr); writeErr != nil {
 			log.Printf("[UDP] write response to client: %v", writeErr)
+		}
+	}
+}
+
+// relayQUICResponses reads response datagrams from a QUIC proxy upstream and
+// wraps them in SOCKS5 UDP headers using the original destination address
+// (not the local QUIC proxy address) before sending to the client.
+func (s *Server) relayQUICResponses(upstream net.PacketConn, relay *net.UDPConn, clientAddr net.Addr, originalDst *net.UDPAddr) {
+	buf := make([]byte, 65535)
+	for {
+		upstream.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		n, _, err := upstream.ReadFrom(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				continue
+			}
+			return
+		}
+		resp := BuildSOCKS5UDPResponse(originalDst.IP, originalDst.Port, buf[:n])
+		if _, writeErr := relay.WriteTo(resp, clientAddr); writeErr != nil {
+			log.Printf("[QUIC] write response to client: %v", writeErr)
 		}
 	}
 }
