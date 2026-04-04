@@ -31,8 +31,10 @@ curl -x socks5h://127.0.0.1:1080 https://api.anthropic.com/
 | `--telegram-chat-id` | `$TELEGRAM_CHAT_ID` | Telegram chat ID for approvals |
 | `--health-addr` | `127.0.0.1:3000` | Health check HTTP address |
 | `--shutdown-timeout` | `10s` | Graceful shutdown timeout |
+| `--runtime` | `auto` | Container runtime: `docker`, `apple`, `none`, `auto` |
+| `--container-name` | `openclaw` | Agent container name (env: `SLUICE_AGENT_CONTAINER`) |
+| `--vm-image` | (none) | Apple Container OCI image (required for `--runtime apple`) |
 | `--docker-socket` | (auto-detect) | Docker socket path for container management |
-| `--docker-container` | `openclaw` | Agent container name (env: `SLUICE_AGENT_CONTAINER`) |
 | `--phantom-dir` | (none) | Shared volume path for phantom token files (enables hot-reload) |
 
 ## CLI Subcommands
@@ -186,8 +188,37 @@ sluice audit verify
 
 Three-container architecture: sluice + tun2proxy + openclaw. All agent traffic is routed through sluice's SOCKS5 proxy via TUN device. Phantom tokens are delivered to the agent via a shared volume (`sluice-phantoms`). See `compose.yml` for details.
 
+## Apple Container
+
+Apple Container (macOS Virtualization.framework micro-VMs) is supported as an alternative to Docker. It provides native macOS isolation with access to Apple frameworks (EventKit, Messages, CallKit) that Linux containers cannot reach.
+
+```bash
+sudo ./sluice --runtime apple --container-name openclaw --vm-image openclaw/openclaw:latest
+```
+
+Traffic routing uses macOS pf rules to redirect VM bridge traffic through tun2proxy on the host to sluice's SOCKS5 proxy. APNS traffic (port 5223) is detected as a distinct protocol for policy rules.
+
+See `docs/apple-container-quickstart.md` for full setup instructions.
+
+## Standalone Mode
+
+Run sluice as a proxy without any container runtime:
+
+```bash
+./sluice --runtime none --listen 127.0.0.1:1080
+```
+
+Then configure your application to use the proxy:
+
+```bash
+export ALL_PROXY=socks5://localhost:1080
+```
+
+Credential injection (MITM proxy) and MCP gateway work normally. Only container lifecycle management is disabled.
+
 ## Requirements
 
 - Go 1.22+
 - Telegram bot token (from @BotFather) for the approval flow (optional)
 - Docker (optional, for container deployment)
+- macOS with Apple Container runtime (optional, for Apple Container deployment)

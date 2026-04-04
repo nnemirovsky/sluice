@@ -222,11 +222,11 @@ Support running sluice as a standalone proxy on macOS without any container runt
 
 ### Task 9: [Final] Update documentation
 
-- [ ] Update CLAUDE.md: document Apple Container support, runtime selection, pf routing
-- [ ] Update CLAUDE.md: document standalone mode
-- [ ] Create `docs/apple-container-quickstart.md` with setup instructions
-- [ ] Update CONTRIBUTING.md: note macOS-specific build tags and testing requirements
-- [ ] Update README.md: mention Apple Container as a deployment option
+- [x] Update CLAUDE.md: document Apple Container support, runtime selection, pf routing
+- [x] Update CLAUDE.md: document standalone mode
+- [x] Create `docs/apple-container-quickstart.md` with setup instructions
+- [x] Update CONTRIBUTING.md: note macOS-specific build tags and testing requirements
+- [x] Update README.md: mention Apple Container as a deployment option
 
 ## Technical Details
 
