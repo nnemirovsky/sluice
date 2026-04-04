@@ -180,6 +180,7 @@ func (h *HTTPChannel) deliverApproval(req channel.ApprovalRequest) {
 
 	default:
 		log.Printf("[WARN] http channel: unexpected status %d for approval %s", resp.StatusCode, req.ID)
+		h.resolveDenyOnSingleChannel(req.ID)
 		h.pending.Delete(req.ID)
 	}
 }
