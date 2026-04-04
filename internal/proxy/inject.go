@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -63,6 +65,12 @@ type Injector struct {
 	// injector so goproxy's outbound connections use the same addresses
 	// that passed policy checks.
 	pinnedIPs sync.Map
+	// wsProxy handles WebSocket frame-level inspection when non-nil.
+	// When a 101 Switching Protocols response with WebSocket upgrade
+	// headers is detected, the response body is replaced with a
+	// wsFrameInterceptor that performs phantom token replacement and
+	// content inspection on individual WebSocket frames.
+	wsProxy *WSProxy
 }
 
 // PinIPs stores resolved IPs keyed by a unique per-connection pin ID so
@@ -84,12 +92,14 @@ func (inj *Injector) UnpinIPs(pinID string) {
 // requests. The caCert is used to generate per-host TLS certificates for
 // HTTPS interception. The authToken must be included in CONNECT requests
 // to prevent unauthorized local processes from accessing credential injection.
-func NewInjector(provider vault.Provider, resolver *atomic.Pointer[vault.BindingResolver], caCert tls.Certificate, authToken string) *Injector {
+// wsProxy enables frame-level WebSocket inspection when non-nil.
+func NewInjector(provider vault.Provider, resolver *atomic.Pointer[vault.BindingResolver], caCert tls.Certificate, authToken string, wsProxy *WSProxy) *Injector {
 	inj := &Injector{
 		provider:  provider,
 		resolver:  resolver,
 		caCert:    caCert,
 		authToken: authToken,
+		wsProxy:   wsProxy,
 	}
 
 	proxy := goproxy.NewProxyHttpServer()
@@ -158,8 +168,253 @@ func NewInjector(provider vault.Provider, resolver *atomic.Pointer[vault.Binding
 
 	proxy.OnRequest().DoFunc(inj.injectCredentials)
 
+	if inj.wsProxy != nil {
+		proxy.OnResponse().DoFunc(inj.handleWSUpgrade)
+	}
+
 	inj.Proxy = proxy
 	return inj
+}
+
+// handleWSUpgrade detects 101 Switching Protocols responses with WebSocket
+// upgrade headers and replaces the response body with a wsFrameInterceptor.
+// goproxy's built-in WebSocket relay then reads/writes through the interceptor,
+// which performs frame-level phantom token replacement and content inspection.
+func (inj *Injector) handleWSUpgrade(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
+	if resp == nil || resp.StatusCode != http.StatusSwitchingProtocols {
+		return resp
+	}
+	if !isWSUpgradeResponse(resp.Header) {
+		return resp
+	}
+	upstream, ok := resp.Body.(io.ReadWriter)
+	if !ok {
+		return resp
+	}
+
+	host := ctx.Req.URL.Hostname()
+	if host == "" {
+		host = ctx.Req.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+	}
+	port := portFromRequest(ctx.Req)
+
+	proto := "ws"
+	if ctx.Req.URL.Scheme == "https" {
+		proto = "wss"
+	}
+
+	interceptor := newWSFrameInterceptor(upstream, inj.wsProxy, host, port, proto)
+	resp.Body = interceptor
+
+	log.Printf("[WS] intercepting WebSocket upgrade for %s:%d (%s)", host, port, proto)
+	return resp
+}
+
+// isWSUpgradeResponse checks if the response headers indicate a WebSocket upgrade.
+func isWSUpgradeResponse(h http.Header) bool {
+	if !strings.EqualFold(h.Get("Upgrade"), "websocket") {
+		return false
+	}
+	for _, v := range strings.Split(h.Get("Connection"), ",") {
+		if strings.EqualFold(strings.TrimSpace(v), "upgrade") {
+			return true
+		}
+	}
+	return false
+}
+
+// wsFrameInterceptor wraps an upstream WebSocket connection and performs
+// frame-level inspection. It implements io.ReadWriteCloser so it can
+// replace resp.Body in goproxy's WebSocket handling. goproxy's proxyWebsocket
+// does bidirectional io.Copy between the client and this interceptor.
+//
+// Read (upstream -> client): reads frames from the real upstream, applies
+// content redaction rules, and returns processed frame bytes.
+//
+// Write (client -> upstream): parses WebSocket frames from client data,
+// applies phantom token replacement and content deny rules, and forwards
+// processed frames to the real upstream.
+type wsFrameInterceptor struct {
+	upstream io.ReadWriter
+	wp       *WSProxy
+	host     string
+	port     int
+	proto    string
+
+	pairs []phantomPair
+
+	readBuf     bytes.Buffer
+	readTracker FragmentTracker
+
+	writePending []byte
+	writeTracker FragmentTracker
+
+	closeOnce sync.Once
+}
+
+func newWSFrameInterceptor(upstream io.ReadWriter, wp *WSProxy, host string, port int, proto string) *wsFrameInterceptor {
+	fi := &wsFrameInterceptor{
+		upstream: upstream,
+		wp:       wp,
+		host:     host,
+		port:     port,
+		proto:    proto,
+	}
+
+	if res := wp.resolver.Load(); res != nil {
+		for _, name := range res.CredentialsForDestination(host, port, proto) {
+			secret, err := wp.provider.Get(name)
+			if err != nil {
+				log.Printf("[WS-MITM] credential %q lookup failed: %v", name, err)
+				continue
+			}
+			fi.pairs = append(fi.pairs, phantomPair{
+				phantom: []byte(PhantomToken(name)),
+				secret:  secret,
+			})
+		}
+	}
+	sort.Slice(fi.pairs, func(i, j int) bool {
+		return len(fi.pairs[i].phantom) > len(fi.pairs[j].phantom)
+	})
+
+	return fi
+}
+
+// Read implements io.Reader. It reads WebSocket frames from the real upstream,
+// applies content redaction rules to text frames, and returns the processed
+// frame bytes for goproxy to forward to the client.
+func (fi *wsFrameInterceptor) Read(p []byte) (int, error) {
+	for fi.readBuf.Len() == 0 {
+		frame, err := ReadFrame(fi.upstream)
+		if err != nil {
+			return 0, err
+		}
+
+		if frame.IsControl() {
+			if writeErr := WriteFrame(&fi.readBuf, frame); writeErr != nil {
+				return 0, writeErr
+			}
+			break
+		}
+
+		payload, opcode, complete := fi.readTracker.Accept(frame)
+		if !complete {
+			continue
+		}
+
+		if opcode == OpcodeBinary {
+			out := &Frame{FIN: true, Opcode: OpcodeBinary}
+			out.SetPayload(payload)
+			if writeErr := WriteFrame(&fi.readBuf, out); writeErr != nil {
+				return 0, writeErr
+			}
+			break
+		}
+
+		if opcode == OpcodeText {
+			text := string(payload)
+			for _, rule := range fi.wp.redactRules {
+				text = rule.re.ReplaceAllString(text, rule.replacement)
+			}
+			out := &Frame{FIN: true, Opcode: OpcodeText}
+			out.SetPayload([]byte(text))
+			if writeErr := WriteFrame(&fi.readBuf, out); writeErr != nil {
+				return 0, writeErr
+			}
+			break
+		}
+	}
+
+	return fi.readBuf.Read(p)
+}
+
+// Write implements io.Writer. It receives raw WebSocket frame bytes from
+// the client (via goproxy's io.Copy), parses complete frames, applies
+// phantom token replacement and content deny rules to text frames, and
+// forwards processed frames to the real upstream.
+func (fi *wsFrameInterceptor) Write(p []byte) (int, error) {
+	n := len(p)
+	fi.writePending = append(fi.writePending, p...)
+
+	for len(fi.writePending) > 0 {
+		reader := bytes.NewReader(fi.writePending)
+		frame, err := ReadFrame(reader)
+		if err != nil {
+			break // incomplete frame, wait for more data
+		}
+
+		consumed := len(fi.writePending) - int(reader.Len())
+		fi.writePending = fi.writePending[consumed:]
+
+		if frame.IsControl() {
+			if writeErr := WriteFrame(fi.upstream, frame); writeErr != nil {
+				return 0, writeErr
+			}
+			if frame.Opcode == OpcodeClose {
+				return n, nil
+			}
+			continue
+		}
+
+		payload, opcode, complete := fi.writeTracker.Accept(frame)
+		if !complete {
+			continue
+		}
+
+		if opcode == OpcodeBinary {
+			out := &Frame{FIN: true, Opcode: OpcodeBinary}
+			out.SetPayload(payload)
+			if writeErr := WriteFrame(fi.upstream, out); writeErr != nil {
+				return 0, writeErr
+			}
+			continue
+		}
+
+		if opcode == OpcodeText {
+			for _, rule := range fi.wp.blockRules {
+				if rule.re.Match(payload) {
+					sendCloseFrame(fi.upstream, 1008, "blocked by content policy")
+					return 0, fmt.Errorf("blocked by ws content deny rule %q", rule.name)
+				}
+			}
+
+			for _, pp := range fi.pairs {
+				if bytes.Contains(payload, pp.phantom) {
+					payload = bytes.ReplaceAll(payload, pp.phantom, pp.secret.Bytes())
+				}
+			}
+
+			if bytes.Contains(payload, phantomPrefix) {
+				payload = fi.wp.stripUnboundPhantoms(payload)
+				log.Printf("[WS-MITM] stripped unbound phantom token from text frame")
+			}
+
+			out := &Frame{FIN: true, Opcode: OpcodeText}
+			out.SetPayload(payload)
+			if writeErr := WriteFrame(fi.upstream, out); writeErr != nil {
+				return 0, writeErr
+			}
+		}
+	}
+
+	return n, nil
+}
+
+// Close releases credential secrets and closes the upstream connection.
+func (fi *wsFrameInterceptor) Close() error {
+	fi.closeOnce.Do(func() {
+		for i := range fi.pairs {
+			fi.pairs[i].secret.Release()
+		}
+		if closer, ok := fi.upstream.(io.Closer); ok {
+			_ = closer.Close()
+		}
+	})
+	return nil
 }
 
 func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {

@@ -121,13 +121,13 @@ Intercept `101 Switching Protocols` in goproxy and switch to frame proxying.
 - Modify: `internal/proxy/server.go`
 - Modify: `internal/proxy/inject_test.go`
 
-- [ ] In goproxy's response handler: detect `101 Switching Protocols` + `Upgrade: websocket`. Hijack both agent and upstream connections.
-- [ ] Hand off hijacked connections to `WSProxy.Relay()` for the lifetime of the WebSocket connection
-- [ ] HTTP-level phantom token replacement still applies to upgrade request headers (existing behavior)
-- [ ] Frame-level replacement applies to all subsequent text frames (new behavior)
-- [ ] Write integration test: HTTP client upgrades to WebSocket through MITM, sends text frame with phantom token, verify upstream receives real credential
-- [ ] Write integration test: upstream sends text frame with pattern-matched string, verify agent receives redacted version
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] In goproxy's response handler: detect `101 Switching Protocols` + `Upgrade: websocket`. Hijack both agent and upstream connections.
+- [x] Hand off hijacked connections to `WSProxy.Relay()` for the lifetime of the WebSocket connection
+- [x] HTTP-level phantom token replacement still applies to upgrade request headers (existing behavior)
+- [x] Frame-level replacement applies to all subsequent text frames (new behavior)
+- [x] Write integration test: HTTP client upgrades to WebSocket through MITM, sends text frame with phantom token, verify upstream receives real credential
+- [x] Write integration test: upstream sends text frame with pattern-matched string, verify agent receives redacted version
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 5: Replace armon/go-socks5 with things-go/go-socks5
 

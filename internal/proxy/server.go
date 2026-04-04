@@ -41,14 +41,16 @@ const connectTimeout = 30 * time.Second
 
 // Config holds configuration for creating a new SOCKS5 proxy server.
 type Config struct {
-	ListenAddr string
-	Policy     *policy.Engine
-	Audit      *audit.FileLogger
-	Broker     *channel.Broker
-	Provider   vault.Provider           // nil = no credential injection
-	Resolver   *vault.BindingResolver   // nil = no credential injection
-	VaultDir   string                   // CA cert storage dir (defaults to ~/.sluice)
-	Store      *store.Store             // nil = in-memory only (no persistence)
+	ListenAddr    string
+	Policy        *policy.Engine
+	Audit         *audit.FileLogger
+	Broker        *channel.Broker
+	Provider      vault.Provider           // nil = no credential injection
+	Resolver      *vault.BindingResolver   // nil = no credential injection
+	VaultDir      string                   // CA cert storage dir (defaults to ~/.sluice)
+	Store         *store.Store             // nil = in-memory only (no persistence)
+	WSBlockRules  []WSBlockRuleConfig      // WebSocket content deny rules
+	WSRedactRules []WSRedactRuleConfig     // WebSocket content redact rules
 }
 
 // Server wraps a SOCKS5 server with policy enforcement and audit logging.
@@ -422,7 +424,20 @@ func (s *Server) setupInjection(cfg Config, mainLn net.Listener) error {
 	}
 	authToken := hex.EncodeToString(tokenBytes)
 
-	s.injector = NewInjector(cfg.Provider, &s.resolver, caCert, authToken)
+	// Create WebSocket proxy for frame-level inspection when configured.
+	var wsProxy *WSProxy
+	if len(cfg.WSBlockRules) > 0 || len(cfg.WSRedactRules) > 0 {
+		var wsErr error
+		wsProxy, wsErr = NewWSProxy(cfg.Provider, &s.resolver, cfg.WSBlockRules, cfg.WSRedactRules)
+		if wsErr != nil {
+			return fmt.Errorf("create ws proxy: %w", wsErr)
+		}
+	} else {
+		// Create WSProxy with empty rules for phantom token replacement.
+		wsProxy, _ = NewWSProxy(cfg.Provider, &s.resolver, nil, nil)
+	}
+
+	s.injector = NewInjector(cfg.Provider, &s.resolver, caCert, authToken, wsProxy)
 	injLn, injErr := net.Listen("tcp", "127.0.0.1:0")
 	if injErr != nil {
 		return fmt.Errorf("injector listener: %w", injErr)
