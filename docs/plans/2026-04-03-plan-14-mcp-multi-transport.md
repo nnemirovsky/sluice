@@ -85,16 +85,16 @@ Connect to remote MCP servers via Streamable HTTP (POST to single endpoint, `Mcp
 - Create: `internal/mcp/transport_http.go`
 - Create: `internal/mcp/transport_http_test.go`
 
-- [ ] Implement `HTTPUpstream` struct that satisfies the same interface as `Upstream` (SendRequest, Initialize, DiscoverTools, Stop)
-- [ ] On `Initialize`: POST `initialize` JSON-RPC to the upstream URL, read `Mcp-Session-Id` from response header, store for subsequent requests
-- [ ] On `SendRequest`: POST JSON-RPC with `Mcp-Session-Id` header, read response
-- [ ] Handle SSE streaming responses (for long-running tool calls that stream progress)
-- [ ] Support `DELETE` request to close session on `Stop`
-- [ ] Configurable timeout per-upstream (from `timeout_sec`)
-- [ ] Write tests with httptest mock MCP server
-- [ ] Write tests for session ID management
-- [ ] Write tests for streaming response handling
-- [ ] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
+- [x] Implement `HTTPUpstream` struct that satisfies the same interface as `Upstream` (SendRequest, Initialize, DiscoverTools, Stop)
+- [x] On `Initialize`: POST `initialize` JSON-RPC to the upstream URL, read `Mcp-Session-Id` from response header, store for subsequent requests
+- [x] On `SendRequest`: POST JSON-RPC with `Mcp-Session-Id` header, read response
+- [x] Handle SSE streaming responses (for long-running tool calls that stream progress)
+- [x] Support `DELETE` request to close session on `Stop`
+- [x] Configurable timeout per-upstream (from `timeout_sec`)
+- [x] Write tests with httptest mock MCP server
+- [x] Write tests for session ID management
+- [x] Write tests for streaming response handling
+- [x] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
 
 ### Task 3: WebSocket upstream client
 
