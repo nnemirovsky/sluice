@@ -171,19 +171,19 @@ Create the HTTP Channel implementation satisfying `channel.Channel` from Plan 9.
 3b. Async: 202 Accepted -> waits for callback to POST /api/approvals/:id/resolve
 ```
 
-- [ ] Add `ChannelHTTP ChannelType = 1` to enum in channel.go
-- [ ] Create `HTTPChannel` struct implementing `channel.Channel`
-- [ ] Implement `RequestApproval`: POST to webhook_url with HMAC-SHA256 signature. Parse sync response or wait for async callback.
-- [ ] Implement `CancelApproval`, `CancelAll`: POST cancellation notification, auto-deny pending requests
-- [ ] Implement `Commands() <-chan channel.Command`: return nil (webhook doesn't support incoming commands)
-- [ ] Implement `Notify`: POST notification to webhook_url (fire and forget)
-- [ ] Implement `Type()`: return ChannelHTTP
-- [ ] Add retry logic: 3 attempts with exponential backoff for delivery failures
-- [ ] Write tests with httptest mock server for webhook target
-- [ ] Write tests for sync response path
-- [ ] Write tests for async callback path
-- [ ] Write tests for retry and timeout
-- [ ] Run tests: `go test ./internal/channel/webhook/ -v -timeout 30s`
+- [x] Add `ChannelHTTP ChannelType = 1` to enum in channel.go
+- [x] Create `HTTPChannel` struct implementing `channel.Channel`
+- [x] Implement `RequestApproval`: POST to webhook_url with HMAC-SHA256 signature. Parse sync response or wait for async callback.
+- [x] Implement `CancelApproval`, `CancelAll`: POST cancellation notification, auto-deny pending requests
+- [x] Implement `Commands() <-chan channel.Command`: return nil (webhook doesn't support incoming commands)
+- [x] Implement `Notify`: POST notification to webhook_url (fire and forget)
+- [x] Implement `Type()`: return ChannelHTTP
+- [x] Add retry logic: 3 attempts with exponential backoff for delivery failures
+- [x] Write tests with httptest mock server for webhook target
+- [x] Write tests for sync response path
+- [x] Write tests for async callback path
+- [x] Write tests for retry and timeout
+- [x] Run tests: `go test ./internal/channel/http/ -v -timeout 30s`
 
 ### Task 6: Add webhook config migration and channel wiring
 
