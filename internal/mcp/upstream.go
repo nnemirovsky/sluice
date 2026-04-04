@@ -22,6 +22,14 @@ const (
 	TransportWS    = "websocket" // WebSocket client
 )
 
+// vaultPrefix marks env values that should be resolved from the vault.
+const vaultPrefix = "vault:"
+
+// CredentialResolver resolves a credential name to its plaintext value.
+// Typically wraps a vault.Provider. The caller should treat the returned
+// string as sensitive and avoid logging it.
+type CredentialResolver func(name string) (string, error)
+
 // ValidTransport returns true if t is a recognized transport type.
 func ValidTransport(t string) bool {
 	return t == TransportStdio || t == TransportHTTP || t == TransportWS
@@ -66,6 +74,29 @@ type UpstreamConfig struct {
 	Env        map[string]string
 	TimeoutSec int
 	Transport  string // "stdio" (default), "http", or "websocket"
+}
+
+// resolveVaultEnv returns a copy of env with "vault:" prefixed values resolved
+// through the credential resolver. Plain values are copied unchanged. Returns
+// an error if any vault credential cannot be resolved.
+func resolveVaultEnv(env map[string]string, resolver CredentialResolver) (map[string]string, error) {
+	if resolver == nil || len(env) == 0 {
+		return env, nil
+	}
+	resolved := make(map[string]string, len(env))
+	for k, v := range env {
+		if strings.HasPrefix(v, vaultPrefix) {
+			credName := strings.TrimPrefix(v, vaultPrefix)
+			val, err := resolver(credName)
+			if err != nil {
+				return nil, fmt.Errorf("resolve credential %q for env var %s: %w", credName, k, err)
+			}
+			resolved[k] = val
+		} else {
+			resolved[k] = v
+		}
+	}
+	return resolved, nil
 }
 
 // Upstream manages a running upstream MCP server process. Communication

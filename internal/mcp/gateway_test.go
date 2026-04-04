@@ -1013,3 +1013,139 @@ func TestGatewayStop(t *testing.T) {
 		t.Fatal("Stop did not complete within 10 seconds")
 	}
 }
+
+// --- Credential resolver integration ---
+
+func TestGatewayCredentialResolverInjectsEnv(t *testing.T) {
+	script := writeMockServer(t)
+
+	resolver := func(name string) (string, error) {
+		if name == "test_secret" {
+			return "real_value_123", nil
+		}
+		return "", fmt.Errorf("credential %q not found", name)
+	}
+
+	gw := newGatewayForTest(t, GatewayConfig{
+		Upstreams: []UpstreamConfig{{
+			Name:    "creds",
+			Command: "bash",
+			Args:    []string{script},
+			Env: map[string]string{
+				"SECRET_KEY": "vault:test_secret",
+				"PLAIN_KEY":  "plain_value",
+			},
+		}},
+		CredentialResolver: resolver,
+	})
+
+	// Gateway should start successfully with resolved credentials.
+	tools := gw.Tools()
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(tools))
+	}
+
+	// Verify original config is preserved with vault: prefix for restart.
+	cfg := gw.upstreamCfgs["creds"]
+	if cfg.Env["SECRET_KEY"] != "vault:test_secret" {
+		t.Errorf("original config should keep vault: prefix, got %q", cfg.Env["SECRET_KEY"])
+	}
+}
+
+func TestGatewayCredentialResolverFailure(t *testing.T) {
+	script := writeMockServer(t)
+
+	resolver := func(name string) (string, error) {
+		return "", fmt.Errorf("vault is sealed")
+	}
+
+	_, err := NewGateway(GatewayConfig{
+		Upstreams: []UpstreamConfig{{
+			Name:    "bad",
+			Command: "bash",
+			Args:    []string{script},
+			Env: map[string]string{
+				"TOKEN": "vault:missing_cred",
+			},
+		}},
+		CredentialResolver: resolver,
+	})
+	if err == nil {
+		t.Fatal("expected error when credential resolution fails")
+	}
+	if !strings.Contains(err.Error(), "missing_cred") {
+		t.Errorf("error should mention credential name, got: %v", err)
+	}
+}
+
+func TestGatewayRestartUpstream(t *testing.T) {
+	script := writeMockServer(t)
+
+	callCount := 0
+	resolver := func(name string) (string, error) {
+		callCount++
+		if name == "rotating_secret" {
+			return fmt.Sprintf("value_%d", callCount), nil
+		}
+		return "", fmt.Errorf("credential %q not found", name)
+	}
+
+	gw := newGatewayForTest(t, GatewayConfig{
+		Upstreams: []UpstreamConfig{{
+			Name:    "restart-test",
+			Command: "bash",
+			Args:    []string{script},
+			Env: map[string]string{
+				"SECRET": "vault:rotating_secret",
+			},
+		}},
+		CredentialResolver: resolver,
+	})
+
+	// Initial startup resolves the credential.
+	if callCount != 1 {
+		t.Fatalf("expected 1 resolver call after startup, got %d", callCount)
+	}
+
+	// Verify tools work before restart.
+	result, err := gw.HandleToolCall(CallToolParams{
+		Name:      "restart-test__greet",
+		Arguments: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("HandleToolCall before restart: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success before restart, got error: %s", result.Content[0].Text)
+	}
+
+	// Restart the upstream (simulating credential rotation).
+	if err := gw.RestartUpstream("restart-test"); err != nil {
+		t.Fatalf("RestartUpstream: %v", err)
+	}
+
+	// Resolver should have been called again.
+	if callCount != 2 {
+		t.Fatalf("expected 2 resolver calls after restart, got %d", callCount)
+	}
+
+	// Verify tools still work after restart.
+	result2, err := gw.HandleToolCall(CallToolParams{
+		Name:      "restart-test__greet",
+		Arguments: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("HandleToolCall after restart: %v", err)
+	}
+	if result2.IsError {
+		t.Fatalf("expected success after restart, got error: %s", result2.Content[0].Text)
+	}
+}
+
+func TestGatewayRestartUpstreamNotFound(t *testing.T) {
+	gw := newGatewayForTest(t, GatewayConfig{})
+	err := gw.RestartUpstream("nonexistent")
+	if err == nil {
+		t.Fatal("expected error for nonexistent upstream")
+	}
+}

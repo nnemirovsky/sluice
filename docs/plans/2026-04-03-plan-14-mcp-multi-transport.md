@@ -159,15 +159,15 @@ Startup:
 
 The `vault:` prefix in env values signals that the value is a vault credential name to resolve. Plain values are passed through as-is.
 
-- [ ] In `StartUpstream`: scan env map for values with `vault:` prefix
-- [ ] For each `vault:` value: call `provider.Get(name)`, set the real credential as the env var value
-- [ ] Plain env values (no prefix) pass through unchanged
-- [ ] Release credential memory after setting env (best-effort, Go copies strings)
-- [ ] On credential rotation (vault change): stop and restart the upstream process to pick up new credentials
-- [ ] Write test: env value with `vault:` prefix is resolved from mock provider
-- [ ] Write test: env value without prefix is passed through unchanged
-- [ ] Write test: missing vault credential returns clear error on startup
-- [ ] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
+- [x] In `StartUpstream`: scan env map for values with `vault:` prefix
+- [x] For each `vault:` value: call `provider.Get(name)`, set the real credential as the env var value
+- [x] Plain env values (no prefix) pass through unchanged
+- [x] Release credential memory after setting env (best-effort, Go copies strings)
+- [x] On credential rotation (vault change): stop and restart the upstream process to pick up new credentials
+- [x] Write test: env value with `vault:` prefix is resolved from mock provider
+- [x] Write test: env value without prefix is passed through unchanged
+- [x] Write test: missing vault credential returns clear error on startup
+- [x] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
 
 ### Task 6: Expose gateway via Streamable HTTP server
 
