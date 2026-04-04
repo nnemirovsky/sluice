@@ -91,19 +91,19 @@ Detect TLS, SSH, and HTTP by peeking at the first bytes sent by the client after
 - Modify: `internal/proxy/protocol_test.go`
 - Modify: `internal/proxy/server.go`
 
-- [ ] Implement `DetectFromClientBytes(data []byte) Protocol` that examines the first bytes:
+- [x] Implement `DetectFromClientBytes(data []byte) Protocol` that examines the first bytes:
   - TLS: byte 0 = 0x16, bytes 1-2 in {0x0301, 0x0302, 0x0303} -> ProtoHTTPS
   - SSH: starts with "SSH-" -> ProtoSSH
   - HTTP: starts with method verb (GET, POST, PUT, HEAD, DELETE, PATCH, OPTIONS, CONNECT) -> ProtoHTTP
   - No match: return ProtoGeneric (keep port-based guess)
-- [ ] Wire into the SOCKS5 dial path: after TCP connect, use `net.Conn` peek (wrap with `bufio.Reader`) to read first bytes without consuming them
-- [ ] Two-phase detection: `portGuess := DetectProtocol(port)` then `confirmed := DetectFromClientBytes(peekedBytes)`. If confirmed != ProtoGeneric, use confirmed. Otherwise keep portGuess.
-- [ ] Store the confirmed protocol in the connection context (replacing the port-based guess)
-- [ ] Write tests: HTTPS on port 8000 detected correctly via TLS bytes
-- [ ] Write tests: SSH on port 2222 detected correctly via "SSH-" banner
-- [ ] Write tests: HTTP on port 9090 detected correctly via "GET " prefix
-- [ ] Write tests: unknown protocol on standard port (binary data on port 443 stays generic, not forced to HTTPS)
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] Wire into the SOCKS5 dial path: after TCP connect, use `net.Conn` peek (wrap with `bufio.Reader`) to read first bytes without consuming them
+- [x] Two-phase detection: `portGuess := DetectProtocol(port)` then `confirmed := DetectFromClientBytes(peekedBytes)`. If confirmed != ProtoGeneric, use confirmed. Otherwise keep portGuess.
+- [x] Store the confirmed protocol in the connection context (replacing the port-based guess)
+- [x] Write tests: HTTPS on port 8000 detected correctly via TLS bytes
+- [x] Write tests: SSH on port 2222 detected correctly via "SSH-" banner
+- [x] Write tests: HTTP on port 9090 detected correctly via "GET " prefix
+- [x] Write tests: unknown protocol on standard port (binary data on port 443 stays generic, not forced to HTTPS)
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 3: Add byte-level detection for server-first protocols
 

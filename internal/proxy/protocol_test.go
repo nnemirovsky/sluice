@@ -241,6 +241,203 @@ func TestDetectProtocolFromHeaders(t *testing.T) {
 	}
 }
 
+func TestDetectFromClientBytes(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		want Protocol
+	}{
+		// TLS/HTTPS detection
+		{
+			name: "tls_1_2",
+			data: []byte{0x16, 0x03, 0x03, 0x00, 0x05, 0x01, 0x00, 0x00},
+			want: ProtoHTTPS,
+		},
+		{
+			name: "tls_1_1",
+			data: []byte{0x16, 0x03, 0x02, 0x00, 0x05},
+			want: ProtoHTTPS,
+		},
+		{
+			name: "tls_1_0",
+			data: []byte{0x16, 0x03, 0x01, 0x00, 0x05},
+			want: ProtoHTTPS,
+		},
+		// SSH detection
+		{
+			name: "ssh_banner",
+			data: []byte("SSH-2.0-OpenSSH_8.9\r\n"),
+			want: ProtoSSH,
+		},
+		{
+			name: "ssh_banner_short",
+			data: []byte("SSH-"),
+			want: ProtoSSH,
+		},
+		// HTTP method detection
+		{
+			name: "http_get",
+			data: []byte("GET / HTTP/1.1\r\n"),
+			want: ProtoHTTP,
+		},
+		{
+			name: "http_post",
+			data: []byte("POST /api/v1 HTTP/1.1\r\n"),
+			want: ProtoHTTP,
+		},
+		{
+			name: "http_put",
+			data: []byte("PUT /resource HTTP/1.1\r\n"),
+			want: ProtoHTTP,
+		},
+		{
+			name: "http_head",
+			data: []byte("HEAD / HTTP/1.1\r\n"),
+			want: ProtoHTTP,
+		},
+		{
+			name: "http_delete",
+			data: []byte("DELE /resource HTTP/1.1\r\n"),
+			want: ProtoHTTP,
+		},
+		{
+			name: "http_patch",
+			data: []byte("PATC /resource HTTP/1.1\r\n"),
+			want: ProtoHTTP,
+		},
+		{
+			name: "http_options",
+			data: []byte("OPTI / HTTP/1.1\r\n"),
+			want: ProtoHTTP,
+		},
+		{
+			name: "http_connect",
+			data: []byte("CONN example.com:443 HTTP/1.1\r\n"),
+			want: ProtoHTTP,
+		},
+		// No match / generic
+		{
+			name: "binary_data",
+			data: []byte{0x00, 0x01, 0x02, 0x03, 0x04},
+			want: ProtoGeneric,
+		},
+		{
+			name: "empty",
+			data: []byte{},
+			want: ProtoGeneric,
+		},
+		{
+			name: "nil",
+			data: nil,
+			want: ProtoGeneric,
+		},
+		{
+			name: "short_tls_incomplete",
+			data: []byte{0x16, 0x03},
+			want: ProtoGeneric,
+		},
+		{
+			name: "tls_wrong_version",
+			data: []byte{0x16, 0x03, 0x00, 0x00, 0x05},
+			want: ProtoGeneric,
+		},
+		{
+			name: "tls_ssl3",
+			data: []byte{0x16, 0x03, 0x00, 0x00, 0x05},
+			want: ProtoGeneric,
+		},
+		{
+			name: "short_ssh",
+			data: []byte("SSH"),
+			want: ProtoGeneric,
+		},
+		{
+			name: "partial_method",
+			data: []byte("GE"),
+			want: ProtoGeneric,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DetectFromClientBytes(tt.data)
+			if got != tt.want {
+				t.Errorf("DetectFromClientBytes(%v) = %s, want %s", tt.data, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTwoPhaseDetection(t *testing.T) {
+	// Two-phase detection: port-based guess + byte-level confirmation.
+	tests := []struct {
+		name     string
+		port     int
+		data     []byte
+		wantFinal Protocol
+	}{
+		{
+			name:      "https_on_port_8000",
+			port:      8000,
+			data:      []byte{0x16, 0x03, 0x03, 0x00, 0x05, 0x01, 0x00, 0x00},
+			wantFinal: ProtoHTTPS,
+		},
+		{
+			name:      "ssh_on_port_2222",
+			port:      2222,
+			data:      []byte("SSH-2.0-OpenSSH_8.9\r\n"),
+			wantFinal: ProtoSSH,
+		},
+		{
+			name:      "http_on_port_9090",
+			port:      9090,
+			data:      []byte("GET / HTTP/1.1\r\n"),
+			wantFinal: ProtoHTTP,
+		},
+		{
+			name:      "binary_on_standard_port_443_keeps_port_guess",
+			port:      443,
+			data:      []byte{0x00, 0x01, 0x02, 0x03, 0x04},
+			wantFinal: ProtoHTTPS, // byte detection returns generic -> keep port guess
+		},
+		{
+			name:      "standard_port_443_with_tls",
+			port:      443,
+			data:      []byte{0x16, 0x03, 0x03, 0x00, 0x05},
+			wantFinal: ProtoHTTPS,
+		},
+		{
+			name:      "standard_port_22_with_ssh",
+			port:      22,
+			data:      []byte("SSH-2.0-OpenSSH_8.9\r\n"),
+			wantFinal: ProtoSSH,
+		},
+		{
+			name:      "unknown_data_on_non_standard_port",
+			port:      12345,
+			data:      []byte{0xFF, 0xFE, 0xFD, 0xFC},
+			wantFinal: ProtoGeneric,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			portGuess := DetectProtocol(tt.port)
+			byteDetect := DetectFromClientBytes(tt.data)
+
+			// Two-phase logic: byte detection overrides port guess when
+			// it returns a specific protocol (not generic).
+			final := portGuess
+			if byteDetect != ProtoGeneric {
+				final = byteDetect
+			}
+
+			if final != tt.wantFinal {
+				t.Errorf("two-phase(%d, bytes) = %s (port=%s, bytes=%s), want %s",
+					tt.port, final, portGuess, byteDetect, tt.wantFinal)
+			}
+		})
+	}
+}
+
 func TestIsQUICPacket(t *testing.T) {
 	tests := []struct {
 		name string

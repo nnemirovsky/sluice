@@ -161,6 +161,47 @@ func DetectProtocolFromHeaders(headers http.Header, isTLS bool) Protocol {
 	return ProtoGeneric
 }
 
+// httpMethods lists the ASCII prefixes that identify HTTP request methods.
+// Each entry is at least 3 bytes so a 4-byte peek can distinguish all methods.
+var httpMethods = []string{
+	"GET ", "POST", "PUT ", "HEAD", "DELE", "PATC", "OPTI", "CONN",
+}
+
+// DetectFromClientBytes examines the first bytes sent by the client after TCP
+// connect to determine the application-layer protocol. Returns ProtoGeneric
+// when the bytes do not match any known signature, leaving the port-based
+// guess in effect.
+func DetectFromClientBytes(data []byte) Protocol {
+	if len(data) == 0 {
+		return ProtoGeneric
+	}
+
+	// TLS ClientHello: ContentType=Handshake (0x16), then 2-byte version.
+	if len(data) >= 3 && data[0] == 0x16 {
+		version := uint16(data[1])<<8 | uint16(data[2])
+		if version >= 0x0301 && version <= 0x0303 {
+			return ProtoHTTPS
+		}
+	}
+
+	// SSH version banner: starts with "SSH-".
+	if len(data) >= 4 && string(data[:4]) == "SSH-" {
+		return ProtoSSH
+	}
+
+	// HTTP method verb: GET, POST, PUT, HEAD, DELETE, PATCH, OPTIONS, CONNECT.
+	if len(data) >= 4 {
+		prefix := string(data[:4])
+		for _, m := range httpMethods {
+			if prefix == m {
+				return ProtoHTTP
+			}
+		}
+	}
+
+	return ProtoGeneric
+}
+
 // IsQUICPacket checks whether a UDP payload is a QUIC Initial packet by
 // verifying the long header form bit, fixed bit, and version field.
 // Supports QUIC v1 (RFC 9000) and QUIC v2 (RFC 9369).
