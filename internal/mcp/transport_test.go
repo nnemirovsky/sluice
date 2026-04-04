@@ -14,7 +14,7 @@ func newTestGateway() *Gateway {
 	}
 	tp, _ := NewToolPolicy(nil, policy.Allow)
 	return &Gateway{
-		upstreams:  make(map[string]*Upstream),
+		upstreams:  make(map[string]MCPUpstream),
 		toolMap:    map[string]string{"test__hello": "test", "test__greet": "test"},
 		allTools:   tools,
 		policy:     tp,

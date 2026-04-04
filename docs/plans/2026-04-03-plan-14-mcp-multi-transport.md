@@ -122,11 +122,11 @@ Route upstream creation to the correct transport based on config.
 - Modify: `internal/mcp/gateway.go`
 - Modify: `internal/mcp/gateway_test.go`
 
-- [ ] In `NewGateway`: check `UpstreamConfig.Transport` and instantiate `Upstream` (stdio), `HTTPUpstream`, or `WSUpstream`
-- [ ] All three satisfy the same interface: `Initialize`, `DiscoverTools`, `SendRequest`, `Stop`
-- [ ] Mixed upstreams work: some stdio (local), some HTTP (remote), some WebSocket (real-time)
-- [ ] Write test with mixed upstream types
-- [ ] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
+- [x] In `NewGateway`: check `UpstreamConfig.Transport` and instantiate `Upstream` (stdio), `HTTPUpstream`, or `WSUpstream`
+- [x] All three satisfy the same interface: `Initialize`, `DiscoverTools`, `SendRequest`, `Stop`
+- [x] Mixed upstreams work: some stdio (local), some HTTP (remote), some WebSocket (real-time)
+- [x] Write test with mixed upstream types
+- [x] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
 
 ### Task 5: MCP upstream credential injection via env vars
 

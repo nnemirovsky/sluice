@@ -28,8 +28,8 @@ type GatewayConfig struct {
 // Gateway intercepts tool calls between an AI agent and upstream MCP servers,
 // applying tool-level policy and optional Telegram approval.
 type Gateway struct {
-	upstreams  map[string]*Upstream // upstream name -> upstream
-	toolMap    map[string]string    // namespaced tool -> upstream name
+	upstreams  map[string]MCPUpstream // upstream name -> upstream
+	toolMap    map[string]string      // namespaced tool -> upstream name
 	allTools   []Tool
 	policy     *ToolPolicy
 	inspector  *ContentInspector
@@ -43,7 +43,7 @@ type Gateway struct {
 // tools, and returns a ready-to-use gateway.
 func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 	gw := &Gateway{
-		upstreams:  make(map[string]*Upstream),
+		upstreams:  make(map[string]MCPUpstream),
 		toolMap:    make(map[string]string),
 		allTools:   []Tool{},
 		policy:     cfg.ToolPolicy,
@@ -75,7 +75,7 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 			gw.Stop()
 			return nil, fmt.Errorf("duplicate upstream name %q", ucfg.Name)
 		}
-		u, err := StartUpstream(ucfg)
+		u, err := StartUpstreamForTransport(ucfg)
 		if err != nil {
 			gw.Stop()
 			return nil, fmt.Errorf("start upstream %s: %w", ucfg.Name, err)

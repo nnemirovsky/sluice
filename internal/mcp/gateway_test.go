@@ -841,6 +841,150 @@ func TestGatewayAuditLogging(t *testing.T) {
 	}
 }
 
+// --- Mixed upstream transports ---
+
+func TestGatewayMixedTransports(t *testing.T) {
+	// Stdio upstream via bash mock script.
+	script := writeMockServer(t)
+
+	// HTTP upstream via httptest.
+	httpSrv := mockHTTPMCPServer(t)
+	defer httpSrv.Close()
+
+	// WebSocket upstream via httptest.
+	wsSrv := mockWSMCPServer(t)
+	defer wsSrv.Close()
+
+	gw := newGatewayForTest(t, GatewayConfig{
+		Upstreams: []UpstreamConfig{
+			{Name: "local", Command: "bash", Args: []string{script}, Transport: TransportStdio},
+			{Name: "remote", Command: httpSrv.URL, Transport: TransportHTTP},
+			{Name: "realtime", Command: wsSrv.URL, Transport: TransportWS},
+		},
+	})
+
+	// Verify all tools are discovered from all three transports.
+	tools := gw.Tools()
+	names := make(map[string]bool)
+	for _, t := range tools {
+		names[t.Name] = true
+	}
+
+	// Stdio mock: greet, add. HTTP mock: search, fetch. WS mock: subscribe, query.
+	expected := []string{
+		"local__greet", "local__add",
+		"remote__search", "remote__fetch",
+		"realtime__subscribe", "realtime__query",
+	}
+	for _, name := range expected {
+		if !names[name] {
+			t.Errorf("missing expected tool %q", name)
+		}
+	}
+	if len(tools) != len(expected) {
+		t.Errorf("expected %d tools, got %d", len(expected), len(tools))
+	}
+
+	// Call a tool from each transport and verify routing.
+	result1, err := gw.HandleToolCall(CallToolParams{
+		Name:      "local__greet",
+		Arguments: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("HandleToolCall local__greet: %v", err)
+	}
+	if result1.IsError || result1.Content[0].Text != "hello from mock" {
+		t.Errorf("stdio upstream: expected 'hello from mock', got %q (isError=%v)", result1.Content[0].Text, result1.IsError)
+	}
+
+	result2, err := gw.HandleToolCall(CallToolParams{
+		Name:      "remote__search",
+		Arguments: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("HandleToolCall remote__search: %v", err)
+	}
+	if result2.IsError || result2.Content[0].Text != "result from HTTP upstream" {
+		t.Errorf("HTTP upstream: expected 'result from HTTP upstream', got %q (isError=%v)", result2.Content[0].Text, result2.IsError)
+	}
+
+	result3, err := gw.HandleToolCall(CallToolParams{
+		Name:      "realtime__subscribe",
+		Arguments: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("HandleToolCall realtime__subscribe: %v", err)
+	}
+	if result3.IsError || result3.Content[0].Text != "result from WS upstream" {
+		t.Errorf("WS upstream: expected 'result from WS upstream', got %q (isError=%v)", result3.Content[0].Text, result3.IsError)
+	}
+}
+
+func TestGatewayHTTPTransport(t *testing.T) {
+	httpSrv := mockHTTPMCPServer(t)
+	defer httpSrv.Close()
+
+	gw := newGatewayForTest(t, GatewayConfig{
+		Upstreams: []UpstreamConfig{
+			{Name: "httpsvc", Command: httpSrv.URL, Transport: TransportHTTP},
+		},
+	})
+
+	tools := gw.Tools()
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(tools))
+	}
+	if tools[0].Name != "httpsvc__search" {
+		t.Errorf("expected httpsvc__search, got %q", tools[0].Name)
+	}
+}
+
+func TestGatewayWSTransport(t *testing.T) {
+	wsSrv := mockWSMCPServer(t)
+	defer wsSrv.Close()
+
+	gw := newGatewayForTest(t, GatewayConfig{
+		Upstreams: []UpstreamConfig{
+			{Name: "wssvc", Command: wsSrv.URL, Transport: TransportWS},
+		},
+	})
+
+	tools := gw.Tools()
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(tools))
+	}
+	if tools[0].Name != "wssvc__subscribe" {
+		t.Errorf("expected wssvc__subscribe, got %q", tools[0].Name)
+	}
+}
+
+func TestGatewayDefaultTransportIsStdio(t *testing.T) {
+	script := writeMockServer(t)
+
+	// No Transport field set. Should default to stdio.
+	gw := newGatewayForTest(t, GatewayConfig{
+		Upstreams: []UpstreamConfig{
+			{Name: "default", Command: "bash", Args: []string{script}},
+		},
+	})
+
+	tools := gw.Tools()
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(tools))
+	}
+}
+
+func TestGatewayUnknownTransport(t *testing.T) {
+	_, err := NewGateway(GatewayConfig{
+		Upstreams: []UpstreamConfig{
+			{Name: "bad", Command: "http://example.com", Transport: "grpc"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown transport")
+	}
+}
+
 // --- Stop cleanup ---
 
 func TestGatewayStop(t *testing.T) {

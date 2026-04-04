@@ -27,6 +27,37 @@ func ValidTransport(t string) bool {
 	return t == TransportStdio || t == TransportHTTP || t == TransportWS
 }
 
+// MCPUpstream is the interface satisfied by all upstream transport types
+// (stdio, HTTP, WebSocket). The gateway uses this to interact with upstreams
+// without knowing which transport is in use.
+type MCPUpstream interface {
+	Initialize() error
+	DiscoverTools() ([]Tool, error)
+	CallTool(toolName string, arguments json.RawMessage) (*JSONRPCResponse, error)
+	Stop() error
+}
+
+// StartUpstreamForTransport creates and returns the correct MCPUpstream
+// implementation based on the transport field in the config. For stdio
+// upstreams it spawns a child process. For HTTP and WebSocket upstreams
+// it creates a client pointing at the URL in the Command field.
+func StartUpstreamForTransport(cfg UpstreamConfig) (MCPUpstream, error) {
+	transport := cfg.Transport
+	if transport == "" {
+		transport = TransportStdio
+	}
+	switch transport {
+	case TransportStdio:
+		return StartUpstream(cfg)
+	case TransportHTTP:
+		return NewHTTPUpstream(cfg.Name, cfg.Command, cfg.TimeoutSec), nil
+	case TransportWS:
+		return NewWSUpstream(cfg.Name, cfg.Command, cfg.TimeoutSec), nil
+	default:
+		return nil, fmt.Errorf("unknown transport %q for upstream %s", transport, cfg.Name)
+	}
+}
+
 // UpstreamConfig describes how to launch an upstream MCP server process.
 type UpstreamConfig struct {
 	Name       string
