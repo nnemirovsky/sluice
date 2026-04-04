@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -39,6 +40,11 @@ const dnsTimeout = 10 * time.Second
 // a goroutine/socket until the kernel TCP timeout expires (typically 2+
 // minutes on Linux). This limits the resource impact of such requests.
 const connectTimeout = 30 * time.Second
+
+// byteDetectTimeout is how long to wait for the client's first bytes during
+// byte-level protocol detection on non-standard ports. Kept short to minimize
+// latency for server-first protocols where the client never sends first.
+const byteDetectTimeout = 200 * time.Millisecond
 
 // Config holds configuration for creating a new SOCKS5 proxy server.
 type Config struct {
@@ -495,7 +501,7 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 			// Use protocol-aware resolution so the correct binding is
 			// selected when multiple bindings exist for the same host:port
 			// with different protocols (e.g. one for SSH, one for HTTPS).
-			binding, ok := r.ResolveForProtocol(fqdn, port, string(proto))
+			binding, ok := r.ResolveForProtocol(fqdn, port, proto.String())
 			if !ok {
 				// No protocol-specific or protocol-agnostic binding
 				// matched. Fall back to any dest+port binding and adopt
@@ -506,7 +512,9 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 				binding, ok = r.Resolve(fqdn, port)
 				if ok && len(binding.Protocols) == 1 {
 					if hint, hok := r.ResolveProtocolHint(fqdn, port); hok {
-						proto = Protocol(hint)
+						if parsed, perr := ParseProtocol(hint); perr == nil {
+							proto = parsed
+						}
 					}
 				}
 			}
@@ -518,7 +526,9 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 			// through to direct dial, bypassing the injector.
 			if ok && proto == ProtoGeneric && len(binding.Protocols) == 0 {
 				if hint, hok := r.ResolveProtocolHint(fqdn, port); hok {
-					proto = Protocol(hint)
+					if parsed, perr := ParseProtocol(hint); perr == nil {
+						proto = parsed
+					}
 					if specific, sok := r.ResolveForProtocol(fqdn, port, hint); sok {
 						binding = specific
 					}
@@ -579,6 +589,16 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 						})
 					}
 				}
+				// Non-standard port with binding: use byte-level detection
+				// to determine the correct injection handler. Port-based
+				// detection returned ProtoGeneric, so peek the client's
+				// first bytes to identify the actual protocol.
+				if proto == ProtoGeneric {
+					bnd := binding // capture for closure
+					return dialWithHandler(func(agentConn net.Conn, ready chan<- error) {
+						s.handleWithDetection(agentConn, ready, &bnd, fqdn, port, hostAddr, dialAddrs)
+					})
+				}
 			}
 		}
 	}
@@ -615,6 +635,24 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 			} else {
 				return &pinnedConn{Conn: conn, injector: s.injector, pinID: pinID}, nil
 			}
+		} else if proto == ProtoGeneric {
+			// Non-standard port without binding: use byte-level
+			// detection to catch HTTPS/HTTP for phantom stripping.
+			fqdn, _ := ctx.Value(ctxKeyFQDN).(string)
+			if fqdn == "" {
+				host, _, _ := net.SplitHostPort(addr)
+				fqdn = host
+			}
+			unboundAddrs := []string{addr}
+			if fallbacks, ok := ctx.Value(ctxKeyFallbackAddrs).([]net.IP); ok {
+				for _, ip := range fallbacks {
+					unboundAddrs = append(unboundAddrs, net.JoinHostPort(ip.String(), portStr))
+				}
+			}
+			hostAddr := net.JoinHostPort(fqdn, portStr)
+			return dialWithHandler(func(agentConn net.Conn, ready chan<- error) {
+				s.handleWithDetection(agentConn, ready, nil, fqdn, port, hostAddr, unboundAddrs)
+			})
 		}
 	}
 
@@ -640,6 +678,212 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 		}
 	}
 	return nil, err
+}
+
+// handleWithDetection peeks the agent's first bytes to detect the protocol
+// and routes through the appropriate injection handler. Used for connections
+// on non-standard ports where port-based detection returned ProtoGeneric.
+// The binding parameter is nil for unbound connections (phantom stripping only).
+func (s *Server) handleWithDetection(
+	agentConn net.Conn,
+	ready chan<- error,
+	binding *vault.Binding,
+	fqdn string,
+	port int,
+	hostAddr string,
+	dialAddrs []string,
+) {
+	defer agentConn.Close()
+	// Signal ready immediately: byte detection requires reading client
+	// data, which only arrives after the SOCKS5 CONNECT succeeds. Any
+	// handler failures after this point close the connection, surfacing
+	// as an application-layer error rather than a SOCKS5 failure.
+	ready <- nil
+
+	// Read first bytes with a deadline. For client-first protocols (TLS,
+	// SSH, HTTP), data arrives quickly. For server-first or idle
+	// connections, the deadline fires and we fall through to direct relay.
+	peekBuf := make([]byte, 4)
+	agentConn.SetReadDeadline(time.Now().Add(byteDetectTimeout))
+	n, _ := io.ReadFull(agentConn, peekBuf)
+	agentConn.SetReadDeadline(time.Time{})
+
+	proto := DetectFromClientBytes(peekBuf[:n])
+
+	// Replay peeked bytes before the rest of the stream.
+	var peekReader io.Reader = agentConn
+	if n > 0 {
+		peekReader = io.MultiReader(bytes.NewReader(peekBuf[:n]), agentConn)
+	}
+	peekConn := &bufferedConn{Reader: peekReader, Conn: agentConn}
+
+	if proto != ProtoGeneric {
+		log.Printf("[DETECT] %s byte detection -> %s", hostAddr, proto)
+	}
+
+	switch proto {
+	case ProtoHTTPS, ProtoHTTP:
+		if s.injector != nil {
+			ips := make([]string, 0, len(dialAddrs))
+			for _, a := range dialAddrs {
+				if ip, _, err := net.SplitHostPort(a); err == nil {
+					ips = append(ips, ip)
+				}
+			}
+			pinID := generatePinID()
+			s.injector.PinIPs(pinID, ips)
+			defer s.injector.UnpinIPs(pinID)
+			injConn, err := dialThroughInjector(s.injectorLn.Addr().String(), fqdn, port, s.injector.authToken, pinID)
+			if err != nil {
+				log.Printf("[DETECT] injector failed for %s: %v", hostAddr, err)
+				if binding != nil {
+					// Fail closed for bound connections: credential
+					// injection is required and phantom tokens must not
+					// leak upstream. Unlike the standard bound path
+					// (which returns an error before CONNECT succeeds),
+					// the detection path has already signaled ready, so
+					// this drops the connection at the application layer.
+					return
+				}
+				relayDirect(peekConn, dialAddrs)
+				return
+			}
+			bidirectionalRelay(peekConn, injConn)
+			return
+		}
+	case ProtoSSH:
+		if s.sshJump != nil && binding != nil {
+			// Pass nil for ready: SOCKS5 CONNECT already succeeded (see
+			// comment above), so the handler's readiness signal is unused.
+			// Both HandleConnection implementations guard with
+			// "if ready != nil" before sending.
+			if err := s.sshJump.HandleConnection(peekConn, dialAddrs, hostAddr, *binding, nil); err != nil {
+				log.Printf("[SSH] handler error for %s: %v", hostAddr, err)
+			}
+			return
+		}
+	case ProtoIMAP, ProtoSMTP:
+		if s.mailProxy != nil && binding != nil {
+			if err := s.mailProxy.HandleConnection(peekConn, dialAddrs, hostAddr, *binding, proto, nil); err != nil {
+				log.Printf("[MAIL] handler error for %s: %v", hostAddr, err)
+			}
+			return
+		}
+	}
+
+	// Server-first detection: when no client bytes arrived (timeout),
+	// the remote might be a server-first protocol (SMTP, IMAP). Connect
+	// upstream and peek the server's first bytes to find out. Only attempt
+	// this when a binding and mail proxy exist, since server-first detection
+	// can only route through the mail proxy and the upstream probe is wasted
+	// without a binding to inject.
+	if n == 0 && binding != nil && s.mailProxy != nil {
+		s.handleServerFirstDetection(peekConn, binding, hostAddr, dialAddrs)
+		return
+	}
+
+	relayDirect(peekConn, dialAddrs)
+}
+
+// serverDetectTimeout bounds how long to wait for the server's first bytes
+// during server-first protocol detection (SMTP banner, IMAP greeting).
+const serverDetectTimeout = 500 * time.Millisecond
+
+// handleServerFirstDetection connects upstream and peeks the server's first
+// bytes to detect server-first protocols (SMTP, IMAP). If a match is found
+// and a binding exists, the connection is routed through the mail proxy.
+// Otherwise, the server's pre-read bytes are relayed and the connection
+// continues as a direct relay.
+func (s *Server) handleServerFirstDetection(
+	agentConn net.Conn,
+	binding *vault.Binding,
+	hostAddr string,
+	dialAddrs []string,
+) {
+	d := &net.Dialer{Timeout: connectTimeout}
+	var upstream net.Conn
+	var err error
+	for _, addr := range dialAddrs {
+		upstream, err = d.Dial("tcp", addr)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		log.Printf("[DETECT] server-first upstream dial failed for %s: %v", hostAddr, err)
+		return
+	}
+
+	// Peek server's first bytes with a short deadline.
+	serverBuf := make([]byte, 8)
+	upstream.SetReadDeadline(time.Now().Add(serverDetectTimeout))
+	sn, _ := io.ReadFull(upstream, serverBuf)
+	upstream.SetReadDeadline(time.Time{})
+
+	serverProto := DetectFromServerBytes(serverBuf[:sn])
+
+	if serverProto != ProtoGeneric {
+		log.Printf("[DETECT] %s server byte detection -> %s", hostAddr, serverProto)
+	}
+
+	if (serverProto == ProtoIMAP || serverProto == ProtoSMTP) && s.mailProxy != nil && binding != nil {
+		// Close probe connection. The mail proxy establishes its own
+		// upstream connection to manage STARTTLS and AUTH interception.
+		upstream.Close()
+		// Pass nil for ready: SOCKS5 CONNECT already succeeded in the
+		// parent handleWithDetection call.
+		if err := s.mailProxy.HandleConnection(agentConn, dialAddrs, hostAddr, *binding, serverProto, nil); err != nil {
+			log.Printf("[MAIL] handler error for %s: %v", hostAddr, err)
+		}
+		return
+	}
+
+	// No server-first protocol match or no mail proxy/binding available.
+	// Relay with pre-read server bytes prepended to the upstream stream.
+	var upstreamReader io.Reader = upstream
+	if sn > 0 {
+		upstreamReader = io.MultiReader(bytes.NewReader(serverBuf[:sn]), upstream)
+	}
+	upConn := &bufferedConn{Reader: upstreamReader, Conn: upstream}
+	defer upstream.Close()
+	bidirectionalRelay(agentConn, upConn)
+}
+
+// relayDirect connects to the first reachable address in dialAddrs and
+// relays data bidirectionally with the agent connection.
+func relayDirect(agent io.ReadWriteCloser, dialAddrs []string) {
+	d := &net.Dialer{Timeout: connectTimeout}
+	var upstream net.Conn
+	var err error
+	for _, addr := range dialAddrs {
+		upstream, err = d.Dial("tcp", addr)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		log.Printf("[DETECT] relay upstream dial failed for %v: %v", dialAddrs, err)
+		return
+	}
+	defer upstream.Close()
+	bidirectionalRelay(agent, upstream)
+}
+
+// bidirectionalRelay copies data between two connections until either
+// direction closes or errors. Both connections are closed when done.
+func bidirectionalRelay(a, b io.ReadWriter) {
+	errc := make(chan error, 2)
+	go func() { _, err := io.Copy(b, a); errc <- err }()
+	go func() { _, err := io.Copy(a, b); errc <- err }()
+	<-errc
+	// One direction done. Close connections to unblock the other copy.
+	if c, ok := a.(io.Closer); ok {
+		c.Close()
+	}
+	if c, ok := b.(io.Closer); ok {
+		c.Close()
+	}
+	<-errc
 }
 
 // dialThroughInjector connects to the local goproxy MITM listener and
@@ -847,7 +1091,7 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 								if logErr := s.udpRelay.audit.Log(audit.Event{
 									Destination: dest,
 									Port:        port,
-									Protocol:    "quic",
+									Protocol:    ProtoQUIC.String(),
 									Verdict:     "deny",
 									Reason:      "quic denied by policy",
 								}); logErr != nil {

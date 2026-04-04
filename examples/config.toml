@@ -68,6 +68,10 @@ provider = "age"
 # store = "~/.local/share/gopass/stores/root"  # optional, uses gopass default
 
 # --- Network rules (destination field) ---
+# Protocol detection is automatic via deep packet inspection. Sluice peeks at
+# the first bytes of each connection to determine the actual protocol (TLS,
+# SSH, HTTP, SMTP, IMAP) regardless of port. You only need to specify
+# protocols in rules when restricting to specific protocols (e.g. UDP-only).
 
 # AI model APIs
 [[allow]]

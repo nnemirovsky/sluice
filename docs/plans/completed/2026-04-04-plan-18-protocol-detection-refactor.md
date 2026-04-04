@@ -71,16 +71,16 @@ const (
 )
 ```
 
-- [ ] Change `type Protocol string` to `type Protocol int` with explicit integer values
-- [ ] Add `String() string` method returning the display name ("http", "https", etc.)
-- [ ] Add `ParseProtocol(s string) (Protocol, error)` for TOML/CLI/API parsing
-- [ ] Update all string comparisons (`proto == "https"`) to integer comparisons (`proto == ProtoHTTPS`)
-- [ ] Update `DetectProtocol(port int) Protocol` return values to use integer constants
-- [ ] Update store serialization: protocols stored as integer arrays in JSON, parsed from string names in TOML import
-- [ ] Update policy evaluation to compare integer protocol values
-- [ ] Write tests for String() and ParseProtocol round-trip for all protocol values
-- [ ] Write tests verifying all existing protocol comparisons still work after refactor
-- [ ] Run tests: `go test ./... -v -timeout 60s`
+- [x] Change `type Protocol string` to `type Protocol int` with explicit integer values
+- [x] Add `String() string` method returning the display name ("http", "https", etc.)
+- [x] Add `ParseProtocol(s string) (Protocol, error)` for TOML/CLI/API parsing
+- [x] Update all string comparisons (`proto == "https"`) to integer comparisons (`proto == ProtoHTTPS`)
+- [x] Update `DetectProtocol(port int) Protocol` return values to use integer constants
+- [x] Update store serialization: protocols stored as integer arrays in JSON, parsed from string names in TOML import
+- [x] Update policy evaluation to compare integer protocol values
+- [x] Write tests for String() and ParseProtocol round-trip for all protocol values
+- [x] Write tests verifying all existing protocol comparisons still work after refactor
+- [x] Run tests: `go test ./... -v -timeout 60s`
 
 ### Task 2: Add byte-level protocol detection for client-first protocols
 
@@ -91,19 +91,19 @@ Detect TLS, SSH, and HTTP by peeking at the first bytes sent by the client after
 - Modify: `internal/proxy/protocol_test.go`
 - Modify: `internal/proxy/server.go`
 
-- [ ] Implement `DetectFromClientBytes(data []byte) Protocol` that examines the first bytes:
+- [x] Implement `DetectFromClientBytes(data []byte) Protocol` that examines the first bytes:
   - TLS: byte 0 = 0x16, bytes 1-2 in {0x0301, 0x0302, 0x0303} -> ProtoHTTPS
   - SSH: starts with "SSH-" -> ProtoSSH
   - HTTP: starts with method verb (GET, POST, PUT, HEAD, DELETE, PATCH, OPTIONS, CONNECT) -> ProtoHTTP
   - No match: return ProtoGeneric (keep port-based guess)
-- [ ] Wire into the SOCKS5 dial path: after TCP connect, use `net.Conn` peek (wrap with `bufio.Reader`) to read first bytes without consuming them
-- [ ] Two-phase detection: `portGuess := DetectProtocol(port)` then `confirmed := DetectFromClientBytes(peekedBytes)`. If confirmed != ProtoGeneric, use confirmed. Otherwise keep portGuess.
-- [ ] Store the confirmed protocol in the connection context (replacing the port-based guess)
-- [ ] Write tests: HTTPS on port 8000 detected correctly via TLS bytes
-- [ ] Write tests: SSH on port 2222 detected correctly via "SSH-" banner
-- [ ] Write tests: HTTP on port 9090 detected correctly via "GET " prefix
-- [ ] Write tests: unknown protocol on standard port (binary data on port 443 stays generic, not forced to HTTPS)
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] Wire into the SOCKS5 dial path: after TCP connect, use `net.Conn` peek (wrap with `bufio.Reader`) to read first bytes without consuming them
+- [x] Two-phase detection: `portGuess := DetectProtocol(port)` then `confirmed := DetectFromClientBytes(peekedBytes)`. If confirmed != ProtoGeneric, use confirmed. Otherwise keep portGuess.
+- [x] Store the confirmed protocol in the connection context (replacing the port-based guess)
+- [x] Write tests: HTTPS on port 8000 detected correctly via TLS bytes
+- [x] Write tests: SSH on port 2222 detected correctly via "SSH-" banner
+- [x] Write tests: HTTP on port 9090 detected correctly via "GET " prefix
+- [x] Write tests: unknown protocol on standard port (binary data on port 443 stays generic, not forced to HTTPS)
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 3: Add byte-level detection for server-first protocols
 
@@ -113,37 +113,37 @@ SMTP and IMAP servers send a banner before the client speaks. Detection requires
 - Modify: `internal/proxy/protocol.go`
 - Modify: `internal/proxy/server.go`
 
-- [ ] Implement `DetectFromServerBytes(data []byte) Protocol` that examines the server's first bytes:
+- [x] Implement `DetectFromServerBytes(data []byte) Protocol` that examines the server's first bytes:
   - SMTP: starts with "220 " or "220-" -> ProtoSMTP
   - IMAP: starts with "* OK" -> ProtoIMAP
   - No match: return ProtoGeneric
-- [ ] For connections where port-based guess is SMTP or IMAP: connect to upstream first, peek server banner, confirm protocol, then relay banner to agent
-- [ ] For connections where port-based guess is not a server-first protocol: skip server banner detection (don't add latency to HTTP/SSH connections)
-- [ ] Write tests: SMTP on port 2525 detected via "220 " banner
-- [ ] Write tests: IMAP on port 1143 detected via "* OK" banner
-- [ ] Write tests: non-mail server on port 25 (doesn't send "220") falls back to generic
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] For connections where port-based guess is SMTP or IMAP: connect to upstream first, peek server banner, confirm protocol, then relay banner to agent
+- [x] For connections where port-based guess is not a server-first protocol: skip server banner detection (don't add latency to HTTP/SSH connections)
+- [x] Write tests: SMTP on port 2525 detected via "220 " banner
+- [x] Write tests: IMAP on port 1143 detected via "* OK" banner
+- [x] Write tests: non-mail server on port 25 (doesn't send "220") falls back to generic
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 4: Verify acceptance criteria
 
-- [ ] Verify Protocol type is integer throughout the codebase (no string comparisons remain)
-- [ ] Verify Protocol.String() returns correct display names for all values
-- [ ] Verify ParseProtocol handles all known protocol names and returns error for unknown
-- [ ] Verify HTTPS on non-standard port (8000) is detected and gets MITM credential injection
-- [ ] Verify SSH on non-standard port (2222) is detected and gets jump host injection
-- [ ] Verify HTTP on non-standard port (9090) is detected correctly
-- [ ] Verify SMTP/IMAP on non-standard ports detected via server banner
-- [ ] Verify standard-port detection still works (no regression)
-- [ ] Verify store serializes protocols as integers in DB
-- [ ] Verify TOML import parses protocol strings ("https") into integers
-- [ ] Run full test suite: `go test ./... -v -timeout 60s -race`
-- [ ] Run linter: `go vet ./...`
+- [x] Verify Protocol type is integer throughout the codebase (no string comparisons remain)
+- [x] Verify Protocol.String() returns correct display names for all values
+- [x] Verify ParseProtocol handles all known protocol names and returns error for unknown
+- [x] Verify HTTPS on non-standard port (8000) is detected and gets MITM credential injection
+- [x] Verify SSH on non-standard port (2222) is detected and gets jump host injection
+- [x] Verify HTTP on non-standard port (9090) is detected correctly
+- [x] Verify SMTP/IMAP on non-standard ports detected via server banner
+- [x] Verify standard-port detection still works (no regression)
+- [x] Verify store serializes protocols as integers in DB
+- [x] Verify TOML import parses protocol strings ("https") into integers
+- [x] Run full test suite: `go test ./... -v -timeout 60s -race`
+- [x] Run linter: `go vet ./...`
 
 ### Task 5: [Final] Update documentation
 
-- [ ] Update CLAUDE.md: document deep packet detection, explain two-phase detection (port guess + byte confirmation)
-- [ ] Update CLAUDE.md: note that Protocol is integer enum, not string
-- [ ] Update examples/config.toml: add comment noting protocol detection is automatic (no need to specify protocols for standard ports)
+- [x] Update CLAUDE.md: document deep packet detection, explain two-phase detection (port guess + byte confirmation)
+- [x] Update CLAUDE.md: note that Protocol is integer enum, not string
+- [x] Update examples/config.toml: add comment noting protocol detection is automatic (no need to specify protocols for standard ports)
 
 ## Technical Details
 

@@ -241,7 +241,7 @@ func (d *DNSInterceptor) HandleQuery(query []byte) ([]byte, error) {
 		if logErr := d.audit.Log(audit.Event{
 			Destination: domain,
 			Port:        53,
-			Protocol:    "dns",
+			Protocol:    ProtoDNS.String(),
 			Verdict:     verdictStr,
 			Reason:      fmt.Sprintf("dns query type=%d", questions[0].Type),
 		}); logErr != nil {
@@ -264,7 +264,7 @@ func (d *DNSInterceptor) evaluate(domain string) policy.Verdict {
 	// DNS follows the same deny-then-allow-then-default semantics as
 	// regular evaluation, not the UDP default-deny semantics, because
 	// DNS queries are a known protocol with meaningful domain-level policy.
-	v := eng.EvaluateWithProtocol(domain, 53, "dns")
+	v := eng.EvaluateWithProtocol(domain, 53, ProtoDNS.String())
 	return v
 }
 

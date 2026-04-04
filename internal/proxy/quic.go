@@ -374,7 +374,7 @@ func (q *QUICProxy) buildHandler(upstreamHost string, destPort int) http.Handler
 
 		// Binding-specific header injection.
 		if res := q.resolver.Load(); res != nil {
-			if binding, ok := res.ResolveForProtocol(host, port, "quic"); ok {
+			if binding, ok := res.ResolveForProtocol(host, port, ProtoQUIC.String()); ok {
 				secret, err := q.provider.Get(binding.Credential)
 				if err != nil {
 					log.Printf("[QUIC-MITM] credential %q lookup failed: %v", binding.Credential, err)
@@ -502,7 +502,7 @@ func (q *QUICProxy) buildHandler(upstreamHost string, destPort int) http.Handler
 func (q *QUICProxy) buildPhantomPairs(host string, port int) []phantomPair {
 	var pairs []phantomPair
 	if res := q.resolver.Load(); res != nil {
-		for _, name := range res.CredentialsForDestination(host, port, "quic") {
+		for _, name := range res.CredentialsForDestination(host, port, ProtoQUIC.String()) {
 			secret, err := q.provider.Get(name)
 			if err != nil {
 				log.Printf("[QUIC-MITM] credential %q lookup failed: %v", name, err)
@@ -587,7 +587,7 @@ func (q *QUICProxy) logAudit(host string, port int, verdict, reason string) {
 	if err := q.audit.Log(audit.Event{
 		Destination: host,
 		Port:        port,
-		Protocol:    "quic",
+		Protocol:    ProtoQUIC.String(),
 		Verdict:     verdict,
 		Reason:      reason,
 	}); err != nil {

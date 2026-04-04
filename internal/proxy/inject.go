@@ -206,15 +206,15 @@ func (inj *Injector) handleWSUpgrade(resp *http.Response, ctx *goproxy.ProxyCtx)
 	}
 	port := portFromRequest(ctx.Req)
 
-	proto := "ws"
+	wsProto := ProtoWS.String()
 	if ctx.Req.URL.Scheme == "https" {
-		proto = "wss"
+		wsProto = ProtoWSS.String()
 	}
 
-	interceptor := newWSFrameInterceptor(upstream, inj.wsProxy, host, port, proto)
+	interceptor := newWSFrameInterceptor(upstream, inj.wsProxy, host, port, wsProto)
 	resp.Body = interceptor
 
-	log.Printf("[WS] intercepting WebSocket upgrade for %s:%d (%s)", host, port, proto)
+	log.Printf("[WS] intercepting WebSocket upgrade for %s:%d (%s)", host, port, wsProto)
 	return resp
 }
 
@@ -479,18 +479,24 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 	// only handles HTTP/HTTPS traffic and the scheme is known from the
 	// request. This ensures bindings with protocols=["http"] match on
 	// non-standard ports (e.g. 8000) where DetectProtocol returns "generic".
-	proto := r.URL.Scheme
-	if proto == "" {
-		proto = string(DetectProtocol(port))
+	var proto Protocol
+	switch r.URL.Scheme {
+	case "https":
+		proto = ProtoHTTPS
+	case "http":
+		proto = ProtoHTTP
+	default:
+		proto = DetectProtocol(port)
 	}
 	// Refine protocol from HTTP headers to detect WebSocket upgrades
 	// and gRPC requests. This ensures bindings and rules scoped to
 	// protocols=["grpc"] or protocols=["wss"] match correctly.
-	if refined := DetectProtocolFromHeaders(r.Header, proto == "https"); refined != ProtoGeneric {
-		proto = string(refined)
+	if refined := DetectProtocolFromHeaders(r.Header, proto == ProtoHTTPS); refined != ProtoGeneric {
+		proto = refined
 	}
+	protoStr := proto.String()
 	if res := inj.resolver.Load(); res != nil {
-		if binding, ok := res.ResolveForProtocol(host, port, proto); ok {
+		if binding, ok := res.ResolveForProtocol(host, port, protoStr); ok {
 			secret, err := inj.provider.Get(binding.Credential)
 			if err != nil {
 				log.Printf("[INJECT] credential %q lookup failed: %v", binding.Credential, err)
@@ -510,7 +516,7 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 	// exfiltration to unintended destinations.
 	var boundCreds []string
 	if res := inj.resolver.Load(); res != nil {
-		boundCreds = res.CredentialsForDestination(host, port, proto)
+		boundCreds = res.CredentialsForDestination(host, port, protoStr)
 	}
 
 	var pairs []phantomPair
