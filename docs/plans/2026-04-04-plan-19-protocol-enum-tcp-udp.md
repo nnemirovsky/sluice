@@ -32,12 +32,12 @@ Add `ProtoTCP` and `ProtoUDP` to the Protocol integer enum and replace hardcoded
 - Modify: `internal/proxy/protocol.go`
 - Modify: `internal/proxy/protocol_test.go`
 
-- [ ] Add `ProtoTCP Protocol = 12` and `ProtoUDP Protocol = 13` to the Protocol enum
-- [ ] Add `"tcp"` and `"udp"` cases to `String()` method
-- [ ] Add `"tcp"` and `"udp"` entries to `protocolNames` map for `ParseProtocol()`
-- [ ] Write tests for `ParseProtocol("tcp")` and `ParseProtocol("udp")` round-trips
-- [ ] Write tests for `ProtoTCP.String() == "tcp"` and `ProtoUDP.String() == "udp"`
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] Add `ProtoTCP Protocol = 12` and `ProtoUDP Protocol = 13` to the Protocol enum
+- [x] Add `"tcp"` and `"udp"` cases to `String()` method
+- [x] Add `"tcp"` and `"udp"` entries to `protocolNames` map for `ParseProtocol()`
+- [x] Write tests for `ParseProtocol("tcp")` and `ParseProtocol("udp")` round-trips
+- [x] Write tests for `ProtoTCP.String() == "tcp"` and `ProtoUDP.String() == "udp"`
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 2: Replace hardcoded strings in policy engine
 
