@@ -795,6 +795,7 @@ func (s *Server) handleServerFirstDetection(
 		}
 	}
 	if err != nil {
+		log.Printf("[DETECT] server-first upstream dial failed for %s: %v", hostAddr, err)
 		return
 	}
 
@@ -845,6 +846,7 @@ func relayDirect(agent io.ReadWriteCloser, dialAddrs []string) {
 		}
 	}
 	if err != nil {
+		log.Printf("[DETECT] relay upstream dial failed for %v: %v", dialAddrs, err)
 		return
 	}
 	defer upstream.Close()
