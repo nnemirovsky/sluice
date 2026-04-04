@@ -6,6 +6,95 @@ import (
 	"testing"
 )
 
+func TestProtocolStringRoundTrip(t *testing.T) {
+	// All Protocol values should round-trip through String() and ParseProtocol().
+	allProtocols := []struct {
+		proto Protocol
+		name  string
+	}{
+		{ProtoGeneric, "generic"},
+		{ProtoHTTP, "http"},
+		{ProtoHTTPS, "https"},
+		{ProtoSSH, "ssh"},
+		{ProtoIMAP, "imap"},
+		{ProtoSMTP, "smtp"},
+		{ProtoWS, "ws"},
+		{ProtoWSS, "wss"},
+		{ProtoGRPC, "grpc"},
+		{ProtoDNS, "dns"},
+		{ProtoQUIC, "quic"},
+		{ProtoAPNS, "apns"},
+	}
+
+	for _, tt := range allProtocols {
+		t.Run(tt.name, func(t *testing.T) {
+			// String() returns the expected display name.
+			if got := tt.proto.String(); got != tt.name {
+				t.Errorf("Protocol(%d).String() = %q, want %q", int(tt.proto), got, tt.name)
+			}
+
+			// ParseProtocol() recovers the original Protocol value.
+			parsed, err := ParseProtocol(tt.name)
+			if err != nil {
+				t.Fatalf("ParseProtocol(%q) error: %v", tt.name, err)
+			}
+			if parsed != tt.proto {
+				t.Errorf("ParseProtocol(%q) = %d, want %d", tt.name, int(parsed), int(tt.proto))
+			}
+		})
+	}
+}
+
+func TestParseProtocolCaseInsensitive(t *testing.T) {
+	parsed, err := ParseProtocol("HTTPS")
+	if err != nil {
+		t.Fatalf("ParseProtocol(\"HTTPS\") error: %v", err)
+	}
+	if parsed != ProtoHTTPS {
+		t.Errorf("ParseProtocol(\"HTTPS\") = %d, want %d", int(parsed), int(ProtoHTTPS))
+	}
+}
+
+func TestParseProtocolUnknown(t *testing.T) {
+	_, err := ParseProtocol("ftp")
+	if err == nil {
+		t.Error("ParseProtocol(\"ftp\") should return error for unknown protocol")
+	}
+}
+
+func TestProtocolStringUnknownValue(t *testing.T) {
+	p := Protocol(999)
+	if got := p.String(); got != "unknown" {
+		t.Errorf("Protocol(999).String() = %q, want \"unknown\"", got)
+	}
+}
+
+func TestProtocolIntegerValues(t *testing.T) {
+	// Verify explicit integer assignments match the plan.
+	tests := []struct {
+		proto Protocol
+		value int
+	}{
+		{ProtoGeneric, 0},
+		{ProtoHTTP, 1},
+		{ProtoHTTPS, 2},
+		{ProtoSSH, 3},
+		{ProtoIMAP, 4},
+		{ProtoSMTP, 5},
+		{ProtoWS, 6},
+		{ProtoWSS, 7},
+		{ProtoGRPC, 8},
+		{ProtoDNS, 9},
+		{ProtoQUIC, 10},
+		{ProtoAPNS, 11},
+	}
+	for _, tt := range tests {
+		if int(tt.proto) != tt.value {
+			t.Errorf("Protocol %s = %d, want %d", tt.proto, int(tt.proto), tt.value)
+		}
+	}
+}
+
 func TestDetectProtocol(t *testing.T) {
 	tests := []struct {
 		port int
@@ -30,7 +119,7 @@ func TestDetectProtocol(t *testing.T) {
 		t.Run(fmt.Sprintf("port_%d", tt.port), func(t *testing.T) {
 			got := DetectProtocol(tt.port)
 			if got != tt.want {
-				t.Errorf("DetectProtocol(%d) = %q, want %q",
+				t.Errorf("DetectProtocol(%d) = %s, want %s",
 					tt.port, got, tt.want)
 			}
 		})
@@ -52,7 +141,7 @@ func TestDetectUDPProtocol(t *testing.T) {
 		t.Run(fmt.Sprintf("port_%d", tt.port), func(t *testing.T) {
 			got := DetectUDPProtocol(tt.port)
 			if got != tt.want {
-				t.Errorf("DetectUDPProtocol(%d) = %q, want %q",
+				t.Errorf("DetectUDPProtocol(%d) = %s, want %s",
 					tt.port, got, tt.want)
 			}
 		})
@@ -146,7 +235,7 @@ func TestDetectProtocolFromHeaders(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := DetectProtocolFromHeaders(tt.hdr, tt.isTLS)
 			if got != tt.want {
-				t.Errorf("DetectProtocolFromHeaders() = %q, want %q", got, tt.want)
+				t.Errorf("DetectProtocolFromHeaders() = %s, want %s", got, tt.want)
 			}
 		})
 	}

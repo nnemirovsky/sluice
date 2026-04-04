@@ -495,7 +495,7 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 			// Use protocol-aware resolution so the correct binding is
 			// selected when multiple bindings exist for the same host:port
 			// with different protocols (e.g. one for SSH, one for HTTPS).
-			binding, ok := r.ResolveForProtocol(fqdn, port, string(proto))
+			binding, ok := r.ResolveForProtocol(fqdn, port, proto.String())
 			if !ok {
 				// No protocol-specific or protocol-agnostic binding
 				// matched. Fall back to any dest+port binding and adopt
@@ -506,7 +506,9 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 				binding, ok = r.Resolve(fqdn, port)
 				if ok && len(binding.Protocols) == 1 {
 					if hint, hok := r.ResolveProtocolHint(fqdn, port); hok {
-						proto = Protocol(hint)
+						if parsed, perr := ParseProtocol(hint); perr == nil {
+							proto = parsed
+						}
 					}
 				}
 			}
@@ -518,7 +520,9 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 			// through to direct dial, bypassing the injector.
 			if ok && proto == ProtoGeneric && len(binding.Protocols) == 0 {
 				if hint, hok := r.ResolveProtocolHint(fqdn, port); hok {
-					proto = Protocol(hint)
+					if parsed, perr := ParseProtocol(hint); perr == nil {
+						proto = parsed
+					}
 					if specific, sok := r.ResolveForProtocol(fqdn, port, hint); sok {
 						binding = specific
 					}
@@ -847,7 +851,7 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 								if logErr := s.udpRelay.audit.Log(audit.Event{
 									Destination: dest,
 									Port:        port,
-									Protocol:    "quic",
+									Protocol:    ProtoQUIC.String(),
 									Verdict:     "deny",
 									Reason:      "quic denied by policy",
 								}); logErr != nil {

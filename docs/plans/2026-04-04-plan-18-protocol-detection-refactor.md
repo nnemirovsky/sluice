@@ -71,16 +71,16 @@ const (
 )
 ```
 
-- [ ] Change `type Protocol string` to `type Protocol int` with explicit integer values
-- [ ] Add `String() string` method returning the display name ("http", "https", etc.)
-- [ ] Add `ParseProtocol(s string) (Protocol, error)` for TOML/CLI/API parsing
-- [ ] Update all string comparisons (`proto == "https"`) to integer comparisons (`proto == ProtoHTTPS`)
-- [ ] Update `DetectProtocol(port int) Protocol` return values to use integer constants
-- [ ] Update store serialization: protocols stored as integer arrays in JSON, parsed from string names in TOML import
-- [ ] Update policy evaluation to compare integer protocol values
-- [ ] Write tests for String() and ParseProtocol round-trip for all protocol values
-- [ ] Write tests verifying all existing protocol comparisons still work after refactor
-- [ ] Run tests: `go test ./... -v -timeout 60s`
+- [x] Change `type Protocol string` to `type Protocol int` with explicit integer values
+- [x] Add `String() string` method returning the display name ("http", "https", etc.)
+- [x] Add `ParseProtocol(s string) (Protocol, error)` for TOML/CLI/API parsing
+- [x] Update all string comparisons (`proto == "https"`) to integer comparisons (`proto == ProtoHTTPS`)
+- [x] Update `DetectProtocol(port int) Protocol` return values to use integer constants
+- [x] Update store serialization: protocols stored as integer arrays in JSON, parsed from string names in TOML import
+- [x] Update policy evaluation to compare integer protocol values
+- [x] Write tests for String() and ParseProtocol round-trip for all protocol values
+- [x] Write tests verifying all existing protocol comparisons still work after refactor
+- [x] Run tests: `go test ./... -v -timeout 60s`
 
 ### Task 2: Add byte-level protocol detection for client-first protocols
 

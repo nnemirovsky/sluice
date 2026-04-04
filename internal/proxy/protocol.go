@@ -5,39 +5,100 @@ package proxy
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net/http"
 	"strings"
 )
 
 // Protocol represents the detected application-layer protocol for a connection.
-type Protocol string
+// It is an integer enum consistent with other enums in the codebase (Verdict,
+// ChannelType). Use String() for display names and ParseProtocol() to convert
+// from string representations.
+type Protocol int
 
 const (
-	// ProtoHTTP indicates plain HTTP traffic (ports 80, 8080).
-	ProtoHTTP Protocol = "http"
-	// ProtoHTTPS indicates TLS-encrypted HTTP traffic (ports 443, 8443).
-	ProtoHTTPS Protocol = "https"
-	// ProtoSSH indicates SSH traffic (port 22).
-	ProtoSSH Protocol = "ssh"
-	// ProtoIMAP indicates IMAP mail retrieval traffic (ports 143, 993).
-	ProtoIMAP Protocol = "imap"
-	// ProtoSMTP indicates SMTP mail submission traffic (ports 25, 587, 465).
-	ProtoSMTP Protocol = "smtp"
-	// ProtoWS indicates plaintext WebSocket traffic (HTTP Upgrade).
-	ProtoWS Protocol = "ws"
-	// ProtoWSS indicates TLS-encrypted WebSocket traffic (HTTPS Upgrade).
-	ProtoWSS Protocol = "wss"
-	// ProtoGRPC indicates gRPC traffic (HTTP/2 with application/grpc content type).
-	ProtoGRPC Protocol = "grpc"
-	// ProtoDNS indicates DNS query traffic (UDP port 53).
-	ProtoDNS Protocol = "dns"
-	// ProtoQUIC indicates QUIC/HTTP3 traffic (UDP with QUIC long header).
-	ProtoQUIC Protocol = "quic"
-	// ProtoAPNS indicates Apple Push Notification Service traffic (port 5223).
-	ProtoAPNS Protocol = "apns"
 	// ProtoGeneric indicates unrecognized traffic on a non-standard port.
-	ProtoGeneric Protocol = "generic"
+	ProtoGeneric Protocol = 0
+	// ProtoHTTP indicates plain HTTP traffic (ports 80, 8080).
+	ProtoHTTP Protocol = 1
+	// ProtoHTTPS indicates TLS-encrypted HTTP traffic (ports 443, 8443).
+	ProtoHTTPS Protocol = 2
+	// ProtoSSH indicates SSH traffic (port 22).
+	ProtoSSH Protocol = 3
+	// ProtoIMAP indicates IMAP mail retrieval traffic (ports 143, 993).
+	ProtoIMAP Protocol = 4
+	// ProtoSMTP indicates SMTP mail submission traffic (ports 25, 587, 465).
+	ProtoSMTP Protocol = 5
+	// ProtoWS indicates plaintext WebSocket traffic (HTTP Upgrade).
+	ProtoWS Protocol = 6
+	// ProtoWSS indicates TLS-encrypted WebSocket traffic (HTTPS Upgrade).
+	ProtoWSS Protocol = 7
+	// ProtoGRPC indicates gRPC traffic (HTTP/2 with application/grpc content type).
+	ProtoGRPC Protocol = 8
+	// ProtoDNS indicates DNS query traffic (UDP port 53).
+	ProtoDNS Protocol = 9
+	// ProtoQUIC indicates QUIC/HTTP3 traffic (UDP with QUIC long header).
+	ProtoQUIC Protocol = 10
+	// ProtoAPNS indicates Apple Push Notification Service traffic (port 5223).
+	ProtoAPNS Protocol = 11
 )
+
+// String returns the display name for the protocol (e.g. "http", "https").
+func (p Protocol) String() string {
+	switch p {
+	case ProtoHTTP:
+		return "http"
+	case ProtoHTTPS:
+		return "https"
+	case ProtoSSH:
+		return "ssh"
+	case ProtoIMAP:
+		return "imap"
+	case ProtoSMTP:
+		return "smtp"
+	case ProtoWS:
+		return "ws"
+	case ProtoWSS:
+		return "wss"
+	case ProtoGRPC:
+		return "grpc"
+	case ProtoDNS:
+		return "dns"
+	case ProtoQUIC:
+		return "quic"
+	case ProtoAPNS:
+		return "apns"
+	case ProtoGeneric:
+		return "generic"
+	default:
+		return "unknown"
+	}
+}
+
+// protocolNames maps string names to Protocol values for parsing.
+var protocolNames = map[string]Protocol{
+	"generic": ProtoGeneric,
+	"http":    ProtoHTTP,
+	"https":   ProtoHTTPS,
+	"ssh":     ProtoSSH,
+	"imap":    ProtoIMAP,
+	"smtp":    ProtoSMTP,
+	"ws":      ProtoWS,
+	"wss":     ProtoWSS,
+	"grpc":    ProtoGRPC,
+	"dns":     ProtoDNS,
+	"quic":    ProtoQUIC,
+	"apns":    ProtoAPNS,
+}
+
+// ParseProtocol converts a string protocol name to a Protocol value.
+// Returns an error for unknown protocol names.
+func ParseProtocol(s string) (Protocol, error) {
+	if p, ok := protocolNames[strings.ToLower(s)]; ok {
+		return p, nil
+	}
+	return ProtoGeneric, fmt.Errorf("unknown protocol %q", s)
+}
 
 // DetectProtocol infers the application-layer protocol from the destination port.
 // This is a port-based heuristic used before any bytes are read from the connection.

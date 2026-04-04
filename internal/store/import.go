@@ -128,6 +128,35 @@ type importFile struct {
 	MCPUpstreams []importMCPUpstream `toml:"mcp_upstream"`
 }
 
+// validProtocolNames lists recognized protocol names for validation during
+// TOML import. These correspond to the Protocol enum values in the proxy
+// package. "udp" is included as a transport-level label used in policy rules.
+var validProtocolNames = map[string]bool{
+	"generic": true,
+	"http":    true,
+	"https":   true,
+	"ssh":     true,
+	"imap":    true,
+	"smtp":    true,
+	"ws":      true,
+	"wss":     true,
+	"grpc":    true,
+	"dns":     true,
+	"quic":    true,
+	"apns":    true,
+	"udp":     true,
+}
+
+// validateProtocols checks that all protocol names are recognized.
+func validateProtocols(protocols []string, context string) error {
+	for _, p := range protocols {
+		if !validProtocolNames[p] {
+			return fmt.Errorf("%s: unknown protocol %q", context, p)
+		}
+	}
+	return nil
+}
+
 // ImportTOML parses TOML config data and inserts rules into the store with
 // merge semantics. Duplicate rules (matched by verdict+destination+ports for
 // network rules, verdict+tool for tool rules, verdict+pattern for content
@@ -319,6 +348,10 @@ func insertRuleIfNew(tx *sql.Tx, verdict string, r importRule) (bool, error) {
 		}
 	}
 
+	if err := validateProtocols(r.Protocols, fmt.Sprintf("%s rule %q", verdict, r.Destination+r.Tool+r.Pattern)); err != nil {
+		return false, err
+	}
+
 	// Validate regex for pattern rules.
 	if r.Pattern != "" {
 		if _, err := regexp.Compile(r.Pattern); err != nil {
@@ -452,6 +485,9 @@ func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
 		if p < 1 || p > 65535 {
 			return false, fmt.Errorf("binding %q->%q: invalid port %d (must be 1-65535)", b.Destination, b.Credential, p)
 		}
+	}
+	if err := validateProtocols(b.Protocols, fmt.Sprintf("binding %q->%q", b.Destination, b.Credential)); err != nil {
+		return false, err
 	}
 	portsJSON := portsToJSONPtr(b.Ports)
 	protocolsJSON := protocolsToJSONPtr(b.Protocols)
