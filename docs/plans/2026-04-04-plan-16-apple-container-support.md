@@ -124,14 +124,14 @@ Wire the CLI wrapper into the ContainerManager interface. Handle credential inje
 - Modify: `internal/container/apple.go`
 - Modify: `internal/container/apple_test.go`
 
-- [ ] Implement `ReloadSecrets`: write phantom token files to shared volume, run `container exec <name> openclaw secrets reload`
-- [ ] Implement `RestartWithEnv`: stop VM, remove, recreate with new env vars (fallback if exec fails)
-- [ ] Implement `InjectMCPConfig`: write mcp-servers.json to shared volume, run `container exec <name> openclaw mcp reload`
-- [ ] Implement `Status`: run `container inspect`, parse running state, IP, health
-- [ ] Implement `Stop`: run `container stop`
-- [ ] Implement `Runtime()`: return `RuntimeApple`
-- [ ] Write tests for each method with mock exec
-- [ ] Run tests: `go test ./internal/container/ -v -timeout 30s`
+- [x] Implement `ReloadSecrets`: write phantom token files to shared volume, run `container exec <name> openclaw secrets reload`
+- [x] Implement `RestartWithEnv`: stop VM, remove, recreate with new env vars (fallback if exec fails)
+- [x] Implement `InjectMCPConfig`: write mcp-servers.json to shared volume, run `container exec <name> openclaw mcp reload`
+- [x] Implement `Status`: run `container inspect`, parse running state, IP, health
+- [x] Implement `Stop`: run `container stop`
+- [x] Implement `Runtime()`: return `RuntimeApple`
+- [x] Write tests for each method with mock exec
+- [x] Run tests: `go test ./internal/container/ -v -timeout 30s`
 
 ### Task 4: Network routing via pf + tun2proxy on host
 

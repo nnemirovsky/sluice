@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -471,6 +473,9 @@ func TestExecRunnerIntegration(t *testing.T) {
 	var _ CommandRunner = ExecRunner{}
 }
 
+// Verify AppleManager satisfies ContainerManager at compile time.
+var _ ContainerManager = (*AppleManager)(nil)
+
 func TestRunConfigNoEnvNoVolumes(t *testing.T) {
 	runner := newMockRunner()
 	runner.onCommand("container --version", []byte("v1.0\n"), nil)
@@ -498,5 +503,375 @@ func TestRunConfigNoEnvNoVolumes(t *testing.T) {
 	}
 	if !strings.HasSuffix(cmd, "test:latest") {
 		t.Errorf("should end with image name: %s", cmd)
+	}
+}
+
+// newTestAppleManager creates an AppleManager with a mock runner for testing.
+// Returns the manager, mock runner, and a temp dir for phantom files.
+func newTestAppleManager(t *testing.T) (*AppleManager, *mockRunner, string) {
+	t.Helper()
+	runner := newMockRunner()
+	runner.onCommand("container --version", []byte("v1.0\n"), nil)
+
+	cli, err := NewAppleCLIWithBin("container", runner)
+	if err != nil {
+		t.Fatalf("create CLI: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+
+	mgr := NewAppleManager(AppleManagerConfig{
+		CLI:           cli,
+		ContainerName: "openclaw",
+		Image:         "openclaw/openclaw:latest",
+		Volumes: []VolumeMount{
+			{HostPath: tmpDir, GuestPath: "/phantoms"},
+		},
+	})
+
+	return mgr, runner, tmpDir
+}
+
+func TestAppleManagerReloadSecrets(t *testing.T) {
+	mgr, runner, tmpDir := newTestAppleManager(t)
+	runner.onCommand("container exec openclaw openclaw secrets reload", []byte("ok\n"), nil)
+
+	env := map[string]string{
+		"ANTHROPIC_API_KEY": "sk-ant-phantom-abc123",
+		"OPENAI_API_KEY":    "sk-phantom-xyz789",
+	}
+
+	err := mgr.ReloadSecrets(context.Background(), tmpDir, env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify phantom files were written.
+	for name, value := range env {
+		data, err := os.ReadFile(filepath.Join(tmpDir, name))
+		if err != nil {
+			t.Errorf("phantom file %s not found: %v", name, err)
+			continue
+		}
+		if string(data) != value {
+			t.Errorf("phantom file %s = %q, want %q", name, string(data), value)
+		}
+	}
+
+	// Verify exec was called.
+	if !runner.called("container exec openclaw openclaw secrets reload") {
+		t.Error("expected exec call for secrets reload")
+	}
+}
+
+func TestAppleManagerReloadSecretsRemoveEmpty(t *testing.T) {
+	mgr, runner, tmpDir := newTestAppleManager(t)
+	runner.onCommand("container exec", []byte("ok\n"), nil)
+
+	// Write a file first, then remove via empty value.
+	path := filepath.Join(tmpDir, "OLD_KEY")
+	if err := os.WriteFile(path, []byte("old-value"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := mgr.ReloadSecrets(context.Background(), tmpDir, map[string]string{
+		"OLD_KEY": "",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("expected phantom file to be removed")
+	}
+}
+
+func TestAppleManagerReloadSecretsFallback(t *testing.T) {
+	mgr, runner, tmpDir := newTestAppleManager(t)
+
+	// Exec fails, triggering RestartWithEnv fallback.
+	runner.onCommand("container exec", nil, errors.New("exec not supported"))
+
+	inspectJSON, _ := json.Marshal([]VMInfo{{
+		Name:  "openclaw",
+		ID:    "abc123",
+		Image: "openclaw/openclaw:latest",
+		State: VMState{Status: "running", Running: true},
+		Env:   []string{"EXISTING=value"},
+	}})
+	runner.onCommand("container inspect", inspectJSON, nil)
+	runner.onCommand("container stop", nil, nil)
+	runner.onCommand("container rm", nil, nil)
+	runner.onCommand("container run", nil, nil)
+
+	err := mgr.ReloadSecrets(context.Background(), tmpDir, map[string]string{
+		"NEW_KEY": "new-value",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify fallback called stop, rm, run.
+	if !runner.called("container stop openclaw") {
+		t.Error("expected stop call in fallback")
+	}
+	if !runner.called("container rm openclaw") {
+		t.Error("expected rm call in fallback")
+	}
+	if !runner.called("container run") {
+		t.Error("expected run call in fallback")
+	}
+}
+
+func TestAppleManagerRestartWithEnv(t *testing.T) {
+	mgr, runner, _ := newTestAppleManager(t)
+
+	inspectJSON, _ := json.Marshal([]VMInfo{{
+		Name:  "openclaw",
+		ID:    "abc123",
+		Image: "openclaw/openclaw:latest",
+		State: VMState{Status: "running", Running: true},
+		Env:   []string{"EXISTING=keep", "UPDATE_ME=old"},
+	}})
+	runner.onCommand("container inspect", inspectJSON, nil)
+	runner.onCommand("container stop", nil, nil)
+	runner.onCommand("container rm", nil, nil)
+	runner.onCommand("container run", nil, nil)
+
+	err := mgr.RestartWithEnv(context.Background(), map[string]string{
+		"UPDATE_ME": "new",
+		"NEW_VAR":   "added",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify the sequence: inspect, stop, rm, run.
+	if !runner.called("container inspect openclaw") {
+		t.Error("expected inspect call")
+	}
+	if !runner.called("container stop openclaw") {
+		t.Error("expected stop call")
+	}
+	if !runner.called("container rm openclaw") {
+		t.Error("expected rm call")
+	}
+
+	runCmd := runner.callWith("container run")
+	if runCmd == "" {
+		t.Fatal("expected run call")
+	}
+	if !strings.Contains(runCmd, "openclaw/openclaw:latest") {
+		t.Errorf("run should use original image: %s", runCmd)
+	}
+	if !strings.Contains(runCmd, "-e UPDATE_ME=new") {
+		t.Errorf("run should contain updated env: %s", runCmd)
+	}
+	if !strings.Contains(runCmd, "-e NEW_VAR=added") {
+		t.Errorf("run should contain new env: %s", runCmd)
+	}
+	if !strings.Contains(runCmd, "-e EXISTING=keep") {
+		t.Errorf("run should preserve existing env: %s", runCmd)
+	}
+}
+
+func TestAppleManagerRestartWithEnvRemoval(t *testing.T) {
+	mgr, runner, _ := newTestAppleManager(t)
+
+	inspectJSON, _ := json.Marshal([]VMInfo{{
+		Name:  "openclaw",
+		ID:    "abc123",
+		Image: "openclaw/openclaw:latest",
+		State: VMState{Status: "running", Running: true},
+		Env:   []string{"KEEP=yes", "REMOVE=old"},
+	}})
+	runner.onCommand("container inspect", inspectJSON, nil)
+	runner.onCommand("container stop", nil, nil)
+	runner.onCommand("container rm", nil, nil)
+	runner.onCommand("container run", nil, nil)
+
+	err := mgr.RestartWithEnv(context.Background(), map[string]string{
+		"REMOVE": "",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	runCmd := runner.callWith("container run")
+	if strings.Contains(runCmd, "REMOVE") {
+		t.Errorf("run should not contain removed env var: %s", runCmd)
+	}
+	if !strings.Contains(runCmd, "-e KEEP=yes") {
+		t.Errorf("run should preserve kept env var: %s", runCmd)
+	}
+}
+
+func TestAppleManagerRestartWithEnvInspectError(t *testing.T) {
+	mgr, runner, _ := newTestAppleManager(t)
+	runner.onCommand("container inspect", nil, errors.New("VM not found"))
+
+	err := mgr.RestartWithEnv(context.Background(), map[string]string{"K": "V"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "inspect VM") {
+		t.Errorf("error should mention inspect: %v", err)
+	}
+}
+
+func TestAppleManagerRestartWithEnvStopError(t *testing.T) {
+	mgr, runner, _ := newTestAppleManager(t)
+
+	inspectJSON, _ := json.Marshal([]VMInfo{{
+		Name: "openclaw", Image: "img:latest", State: VMState{Running: true},
+	}})
+	runner.onCommand("container inspect", inspectJSON, nil)
+	runner.onCommand("container stop", nil, errors.New("stop failed"))
+
+	err := mgr.RestartWithEnv(context.Background(), map[string]string{"K": "V"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "stop VM") {
+		t.Errorf("error should mention stop: %v", err)
+	}
+}
+
+func TestAppleManagerInjectMCPConfig(t *testing.T) {
+	mgr, runner, tmpDir := newTestAppleManager(t)
+	runner.onCommand("container exec openclaw openclaw mcp reload", []byte("ok\n"), nil)
+
+	err := mgr.InjectMCPConfig(tmpDir, "http://localhost:3000/mcp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify mcp-servers.json was written.
+	data, err := os.ReadFile(filepath.Join(tmpDir, "mcp-servers.json"))
+	if err != nil {
+		t.Fatalf("mcp-servers.json not found: %v", err)
+	}
+	if !strings.Contains(string(data), "http://localhost:3000/mcp") {
+		t.Errorf("mcp config should contain sluice URL: %s", string(data))
+	}
+	if !strings.Contains(string(data), "sluice") {
+		t.Errorf("mcp config should contain sluice key: %s", string(data))
+	}
+
+	// Verify exec was called.
+	if !runner.called("container exec openclaw openclaw mcp reload") {
+		t.Error("expected exec call for mcp reload")
+	}
+}
+
+func TestAppleManagerInjectMCPConfigExecError(t *testing.T) {
+	mgr, runner, tmpDir := newTestAppleManager(t)
+	runner.onCommand("container exec", nil, errors.New("exec failed"))
+
+	err := mgr.InjectMCPConfig(tmpDir, "http://localhost:3000/mcp")
+	if err == nil {
+		t.Fatal("expected error when exec fails")
+	}
+}
+
+func TestAppleManagerStatus(t *testing.T) {
+	mgr, runner, _ := newTestAppleManager(t)
+
+	inspectJSON, _ := json.Marshal([]VMInfo{{
+		Name:  "openclaw",
+		ID:    "vm-abc123",
+		Image: "openclaw/openclaw:latest",
+		State: VMState{Status: "running", Running: true},
+	}})
+	runner.onCommand("container inspect", inspectJSON, nil)
+
+	status, err := mgr.Status(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.ID != "vm-abc123" {
+		t.Errorf("ID = %q, want vm-abc123", status.ID)
+	}
+	if !status.Running {
+		t.Error("should be running")
+	}
+	if status.Image != "openclaw/openclaw:latest" {
+		t.Errorf("Image = %q, want openclaw/openclaw:latest", status.Image)
+	}
+}
+
+func TestAppleManagerStatusStopped(t *testing.T) {
+	mgr, runner, _ := newTestAppleManager(t)
+
+	inspectJSON, _ := json.Marshal([]VMInfo{{
+		Name:  "openclaw",
+		ID:    "vm-abc123",
+		Image: "openclaw/openclaw:latest",
+		State: VMState{Status: "stopped", Running: false},
+	}})
+	runner.onCommand("container inspect", inspectJSON, nil)
+
+	status, err := mgr.Status(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.Running {
+		t.Error("should not be running")
+	}
+}
+
+func TestAppleManagerStatusError(t *testing.T) {
+	mgr, runner, _ := newTestAppleManager(t)
+	runner.onCommand("container inspect", nil, errors.New("VM not found"))
+
+	_, err := mgr.Status(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestAppleManagerStop(t *testing.T) {
+	mgr, runner, _ := newTestAppleManager(t)
+	runner.onCommand("container stop", nil, nil)
+
+	err := mgr.Stop(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !runner.called("container stop openclaw") {
+		t.Error("expected stop call with container name")
+	}
+}
+
+func TestAppleManagerStopError(t *testing.T) {
+	mgr, runner, _ := newTestAppleManager(t)
+	runner.onCommand("container stop", nil, errors.New("already stopped"))
+
+	err := mgr.Stop(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestAppleManagerRuntime(t *testing.T) {
+	mgr, _, _ := newTestAppleManager(t)
+	if mgr.Runtime() != RuntimeApple {
+		t.Errorf("Runtime() = %v, want RuntimeApple", mgr.Runtime())
+	}
+}
+
+func TestNewAppleManagerNilEnv(t *testing.T) {
+	runner := newMockRunner()
+	runner.onCommand("container --version", []byte("v1.0\n"), nil)
+	cli, _ := NewAppleCLIWithBin("container", runner)
+
+	mgr := NewAppleManager(AppleManagerConfig{
+		CLI:           cli,
+		ContainerName: "test",
+		Image:         "test:latest",
+	})
+	if mgr.env == nil {
+		t.Error("env map should be initialized even when nil config")
 	}
 }

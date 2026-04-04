@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -183,4 +185,150 @@ func (c *AppleCLI) List(ctx context.Context) ([]VMListEntry, error) {
 		return nil, fmt.Errorf("parse ls output: %w", err)
 	}
 	return entries, nil
+}
+
+// AppleManager implements ContainerManager for Apple Container micro-VMs.
+// It uses AppleCLI for VM lifecycle and credential injection via shared
+// volumes and container exec.
+type AppleManager struct {
+	cli           *AppleCLI
+	containerName string
+	image         string
+	volumes       []VolumeMount
+	env           map[string]string
+}
+
+// AppleManagerConfig holds configuration for creating an AppleManager.
+type AppleManagerConfig struct {
+	CLI           *AppleCLI
+	ContainerName string
+	Image         string
+	Volumes       []VolumeMount
+	Env           map[string]string
+}
+
+// NewAppleManager creates a new AppleManager from the given config.
+func NewAppleManager(cfg AppleManagerConfig) *AppleManager {
+	env := cfg.Env
+	if env == nil {
+		env = make(map[string]string)
+	}
+	return &AppleManager{
+		cli:           cfg.CLI,
+		containerName: cfg.ContainerName,
+		image:         cfg.Image,
+		volumes:       cfg.Volumes,
+		env:           env,
+	}
+}
+
+// ReloadSecrets writes phantom token files to the shared volume directory and
+// signals the Apple Container VM to reload them via container exec. Falls back
+// to RestartWithEnv if the exec command fails.
+func (m *AppleManager) ReloadSecrets(ctx context.Context, phantomDir string, phantomEnv map[string]string) error {
+	for name, value := range phantomEnv {
+		path := filepath.Join(phantomDir, name)
+		if value == "" {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove phantom file %s: %w", name, err)
+			}
+			continue
+		}
+		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
+			return fmt.Errorf("write phantom file %s: %w", name, err)
+		}
+	}
+
+	_, err := m.cli.Exec(ctx, m.containerName, []string{"openclaw", "secrets", "reload"})
+	if err != nil {
+		return m.RestartWithEnv(ctx, phantomEnv)
+	}
+	return nil
+}
+
+// RestartWithEnv stops the VM, removes it, and recreates it with updated
+// environment variables merged into the existing config.
+func (m *AppleManager) RestartWithEnv(ctx context.Context, envUpdates map[string]string) error {
+	// Inspect current state to preserve existing env.
+	info, err := m.cli.Inspect(ctx, m.containerName)
+	if err != nil {
+		return fmt.Errorf("inspect VM: %w", err)
+	}
+
+	// Parse existing env from inspect output.
+	existingEnv := make(map[string]string)
+	for _, e := range info.Env {
+		k, v, _ := strings.Cut(e, "=")
+		existingEnv[k] = v
+	}
+
+	// Merge updates.
+	for k, v := range envUpdates {
+		if v == "" {
+			delete(existingEnv, k)
+		} else {
+			existingEnv[k] = v
+		}
+	}
+
+	if err := m.cli.Stop(ctx, m.containerName); err != nil {
+		return fmt.Errorf("stop VM: %w", err)
+	}
+	if err := m.cli.Remove(ctx, m.containerName); err != nil {
+		return fmt.Errorf("remove VM: %w", err)
+	}
+
+	return m.cli.Run(ctx, RunConfig{
+		Name:    m.containerName,
+		Image:   info.Image,
+		Env:     existingEnv,
+		Volumes: m.volumes,
+	})
+}
+
+// InjectMCPConfig writes an mcp-servers.json file to the shared volume and
+// signals the VM to reload MCP configuration via container exec.
+func (m *AppleManager) InjectMCPConfig(phantomDir, sluiceURL string) error {
+	mcpConfig := map[string]any{
+		"sluice": map[string]any{
+			"url": sluiceURL,
+		},
+	}
+
+	data, err := json.Marshal(mcpConfig)
+	if err != nil {
+		return fmt.Errorf("marshal mcp config: %w", err)
+	}
+
+	path := filepath.Join(phantomDir, "mcp-servers.json")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("write mcp config: %w", err)
+	}
+
+	ctx := context.Background()
+	_, execErr := m.cli.Exec(ctx, m.containerName, []string{"openclaw", "mcp", "reload"})
+	return execErr
+}
+
+// Status returns VM health information by running container inspect.
+func (m *AppleManager) Status(ctx context.Context) (ContainerStatus, error) {
+	info, err := m.cli.Inspect(ctx, m.containerName)
+	if err != nil {
+		return ContainerStatus{}, err
+	}
+	return ContainerStatus{
+		ID:      info.ID,
+		Running: info.State.Running,
+		Image:   info.Image,
+	}, nil
+}
+
+// Stop stops the Apple Container VM.
+func (m *AppleManager) Stop(ctx context.Context) error {
+	return m.cli.Stop(ctx, m.containerName)
+}
+
+// Runtime returns RuntimeApple.
+func (m *AppleManager) Runtime() Runtime {
+	return RuntimeApple
 }
