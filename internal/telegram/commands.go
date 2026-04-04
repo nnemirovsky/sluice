@@ -48,15 +48,16 @@ func ParseCommand(text string) *Command {
 
 // CommandHandler holds the dependencies needed by command handlers.
 type CommandHandler struct {
-	engine      *atomic.Pointer[policy.Engine]
-	resolverPtr *atomic.Pointer[vault.BindingResolver] // shared with proxy; nil if not wired
-	reloadMu    *sync.Mutex                            // shared with proxy; serializes engine swaps and policy mutations
-	broker      *channel.Broker
-	auditPath   string
-	vault       *vault.Store
-	dockerMgr   *docker.Manager
-	store       *store.Store
-	phantomDir  string // shared volume path for phantom token files
+	engine        *atomic.Pointer[policy.Engine]
+	resolverPtr   *atomic.Pointer[vault.BindingResolver] // shared with proxy; nil if not wired
+	reloadMu      *sync.Mutex                            // shared with proxy; serializes engine swaps and policy mutations
+	broker        *channel.Broker
+	auditPath     string
+	vault         *vault.Store
+	dockerMgr     *docker.Manager
+	store         *store.Store
+	phantomDir    string                   // shared volume path for phantom token files
+	onEngineSwap  func(eng *policy.Engine) // called after engine swap to update dependent state
 }
 
 // SetVault enables credential management commands.
@@ -83,6 +84,12 @@ func (h *CommandHandler) SetPhantomDir(dir string) {
 // mutations can update the live binding snapshot without requiring SIGHUP.
 func (h *CommandHandler) SetResolverPtr(ptr *atomic.Pointer[vault.BindingResolver]) {
 	h.resolverPtr = ptr
+}
+
+// SetOnEngineSwap sets a callback invoked after each engine swap so
+// dependent state (e.g. content inspection rules) can be updated.
+func (h *CommandHandler) SetOnEngineSwap(fn func(eng *policy.Engine)) {
+	h.onEngineSwap = fn
 }
 
 // SetBroker sets the channel broker for status reporting.
@@ -135,6 +142,9 @@ func (h *CommandHandler) recompileAndSwap() error {
 		return fmt.Errorf("validation failed: %w", err)
 	}
 	h.engine.Store(newEng)
+	if h.onEngineSwap != nil {
+		h.onEngineSwap(newEng)
+	}
 	return nil
 }
 

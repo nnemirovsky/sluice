@@ -252,16 +252,17 @@ func main() {
 	if telegramEnabled {
 		var channelErr error
 		tgChannel, channelErr = telegram.NewTelegramChannel(telegram.ChannelConfig{
-			Token:       *telegramToken,
-			ChatID:      telegramChatID,
-			EnginePtr:   srv.EnginePtr(),
-			ResolverPtr: srv.ResolverPtr(),
-			ReloadMu:    srv.ReloadMu(),
-			AuditPath:   *auditPath,
-			Vault:       vaultStore,
-			DockerMgr:   dockerMgr,
-			Store:       db,
-			PhantomDir:  *phantomDir,
+			Token:        *telegramToken,
+			ChatID:       telegramChatID,
+			EnginePtr:    srv.EnginePtr(),
+			ResolverPtr:  srv.ResolverPtr(),
+			ReloadMu:     srv.ReloadMu(),
+			AuditPath:    *auditPath,
+			Vault:        vaultStore,
+			DockerMgr:    dockerMgr,
+			Store:        db,
+			PhantomDir:   *phantomDir,
+			OnEngineSwap: srv.UpdateInspectRules,
 		})
 		if channelErr != nil {
 			log.Fatalf("telegram channel: %v", channelErr)
@@ -319,6 +320,7 @@ func main() {
 			log.Printf("reloaded policy: %d allow, %d deny, %d ask rules (default: %s)",
 				len(newEng.AllowRules), len(newEng.DenyRules), len(newEng.AskRules), newEng.Default)
 			srv.StoreEngine(newEng)
+			srv.UpdateInspectRules(newEng)
 
 			// Rebuild binding resolver so credential injection picks up
 			// bindings added via CLI or Telegram since last reload.

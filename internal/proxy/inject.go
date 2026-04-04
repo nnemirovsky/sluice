@@ -324,12 +324,16 @@ func (fi *wsFrameInterceptor) Read(p []byte) (int, error) {
 		}
 
 		if opcode == OpcodeText {
-			text := string(payload)
-			for _, rule := range fi.wp.redactRules {
-				text = rule.re.ReplaceAllString(text, rule.replacement)
+			rules := fi.wp.rules.Load()
+			if rules != nil {
+				text := string(payload)
+				for _, rule := range rules.redact {
+					text = rule.re.ReplaceAllString(text, rule.replacement)
+				}
+				payload = []byte(text)
 			}
 			out := &Frame{FIN: true, Opcode: OpcodeText}
-			out.SetPayload([]byte(text))
+			out.SetPayload(payload)
 			if writeErr := WriteFrame(&fi.readBuf, out); writeErr != nil {
 				return 0, writeErr
 			}
@@ -398,10 +402,13 @@ func (fi *wsFrameInterceptor) Write(p []byte) (int, error) {
 		}
 
 		if opcode == OpcodeText {
-			for _, rule := range fi.wp.blockRules {
-				if rule.re.Match(payload) {
-					sendCloseFrame(fi.upstream, 1008, "blocked by content policy")
-					return 0, fmt.Errorf("blocked by ws content deny rule %q", rule.name)
+			rules := fi.wp.rules.Load()
+			if rules != nil {
+				for _, rule := range rules.block {
+					if rule.re.Match(payload) {
+						sendCloseFrame(fi.upstream, 1008, "blocked by content policy")
+						return 0, fmt.Errorf("blocked by ws content deny rule %q", rule.name)
+					}
 				}
 			}
 
@@ -475,6 +482,12 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 	proto := r.URL.Scheme
 	if proto == "" {
 		proto = string(DetectProtocol(port))
+	}
+	// Refine protocol from HTTP headers to detect WebSocket upgrades
+	// and gRPC requests. This ensures bindings and rules scoped to
+	// protocols=["grpc"] or protocols=["wss"] match correctly.
+	if refined := DetectProtocolFromHeaders(r.Header, proto == "https"); refined != ProtoGeneric {
+		proto = string(refined)
 	}
 	if res := inj.resolver.Load(); res != nil {
 		if binding, ok := res.ResolveForProtocol(host, port, proto); ok {

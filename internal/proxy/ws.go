@@ -313,14 +313,19 @@ type WSRedactRuleConfig struct {
 	Name        string
 }
 
+// wsInspectRules holds compiled content inspection rules for atomic swap.
+type wsInspectRules struct {
+	block  []wsBlockRule
+	redact []wsRedactRule
+}
+
 // WSProxy relays WebSocket frames bidirectionally between agent and upstream
 // connections. Text frames are inspected for phantom tokens (agent->upstream)
 // and content policy rules. Binary and control frames pass through unchanged.
 type WSProxy struct {
-	provider    vault.Provider
-	resolver    *atomic.Pointer[vault.BindingResolver]
-	blockRules  []wsBlockRule
-	redactRules []wsRedactRule
+	provider vault.Provider
+	resolver *atomic.Pointer[vault.BindingResolver]
+	rules    atomic.Pointer[wsInspectRules]
 }
 
 // NewWSProxy creates a WebSocket proxy with the given credential provider,
@@ -337,21 +342,32 @@ func NewWSProxy(
 		provider: provider,
 		resolver: resolver,
 	}
+	if err := wp.UpdateRules(blockConfigs, redactConfigs); err != nil {
+		return nil, err
+	}
+	return wp, nil
+}
+
+// UpdateRules compiles new content inspection rules and atomically swaps them
+// in. This is safe to call while Relay goroutines are running.
+func (wp *WSProxy) UpdateRules(blockConfigs []WSBlockRuleConfig, redactConfigs []WSRedactRuleConfig) error {
+	rules := &wsInspectRules{}
 	for _, cfg := range blockConfigs {
 		re, err := regexp.Compile(cfg.Pattern)
 		if err != nil {
-			return nil, fmt.Errorf("compile ws block pattern %q: %w", cfg.Name, err)
+			return fmt.Errorf("compile ws block pattern %q: %w", cfg.Name, err)
 		}
-		wp.blockRules = append(wp.blockRules, wsBlockRule{re: re, name: cfg.Name})
+		rules.block = append(rules.block, wsBlockRule{re: re, name: cfg.Name})
 	}
 	for _, cfg := range redactConfigs {
 		re, err := regexp.Compile(cfg.Pattern)
 		if err != nil {
-			return nil, fmt.Errorf("compile ws redact pattern %q: %w", cfg.Name, err)
+			return fmt.Errorf("compile ws redact pattern %q: %w", cfg.Name, err)
 		}
-		wp.redactRules = append(wp.redactRules, wsRedactRule{re: re, replacement: cfg.Replacement, name: cfg.Name})
+		rules.redact = append(rules.redact, wsRedactRule{re: re, replacement: cfg.Replacement, name: cfg.Name})
 	}
-	return wp, nil
+	wp.rules.Store(rules)
+	return nil
 }
 
 // phantomPair holds a phantom token and its corresponding real credential.
@@ -456,12 +472,17 @@ func (wp *WSProxy) relayFrames(src io.Reader, dst io.Writer, pairs []phantomPair
 
 		// Text frames: apply direction-specific transformations.
 		if opcode == OpcodeText {
+			// Load rules atomically so SIGHUP-reloaded rules take
+			// effect on the next frame without restarting connections.
+			rules := wp.rules.Load()
 			if agentToUpstream {
 				// Check block rules before phantom replacement.
-				for _, rule := range wp.blockRules {
-					if rule.re.Match(payload) {
-						sendCloseFrame(dst, 1008, "blocked by content policy")
-						return fmt.Errorf("blocked by ws content deny rule %q", rule.name)
+				if rules != nil {
+					for _, rule := range rules.block {
+						if rule.re.Match(payload) {
+							sendCloseFrame(dst, 1008, "blocked by content policy")
+							return fmt.Errorf("blocked by ws content deny rule %q", rule.name)
+						}
 					}
 				}
 
@@ -479,11 +500,13 @@ func (wp *WSProxy) relayFrames(src io.Reader, dst io.Writer, pairs []phantomPair
 				}
 			} else {
 				// Upstream -> Agent: apply redact rules.
-				text := string(payload)
-				for _, rule := range wp.redactRules {
-					text = rule.re.ReplaceAllString(text, rule.replacement)
+				if rules != nil {
+					text := string(payload)
+					for _, rule := range rules.redact {
+						text = rule.re.ReplaceAllString(text, rule.replacement)
+					}
+					payload = []byte(text)
 				}
-				payload = []byte(text)
 			}
 
 			out := &Frame{FIN: true, Opcode: OpcodeText}

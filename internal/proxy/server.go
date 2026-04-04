@@ -1119,6 +1119,39 @@ func (s *Server) StoreEngine(eng *policy.Engine) {
 	s.rules.engine.Store(eng)
 }
 
+// UpdateInspectRules recompiles content inspection rules from the engine and
+// atomically swaps them into the WebSocket and QUIC proxies. Call this after
+// StoreEngine so SIGHUP-reloaded block/redact patterns take effect for
+// in-flight WebSocket and QUIC connections.
+func (s *Server) UpdateInspectRules(eng *policy.Engine) {
+	var wsBlock []WSBlockRuleConfig
+	var wsRedact []WSRedactRuleConfig
+	for _, r := range eng.InspectBlockRules {
+		wsBlock = append(wsBlock, WSBlockRuleConfig{Pattern: r.Pattern, Name: r.Name})
+	}
+	for _, r := range eng.InspectRedactRules {
+		wsRedact = append(wsRedact, WSRedactRuleConfig{Pattern: r.Pattern, Replacement: r.Replacement, Name: r.Name})
+	}
+	if s.injector != nil && s.injector.wsProxy != nil {
+		if err := s.injector.wsProxy.UpdateRules(wsBlock, wsRedact); err != nil {
+			log.Printf("update ws inspect rules: %v", err)
+		}
+	}
+	if s.quicProxy != nil {
+		var quicBlock []QUICBlockRuleConfig
+		var quicRedact []QUICRedactRuleConfig
+		for _, r := range eng.InspectBlockRules {
+			quicBlock = append(quicBlock, QUICBlockRuleConfig{Pattern: r.Pattern, Name: r.Name})
+		}
+		for _, r := range eng.InspectRedactRules {
+			quicRedact = append(quicRedact, QUICRedactRuleConfig{Pattern: r.Pattern, Replacement: r.Replacement, Name: r.Name})
+		}
+		if err := s.quicProxy.UpdateRules(quicBlock, quicRedact); err != nil {
+			log.Printf("update quic inspect rules: %v", err)
+		}
+	}
+}
+
 // StoreResolver atomically stores a new binding resolver. The caller must
 // hold ReloadMu() when concurrent mutations are possible. The injector
 // shares the same atomic pointer so both the dial function and MITM proxy

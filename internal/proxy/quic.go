@@ -52,17 +52,22 @@ type quicRedactRule struct {
 	name        string
 }
 
+// quicInspectRules holds compiled content inspection rules for atomic swap.
+type quicInspectRules struct {
+	block  []quicBlockRule
+	redact []quicRedactRule
+}
+
 // QUICProxy terminates QUIC connections from the agent using sluice's CA
 // certificate. It generates per-host TLS certificates based on the SNI
 // from the TLS ClientHello, enabling HTTP/3 MITM credential injection.
 type QUICProxy struct {
-	caCert      tls.Certificate
-	caX509      *x509.Certificate
-	provider    vault.Provider
-	resolver    *atomic.Pointer[vault.BindingResolver]
-	audit       *audit.FileLogger
-	blockRules  []quicBlockRule
-	redactRules []quicRedactRule
+	caCert   tls.Certificate
+	caX509   *x509.Certificate
+	provider vault.Provider
+	resolver *atomic.Pointer[vault.BindingResolver]
+	audit    *audit.FileLogger
+	rules    atomic.Pointer[quicInspectRules]
 
 	// upstreamTLSConfig overrides the TLS configuration for outbound HTTP/3
 	// connections to real upstreams. Nil uses system roots. Tests set this
@@ -124,21 +129,32 @@ func NewQUICProxy(
 		resolver: resolver,
 		audit:    auditLog,
 	}
+	if err := qp.UpdateRules(blockConfigs, redactConfigs); err != nil {
+		return nil, err
+	}
+	return qp, nil
+}
+
+// UpdateRules compiles new content inspection rules and atomically swaps them
+// in. This is safe to call while handleConnection goroutines are running.
+func (q *QUICProxy) UpdateRules(blockConfigs []QUICBlockRuleConfig, redactConfigs []QUICRedactRuleConfig) error {
+	rules := &quicInspectRules{}
 	for _, cfg := range blockConfigs {
 		re, err := regexp.Compile(cfg.Pattern)
 		if err != nil {
-			return nil, fmt.Errorf("compile quic block pattern %q: %w", cfg.Name, err)
+			return fmt.Errorf("compile quic block pattern %q: %w", cfg.Name, err)
 		}
-		qp.blockRules = append(qp.blockRules, quicBlockRule{re: re, name: cfg.Name})
+		rules.block = append(rules.block, quicBlockRule{re: re, name: cfg.Name})
 	}
 	for _, cfg := range redactConfigs {
 		re, err := regexp.Compile(cfg.Pattern)
 		if err != nil {
-			return nil, fmt.Errorf("compile quic redact pattern %q: %w", cfg.Name, err)
+			return fmt.Errorf("compile quic redact pattern %q: %w", cfg.Name, err)
 		}
-		qp.redactRules = append(qp.redactRules, quicRedactRule{re: re, replacement: cfg.Replacement, name: cfg.Name})
+		rules.redact = append(rules.redact, quicRedactRule{re: re, replacement: cfg.Replacement, name: cfg.Name})
 	}
-	return qp, nil
+	q.rules.Store(rules)
+	return nil
 }
 
 // ListenAndServe starts the QUIC listener on the given UDP address and
@@ -371,12 +387,16 @@ func (q *QUICProxy) buildHandler(upstreamHost string) http.Handler {
 		}
 
 		// Check content deny rules BEFORE phantom replacement so patterns
-		// never run against decrypted credentials.
-		for _, rule := range q.blockRules {
-			if rule.re.Match(reqBody) {
-				q.logAudit(host, port, "deny", fmt.Sprintf("blocked by content rule %q", rule.name))
-				http.Error(w, "blocked by content policy", http.StatusForbidden)
-				return
+		// never run against decrypted credentials. Rules are loaded
+		// atomically so SIGHUP-reloaded rules take effect immediately.
+		rules := q.rules.Load()
+		if rules != nil {
+			for _, rule := range rules.block {
+				if rule.re.Match(reqBody) {
+					q.logAudit(host, port, "deny", fmt.Sprintf("blocked by content rule %q", rule.name))
+					http.Error(w, "blocked by content policy", http.StatusForbidden)
+					return
+				}
 			}
 		}
 
@@ -427,9 +447,13 @@ func (q *QUICProxy) buildHandler(upstreamHost string) http.Handler {
 			return
 		}
 
-		// Apply redact rules to response body.
-		for _, rule := range q.redactRules {
-			respBody = rule.re.ReplaceAll(respBody, []byte(rule.replacement))
+		// Apply redact rules to response body. Reload atomically in case
+		// rules were updated via SIGHUP since the block check above.
+		rules = q.rules.Load()
+		if rules != nil {
+			for _, rule := range rules.redact {
+				respBody = rule.re.ReplaceAll(respBody, []byte(rule.replacement))
+			}
 		}
 
 		// Copy response headers.
