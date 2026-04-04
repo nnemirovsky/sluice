@@ -104,15 +104,15 @@ Connect to remote MCP servers via WebSocket (`mcp` subprotocol).
 - Create: `internal/mcp/transport_ws.go`
 - Create: `internal/mcp/transport_ws_test.go`
 
-- [ ] Add `github.com/coder/websocket` dependency
-- [ ] Implement `WSUpstream` struct satisfying the same interface as `Upstream`
-- [ ] On `Initialize`: WebSocket dial with `Sec-WebSocket-Protocol: mcp`, send `initialize` JSON-RPC, read response
-- [ ] On `SendRequest`: write JSON-RPC text frame, read response frame
-- [ ] Handle bidirectional communication (server-initiated notifications)
-- [ ] Support session ID via subprotocol (`mcp.session-id.<ID>`) or query parameter
-- [ ] Write tests with mock WebSocket MCP server
-- [ ] Write tests for reconnection on connection drop
-- [ ] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
+- [x] Add `github.com/coder/websocket` dependency
+- [x] Implement `WSUpstream` struct satisfying the same interface as `Upstream`
+- [x] On `Initialize`: WebSocket dial with `Sec-WebSocket-Protocol: mcp`, send `initialize` JSON-RPC, read response
+- [x] On `SendRequest`: write JSON-RPC text frame, read response frame
+- [x] Handle bidirectional communication (server-initiated notifications)
+- [x] Support session ID via subprotocol (`mcp.session-id.<ID>`) or query parameter
+- [x] Write tests with mock WebSocket MCP server
+- [x] Write tests for reconnection on connection drop
+- [x] Run tests: `go test ./internal/mcp/ -v -timeout 30s`
 
 ### Task 4: Wire transports into gateway startup
 
