@@ -53,6 +53,7 @@ func (h *MCPHTTPHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req JSONRPCRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 10*1024*1024) // 10 MB
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(&JSONRPCResponse{

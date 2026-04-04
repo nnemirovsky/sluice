@@ -21,6 +21,7 @@ import (
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/telegram"
+	"github.com/nemirovsky/sluice/internal/vault"
 )
 
 func handleMCPCommand(args []string) error {
@@ -177,14 +178,38 @@ func handleMCPGateway(args []string) error {
 			len(eng.InspectBlockRules), len(eng.InspectRedactRules))
 	}
 
+	// Build credential resolver so vault: prefixed env values in upstream
+	// configs are resolved to real credentials.
+	var credResolver mcp.CredentialResolver
+	vaultCfg, err := readVaultConfig(db)
+	if err != nil {
+		log.Printf("vault config unavailable (vault: env values will not be resolved): %v", err)
+	} else {
+		provider, provErr := vault.NewProviderFromConfig(vaultCfg)
+		if provErr != nil {
+			log.Printf("vault provider unavailable (vault: env values will not be resolved): %v", provErr)
+		} else {
+			credResolver = func(name string) (string, error) {
+				sb, getErr := provider.Get(name)
+				if getErr != nil {
+					return "", getErr
+				}
+				val := sb.String()
+				sb.Release()
+				return val, nil
+			}
+		}
+	}
+
 	gw, err := mcp.NewGateway(mcp.GatewayConfig{
-		Upstreams:  upstreams,
-		ToolPolicy: toolPolicy,
-		Inspector:  inspector,
-		Audit:      logger,
-		Broker:     broker,
-		TimeoutSec: eng.TimeoutSec,
-		Store:      db,
+		Upstreams:          upstreams,
+		ToolPolicy:         toolPolicy,
+		Inspector:          inspector,
+		Audit:              logger,
+		Broker:             broker,
+		TimeoutSec:         eng.TimeoutSec,
+		Store:              db,
+		CredentialResolver: credResolver,
 	})
 	if err != nil {
 		return fmt.Errorf("start MCP gateway: %w", err)
