@@ -32,7 +32,15 @@ CREATE TABLE config (
     vault_hashicorp_role_id TEXT,
     vault_hashicorp_secret_id TEXT,
     vault_hashicorp_role_id_env TEXT,
-    vault_hashicorp_secret_id_env TEXT
+    vault_hashicorp_secret_id_env TEXT,
+    vault_1password_token TEXT,
+    vault_1password_vault TEXT,
+    vault_1password_field TEXT,
+    vault_bitwarden_token TEXT,
+    vault_bitwarden_org_id TEXT,
+    vault_keepass_path TEXT,
+    vault_keepass_key_file TEXT,
+    vault_gopass_store TEXT
 );
 
 INSERT OR IGNORE INTO config (id) VALUES (1);
@@ -55,6 +63,7 @@ CREATE TABLE mcp_upstreams (
     args TEXT,
     env TEXT,
     timeout_sec INTEGER DEFAULT 120,
+    transport TEXT NOT NULL DEFAULT 'stdio',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -62,6 +71,8 @@ CREATE TABLE channels (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     type INTEGER NOT NULL DEFAULT 0,
     enabled INTEGER NOT NULL DEFAULT 1,
+    webhook_url TEXT,
+    webhook_secret TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

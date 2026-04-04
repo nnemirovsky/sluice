@@ -10,6 +10,8 @@ Add `ProtoTCP` and `ProtoUDP` to the Protocol integer enum and replace hardcoded
 
 ## Context
 
+**IMPORTANT: Do NOT create new migration files.** All schema is in a single `000001_init.up.sql`. If the schema needs changes (it shouldn't for this plan since protocols are stored as strings in JSON arrays, not as DB columns), edit `000001_init.up.sql` directly.
+
 **Files with hardcoded "udp" strings:**
 - `internal/policy/engine.go` lines 624, 627, 654, 657: `matchRulesStrictProto(rules, dest, port, "udp")`
 - `internal/store/import.go` line 149: `"udp": true` in validProtocolNames
