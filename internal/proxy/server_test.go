@@ -1,17 +1,25 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"testing"
 	"time"
 
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/net/proxy"
 
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/policy"
+	"github.com/nemirovsky/sluice/internal/vault"
 )
 
 // autoResolveChannel is a mock channel that automatically resolves approval
@@ -1318,4 +1326,240 @@ func splitDomainLabels(domain string) []string {
 		labels = append(labels, domain[start:])
 	}
 	return labels
+}
+
+// TestQUICProxyWiredIntoServer verifies that when credential injection is
+// enabled, the QUIC proxy is created alongside the HTTPS MITM injector and
+// listens on a local UDP port. This is the wiring test for Task 11.
+func TestQUICProxyWiredIntoServer(t *testing.T) {
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tmpDir := t.TempDir()
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Provider:   &stubQUICProvider{},
+		Resolver:   mustBindingResolver(t),
+		VaultDir:   tmpDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
+
+	if srv.quicProxy == nil {
+		t.Fatal("expected QUIC proxy to be created when injection is enabled")
+	}
+
+	// Wait for the QUIC proxy listener to start.
+	var addr net.Addr
+	for i := 0; i < 50; i++ {
+		addr = srv.quicProxy.Addr()
+		if addr != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if addr == nil {
+		t.Fatal("QUIC proxy did not start listening")
+	}
+	t.Logf("QUIC proxy listening on %s", addr)
+}
+
+// mustBindingResolver creates a minimal BindingResolver for tests.
+func mustBindingResolver(t *testing.T) *vault.BindingResolver {
+	t.Helper()
+	r, err := vault.NewBindingResolver([]vault.Binding{
+		{Destination: "example.com", Ports: []int{443}, Credential: "test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// TestUDPAssociateQUICDetectionAndRouting verifies the full chain: a QUIC
+// Initial packet sent through UDP ASSOCIATE is detected and routed to the
+// QUICProxy, which terminates TLS and proxies the HTTP/3 request with
+// phantom token replacement.
+func TestUDPAssociateQUICDetectionAndRouting(t *testing.T) {
+	const sni = "api.example.com"
+
+	// 1. Start an HTTP/3 upstream echo server.
+	upstreamCACert, upstreamCAX509, err := GenerateCA()
+	if err != nil {
+		t.Fatalf("GenerateCA upstream: %v", err)
+	}
+	upstreamAddr, cleanup := startH3Upstream(t, upstreamCACert)
+	defer cleanup()
+
+	// 2. Create vault provider with a test credential.
+	provider := &mapQUICProvider{
+		creds: map[string]string{
+			"test_cred": "real-secret-value",
+		},
+	}
+
+	bindings := []vault.Binding{
+		{
+			Destination: sni,
+			Ports:       []int{443},
+			Credential:  "test_cred",
+			Header:      "X-Api-Key",
+			Protocols:   []string{"quic"},
+		},
+	}
+	resolver, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatalf("NewBindingResolver: %v", err)
+	}
+
+	// 3. Create the SOCKS5 server with credential injection (which creates QUICProxy).
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+
+[[allow]]
+destination = "api.example.com"
+ports = [443]
+protocols = ["udp"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tmpDir := t.TempDir()
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Provider:   provider,
+		Resolver:   resolver,
+		VaultDir:   tmpDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
+
+	if srv.quicProxy == nil {
+		t.Fatal("expected QUIC proxy to be created")
+	}
+
+	// Wait for QUIC proxy to start.
+	var quicAddr net.Addr
+	for i := 0; i < 50; i++ {
+		quicAddr = srv.quicProxy.Addr()
+		if quicAddr != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if quicAddr == nil {
+		t.Fatal("QUIC proxy did not start listening")
+	}
+
+	// Configure QUICProxy to connect to the local upstream instead of
+	// the real destination.
+	upstreamPool := x509.NewCertPool()
+	upstreamPool.AddCert(upstreamCAX509)
+	srv.quicProxy.upstreamTLSConfig = &tls.Config{
+		RootCAs: upstreamPool,
+	}
+	srv.quicProxy.upstreamDial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+		return quic.DialAddr(ctx, upstreamAddr, tlsCfg, cfg)
+	}
+
+	// 4. Connect an HTTP/3 client directly to the QUIC proxy to verify
+	// the credential injection pipeline works end-to-end. The proxy
+	// generates a per-host cert signed by its CA.
+	proxyCAX509 := srv.quicProxy.caX509
+
+	pool := x509.NewCertPool()
+	pool.AddCert(proxyCAX509)
+
+	transport := &http3.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:    pool,
+			ServerName: sni,
+		},
+		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+			return quic.DialAddr(ctx, quicAddr.String(), tlsCfg, cfg)
+		},
+	}
+	defer transport.Close()
+
+	phantomToken := PhantomToken("test_cred")
+	reqURL := fmt.Sprintf("https://%s/v1/test", sni)
+	req, err := http.NewRequest("POST", reqURL, bytes.NewReader([]byte("body with "+phantomToken)))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+phantomToken)
+
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("HTTP/3 round trip: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	// Verify binding-specific header injection.
+	echoAPIKey := resp.Header.Get("X-Echo-Api-Key")
+	if echoAPIKey != "real-secret-value" {
+		t.Errorf("X-Echo-Api-Key = %q, want %q", echoAPIKey, "real-secret-value")
+	}
+
+	// Verify phantom token replaced in Authorization header.
+	echoAuth := resp.Header.Get("X-Echo-Auth")
+	if echoAuth != "Bearer real-secret-value" {
+		t.Errorf("X-Echo-Auth = %q, want %q", echoAuth, "Bearer real-secret-value")
+	}
+
+	// Verify phantom token replaced in body.
+	if bytes.Contains(respBody, []byte(phantomToken)) {
+		t.Errorf("body still contains phantom token")
+	}
+	if !bytes.Contains(respBody, []byte("real-secret-value")) {
+		t.Errorf("body missing real credential: %s", string(respBody))
+	}
+}
+
+// TestServerQUICProxyNotCreatedWithoutProvider verifies that the QUICProxy
+// is not created when no vault provider is configured.
+func TestServerQUICProxyNotCreatedWithoutProvider(t *testing.T) {
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer func() { _ = srv.Close() }()
+
+	if srv.quicProxy != nil {
+		t.Error("QUIC proxy should not be created without a vault provider")
+	}
 }

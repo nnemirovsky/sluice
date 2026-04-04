@@ -56,6 +56,20 @@ destination = "169.254.169.254"
 [[deny]]
 destination = "100.100.100.200"
 
+# --- UDP rules ---
+# Block all UDP by default (safe: legitimate API traffic uses TCP)
+[[deny]]
+destination = "*"
+protocols = ["udp"]
+name = "block all UDP by default"
+
+# Allow Google DNS over UDP
+[[allow]]
+destination = "dns.google"
+ports = [53]
+protocols = ["udp", "dns"]
+name = "allow Google DNS"
+
 # --- Tool rules (tool field) ---
 
 [[allow]]

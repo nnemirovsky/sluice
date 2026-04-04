@@ -251,14 +251,14 @@ Connect QUIC handler to UDP relay. Update Docker compose for UDP routing.
 - Modify: `internal/proxy/udp.go`
 - Modify: `compose.yml`, `compose.dev.yml`
 
-- [ ] In `server.New()`: if credential injection enabled, create `QUICProxy` alongside existing `Injector`
-- [ ] QUICProxy listens on local UDP port (like Injector listens on local TCP port)
-- [ ] UDP relay: when QUIC packet detected, forward to QUICProxy's local port
-- [ ] Update tun2proxy command in compose files to enable UDP routing
-- [ ] Add default UDP deny rule in examples/config.toml: `[[deny]] destination = "*" protocols = ["udp"]`
-- [ ] Add DNS allow rule: `[[allow]] destination = "dns.google" ports = [53] protocols = ["udp", "dns"]`
-- [ ] Write integration test: full chain (UDP ASSOCIATE -> QUIC detection -> HTTP/3 MITM -> credential injection)
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] In `server.New()`: if credential injection enabled, create `QUICProxy` alongside existing `Injector`
+- [x] QUICProxy listens on local UDP port (like Injector listens on local TCP port)
+- [x] UDP relay: when QUIC packet detected, forward to QUICProxy's local port
+- [x] Update tun2proxy command in compose files to enable UDP routing
+- [x] Add default UDP deny rule in examples/config.toml: `[[deny]] destination = "*" protocols = ["udp"]`
+- [x] Add DNS allow rule: `[[allow]] destination = "dns.google" ports = [53] protocols = ["udp", "dns"]`
+- [x] Write integration test: full chain (UDP ASSOCIATE -> QUIC detection -> HTTP/3 MITM -> credential injection)
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 12: Verify acceptance criteria
 

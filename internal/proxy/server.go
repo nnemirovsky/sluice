@@ -50,9 +50,11 @@ type Config struct {
 	Resolver      *vault.BindingResolver   // nil = no credential injection
 	VaultDir      string                   // CA cert storage dir (defaults to ~/.sluice)
 	Store         *store.Store             // nil = in-memory only (no persistence)
-	WSBlockRules  []WSBlockRuleConfig      // WebSocket content deny rules
-	WSRedactRules []WSRedactRuleConfig     // WebSocket content redact rules
-	DNSResolver   string                   // upstream DNS resolver for intercepted queries (default: 8.8.8.8:53)
+	WSBlockRules    []WSBlockRuleConfig      // WebSocket content deny rules
+	WSRedactRules   []WSRedactRuleConfig     // WebSocket content redact rules
+	QUICBlockRules  []QUICBlockRuleConfig    // QUIC/HTTP3 content deny rules
+	QUICRedactRules []QUICRedactRuleConfig   // QUIC/HTTP3 content redact rules
+	DNSResolver     string                   // upstream DNS resolver for intercepted queries (default: 8.8.8.8:53)
 }
 
 // Server wraps a SOCKS5 server with policy enforcement and audit logging.
@@ -67,6 +69,7 @@ type Server struct {
 	mailProxy      *MailProxy
 	udpRelay       *UDPRelay
 	dnsInterceptor *DNSInterceptor
+	quicProxy      *QUICProxy
 	resolver       atomic.Pointer[vault.BindingResolver]
 	closed         atomic.Bool
 	serving        atomic.Bool
@@ -460,6 +463,19 @@ func (s *Server) setupInjection(cfg Config, mainLn net.Listener) error {
 	// so implicit TLS ports (993, 465) can be handled via TLS MITM.
 	s.mailProxy = NewMailProxy(cfg.Provider, &caCert)
 
+	// QUIC proxy for HTTP/3 MITM credential injection over UDP.
+	qp, qpErr := NewQUICProxy(caCert, cfg.Provider, &s.resolver, cfg.Audit, cfg.QUICBlockRules, cfg.QUICRedactRules)
+	if qpErr != nil {
+		log.Printf("QUIC proxy disabled: %v", qpErr)
+	} else {
+		s.quicProxy = qp
+		go func() {
+			if listenErr := qp.ListenAndServe("127.0.0.1:0"); listenErr != nil {
+				log.Printf("[QUIC] listener stopped: %v", listenErr)
+			}
+		}()
+	}
+
 	log.Printf("credential injection enabled (%s)", cfg.Provider.Name())
 	return nil
 }
@@ -780,6 +796,38 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 				continue
 			}
 
+			// QUIC interception: QUIC packets on HTTPS ports are routed to
+			// QUICProxy for HTTP/3 MITM credential injection. Use session
+			// tracking so multi-packet handshakes share the same local socket.
+			if s.quicProxy != nil && IsQUICPacket(payload) && isHTTPSPort(port) {
+				quicAddr := s.quicProxy.Addr()
+				if quicAddr != nil {
+					sessionKey := "quic:" + dest + ":" + strconv.Itoa(port)
+					mu.Lock()
+					sess, exists := sessions[sessionKey]
+					if !exists {
+						upstream, listenErr := net.ListenPacket("udp", "127.0.0.1:0")
+						if listenErr != nil {
+							mu.Unlock()
+							log.Printf("[QUIC] create upstream for %s: %v", sessionKey, listenErr)
+							continue
+						}
+						sess = &udpSession{upstream: upstream, lastSeen: time.Now()}
+						sessions[sessionKey] = sess
+						go s.relayUDPResponses(upstream, bindLn, srcAddr)
+					} else {
+						sess.lastSeen = time.Now()
+					}
+					mu.Unlock()
+
+					if _, writeErr := sess.upstream.WriteTo(payload, quicAddr); writeErr != nil {
+						log.Printf("[QUIC] write to proxy: %v", writeErr)
+					}
+					continue
+				}
+				// QUICProxy not yet listening, fall through to normal UDP handling.
+			}
+
 			// General UDP: evaluate policy via UDPRelay.
 			verdict := s.udpRelay.evaluateUDP(dest, port)
 			if verdict != policy.Allow {
@@ -874,6 +922,11 @@ func (s *Server) relayUDPResponses(upstream net.PacketConn, relay *net.UDPConn, 
 			log.Printf("[UDP] write response to client: %v", writeErr)
 		}
 	}
+}
+
+// isHTTPSPort returns true for ports commonly used by HTTPS/HTTP3.
+func isHTTPSPort(port int) bool {
+	return port == 443 || port == 8443
 }
 
 // generatePinID returns a random hex string used to key per-connection
@@ -1033,6 +1086,9 @@ func (s *Server) Close() error {
 	if s.injectorLn != nil {
 		_ = s.injectorLn.Close()
 	}
+	if s.quicProxy != nil {
+		_ = s.quicProxy.Close()
+	}
 	return s.listener.Close()
 }
 
@@ -1046,6 +1102,9 @@ func (s *Server) GracefulShutdown(timeout time.Duration) error {
 	_ = s.listener.Close()
 	if s.injectorLn != nil {
 		_ = s.injectorLn.Close()
+	}
+	if s.quicProxy != nil {
+		_ = s.quicProxy.Close()
 	}
 
 	// Wait for in-flight connections to complete, bounded by timeout.
