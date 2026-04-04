@@ -814,7 +814,12 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 				mu.Unlock()
 
 				if exists {
-					if _, writeErr := sess.upstream.WriteTo(payload, s.quicProxy.Addr()); writeErr != nil {
+					quicAddr := s.quicProxy.Addr()
+					if quicAddr == nil {
+						log.Printf("[QUIC] proxy not ready, dropping datagram for %s:%d", dest, port)
+						continue
+					}
+					if _, writeErr := sess.upstream.WriteTo(payload, quicAddr); writeErr != nil {
 						log.Printf("[QUIC] write to proxy: %v", writeErr)
 					}
 					continue

@@ -218,13 +218,13 @@ func (d *DNSInterceptor) HandleQuery(query []byte) ([]byte, error) {
 		return nil, fmt.Errorf("parse dns query: %w", err)
 	}
 
-	if len(questions) == 0 {
-		// No questions. Forward as-is.
-		return d.forwardToResolver(query)
+	if len(questions) != 1 {
+		// Standard DNS queries have exactly one question. Reject anything
+		// else to prevent policy bypass via crafted multi-question packets
+		// or empty queries.
+		return BuildNXDOMAIN(query)
 	}
 
-	// Evaluate policy for the first question's domain (standard queries
-	// have exactly one question).
 	domain := questions[0].Name
 	verdict := d.evaluate(domain)
 

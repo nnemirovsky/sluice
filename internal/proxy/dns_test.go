@@ -692,6 +692,73 @@ func parseResponseQuestions(data []byte) (id uint16, questions []DNSQuestion, er
 	return id, questions, nil
 }
 
+func TestDNSInterceptor_RejectsMultiQuestionQueries(t *testing.T) {
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	enginePtr := new(atomic.Pointer[policy.Engine])
+	enginePtr.Store(eng)
+
+	interceptor := NewDNSInterceptor(enginePtr, nil, "8.8.8.8:53")
+
+	// Build a query with 2 questions by appending a second question.
+	query := buildDNSQuery(0xAAAA, "allowed.example.com", dnsTypeA)
+	// Append second question for evil.example.com.
+	var second []byte
+	second = appendDNSName(second, "evil.example.com")
+	second = append(second, 0x00, 0x01) // QTYPE A
+	second = append(second, 0x00, 0x01) // QCLASS IN
+	query = append(query, second...)
+	// Set QDCOUNT to 2.
+	binary.BigEndian.PutUint16(query[4:6], 2)
+
+	resp, err := interceptor.HandleQuery(query)
+	if err != nil {
+		t.Fatalf("HandleQuery: %v", err)
+	}
+
+	// Should return NXDOMAIN for non-standard queries.
+	rcode := binary.BigEndian.Uint16(resp[2:4]) & 0x000F
+	if rcode != 3 {
+		t.Errorf("RCODE = %d, want 3 (NXDOMAIN) for multi-question query", rcode)
+	}
+}
+
+func TestDNSInterceptor_RejectsZeroQuestionQueries(t *testing.T) {
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	enginePtr := new(atomic.Pointer[policy.Engine])
+	enginePtr.Store(eng)
+
+	interceptor := NewDNSInterceptor(enginePtr, nil, "8.8.8.8:53")
+
+	query := buildDNSQuery(0xBBBB, "example.com", dnsTypeA)
+	// Set QDCOUNT to 0.
+	binary.BigEndian.PutUint16(query[4:6], 0)
+
+	resp, err := interceptor.HandleQuery(query)
+	if err != nil {
+		t.Fatalf("HandleQuery: %v", err)
+	}
+
+	// Should return NXDOMAIN for zero-question queries.
+	rcode := binary.BigEndian.Uint16(resp[2:4]) & 0x000F
+	if rcode != 3 {
+		t.Errorf("RCODE = %d, want 3 (NXDOMAIN) for zero-question query", rcode)
+	}
+}
+
 // --- End-to-end: DNS interceptor with real UDP relay pattern ---
 
 func TestDNSInterceptor_HandleQuery_ForwardTimeout(t *testing.T) {
