@@ -18,7 +18,8 @@ type WSUpstream struct {
 	name    string
 	url     string
 	conn    *websocket.Conn
-	mu      sync.Mutex
+	mu      sync.Mutex   // protects conn and serializes send/receive
+	ctxMu   sync.RWMutex // protects ctx and cancel
 	nextID  atomic.Int64
 	timeout time.Duration
 	ctx     context.Context    // cancelled by Stop to unblock in-flight reads
@@ -43,7 +44,11 @@ func NewWSUpstream(name, url string, timeoutSec int) *WSUpstream {
 
 // connect dials the WebSocket server with the "mcp" subprotocol.
 func (w *WSUpstream) connect() error {
-	dialCtx, dialCancel := context.WithTimeout(w.ctx, w.timeout)
+	w.ctxMu.RLock()
+	ctx := w.ctx
+	w.ctxMu.RUnlock()
+
+	dialCtx, dialCancel := context.WithTimeout(ctx, w.timeout)
 	defer dialCancel()
 
 	conn, _, err := websocket.Dial(dialCtx, w.url, &websocket.DialOptions{
@@ -77,7 +82,11 @@ func (w *WSUpstream) Send(req JSONRPCRequest) (*JSONRPCResponse, error) {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(w.ctx, w.timeout)
+	w.ctxMu.RLock()
+	parentCtx := w.ctx
+	w.ctxMu.RUnlock()
+
+	ctx, cancel := context.WithTimeout(parentCtx, w.timeout)
 	defer cancel()
 
 	if err := w.conn.Write(ctx, websocket.MessageText, data); err != nil {
@@ -210,7 +219,10 @@ func (w *WSUpstream) CallTool(toolName string, arguments json.RawMessage) (*JSON
 // performing the full MCP handshake again. Call this after a connection
 // drop to re-establish communication with the upstream server.
 func (w *WSUpstream) Reconnect() error {
-	w.cancel()
+	w.ctxMu.RLock()
+	cancel := w.cancel
+	w.ctxMu.RUnlock()
+	cancel()
 
 	w.mu.Lock()
 	if w.conn != nil {
@@ -218,7 +230,9 @@ func (w *WSUpstream) Reconnect() error {
 		w.conn = nil
 	}
 	// Reset context for the new connection.
+	w.ctxMu.Lock()
 	w.ctx, w.cancel = context.WithCancel(context.Background())
+	w.ctxMu.Unlock()
 	w.mu.Unlock()
 
 	return w.Initialize()
@@ -227,7 +241,10 @@ func (w *WSUpstream) Reconnect() error {
 // Stop cancels in-flight operations and closes the WebSocket connection.
 func (w *WSUpstream) Stop() error {
 	// Cancel the context first to unblock any in-flight Send waiting on Read.
-	w.cancel()
+	w.ctxMu.RLock()
+	cancel := w.cancel
+	w.ctxMu.RUnlock()
+	cancel()
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
