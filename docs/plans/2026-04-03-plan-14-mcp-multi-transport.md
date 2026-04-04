@@ -236,11 +236,11 @@ On startup (and after MCP upstream changes), automatically configure OpenClaw to
 
 ### Task 9: [Final] Update documentation
 
-- [ ] Update CLAUDE.md: document MCP transport types (stdio, http, websocket)
-- [ ] Update CLAUDE.md: document `/mcp` Streamable HTTP server endpoint
-- [ ] Update CLAUDE.md: document auto-injection into OpenClaw
-- [ ] Update examples/config.toml: add remote MCP upstream examples with transport field
-- [ ] Update compose.yml: document auto-injection behavior
+- [x] Update CLAUDE.md: document MCP transport types (stdio, http, websocket)
+- [x] Update CLAUDE.md: document `/mcp` Streamable HTTP server endpoint
+- [x] Update CLAUDE.md: document auto-injection into OpenClaw
+- [x] Update examples/config.toml: add remote MCP upstream examples with transport field
+- [x] Update compose.yml: document auto-injection behavior
 
 ## Technical Details
 

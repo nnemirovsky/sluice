@@ -31,6 +31,8 @@ go test ./... -v -timeout 30s
 - `internal/store/migrate.go` - golang-migrate integration with embedded SQL files
 - `internal/store/migrations/000001_init.up.sql` - Initial schema migration (rules, config, bindings, mcp_upstreams, channels)
 - `internal/store/migrations/000001_init.down.sql` - Rollback for initial schema
+- `internal/store/migrations/000003_upstream_transport.up.sql` - Add transport column to mcp_upstreams table
+- `internal/store/migrations/000003_upstream_transport.down.sql` - Rollback for transport column
 - `internal/proxy/server.go` - SOCKS5 server wrapping `things-go/go-socks5` with TCP and UDP policy enforcement
 - `internal/proxy/protocol.go` - Protocol detection for HTTP, HTTPS, SSH, IMAP, SMTP, WebSocket (ws/wss), gRPC, DNS, QUIC, APNS, and generic
 - `internal/proxy/ca.go` - Self-signed CA generation and persistence for HTTPS MITM
@@ -60,8 +62,11 @@ go test ./... -v -timeout 30s
 - `internal/mcp/inspect.go` - Content inspection: argument blocking and response redaction using regex rules
 - `internal/mcp/policy.go` - Tool-level policy evaluation using glob patterns (deny/allow/ask priority)
 - `internal/mcp/transport.go` - Stdio transport for MCP gateway (JSON-RPC over stdin/stdout)
+- `internal/mcp/transport_http.go` - Streamable HTTP upstream client with session management and SSE support
+- `internal/mcp/transport_ws.go` - WebSocket upstream client with `mcp` subprotocol and reconnection
+- `internal/mcp/server_http.go` - Streamable HTTP server endpoint (`POST /mcp`, `DELETE /mcp`) with session tracking
 - `internal/mcp/types.go` - JSON-RPC 2.0 and MCP protocol type definitions
-- `internal/mcp/upstream.go` - Upstream MCP server process management (spawn, handshake, tool discovery)
+- `internal/mcp/upstream.go` - Upstream MCP server process management (spawn, handshake, tool discovery, transport routing)
 - `internal/audit/logger.go` - Thread-safe append-only JSON lines audit logger with blake3 hash chaining
 - `internal/audit/verify.go` - Hash chain verification (walks log file, reports broken links)
 - `internal/channel/channel.go` - Channel interface, ChannelType enum (Telegram=0, HTTP=1), ApprovalRequest/Response/Command types
@@ -312,11 +317,13 @@ sluice policy export                # dump current rules as TOML to stdout
 ### MCP upstream management
 
 ```
-sluice mcp add <name> --command <cmd> [--args "arg1,arg2"] [--env "KEY=VAL,..."] [--timeout 120]
+sluice mcp add <name> --command <cmd> [--transport stdio|http|websocket] [--args "arg1,arg2"] [--env "KEY=VAL,..."] [--timeout 120]
 sluice mcp list
 sluice mcp remove <name>
 sluice mcp                          # start MCP gateway (reads upstreams from store)
 ```
+
+For HTTP/WebSocket upstreams, `--command` holds the URL instead of a binary path. `--args` and `--env` are unused for remote transports. Env values prefixed with `vault:` are resolved from the credential vault at upstream spawn time.
 
 ### Credential management
 
@@ -381,13 +388,19 @@ DNS query interception: `internal/proxy/dns.go` implements `DNSInterceptor` that
 
 QUIC/HTTP3 MITM: `internal/proxy/quic.go` implements `QUICProxy` using `quic-go`. QUIC initial packets are detected in the UDP relay by checking the long header format (first byte bits 7-6 = 11, version field at bytes 1-4 for QUIC v1/v2). Detected QUIC traffic on HTTPS ports is routed to QUICProxy, which terminates TLS using per-host certificates generated from the sluice CA (reusing `GenerateCertForHost` from ca.go). SNI is extracted from the TLS ClientHello. HTTP/3 requests are intercepted using `quic-go/http3`: phantom tokens are replaced in headers and body, content deny patterns block requests, and redact patterns modify responses before forwarding to the agent. The upstream connection uses `http3.RoundTripper`.
 
-Docker integration: Three-container architecture (sluice + tun2proxy + openclaw) with `network_mode: "service:tun2proxy"` routing all openclaw traffic through sluice's SOCKS5 proxy. `docker.Manager` wraps a `ContainerClient` interface with `ExecInContainer` for docker exec and standard container lifecycle methods. On credential mutation via Telegram `/cred` commands or CLI, `credMutationComplete` regenerates phantom environment variables using `GeneratePhantomEnv` and calls `Manager.ReloadSecrets`. Hot reload writes each phantom token as a file in a shared `sluice-phantoms` volume (e.g. `/phantoms/ANTHROPIC_API_KEY`) then runs `docker exec openclaw openclaw secrets reload`. If exec fails (agent image does not support reload), it falls back to `RestartWithEnv` which recreates the container with updated env vars. `ChannelConfig.Vault` and `ChannelConfig.ContainerMgr` wire the vault and container manager (any `container.ContainerManager` implementation) into Telegram command handling. The sluice entrypoint generates a CA cert and copies it to a shared volume so openclaw can trust HTTPS MITM certificates via `SSL_CERT_FILE`.
+Docker integration: Three-container architecture (sluice + tun2proxy + openclaw) with `network_mode: "service:tun2proxy"` routing all openclaw traffic through sluice's SOCKS5 proxy. `docker.Manager` wraps a `ContainerClient` interface with `ExecInContainer` for docker exec and standard container lifecycle methods. On credential mutation via Telegram `/cred` commands or CLI, `credMutationComplete` regenerates phantom environment variables using `GeneratePhantomEnv` and calls `Manager.ReloadSecrets`. Hot reload writes each phantom token as a file in a shared `sluice-phantoms` volume (e.g. `/phantoms/ANTHROPIC_API_KEY`) then runs `docker exec openclaw openclaw secrets reload`. If exec fails (agent image does not support reload), it falls back to `RestartWithEnv` which recreates the container with updated env vars. `ChannelConfig.Vault` and `ChannelConfig.ContainerMgr` wire the vault and container manager (any `container.ContainerManager` implementation) into Telegram command handling. The sluice entrypoint generates a CA cert and copies it to a shared volume so openclaw can trust HTTPS MITM certificates via `SSL_CERT_FILE`. `InjectMCPConfig` writes `mcp-servers.json` to the shared phantoms volume and signals OpenClaw to reload MCP config, enabling auto-discovery of sluice as an MCP server via Streamable HTTP.
 
-Health check: A minimal HTTP server on `127.0.0.1:3000` (configurable via `--health-addr`) serves `/healthz`, returning 200 when the SOCKS5 proxy is listening. The Dockerfile includes a `HEALTHCHECK` directive using `wget` against this endpoint. compose.yml uses `service_healthy` conditions to sequence startup: tun2proxy waits for sluice, openclaw waits for tun2proxy.
+Health check: A minimal HTTP server on `127.0.0.1:3000` (configurable via `--health-addr`) serves `/healthz`, returning 200 when the SOCKS5 proxy is listening. When MCP gateway mode is active, the same server also serves the Streamable HTTP endpoint at `/mcp` (see "MCP Streamable HTTP server" below). The Dockerfile includes a `HEALTHCHECK` directive using `wget` against this endpoint. compose.yml uses `service_healthy` conditions to sequence startup: tun2proxy waits for sluice, openclaw waits for tun2proxy.
 
 Graceful shutdown: On SIGINT/SIGTERM, the proxy stops accepting new connections and drains in-flight connections up to `--shutdown-timeout` (default 10s). Pending approval requests are auto-denied via `channel.Broker.CancelAll()` with a "shutting down" reason. The audit logger is closed after all connections drain.
 
-MCP gateway: `Gateway` spawns upstream MCP servers as child processes via `StartUpstream`, performs `initialize` handshake and `notifications/initialized`, discovers tools via `tools/list`, and namespaces them with `<upstream>__<tool>`. The agent connects via stdio (`RunStdio`). On `tools/call`, the gateway evaluates `ToolPolicy` (deny/allow/ask priority, same as network policy), optionally requests approval via the shared `channel.Broker`, runs `ContentInspector.InspectArguments` to block arguments matching regex patterns (JSON is parsed before matching to prevent unicode escape bypass), strips the namespace prefix, forwards to the upstream, runs `ContentInspector.RedactResponse` on the result, and adds governance metadata. `ToolPolicy` reuses `policy.CompileGlob` for glob matching. The `mcp` subcommand reads upstreams and rules from the unified SQLite rules table. Upstreams can be registered at runtime via `sluice mcp add` (persisted in the `mcp_upstreams` table). Per-upstream timeouts are configurable via `timeout_sec` (default 120s). `GatewayConfig.TimeoutSec` sets a global default that individual upstreams can override.
+MCP gateway: `Gateway` supports three upstream transport types: stdio (child processes), Streamable HTTP (remote servers), and WebSocket (real-time servers). `StartUpstreamForTransport` routes to the correct implementation based on `UpstreamConfig.Transport` (default "stdio"). All three satisfy the `MCPUpstream` interface (`Initialize`, `DiscoverTools`, `SendRequest`, `Stop`). On startup, each upstream performs an `initialize` handshake and `notifications/initialized`, discovers tools via `tools/list`, and namespaces them with `<upstream>__<tool>`. The agent connects via stdio (`RunStdio`) or Streamable HTTP (`POST /mcp`). On `tools/call`, the gateway evaluates `ToolPolicy` (deny/allow/ask priority, same as network policy), optionally requests approval via the shared `channel.Broker`, runs `ContentInspector.InspectArguments` to block arguments matching regex patterns (JSON is parsed before matching to prevent unicode escape bypass), strips the namespace prefix, forwards to the upstream, runs `ContentInspector.RedactResponse` on the result, and adds governance metadata. `ToolPolicy` reuses `policy.CompileGlob` for glob matching. The `mcp` subcommand reads upstreams and rules from the unified SQLite rules table. Upstreams can be registered at runtime via `sluice mcp add` (persisted in the `mcp_upstreams` table). Per-upstream timeouts are configurable via `timeout_sec` (default 120s). `GatewayConfig.TimeoutSec` sets a global default that individual upstreams can override. Env values with `vault:` prefix in upstream config are resolved from the credential vault at spawn time. On credential rotation, `RestartUpstream` stops and restarts the upstream process with fresh credentials.
+
+MCP transport details: `HTTPUpstream` (`transport_http.go`) connects to remote MCP servers via Streamable HTTP. It POSTs JSON-RPC requests to the upstream URL, tracks server sessions via the `Mcp-Session-Id` response header, and handles SSE streaming responses for long-running tool calls. `Stop` sends a DELETE request to close the server-side session. `WSUpstream` (`transport_ws.go`) connects via WebSocket with the `mcp` subprotocol. JSON-RPC messages are sent as text frames. It supports reconnection on connection drop via `Reconnect()` and reads are filtered to skip server-initiated notifications. Both transports use configurable per-upstream timeouts.
+
+MCP Streamable HTTP server: `MCPHTTPHandler` (`server_http.go`) serves `POST /mcp` and `DELETE /mcp` on the existing port 3000 (alongside `/healthz` and `/api/*`). On `initialize`, it generates a random session ID returned via `Mcp-Session-Id` header. Sessions are tracked in a `sync.Map`. All requests are routed through the existing `Gateway.HandleToolCall` with the same policy enforcement, audit, and approval flow. Supports SSE responses when the client sends `Accept: text/event-stream`. The `/mcp` endpoint is mounted only when MCP gateway mode is active.
+
+MCP auto-injection: When `--auto-inject-mcp` is set (defaults to true when a container runtime is active), sluice writes `/phantoms/mcp-servers.json` containing `{"sluice": {"url": "http://127.0.0.1:3000/mcp", "transport": "streamable-http"}}` to the shared phantoms volume after the gateway starts. It then signals OpenClaw to reload MCP config via `docker exec openclaw openclaw mcp reload` (best-effort). The SOCKS5 proxy auto-bypasses connections to sluice's own listener addresses (`SelfBypass` in `Config`) so the agent's MCP HTTP connection is auto-allowed without policy evaluation. Auto-injection also runs after `sluice mcp add/remove` to keep the agent's view of available tools current.
 
 ## Policy Store
 
@@ -670,6 +683,7 @@ See `compose.yml` in the repo root. Key features:
 - `github.com/tobischo/gokeepasslib/v3` - Pure Go KeePass .kdbx file reader/writer
 - `github.com/golang-migrate/migrate/v4` - Schema migration framework with embedded SQL files
 - `github.com/quic-go/quic-go` - QUIC/HTTP3 implementation for QUIC MITM proxy
+- `github.com/coder/websocket` - WebSocket client for MCP WebSocket upstream transport
 
 ## Estimated Scope
 
