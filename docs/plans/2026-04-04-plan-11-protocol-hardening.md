@@ -173,17 +173,17 @@ Parse DNS queries on UDP port 53. Apply policy at the domain level. Prevents DNS
 - Create: `internal/proxy/dns.go`
 - Create: `internal/proxy/dns_test.go`
 
-- [ ] Implement `DNSInterceptor` that parses DNS query packets (Question section only)
-- [ ] Extract queried domain name from the DNS Question section
-- [ ] Evaluate policy against the queried domain (same glob matching as network rules)
-- [ ] Allowed domain: forward DNS query to upstream resolver, relay response
-- [ ] Denied domain: return NXDOMAIN response
-- [ ] Log all DNS queries to audit log (destination=queried domain, port=53, protocol=dns)
-- [ ] Add `--dns-resolver` flag for configurable upstream resolver (default: system resolver)
-- [ ] Write tests for DNS query parsing (A, AAAA, CNAME)
-- [ ] Write tests for policy evaluation on DNS domains
-- [ ] Write tests for NXDOMAIN response generation
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
+- [x] Implement `DNSInterceptor` that parses DNS query packets (Question section only)
+- [x] Extract queried domain name from the DNS Question section
+- [x] Evaluate policy against the queried domain (same glob matching as network rules)
+- [x] Allowed domain: forward DNS query to upstream resolver, relay response
+- [x] Denied domain: return NXDOMAIN response
+- [x] Log all DNS queries to audit log (destination=queried domain, port=53, protocol=dns)
+- [x] Add `--dns-resolver` flag for configurable upstream resolver (default: system resolver)
+- [x] Write tests for DNS query parsing (A, AAAA, CNAME)
+- [x] Write tests for policy evaluation on DNS domains
+- [x] Write tests for NXDOMAIN response generation
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s`
 
 ### Task 8: Wire UDP ASSOCIATE and DNS into SOCKS5 server
 
