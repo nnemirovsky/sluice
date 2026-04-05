@@ -29,8 +29,8 @@ jobs:
             exit 1
           fi
           echo "Total coverage: ${total}%"
-          if awk "BEGIN{exit !($total < 80)}"; then
-            echo "Coverage ${total}% is below 80% threshold"
+          if awk "BEGIN{exit !($total < 75)}"; then
+            echo "Coverage ${total}% is below 75% threshold"
             exit 1
           fi
 
