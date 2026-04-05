@@ -236,15 +236,15 @@ Test the full MCP gateway flow with upstream tool discovery, policy, and inspect
 **Files:**
 - Create: `e2e/mcp_test.go`
 
-- [ ] Test: register MCP upstream via CLI, start gateway, verify tools discoverable via tools/list
-- [ ] Test: tool call with allowed policy succeeds (verify correct response from upstream)
-- [ ] Test: tool call with denied policy returns error
-- [ ] Test: tool call with ask policy and no broker returns error
-- [ ] Test: argument inspection blocks tool call containing pattern match
-- [ ] Test: response redaction strips pattern-matched content from tool response
-- [ ] Test: multiple upstreams with namespaced tools (github__list, fs__read)
-- [ ] Test: upstream timeout (slow upstream exceeds timeout_sec, verify error)
-- [ ] Run: `go test -tags=e2e ./e2e/ -v -timeout 120s`
+- [x] Test: register MCP upstream via CLI, start gateway, verify tools discoverable via tools/list
+- [x] Test: tool call with allowed policy succeeds (verify correct response from upstream)
+- [x] Test: tool call with denied policy returns error
+- [x] Test: tool call with ask policy and no broker returns error
+- [x] Test: argument inspection blocks tool call containing pattern match
+- [x] Test: response redaction strips pattern-matched content from tool response
+- [x] Test: multiple upstreams with namespaced tools (github__list, fs__read)
+- [x] Test: upstream timeout (slow upstream exceeds timeout_sec, verify error)
+- [x] Run: `go test -tags=e2e ./e2e/ -v -timeout 120s`
 
 ### Task 10: E2e tests -- audit log integrity
 
