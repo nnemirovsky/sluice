@@ -26,7 +26,7 @@ services:
     networks: [internal, external]
 
   tun2proxy:
-    image: ghcr.io/tun2proxy/tun2proxy-ubuntu:latest
+    image: ghcr.io/tun2proxy/tun2proxy-alpine:latest
     restart: unless-stopped
     cap_add: [NET_ADMIN]
     devices:
