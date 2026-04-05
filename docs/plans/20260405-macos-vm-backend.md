@@ -151,14 +151,14 @@ tart exec openclaw -- security add-trusted-cert \
 - Modify: `internal/container/tart.go`
 - Modify: `internal/container/tart_test.go`
 
-- [ ] Implement `ReloadSecrets`: write phantom token files to VirtioFS shared directory, run `tart exec <name> -- openclaw secrets reload`
-- [ ] Implement `RestartWithEnv`: stop VM, then re-run with new env (NOT delete+clone, which takes minutes for macOS images). tart VMs persist state across stop/run cycles.
-- [ ] Implement `InjectMCPConfig`: write mcp-servers.json to VirtioFS shared directory, run `tart exec <name> -- openclaw mcp reload`
-- [ ] Implement `Status`: run `tart list`, parse VM state and IP
-- [ ] Implement `Stop`: run `tart stop`
-- [ ] Implement `Runtime()`: return `RuntimeMacOS`
-- [ ] Write tests for each ContainerManager method with mock CommandRunner
-- [ ] Run tests: `go test ./internal/container/ -v -timeout 30s`
+- [x] Implement `ReloadSecrets`: write phantom token files to VirtioFS shared directory, run `tart exec <name> -- openclaw secrets reload`
+- [x] Implement `RestartWithEnv`: stop VM, then re-run with new env (NOT delete+clone, which takes minutes for macOS images). tart VMs persist state across stop/run cycles.
+- [x] Implement `InjectMCPConfig`: write mcp-servers.json to VirtioFS shared directory, run `tart exec <name> -- openclaw mcp reload`
+- [x] Implement `Status`: run `tart list`, parse VM state and IP
+- [x] Implement `Stop`: run `tart stop`
+- [x] Implement `Runtime()`: return `RuntimeMacOS`
+- [x] Write tests for each ContainerManager method with mock CommandRunner
+- [x] Run tests: `go test ./internal/container/ -v -timeout 30s`
 
 ### Task 4: CA cert injection for macOS VM
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -520,5 +522,344 @@ func TestTartVMStateNotFound(t *testing.T) {
 	}
 	if state != "" {
 		t.Errorf("State = %q, want empty for non-existent VM", state)
+	}
+}
+
+// Verify TartManager satisfies ContainerManager at compile time.
+var _ ContainerManager = (*TartManager)(nil)
+
+// newTestTartManager creates a TartManager with a mock runner for testing.
+// Returns the manager, mock runner, and a temp dir for phantom files.
+func newTestTartManager(t *testing.T) (*TartManager, *mockRunner, string) {
+	t.Helper()
+	runner := newMockRunner()
+	runner.onCommand("tart --version", []byte("tart 2.15.0\n"), nil)
+
+	cli, err := NewTartCLIWithBin("tart", runner)
+	if err != nil {
+		t.Fatalf("create CLI: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+
+	mgr := NewTartManager(TartManagerConfig{
+		CLI:    cli,
+		VMName: "openclaw",
+		RunConfig: TartRunConfig{
+			Name: "openclaw",
+			DirMounts: []TartDirMount{
+				{Name: "phantoms", HostPath: "/tmp/phantoms"},
+				{Name: "ca", HostPath: "/tmp/ca", ReadOnly: true},
+			},
+			NoGraphics: true,
+		},
+	})
+
+	return mgr, runner, tmpDir
+}
+
+func TestTartManagerReloadSecrets(t *testing.T) {
+	mgr, runner, tmpDir := newTestTartManager(t)
+	runner.onCommand("tart exec openclaw -- openclaw secrets reload", []byte("ok\n"), nil)
+
+	env := map[string]string{
+		"ANTHROPIC_API_KEY": "sk-ant-phantom-abc123",
+		"OPENAI_API_KEY":    "sk-phantom-xyz789",
+	}
+
+	err := mgr.ReloadSecrets(context.Background(), tmpDir, env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify phantom files were written.
+	for name, value := range env {
+		data, err := os.ReadFile(filepath.Join(tmpDir, name))
+		if err != nil {
+			t.Errorf("phantom file %s not found: %v", name, err)
+			continue
+		}
+		if string(data) != value {
+			t.Errorf("phantom file %s = %q, want %q", name, string(data), value)
+		}
+	}
+
+	// Verify exec was called.
+	if !runner.called("tart exec openclaw -- openclaw secrets reload") {
+		t.Error("expected exec call for secrets reload")
+	}
+}
+
+func TestTartManagerReloadSecretsRemoveEmpty(t *testing.T) {
+	mgr, runner, tmpDir := newTestTartManager(t)
+	runner.onCommand("tart exec", []byte("ok\n"), nil)
+
+	// Write a file first, then remove via empty value.
+	path := filepath.Join(tmpDir, "OLD_KEY")
+	if err := os.WriteFile(path, []byte("old-value"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := mgr.ReloadSecrets(context.Background(), tmpDir, map[string]string{
+		"OLD_KEY": "",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("expected phantom file to be removed")
+	}
+}
+
+func TestTartManagerReloadSecretsFallback(t *testing.T) {
+	mgr, runner, tmpDir := newTestTartManager(t)
+
+	// Exec fails, triggering RestartWithEnv fallback.
+	runner.onCommand("tart exec", nil, errors.New("tart agent not running"))
+	runner.onCommand("tart stop", nil, nil)
+	runner.onCommand("tart run", nil, nil)
+
+	err := mgr.ReloadSecrets(context.Background(), tmpDir, map[string]string{
+		"NEW_KEY": "new-value",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify fallback called stop and run (NOT delete+clone).
+	if !runner.called("tart stop openclaw") {
+		t.Error("expected stop call in fallback")
+	}
+	if !runner.called("tart run") {
+		t.Error("expected run call in fallback")
+	}
+	// tart VMs persist, so delete should NOT be called.
+	if runner.called("tart delete") {
+		t.Error("RestartWithEnv should not delete the VM")
+	}
+	if runner.called("tart clone") {
+		t.Error("RestartWithEnv should not clone the VM")
+	}
+}
+
+func TestTartManagerRestartWithEnv(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+
+	runner.onCommand("tart stop", nil, nil)
+	runner.onCommand("tart run", nil, nil)
+
+	err := mgr.RestartWithEnv(context.Background(), map[string]string{
+		"SOME_KEY": "some-value",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify stop was called.
+	if !runner.called("tart stop openclaw") {
+		t.Error("expected stop call")
+	}
+
+	// Verify run was called with the stored config.
+	runCmd := runner.callWith("tart run")
+	if runCmd == "" {
+		t.Fatal("expected run call")
+	}
+	if !strings.Contains(runCmd, "run openclaw") {
+		t.Errorf("run should use VM name: %s", runCmd)
+	}
+	if !strings.Contains(runCmd, "--dir=phantoms:/tmp/phantoms") {
+		t.Errorf("run should preserve dir mounts: %s", runCmd)
+	}
+	if !strings.Contains(runCmd, "--dir=ca:/tmp/ca:ro") {
+		t.Errorf("run should preserve read-only dir mount: %s", runCmd)
+	}
+	if !strings.Contains(runCmd, "--no-graphics") {
+		t.Errorf("run should preserve --no-graphics: %s", runCmd)
+	}
+
+	// No delete or clone should happen.
+	if runner.called("tart delete") {
+		t.Error("RestartWithEnv should not delete")
+	}
+	if runner.called("tart clone") {
+		t.Error("RestartWithEnv should not clone")
+	}
+}
+
+func TestTartManagerRestartWithEnvStopError(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+	runner.onCommand("tart stop", nil, errors.New("VM already stopped"))
+
+	err := mgr.RestartWithEnv(context.Background(), map[string]string{"K": "V"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "stop VM") {
+		t.Errorf("error should mention stop: %v", err)
+	}
+}
+
+func TestTartManagerRestartWithEnvRunError(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+	runner.onCommand("tart stop", nil, nil)
+	runner.onCommand("tart run", nil, errors.New("failed to start VM"))
+
+	err := mgr.RestartWithEnv(context.Background(), map[string]string{"K": "V"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "failed to start VM") {
+		t.Errorf("error should mention start failure: %v", err)
+	}
+}
+
+func TestTartManagerInjectMCPConfig(t *testing.T) {
+	mgr, runner, tmpDir := newTestTartManager(t)
+	runner.onCommand("tart exec openclaw -- openclaw mcp reload", []byte("ok\n"), nil)
+
+	err := mgr.InjectMCPConfig(tmpDir, "http://localhost:3000/mcp")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify mcp-servers.json was written.
+	data, err := os.ReadFile(filepath.Join(tmpDir, "mcp-servers.json"))
+	if err != nil {
+		t.Fatalf("mcp-servers.json not found: %v", err)
+	}
+	if !strings.Contains(string(data), "http://localhost:3000/mcp") {
+		t.Errorf("mcp config should contain sluice URL: %s", string(data))
+	}
+	if !strings.Contains(string(data), "sluice") {
+		t.Errorf("mcp config should contain sluice key: %s", string(data))
+	}
+
+	// Verify exec was called.
+	if !runner.called("tart exec openclaw -- openclaw mcp reload") {
+		t.Error("expected exec call for mcp reload")
+	}
+}
+
+func TestTartManagerInjectMCPConfigExecError(t *testing.T) {
+	mgr, runner, tmpDir := newTestTartManager(t)
+	runner.onCommand("tart exec", nil, errors.New("exec failed"))
+
+	// Exec failure should not cause InjectMCPConfig to fail.
+	// The file should still be written, and the error is logged.
+	err := mgr.InjectMCPConfig(tmpDir, "http://localhost:3000/mcp")
+	if err != nil {
+		t.Fatalf("InjectMCPConfig() = %v, want nil (exec error is best-effort)", err)
+	}
+
+	// Verify the file was still written despite exec failure.
+	data, readErr := os.ReadFile(filepath.Join(tmpDir, "mcp-servers.json"))
+	if readErr != nil {
+		t.Fatalf("read mcp-servers.json: %v", readErr)
+	}
+	if !strings.Contains(string(data), "sluice") {
+		t.Error("mcp-servers.json should contain sluice config")
+	}
+}
+
+func TestTartManagerStatus(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+
+	entries := []TartVMEntry{
+		{Name: "openclaw", Source: "ghcr.io/cirruslabs/macos-sequoia-base:latest", State: "running", OS: "darwin"},
+	}
+	listJSON, _ := json.Marshal(entries)
+	runner.onCommand("tart list", listJSON, nil)
+
+	status, err := mgr.Status(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.ID != "openclaw" {
+		t.Errorf("ID = %q, want openclaw", status.ID)
+	}
+	if !status.Running {
+		t.Error("should be running")
+	}
+	if status.Image != "ghcr.io/cirruslabs/macos-sequoia-base:latest" {
+		t.Errorf("Image = %q, want ghcr.io/cirruslabs/macos-sequoia-base:latest", status.Image)
+	}
+}
+
+func TestTartManagerStatusStopped(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+
+	entries := []TartVMEntry{
+		{Name: "openclaw", Source: "local", State: "stopped"},
+	}
+	listJSON, _ := json.Marshal(entries)
+	runner.onCommand("tart list", listJSON, nil)
+
+	status, err := mgr.Status(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.Running {
+		t.Error("should not be running")
+	}
+}
+
+func TestTartManagerStatusNotFound(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+
+	entries := []TartVMEntry{
+		{Name: "other-vm", State: "running"},
+	}
+	listJSON, _ := json.Marshal(entries)
+	runner.onCommand("tart list", listJSON, nil)
+
+	_, err := mgr.Status(context.Background())
+	if err == nil {
+		t.Fatal("expected error when VM not found")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error should mention not found: %v", err)
+	}
+}
+
+func TestTartManagerStatusListError(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+	runner.onCommand("tart list", nil, errors.New("tart daemon not running"))
+
+	_, err := mgr.Status(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestTartManagerStop(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+	runner.onCommand("tart stop", nil, nil)
+
+	err := mgr.Stop(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !runner.called("tart stop openclaw") {
+		t.Error("expected stop call with VM name")
+	}
+}
+
+func TestTartManagerStopError(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+	runner.onCommand("tart stop", nil, errors.New("already stopped"))
+
+	err := mgr.Stop(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestTartManagerRuntime(t *testing.T) {
+	mgr, _, _ := newTestTartManager(t)
+	if mgr.Runtime() != RuntimeMacOS {
+		t.Errorf("Runtime() = %v, want RuntimeMacOS", mgr.Runtime())
 	}
 }

@@ -5,7 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 )
 
 // TartCLI wraps the macOS `tart` CLI for managing macOS VMs via the
@@ -174,4 +178,133 @@ func (c *TartCLI) VMState(ctx context.Context, name string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// TartManager implements ContainerManager for macOS VMs managed by tart.
+// It uses TartCLI for VM lifecycle and credential injection via VirtioFS
+// shared volumes and tart exec.
+type TartManager struct {
+	cli    *TartCLI
+	vmName string
+	// runCfg holds the TartRunConfig used to (re)start the VM. This is needed
+	// because tart has no inspect command. The caller sets it at creation time
+	// so RestartWithEnv can re-run the VM with the same mounts.
+	runCfg TartRunConfig
+}
+
+// TartManagerConfig holds configuration for creating a TartManager.
+type TartManagerConfig struct {
+	CLI    *TartCLI
+	VMName string
+	// RunConfig is the full TartRunConfig used to start the VM. TartManager
+	// stores this so it can re-run the VM on restart since tart does not have
+	// an inspect command to recover the original run parameters.
+	RunConfig TartRunConfig
+}
+
+// NewTartManager creates a new TartManager from the given config.
+func NewTartManager(cfg TartManagerConfig) *TartManager {
+	return &TartManager{
+		cli:    cfg.CLI,
+		vmName: cfg.VMName,
+		runCfg: cfg.RunConfig,
+	}
+}
+
+// ReloadSecrets writes phantom token files to the VirtioFS shared directory
+// and signals the macOS VM to reload them via tart exec. Falls back to
+// RestartWithEnv if the exec command fails.
+func (m *TartManager) ReloadSecrets(ctx context.Context, phantomDir string, phantomEnv map[string]string) error {
+	for name, value := range phantomEnv {
+		path := filepath.Join(phantomDir, name)
+		if value == "" {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove phantom file %s: %w", name, err)
+			}
+			continue
+		}
+		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
+			return fmt.Errorf("write phantom file %s: %w", name, err)
+		}
+	}
+
+	_, err := m.cli.Exec(ctx, m.vmName, []string{"openclaw", "secrets", "reload"})
+	if err != nil {
+		return m.RestartWithEnv(ctx, phantomEnv)
+	}
+	return nil
+}
+
+// RestartWithEnv stops the VM and re-runs it. Unlike Apple Container, tart VMs
+// persist state across stop/run cycles so we do NOT delete+clone (which takes
+// minutes for macOS images). Environment variables are not directly supported
+// by tart run, so this method stops and restarts the VM to pick up changes
+// from the shared VirtioFS volume.
+func (m *TartManager) RestartWithEnv(ctx context.Context, _ map[string]string) error {
+	if err := m.cli.Stop(ctx, m.vmName); err != nil {
+		return fmt.Errorf("stop VM: %w", err)
+	}
+
+	// Re-run with the same config. tart VMs persist disk state across stop/run.
+	return m.cli.Run(ctx, m.runCfg)
+}
+
+// InjectMCPConfig writes an mcp-servers.json file to the VirtioFS shared
+// volume and signals the macOS VM to reload MCP configuration via tart exec.
+func (m *TartManager) InjectMCPConfig(phantomDir, sluiceURL string) error {
+	mcpConfig := map[string]any{
+		"sluice": map[string]any{
+			"url":       sluiceURL,
+			"transport": "streamable-http",
+		},
+	}
+
+	data, err := json.Marshal(mcpConfig)
+	if err != nil {
+		return fmt.Errorf("marshal mcp config: %w", err)
+	}
+
+	path := filepath.Join(phantomDir, "mcp-servers.json")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("write mcp config: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, execErr := m.cli.Exec(ctx, m.vmName, []string{"openclaw", "mcp", "reload"}); execErr != nil {
+		// Best-effort: agent picks up config on next restart.
+		log.Printf("MCP config written to %s but exec reload failed: %v", path, execErr)
+	}
+	return nil
+}
+
+// Status returns VM health information by running tart list and checking the
+// VM state. tart does not have an inspect command, so we use list output.
+func (m *TartManager) Status(ctx context.Context) (ContainerStatus, error) {
+	entries, err := m.cli.List(ctx)
+	if err != nil {
+		return ContainerStatus{}, err
+	}
+
+	for _, e := range entries {
+		if e.Name == m.vmName {
+			return ContainerStatus{
+				ID:      e.Name,
+				Running: strings.EqualFold(e.State, "running"),
+				Image:   e.Source,
+			}, nil
+		}
+	}
+
+	return ContainerStatus{}, fmt.Errorf("VM %q not found", m.vmName)
+}
+
+// Stop stops the macOS VM via tart stop.
+func (m *TartManager) Stop(ctx context.Context) error {
+	return m.cli.Stop(ctx, m.vmName)
+}
+
+// Runtime returns RuntimeMacOS.
+func (m *TartManager) Runtime() Runtime {
+	return RuntimeMacOS
 }
