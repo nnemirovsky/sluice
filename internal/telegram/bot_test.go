@@ -62,22 +62,23 @@ func TestFormatApprovalMessage(t *testing.T) {
 		if !strings.Contains(msg, "443") {
 			t.Error("message should contain port")
 		}
-		if !strings.Contains(msg, "https://") {
-			t.Error("message should contain protocol scheme")
+		if !strings.Contains(msg, "HTTPS ") {
+			t.Error("message should contain protocol display name")
 		}
 		if !strings.Contains(msg, "OpenClaw wants to connect") {
 			t.Error("message should use network connection wording")
 		}
 	})
 
-	t.Run("network connection with empty protocol", func(t *testing.T) {
+	t.Run("network connection with protocol", func(t *testing.T) {
 		req := channel.ApprovalRequest{
 			Destination: "example.com",
 			Port:        8080,
+			Protocol:    "http",
 		}
 		msg := FormatApprovalMessage(req)
-		if !strings.Contains(msg, "tcp://") {
-			t.Error("empty protocol should default to tcp")
+		if !strings.Contains(msg, "HTTP example.com:8080") {
+			t.Errorf("expected 'HTTP example.com:8080' in message, got: %s", msg)
 		}
 	})
 

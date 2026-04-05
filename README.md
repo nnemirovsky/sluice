@@ -160,7 +160,7 @@ default = "deny"
 # Network rules
 [[allow]]
 destination = "api.anthropic.com"
-protocols = ["https"]
+protocols = ["http", "https"]
 
 [[allow]]
 destination = "dns.google"

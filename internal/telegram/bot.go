@@ -23,6 +23,24 @@ func sanitizeError(err error) string {
 // We leave a small margin for the truncation notice.
 const telegramMaxMessage = 4000
 
+// protoDisplayName returns the human-readable display name for a protocol.
+var protoDisplayName = map[string]string{
+	"http":    "HTTP",
+	"https":   "HTTPS",
+	"ssh":     "SSH",
+	"imap":    "IMAP",
+	"smtp":    "SMTP",
+	"ws":      "WebSocket",
+	"wss":     "WebSocket (TLS)",
+	"grpc":    "gRPC",
+	"dns":     "DNS",
+	"quic":    "QUIC",
+	"apns":    "APNS",
+	"tcp":     "TCP",
+	"udp":     "UDP",
+	"generic": "TCP",
+}
+
 // FormatApprovalMessage builds the Telegram message text for an approval
 // request. MCP tool calls (protocol == "mcp") show the tool name and
 // arguments. Network connections show the protocol, destination, and port.
@@ -35,9 +53,9 @@ func FormatApprovalMessage(req channel.ApprovalRequest) string {
 		msg += "\n\nAllow this tool call?"
 		return msg
 	}
-	proto := req.Protocol
-	if proto == "" {
-		proto = "tcp"
+	display := protoDisplayName[req.Protocol]
+	if display == "" {
+		display = req.Protocol
 	}
-	return fmt.Sprintf("OpenClaw wants to connect to:\n\n%s://%s:%d\n\nAllow this connection?", proto, req.Destination, req.Port)
+	return fmt.Sprintf("OpenClaw wants to connect to:\n\n%s %s:%d\n\nAllow this connection?", display, req.Destination, req.Port)
 }

@@ -57,21 +57,23 @@ func TestStartStop(t *testing.T) {
 }
 
 func TestRequestApproval_SyncPath(t *testing.T) {
-	var received WebhookPayload
-	var receivedSig string
 	secret := "test-secret-123"
+	payloadCh := make(chan WebhookPayload, 1)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedSig = r.Header.Get("X-Sluice-Signature")
+		sig := r.Header.Get("X-Sluice-Signature")
 		body, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(body, &received)
+
+		var payload WebhookPayload
+		_ = json.Unmarshal(body, &payload)
+		payloadCh <- payload
 
 		// Verify HMAC signature.
 		mac := hmac.New(sha256.New, []byte(secret))
 		mac.Write(body)
 		expectedSig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
-		if receivedSig != expectedSig {
-			t.Errorf("signature mismatch: got %s, want %s", receivedSig, expectedSig)
+		if sig != expectedSig {
+			t.Errorf("signature mismatch: got %s, want %s", sig, expectedSig)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -112,6 +114,9 @@ func TestRequestApproval_SyncPath(t *testing.T) {
 	if resp != channel.ResponseAllowOnce {
 		t.Errorf("got response %v, want %v", resp, channel.ResponseAllowOnce)
 	}
+
+	// Read the payload that was captured by the handler (no race).
+	received := <-payloadCh
 	if received.ID == "" {
 		t.Error("webhook did not receive a request ID")
 	}

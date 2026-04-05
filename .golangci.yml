@@ -13,6 +13,17 @@ linters:
     - recvcheck
     - bodyclose
 
+  exclusions:
+    rules:
+      - path: internal/api/
+        linters:
+          - revive
+        text: "avoid meaningless package names"
+      - path: internal/channel/http/
+        linters:
+          - revive
+        text: "avoid package names that conflict"
+
 formatters:
   enable:
     - gci
