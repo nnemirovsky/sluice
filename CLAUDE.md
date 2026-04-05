@@ -18,6 +18,40 @@ go build -o sluice ./cmd/sluice/
 go test ./... -v -timeout 30s
 ```
 
+## E2e Tests
+
+End-to-end tests live in `e2e/` and use build tags. They start a real sluice binary, configure policies, make connections through the proxy, and verify credential injection, MCP gateway flows, and audit log integrity.
+
+Build tags:
+- `e2e` -- required for all e2e tests
+- `e2e && linux` -- Docker compose integration tests
+- `e2e && darwin` -- Apple Container tests (macOS only)
+
+```bash
+make test-e2e          # run all e2e tests locally
+make test-e2e-docker   # run Linux e2e tests via Docker Compose
+make test-e2e-macos    # run macOS e2e tests (Apple Container)
+```
+
+Or directly:
+```bash
+go test -tags=e2e ./e2e/ -v -count=1 -timeout=300s
+go test -tags="e2e linux" ./e2e/ -v -count=1 -timeout=300s
+go test -tags="e2e darwin" ./e2e/ -v -count=1 -timeout=300s
+```
+
+E2e test files:
+- `e2e/helpers_test.go` -- shared utilities (startSluice, connectSOCKS5, startEchoServer, etc.)
+- `e2e/smoke_test.go` -- basic health check smoke test
+- `e2e/proxy_test.go` -- SOCKS5 proxy and policy enforcement
+- `e2e/credential_test.go` -- phantom token injection through MITM
+- `e2e/mcp_test.go` -- MCP gateway tool call flows
+- `e2e/audit_test.go` -- audit log integrity and hash chain verification
+- `e2e/docker_test.go` -- Docker compose integration (linux only)
+- `e2e/apple_test.go` -- Apple Container integration (darwin only)
+
+CI runs e2e tests via `.github/workflows/e2e-linux.yml` and `.github/workflows/e2e-macos.yml`.
+
 ## Project Structure
 
 - `cmd/sluice/main.go` - CLI entrypoint with flag parsing, runtime selection (--runtime docker|apple|none|auto), and signal handling

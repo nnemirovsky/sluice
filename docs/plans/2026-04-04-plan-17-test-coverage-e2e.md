@@ -340,10 +340,10 @@ steps:
 
 ### Task 15: [Final] Update documentation
 
-- [ ] Update CLAUDE.md: document e2e test infrastructure, build tags, how to run
-- [ ] Update CONTRIBUTING.md: add testing section (unit tests, e2e tests, coverage requirements)
-- [ ] Update Makefile help: document test-e2e, test-e2e-linux, test-e2e-macos targets
-- [ ] Update README.md: add test coverage badge
+- [x] Update CLAUDE.md: document e2e test infrastructure, build tags, how to run
+- [x] Update CONTRIBUTING.md: add testing section (unit tests, e2e tests, coverage requirements)
+- [x] Update Makefile help: document test-e2e, test-e2e-linux, test-e2e-macos targets
+- [x] Update README.md: add test coverage badge
 
 ## Technical Details
 
