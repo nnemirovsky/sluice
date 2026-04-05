@@ -36,6 +36,10 @@ type SluiceOpts struct {
 	// ExtraArgs are additional CLI flags passed to the sluice binary.
 	ExtraArgs []string
 
+	// Env adds extra environment variables to the sluice process in
+	// "KEY=VALUE" format. These are appended to os.Environ().
+	Env []string
+
 	// RuntimeNone disables container management (--runtime none). Defaults to true.
 	RuntimeNone bool
 }
@@ -129,6 +133,9 @@ func startSluice(t *testing.T, opts SluiceOpts) *SluiceProcess {
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Stdout = os.Stderr // show sluice logs in test output
 	cmd.Stderr = os.Stderr
+	if len(opts.Env) > 0 {
+		cmd.Env = append(os.Environ(), opts.Env...)
+	}
 
 	if err := cmd.Start(); err != nil {
 		cancel()

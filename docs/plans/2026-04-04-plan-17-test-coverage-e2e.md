@@ -220,14 +220,14 @@ Test phantom token replacement through the full MITM pipeline.
 **Files:**
 - Create: `e2e/credential_test.go`
 
-- [ ] Test: add credential via CLI, configure binding, make HTTPS request through proxy, verify upstream receives real credential in header
-- [ ] Test: phantom token in request body is replaced
-- [ ] Test: phantom token in request to host WITHOUT binding is still replaced (global replacement)
-- [ ] Test: response from upstream with pattern-matched content is redacted before reaching client
-- [ ] Test: credential rotation (add new value, verify next request uses new credential)
-- [ ] Test: multiple credentials for different destinations (each gets correct injection)
-- [ ] Test: SSH credential injection (connect through SOCKS5 to SSH echo server, verify key authentication)
-- [ ] Run: `go test -tags=e2e ./e2e/ -v -timeout 120s`
+- [x] Test: add credential via CLI, configure binding, make HTTPS request through proxy, verify upstream receives real credential in header
+- [x] Test: phantom token in request body is replaced
+- [x] Test: phantom token in request to host WITHOUT binding is still replaced (global replacement)
+- [x] Test: response from upstream with pattern-matched content is redacted before reaching client
+- [x] Test: credential rotation (add new value, verify next request uses new credential)
+- [x] Test: multiple credentials for different destinations (each gets correct injection)
+- [x] Test: SSH credential injection (connect through SOCKS5 to SSH echo server, verify key authentication)
+- [x] Run: `go test -tags=e2e ./e2e/ -v -timeout 120s`
 
 ### Task 9: E2e tests -- MCP gateway
 
