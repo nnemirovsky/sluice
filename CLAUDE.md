@@ -110,7 +110,9 @@ CI runs e2e tests via `.github/workflows/e2e-linux.yml` and `.github/workflows/e
 - `internal/container/types.go` - ContainerManager interface shared by Docker and Apple Container backends, Runtime enum (Docker=0, Apple=1, None=2), ContainerStatus struct
 - `internal/container/apple.go` - Apple Container backend: AppleCLI wrapping `container` CLI via os/exec, AppleManager implementing ContainerManager, CA cert injection
 - `internal/container/apple_test.go` - Tests for AppleCLI, AppleManager, and CA cert injection with mock CommandRunner
-- `internal/container/network.go` - NetworkRouter for macOS pf rules that redirect Apple Container VM traffic through tun2proxy to SOCKS5
+- `internal/container/tart.go` - macOS VM backend: TartCLI wrapping `tart` CLI for Virtualization.framework VMs with Bin() accessor and StartVM() for non-blocking background launch, TartManager implementing ContainerManager with VirtioFS volume sharing, tart-specific CA cert guest path (TartCACertGuestPath = /Volumes/ca/sluice-ca.crt), Keychain-based CA cert injection, and background VM process management via startVM function field
+- `internal/container/tart_test.go` - Tests for TartCLI, TartManager, and CA cert injection with mock CommandRunner
+- `internal/container/network.go` - NetworkRouter for macOS pf rules that redirect Apple Container or tart VM traffic through tun2proxy to SOCKS5
 - `internal/container/network_test.go` - Tests for pf rule generation, subnet derivation, and network routing
 - `internal/docker/manager.go` - Docker container manager implementing container.ContainerManager for credential hot-reload via shared volume + docker exec, with restart fallback
 - `internal/docker/socket_client.go` - Docker socket HTTP client for container lifecycle and exec operations
@@ -805,3 +807,51 @@ protocols = ["apns"]
 ### Standalone mode (--runtime none)
 
 When `--runtime none` is specified, sluice skips container manager initialization and runs as a standalone SOCKS5 proxy + MCP gateway. The user configures `ALL_PROXY=socks5://localhost:1080` in their shell. Credential injection (MITM proxy) and MCP gateway (stdio upstreams) work normally. Only container lifecycle management (hot-reload, restart) is disabled.
+
+## macOS VM Backend (--runtime macos)
+
+macOS VM backend runs OpenClaw in a macOS guest VM via `tart` (Virtualization.framework). This is the only backend that provides access to Apple frameworks (iMessage, EventKit, Keychain, Shortcuts, CallKit). Apple Container runs Linux guests and does not have Apple framework access.
+
+### Requirements
+
+- macOS with Apple Silicon (M1+)
+- `tart` CLI: `brew install cirruslabs/cli/tart`
+- tun2proxy running on the host (see `scripts/macos-vm-setup.sh`)
+- macOS EULA allows 2 additional macOS VM instances per Apple-branded host
+
+### Architecture
+
+```
+macOS VM (tart):
+  OpenClaw macOS VM (bridge100) -> pf route-to -> tun2proxy on host -> SOCKS5 -> sluice on host -> internet
+```
+
+### CLI flags
+
+- `--runtime macos` selects the tart backend (explicit-only, never auto-detected)
+- `--vm-image <oci-image>` specifies the tart OCI image (must include tart agent for `tart exec`)
+- `--cert-dir <path>` specifies the shared CA cert directory for VirtioFS mount
+- `--container-name <name>` specifies the VM name (shared with other backends)
+
+### How it works
+
+1. `TartManager` implements `ContainerManager` using the same `CommandRunner` interface as `AppleManager`
+2. VM lifecycle: `tart clone` (from OCI image), `tart run` (blocking, started via `StartVM`/`cmd.Start()` in a background goroutine), `tart stop`, `tart delete`
+3. VirtioFS volumes share phantom tokens and CA certs between host and VM. Tart VirtioFS mounts appear at `/Volumes/<name>/` in the guest (e.g., `/Volumes/ca/sluice-ca.crt` for CA cert, `/Volumes/phantoms/` for phantom tokens). This differs from Apple Container which uses `/certs/` for CA certs.
+4. CA cert injection uses `security add-trusted-cert` (macOS Keychain) with the tart-specific guest path (`TartCACertGuestPath = /Volumes/ca/sluice-ca.crt`) instead of `update-ca-certificates` (Linux)
+5. Network routing reuses `NetworkRouter` and pf rules. When no explicit `tunGateway` is provided, it is derived from the VM's IP address (the .1 address in the same /24 subnet, e.g., `192.168.64.1` for VM IP `192.168.64.5`). This is the standard convention for macOS bridge interfaces.
+6. Credential hot-reload via `tart exec <name> -- openclaw secrets reload`. Fallback `RestartWithEnv` stops and re-runs the VM in the background (non-blocking via `StartVM`).
+
+### Runtime comparison
+
+| Feature | Docker | Apple Container | macOS VM (tart) |
+|---------|--------|----------------|-----------------|
+| Guest OS | Linux | Linux | macOS |
+| Isolation | Namespaces | Hypervisor micro-VM | Hypervisor VM |
+| Boot time | ~1s | Sub-second | 2-4 seconds |
+| Memory | ~50MB | ~50MB | 1.5-2GB |
+| Apple frameworks | No | No | Yes |
+| CLI tool | docker | container | tart |
+| Network routing | tun2proxy container | pf + tun2proxy host | pf + tun2proxy host |
+| EULA limit | Unlimited | Unlimited | 2 macOS VMs |
+| Auto-detected | Yes | Yes | No (explicit only) |

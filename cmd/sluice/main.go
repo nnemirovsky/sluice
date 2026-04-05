@@ -238,7 +238,14 @@ func main() {
 			goruntime.GOOS,
 		)
 	}
-	_ = vmImage // used in Task 6 when wiring TartManager startup
+	// tartMgr and tartRouter are set when --runtime macos is active. They
+	// are used during shutdown to stop the VM and tear down pf rules.
+	// tartVMOwned tracks whether sluice started the VM (vs. attaching to
+	// a pre-existing one). Only owned VMs are stopped on shutdown.
+	var tartMgr *container.TartManager
+	var tartRouter *container.NetworkRouter
+	var tartVMOwned bool
+
 	switch selectedRuntime {
 	case "docker":
 		sock, sockErr := resolveDockerSocket(*dockerSocket)
@@ -269,6 +276,8 @@ func main() {
 			})
 			log.Printf("apple container manager enabled: container=%s", *containerName)
 		}
+	case "macos":
+		tartMgr, tartRouter, containerMgr, tartVMOwned = startMacOSVM(*vmImage, *containerName, *phantomDir, *certDir)
 	case "none":
 		log.Printf("standalone mode: no container runtime (configure ALL_PROXY=socks5://%s manually)", *listenAddr)
 	case "":
@@ -589,8 +598,16 @@ func main() {
 		if err := srv.GracefulShutdown(*shutdownTimeout); err != nil {
 			log.Printf("WARNING: %v", err)
 		}
+		// Stop macOS VM and tear down pf rules if active.
+		if tartMgr != nil {
+			shutdownMacOSVM(tartMgr, tartRouter, tartVMOwned)
+		}
 		// Audit logger is closed via defer after all connections drain.
 	case err := <-errCh:
+		// Clean up macOS VM and pf rules before exiting on proxy failure.
+		if tartMgr != nil {
+			shutdownMacOSVM(tartMgr, tartRouter, tartVMOwned)
+		}
 		log.Fatalf("proxy failed: %v", err)
 	}
 }
@@ -867,6 +884,195 @@ func seedStoreFromConfig(db *store.Store, configPath string) error {
 		configPath, result.RulesInserted,
 		result.BindingsInserted, result.UpstreamsInserted, result.ConfigSet)
 	return nil
+}
+
+// startMacOSVM handles the full macOS VM startup sequence for --runtime macos:
+// (1) create TartCLI, (2) check if VM exists, (3) clone from image if needed,
+// (4) start VM in background goroutine, (5) wait for VM IP, (6) set up pf
+// routing. Returns the TartManager, NetworkRouter (for shutdown cleanup),
+// the ContainerManager interface, and a boolean indicating whether sluice
+// started the VM. Calls log.Fatalf on unrecoverable errors.
+func startMacOSVM(vmImage, vmName, phantomDir, certDir string) (*container.TartManager, *container.NetworkRouter, container.ContainerManager, bool) {
+	cli, cliErr := container.NewTartCLI(nil)
+	if cliErr != nil {
+		log.Fatalf("--runtime macos: tart CLI not available: %v", cliErr)
+	}
+
+	mgr, router, owned, err := setupMacOSVM(cli, vmImage, vmName, phantomDir, certDir)
+	if err != nil {
+		log.Fatalf("--runtime macos: %v", err)
+	}
+	return mgr, router, mgr, owned
+}
+
+// buildTartRunConfig creates the TartRunConfig with VirtioFS mounts.
+func buildTartRunConfig(vmName, phantomDir, certDir string) container.TartRunConfig {
+	var dirMounts []container.TartDirMount
+	if phantomDir != "" {
+		dirMounts = append(dirMounts, container.TartDirMount{
+			Name: "phantoms", HostPath: phantomDir,
+		})
+	}
+	if certDir != "" {
+		dirMounts = append(dirMounts, container.TartDirMount{
+			Name: "ca", HostPath: certDir, ReadOnly: true,
+		})
+	}
+	return container.TartRunConfig{
+		Name:       vmName,
+		DirMounts:  dirMounts,
+		NoGraphics: true,
+	}
+}
+
+// VM IP polling parameters.
+const (
+	vmIPPollMaxAttempts = 30
+	vmIPPollBaseDelay   = 500 * time.Millisecond
+	vmIPPollIncrement   = 200 * time.Millisecond
+)
+
+// waitForVMIP polls for the VM's IP address with linear backoff. Returns the
+// IP or an error if the VM does not acquire one within the polling budget.
+func waitForVMIP(ctx context.Context, cli *container.TartCLI, vmName string) (string, error) {
+	for attempt := 0; attempt < vmIPPollMaxAttempts; attempt++ {
+		ip, ipErr := cli.IP(ctx, vmName)
+		if ipErr == nil && ip != "" {
+			return ip, nil
+		}
+		time.Sleep(vmIPPollBaseDelay + time.Duration(attempt)*vmIPPollIncrement)
+	}
+	return "", fmt.Errorf("VM %q did not get an IP address within timeout", vmName)
+}
+
+// setupMacOSVM performs the macOS VM startup sequence using the provided
+// TartCLI. It returns an error instead of calling log.Fatalf, making it
+// testable. The startCmd callback launches `tart run` in a background
+// process. When nil, the default uses os/exec. The returned boolean
+// indicates whether sluice started the VM (true) or attached to an
+// already-running VM (false). Only VMs started by sluice should be
+// stopped on shutdown.
+func setupMacOSVM(cli *container.TartCLI, vmImage, vmName, phantomDir, certDir string) (*container.TartManager, *container.NetworkRouter, bool, error) {
+	ctx := context.Background()
+
+	// Check if VM already exists.
+	exists, err := cli.VMExists(ctx, vmName)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("check VM existence: %w", err)
+	}
+
+	if !exists {
+		log.Printf("cloning macOS VM %q from %q (this may take several minutes for macOS images)...", vmName, vmImage)
+		if cloneErr := cli.Clone(ctx, vmImage, vmName); cloneErr != nil {
+			return nil, nil, false, fmt.Errorf("clone VM: %w", cloneErr)
+		}
+		log.Printf("macOS VM %q cloned successfully", vmName)
+	}
+
+	// Check if VM is already running.
+	state, stateErr := cli.VMState(ctx, vmName)
+	if stateErr != nil {
+		return nil, nil, false, fmt.Errorf("check VM state: %w", stateErr)
+	}
+
+	runCfg := buildTartRunConfig(vmName, phantomDir, certDir)
+
+	// Track whether sluice started the VM so we only stop it on shutdown
+	// if we own it. Attaching to a pre-existing VM and then killing it on
+	// exit would be surprising and disruptive.
+	vmStartedBySluice := false
+
+	// Start the VM in a background goroutine if not already running.
+	// Uses cli.StartVM() which calls cmd.Start() internally, avoiding the
+	// blocking cli.Run() path that would hang forever.
+	if !strings.EqualFold(state, "running") {
+		tartCmd, startErr := cli.StartVM(runCfg)
+		if startErr != nil {
+			return nil, nil, false, fmt.Errorf("start VM: %w", startErr)
+		}
+		vmStartedBySluice = true
+		// Monitor the background process. If it exits unexpectedly, log the error.
+		go func() {
+			if waitErr := tartCmd.Wait(); waitErr != nil {
+				log.Printf("WARNING: macOS VM %q exited: %v", vmName, waitErr)
+			}
+		}()
+		log.Printf("macOS VM %q starting in background (pid=%d)...", vmName, tartCmd.Process.Pid)
+	} else {
+		log.Printf("macOS VM %q is already running (attaching without ownership)", vmName)
+	}
+
+	// cleanupVM stops the VM if sluice started it. Used as a safety net when
+	// later setup steps fail, preventing an orphaned VM with ungoverned
+	// network access.
+	cleanupVM := func(reason string) {
+		if !vmStartedBySluice {
+			return
+		}
+		log.Printf("stopping macOS VM %q after setup failure: %s", vmName, reason)
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer stopCancel()
+		if stopErr := cli.Stop(stopCtx, vmName); stopErr != nil {
+			log.Printf("WARNING: failed to stop orphaned VM %q: %v", vmName, stopErr)
+		}
+	}
+
+	vmIP, ipErr := waitForVMIP(ctx, cli, vmName)
+	if ipErr != nil {
+		cleanupVM("wait for VM IP failed")
+		return nil, nil, false, fmt.Errorf("wait for VM IP: %w", ipErr)
+	}
+	log.Printf("macOS VM %q IP: %s", vmName, vmIP)
+
+	// Create TartManager with the run config for potential restarts.
+	mgr := container.NewTartManager(container.TartManagerConfig{
+		CLI:       cli,
+		VMName:    vmName,
+		RunConfig: runCfg,
+	})
+
+	// Set up pf routing to redirect VM traffic through tun2proxy to SOCKS5.
+	// Routing failure is fatal because without it the VM has a direct network
+	// path that bypasses sluice policy enforcement.
+	router := container.NewNetworkRouter(container.NetworkRouterConfig{})
+	routeCtx, routeCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer routeCancel()
+	if routeErr := mgr.SetupNetworkRouting(routeCtx, router, ""); routeErr != nil {
+		cleanupVM("pf routing setup failed")
+		return nil, nil, false, fmt.Errorf("pf routing setup failed (VM traffic would bypass sluice): %w", routeErr)
+	}
+	log.Printf("pf routing configured for macOS VM %q", vmName)
+
+	log.Printf("macOS VM manager enabled: vm=%s, image=%s", vmName, vmImage)
+	return mgr, router, vmStartedBySluice, nil
+}
+
+// shutdownMacOSVM tears down pf routing rules and optionally stops the VM.
+// The VM is only stopped when ownedBySluice is true, meaning sluice started
+// it. When sluice attached to a pre-existing VM, pf rules are still cleaned
+// up but the VM is left running.
+func shutdownMacOSVM(mgr *container.TartManager, router *container.NetworkRouter, ownedBySluice bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if router != nil {
+		if err := mgr.TeardownNetworkRouting(ctx, router); err != nil {
+			log.Printf("WARNING: pf teardown failed: %v", err)
+		} else {
+			log.Printf("pf routing rules removed")
+		}
+	}
+
+	if !ownedBySluice {
+		log.Printf("macOS VM was not started by sluice, leaving it running")
+		return
+	}
+
+	if err := mgr.Stop(ctx); err != nil {
+		log.Printf("WARNING: failed to stop macOS VM: %v", err)
+	} else {
+		log.Printf("macOS VM stopped")
+	}
 }
 
 // buildInspectRuleConfigs converts policy engine inspect rules into

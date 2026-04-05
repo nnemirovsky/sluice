@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nemirovsky/sluice/internal/api"
+	"github.com/nemirovsky/sluice/internal/container"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
 	"github.com/nemirovsky/sluice/internal/store"
@@ -1243,6 +1244,120 @@ func TestBuildInspectRuleConfigs(t *testing.T) {
 		t.Errorf("expected 1 quic redact rule, got %d", len(quicRedact))
 	}
 }
+
+// TestBuildTartRunConfig verifies VirtioFS mount configuration for macOS VMs.
+func TestBuildTartRunConfig(t *testing.T) {
+	tests := []struct {
+		name       string
+		vmName     string
+		phantomDir string
+		certDir    string
+		wantMounts int
+		wantName   string
+	}{
+		{
+			name:       "both dirs set",
+			vmName:     "openclaw",
+			phantomDir: "/tmp/phantoms",
+			certDir:    "/tmp/ca",
+			wantMounts: 2,
+			wantName:   "openclaw",
+		},
+		{
+			name:       "phantom only",
+			vmName:     "testvm",
+			phantomDir: "/tmp/phantoms",
+			certDir:    "",
+			wantMounts: 1,
+			wantName:   "testvm",
+		},
+		{
+			name:       "cert only",
+			vmName:     "testvm",
+			phantomDir: "",
+			certDir:    "/tmp/ca",
+			wantMounts: 1,
+			wantName:   "testvm",
+		},
+		{
+			name:       "no dirs",
+			vmName:     "testvm",
+			phantomDir: "",
+			certDir:    "",
+			wantMounts: 0,
+			wantName:   "testvm",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := buildTartRunConfig(tt.vmName, tt.phantomDir, tt.certDir)
+			if cfg.Name != tt.wantName {
+				t.Errorf("Name = %q, want %q", cfg.Name, tt.wantName)
+			}
+			if !cfg.NoGraphics {
+				t.Error("NoGraphics should always be true")
+			}
+			if len(cfg.DirMounts) != tt.wantMounts {
+				t.Errorf("DirMounts count = %d, want %d", len(cfg.DirMounts), tt.wantMounts)
+			}
+
+			// When both dirs are set, verify mount names, paths, and readonly flags.
+			if tt.phantomDir != "" && tt.certDir != "" && len(cfg.DirMounts) == 2 {
+				if cfg.DirMounts[0].Name != "phantoms" {
+					t.Errorf("mount[0].Name = %q, want phantoms", cfg.DirMounts[0].Name)
+				}
+				if cfg.DirMounts[0].HostPath != tt.phantomDir {
+					t.Errorf("mount[0].HostPath = %q, want %q", cfg.DirMounts[0].HostPath, tt.phantomDir)
+				}
+				if cfg.DirMounts[0].ReadOnly {
+					t.Error("phantom mount should be writable")
+				}
+				if cfg.DirMounts[1].Name != "ca" {
+					t.Errorf("mount[1].Name = %q, want ca", cfg.DirMounts[1].Name)
+				}
+				if cfg.DirMounts[1].HostPath != tt.certDir {
+					t.Errorf("mount[1].HostPath = %q, want %q", cfg.DirMounts[1].HostPath, tt.certDir)
+				}
+				if !cfg.DirMounts[1].ReadOnly {
+					t.Error("ca mount should be read-only")
+				}
+			}
+		})
+	}
+}
+
+// TestMacOSRuntimeSelectionRequiresExplicit verifies that detectRuntime
+// never auto-selects macos even when tart is available. This validates the
+// design decision that macOS VMs are heavyweight and must be explicitly
+// requested via --runtime macos.
+func TestMacOSRuntimeSelectionRequiresExplicit(t *testing.T) {
+	// tart available but no other runtimes: should NOT auto-select.
+	got := detectRuntime(false, false, true, "darwin")
+	if got != "" {
+		t.Errorf("detectRuntime with only tart should return empty, got %q", got)
+	}
+
+	// tart available with docker: should select docker, not macos.
+	got = detectRuntime(true, false, true, "darwin")
+	if got != "docker" {
+		t.Errorf("detectRuntime with tart+docker should return docker, got %q", got)
+	}
+
+	// tart available with apple: should select apple, not macos.
+	got = detectRuntime(false, true, true, "darwin")
+	if got != "apple" {
+		t.Errorf("detectRuntime with tart+apple should return apple, got %q", got)
+	}
+}
+
+// Compile-time checks: TartManager satisfies ContainerManager and
+// shutdownMacOSVM accepts the expected parameter types (including nil router
+// and ownership boolean).
+var (
+	_ container.ContainerManager                                        = (*container.TartManager)(nil)
+	_ func(*container.TartManager, *container.NetworkRouter, bool) = shutdownMacOSVM
+)
 
 func TestBuildInspectRuleConfigsEmpty(t *testing.T) {
 	db, err := store.New(":memory:")

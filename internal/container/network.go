@@ -8,10 +8,10 @@ import (
 	"strings"
 )
 
-// NetworkRouter manages macOS pf (packet filter) rules that redirect Apple
-// Container VM traffic through a TUN device to tun2proxy, which forwards it
-// to sluice's SOCKS5 proxy. All pfctl calls go through CommandRunner for
-// testability.
+// NetworkRouter manages macOS pf (packet filter) rules that redirect VM
+// traffic (Apple Container or tart) through a TUN device to tun2proxy, which
+// forwards it to sluice's SOCKS5 proxy. All pfctl calls go through
+// CommandRunner for testability.
 type NetworkRouter struct {
 	runner     CommandRunner
 	anchorName string
@@ -58,7 +58,7 @@ func NewNetworkRouter(cfg NetworkRouterConfig) *NetworkRouter {
 // the host-side IP on the TUN interface that tun2proxy listens on.
 func (r *NetworkRouter) GenerateAnchorRules(bridgeIface, vmSubnet, tunGateway string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Sluice pf anchor: redirect Apple Container VM traffic\n")
+	fmt.Fprintf(&b, "# Sluice pf anchor: redirect VM traffic through tun2proxy\n")
 	fmt.Fprintf(&b, "# Bridge: %s, Subnet: %s, TUN: %s\n\n", bridgeIface, vmSubnet, r.tunIface)
 	// Route TCP traffic from the VM through the TUN device to tun2proxy.
 	// Only TCP is routed because SOCKS5/tun2proxy cannot handle UDP or ICMP.
@@ -98,7 +98,17 @@ func (r *NetworkRouter) SetupNetworkRouting(ctx context.Context, vmIP, bridgeIfa
 
 	// Write rules to a temp file and load via pfctl. This avoids shell
 	// injection risks from interpolating rules into a shell command.
-	return r.loadAnchorFromFile(ctx, rules)
+	if err := r.loadAnchorFromFile(ctx, rules); err != nil {
+		return err
+	}
+
+	// Ensure pf is enabled. On hosts where pf is disabled, the anchor rules
+	// load successfully but have no effect. The -e flag is idempotent (returns
+	// exit code 0 with "already enabled" on stderr when pf is running).
+	if _, err := r.runner.Run(ctx, "pfctl", "-e"); err != nil {
+		return fmt.Errorf("enable pf: %w", err)
+	}
+	return nil
 }
 
 // loadAnchorFromFile writes rules to a temp file and loads via pfctl -f.
@@ -217,6 +227,25 @@ func IsTUN2ProxyRunning(ctx context.Context, runner CommandRunner, tunIface stri
 	// On macOS, ifconfig <iface> returns 0 if the interface exists.
 	_, err := runner.Run(ctx, "ifconfig", tunIface)
 	return err == nil
+}
+
+// GatewayFromIP derives the default gateway IP for a /24 subnet from a VM IP.
+// For example, "192.168.64.5" returns "192.168.64.1". This is the standard
+// convention for bridge interfaces where the host-side gateway is .1 in the
+// subnet. Used when no explicit --tun-gateway flag is provided.
+func GatewayFromIP(ipStr string) (string, error) {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return "", fmt.Errorf("invalid IP address: %s", ipStr)
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return "", fmt.Errorf("not an IPv4 address: %s", ipStr)
+	}
+	gw := make(net.IP, len(ip4))
+	copy(gw, ip4)
+	gw[3] = 1
+	return gw.String(), nil
 }
 
 // subnetFromIP derives a /24 CIDR subnet from an IP address.

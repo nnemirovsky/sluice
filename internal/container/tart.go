@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -40,6 +41,29 @@ func NewTartCLIWithBin(bin string, runner CommandRunner) (*TartCLI, error) {
 	}
 
 	return &TartCLI{bin: bin, runner: runner}, nil
+}
+
+// Bin returns the configured path to the tart binary. This allows callers
+// (such as setupMacOSVM) to use the correct binary path for exec.Command
+// instead of hardcoding "tart".
+func (c *TartCLI) Bin() string {
+	return c.bin
+}
+
+// StartVM builds a `tart run` exec.Cmd and starts it in the background via
+// cmd.Start(). This is the correct way to launch a tart VM because `tart run`
+// blocks until the VM shuts down. Returns the started Cmd so the caller can
+// monitor it via cmd.Wait() in a goroutine. The caller is responsible for
+// calling cmd.Wait() to avoid zombie processes.
+func (c *TartCLI) StartVM(cfg TartRunConfig) (*exec.Cmd, error) {
+	args := c.RunArgs(cfg)
+	cmd := exec.Command(c.bin, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start tart VM %q: %w", cfg.Name, err)
+	}
+	return cmd, nil
 }
 
 // Clone creates a VM from an OCI image. This can take minutes for macOS images.
@@ -180,6 +204,12 @@ func (c *TartCLI) VMState(ctx context.Context, name string) (string, error) {
 	return "", nil
 }
 
+// TartCACertGuestPath is the path where the CA cert appears inside a tart
+// macOS VM when mounted via VirtioFS with --dir=ca:<hostpath>. VirtioFS mounts
+// in tart VMs appear at /Volumes/<name>/, unlike Apple Container which uses
+// /certs/ as the shared volume path.
+const TartCACertGuestPath = "/Volumes/ca/sluice-ca.crt"
+
 // TartManager implements ContainerManager for macOS VMs managed by tart.
 // It uses TartCLI for VM lifecycle and credential injection via VirtioFS
 // shared volumes and tart exec.
@@ -190,6 +220,9 @@ type TartManager struct {
 	// because tart has no inspect command. The caller sets it at creation time
 	// so RestartWithEnv can re-run the VM with the same mounts.
 	runCfg TartRunConfig
+	// startVM launches the VM in the background. Defaults to cli.StartVM.
+	// Replaceable in tests to avoid spawning real processes.
+	startVM func(TartRunConfig) (*exec.Cmd, error)
 }
 
 // TartManagerConfig holds configuration for creating a TartManager.
@@ -203,29 +236,26 @@ type TartManagerConfig struct {
 }
 
 // NewTartManager creates a new TartManager from the given config.
+// Panics if cfg.CLI is nil because all manager operations depend on it.
 func NewTartManager(cfg TartManagerConfig) *TartManager {
-	return &TartManager{
+	if cfg.CLI == nil {
+		panic("container: NewTartManager requires non-nil CLI")
+	}
+	m := &TartManager{
 		cli:    cfg.CLI,
 		vmName: cfg.VMName,
 		runCfg: cfg.RunConfig,
 	}
+	m.startVM = cfg.CLI.StartVM
+	return m
 }
 
 // ReloadSecrets writes phantom token files to the VirtioFS shared directory
 // and signals the macOS VM to reload them via tart exec. Falls back to
 // RestartWithEnv if the exec command fails.
 func (m *TartManager) ReloadSecrets(ctx context.Context, phantomDir string, phantomEnv map[string]string) error {
-	for name, value := range phantomEnv {
-		path := filepath.Join(phantomDir, name)
-		if value == "" {
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("remove phantom file %s: %w", name, err)
-			}
-			continue
-		}
-		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
-			return fmt.Errorf("write phantom file %s: %w", name, err)
-		}
+	if err := WritePhantomFiles(phantomDir, phantomEnv); err != nil {
+		return err
 	}
 
 	_, err := m.cli.Exec(ctx, m.vmName, []string{"openclaw", "secrets", "reload"})
@@ -235,44 +265,50 @@ func (m *TartManager) ReloadSecrets(ctx context.Context, phantomDir string, phan
 	return nil
 }
 
-// RestartWithEnv stops the VM and re-runs it. Unlike Apple Container, tart VMs
-// persist state across stop/run cycles so we do NOT delete+clone (which takes
-// minutes for macOS images). Environment variables are not directly supported
-// by tart run, so this method stops and restarts the VM to pick up changes
-// from the shared VirtioFS volume.
+// RestartWithEnv stops the VM and re-runs it in the background. Unlike Apple
+// Container, tart VMs persist state across stop/run cycles so we do NOT
+// delete+clone (which takes minutes for macOS images). Environment variables
+// are not directly supported by tart run, so this method stops and restarts
+// the VM to pick up changes from the shared VirtioFS volume. The VM process
+// runs in a background goroutine because `tart run` is a blocking command.
+//
+// Known limitation: pf routing rules are not re-applied after restart. The VM
+// may receive a different IP address, making existing rules stale. During the
+// restart window, network traffic from the VM could bypass sluice. This is
+// acceptable because RestartWithEnv is only called as a fallback when the
+// preferred hot-reload via exec fails, and credential rotation (the trigger
+// for restart) is infrequent.
 func (m *TartManager) RestartWithEnv(ctx context.Context, _ map[string]string) error {
 	if err := m.cli.Stop(ctx, m.vmName); err != nil {
 		return fmt.Errorf("stop VM: %w", err)
 	}
 
-	// Re-run with the same config. tart VMs persist disk state across stop/run.
-	return m.cli.Run(ctx, m.runCfg)
+	// Re-run with the same config in the background. tart VMs persist disk
+	// state across stop/run. startVM uses cmd.Start() so this returns
+	// immediately. Monitor the background process for unexpected exits.
+	cmd, err := m.startVM(m.runCfg)
+	if err != nil {
+		return fmt.Errorf("restart VM: %w", err)
+	}
+	go func() {
+		if waitErr := cmd.Wait(); waitErr != nil {
+			log.Printf("WARNING: macOS VM %q exited after restart: %v", m.vmName, waitErr)
+		}
+	}()
+	return nil
 }
 
 // InjectMCPConfig writes an mcp-servers.json file to the VirtioFS shared
 // volume and signals the macOS VM to reload MCP configuration via tart exec.
 func (m *TartManager) InjectMCPConfig(phantomDir, sluiceURL string) error {
-	mcpConfig := map[string]any{
-		"sluice": map[string]any{
-			"url":       sluiceURL,
-			"transport": "streamable-http",
-		},
-	}
-
-	data, err := json.Marshal(mcpConfig)
-	if err != nil {
-		return fmt.Errorf("marshal mcp config: %w", err)
-	}
-
-	path := filepath.Join(phantomDir, "mcp-servers.json")
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		return fmt.Errorf("write mcp config: %w", err)
+	if err := WriteMCPConfig(phantomDir, sluiceURL); err != nil {
+		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if _, execErr := m.cli.Exec(ctx, m.vmName, []string{"openclaw", "mcp", "reload"}); execErr != nil {
-		// Best-effort: agent picks up config on next restart.
+		path := filepath.Join(phantomDir, "mcp-servers.json")
 		log.Printf("MCP config written to %s but exec reload failed: %v", path, execErr)
 	}
 	return nil
@@ -327,10 +363,13 @@ func (m *TartManager) InjectCACert(ctx context.Context, hostCertPath, certDir st
 	}
 
 	// macOS guest: add cert to System Keychain via security add-trusted-cert.
+	// Use TartCACertGuestPath (/Volumes/ca/sluice-ca.crt) because tart
+	// VirtioFS mounts appear at /Volumes/<name>/, not at the Apple Container
+	// path (/certs/).
 	_, macErr := m.cli.Exec(ctx, m.vmName, []string{
 		"security", "add-trusted-cert", "-d", "-r", "trustRoot",
 		"-k", "/Library/Keychains/System.keychain",
-		CACertGuestPath,
+		TartCACertGuestPath,
 	})
 	if macErr != nil {
 		// Best-effort. The cert is still usable via env vars set below.
@@ -341,7 +380,7 @@ func (m *TartManager) InjectCACert(ctx context.Context, hostCertPath, certDir st
 	// and NODE_EXTRA_CA_CERTS are set for all GUI and agent processes. This
 	// covers tools that do not use the macOS Keychain for TLS trust (e.g.
 	// Python requests, Node.js, OpenSSL-based tools).
-	envVars := CACertEnvVars(CACertGuestPath)
+	envVars := CACertEnvVars(TartCACertGuestPath)
 	for k, v := range envVars {
 		_, _ = m.cli.Exec(ctx, m.vmName, []string{
 			"launchctl", "setenv", k, v,
@@ -365,7 +404,8 @@ func (m *TartManager) VMIP(ctx context.Context) (string, error) {
 // SetupNetworkRouting gets the VM's IP address and sets up pf rules to route
 // VM traffic through tun2proxy to sluice's SOCKS5 proxy. The router and
 // tunGateway are provided by the caller (typically the main startup code).
-// Logs a warning if tun2proxy does not appear to be running.
+// When tunGateway is empty, it is derived from the VM's IP (e.g., .1 in the
+// same /24 subnet). Logs a warning if tun2proxy does not appear to be running.
 func (m *TartManager) SetupNetworkRouting(ctx context.Context, router *NetworkRouter, tunGateway string) error {
 	// Check if tun2proxy is running by looking for the TUN interface.
 	if !IsTUN2ProxyRunning(ctx, m.cli.runner, router.tunIface) {
@@ -381,6 +421,16 @@ func (m *TartManager) SetupNetworkRouting(ctx context.Context, router *NetworkRo
 	bridgeIface, vmIP, err := DefaultBridgeInterface(getIP)
 	if err != nil {
 		return fmt.Errorf("detect bridge interface: %w", err)
+	}
+
+	// When no explicit gateway is provided, derive it from the VM IP.
+	// Convention: the host-side gateway is .1 in the /24 subnet.
+	if tunGateway == "" {
+		gw, gwErr := GatewayFromIP(vmIP)
+		if gwErr != nil {
+			return fmt.Errorf("derive gateway from VM IP %q: %w", vmIP, gwErr)
+		}
+		tunGateway = gw
 	}
 
 	return router.SetupNetworkRouting(ctx, vmIP, bridgeIface, tunGateway)

@@ -195,11 +195,11 @@ tart exec openclaw -- security add-trusted-cert \
 - Modify: `cmd/sluice/main.go`
 - Modify: `cmd/sluice/main_test.go`
 
-- [ ] When `--runtime macos`: create `TartManager`. Startup sequence: (1) `tart list --format json` to check if VM exists, (2) if not, `tart clone <--vm-image> <--container-name>` (warn user this may take minutes for macOS images), (3) `tart run` in background goroutine, (4) wait for VM IP via `tart ip`, (5) set up pf routing, (6) inject CA cert via `InjectCACert`.
-- [ ] Pass `TartManager` as `ContainerManager` to Telegram commands, API server, MCP auto-injection
-- [ ] On shutdown: stop VM, tear down pf rules
-- [ ] Write tests for macos runtime startup path (mock tart CLI)
-- [ ] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
+- [x] When `--runtime macos`: create `TartManager`. Startup sequence: (1) `tart list --format json` to check if VM exists, (2) if not, `tart clone <--vm-image> <--container-name>` (warn user this may take minutes for macOS images), (3) `tart run` in background goroutine, (4) wait for VM IP via `tart ip`, (5) set up pf routing, (6) inject CA cert via `InjectCACert`.
+- [x] Pass `TartManager` as `ContainerManager` to Telegram commands, API server, MCP auto-injection
+- [x] On shutdown: stop VM, tear down pf rules
+- [x] Write tests for macos runtime startup path (mock tart CLI)
+- [x] Run tests: `go test ./cmd/sluice/ -v -timeout 30s`
 
 ### Task 7: Verify acceptance criteria
 

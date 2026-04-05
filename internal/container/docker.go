@@ -2,10 +2,8 @@ package container
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -79,19 +77,8 @@ func NewDockerManager(client ContainerClient, containerName string) *DockerManag
 // If the exec command fails (e.g. the agent image does not support "secrets
 // reload"), it falls back to RestartWithEnv for backward compatibility.
 func (m *DockerManager) ReloadSecrets(ctx context.Context, phantomDir string, phantomEnv map[string]string) error {
-	// Write each phantom token as a file in the shared volume.
-	for name, value := range phantomEnv {
-		path := filepath.Join(phantomDir, name)
-		if value == "" {
-			// Empty value means removal.
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("remove phantom file %s: %w", name, err)
-			}
-			continue
-		}
-		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
-			return fmt.Errorf("write phantom file %s: %w", name, err)
-		}
+	if err := WritePhantomFiles(phantomDir, phantomEnv); err != nil {
+		return err
 	}
 
 	// Signal the agent container to reload secrets.
@@ -161,28 +148,15 @@ func (m *DockerManager) Status(ctx context.Context) (ContainerStatus, error) {
 // volume and signals the agent container to reload MCP configuration via
 // docker exec. If exec fails, the agent picks up the config on next restart.
 func (m *DockerManager) InjectMCPConfig(phantomDir, sluiceURL string) error {
-	mcpConfig := map[string]any{
-		"sluice": map[string]any{
-			"url":       sluiceURL,
-			"transport": "streamable-http",
-		},
-	}
-
-	data, err := json.Marshal(mcpConfig)
-	if err != nil {
-		return fmt.Errorf("marshal mcp config: %w", err)
-	}
-
-	path := filepath.Join(phantomDir, "mcp-servers.json")
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		return fmt.Errorf("write mcp config: %w", err)
+	if err := WriteMCPConfig(phantomDir, sluiceURL); err != nil {
+		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if execErr := m.client.ExecInContainer(ctx, m.containerName,
 		[]string{"openclaw", "mcp", "reload"}); execErr != nil {
-		// Best-effort: agent picks up config on next restart.
+		path := filepath.Join(phantomDir, "mcp-servers.json")
 		log.Printf("MCP config written to %s but exec reload failed: %v", path, execErr)
 	}
 	return nil

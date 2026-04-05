@@ -78,6 +78,8 @@ func TestSetupNetworkRouting(t *testing.T) {
 	runner.onCommand("pfctl -f", nil, nil)
 	// pfctl -a sluice -f <tempfile> loads the anchor rules.
 	runner.onCommand("pfctl -a sluice -f", nil, nil)
+	// pfctl -e enables pf if not already running.
+	runner.onCommand("pfctl -e", nil, nil)
 
 	pfConf := writeTempPFConf(t, "# default pf rules\n")
 	router := NewNetworkRouter(NetworkRouterConfig{
@@ -98,6 +100,9 @@ func TestSetupNetworkRouting(t *testing.T) {
 	if !runner.called("pfctl -a sluice -f") {
 		t.Error("expected pfctl call to load anchor rules from file")
 	}
+	if !runner.called("pfctl -e") {
+		t.Error("expected pfctl -e call to enable pf")
+	}
 
 	// Verify anchor reference was added to pf.conf.
 	data, _ := os.ReadFile(pfConf)
@@ -109,6 +114,7 @@ func TestSetupNetworkRouting(t *testing.T) {
 func TestSetupNetworkRoutingAnchorAlreadyPresent(t *testing.T) {
 	runner := newMockRunner()
 	runner.onCommand("pfctl -a sluice -f", nil, nil)
+	runner.onCommand("pfctl -e", nil, nil)
 
 	pfConf := writeTempPFConf(t, "# defaults\nanchor \"sluice\"\n")
 	router := NewNetworkRouter(NetworkRouterConfig{
@@ -140,6 +146,7 @@ func TestSetupNetworkRoutingCommentedAnchorNotMatched(t *testing.T) {
 	runner := newMockRunner()
 	runner.onCommand("pfctl -f", nil, nil)
 	runner.onCommand("pfctl -a sluice -f", nil, nil)
+	runner.onCommand("pfctl -e", nil, nil)
 
 	// pf.conf has a commented-out anchor directive. Setup should still add
 	// the active directive and reload.
@@ -240,6 +247,29 @@ func TestSetupNetworkRoutingAnchorLoadError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "load pf anchor") {
 		t.Errorf("error should mention pf anchor: %v", err)
+	}
+}
+
+func TestSetupNetworkRoutingEnablePfError(t *testing.T) {
+	runner := newMockRunner()
+	// Anchor ref and load succeed, but pfctl -e fails.
+	runner.onCommand("pfctl -f", nil, nil)
+	runner.onCommand("pfctl -a sluice -f", nil, nil)
+	runner.onCommand("pfctl -e", nil, errors.New("permission denied"))
+
+	pfConf := writeTempPFConf(t, "# default pf rules\n")
+	router := NewNetworkRouter(NetworkRouterConfig{
+		Runner:     runner,
+		AnchorName: "sluice",
+		PFConfPath: pfConf,
+	})
+
+	err := router.SetupNetworkRouting(context.Background(), "192.168.64.2", "bridge100", "192.168.64.1")
+	if err == nil {
+		t.Fatal("expected error when pfctl -e fails")
+	}
+	if !strings.Contains(err.Error(), "enable pf") {
+		t.Errorf("error should mention enabling pf: %v", err)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -530,6 +531,8 @@ var _ ContainerManager = (*TartManager)(nil)
 
 // newTestTartManager creates a TartManager with a mock runner for testing.
 // Returns the manager, mock runner, and a temp dir for phantom files.
+// The startVM function is replaced with a mock that records the call and
+// returns a nil Cmd (tests that need cmd.Wait() must override startVM).
 func newTestTartManager(t *testing.T) (*TartManager, *mockRunner, string) {
 	t.Helper()
 	runner := newMockRunner()
@@ -554,6 +557,20 @@ func newTestTartManager(t *testing.T) (*TartManager, *mockRunner, string) {
 			NoGraphics: true,
 		},
 	})
+
+	// Replace startVM with a mock that uses the runner (so mock command
+	// matching works) and returns a completed Cmd from a no-op process.
+	mgr.startVM = func(cfg TartRunConfig) (*exec.Cmd, error) {
+		args := cli.RunArgs(cfg)
+		_, runErr := runner.Run(context.Background(), "tart", args...)
+		if runErr != nil {
+			return nil, runErr
+		}
+		// Return a real Cmd that has already exited (true is a no-op).
+		cmd := exec.Command("true")
+		_ = cmd.Start()
+		return cmd, nil
+	}
 
 	return mgr, runner, tmpDir
 }
@@ -710,8 +727,8 @@ func TestTartManagerRestartWithEnvRunError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "failed to start VM") {
-		t.Errorf("error should mention start failure: %v", err)
+	if !strings.Contains(err.Error(), "restart VM") {
+		t.Errorf("error should mention restart VM: %v", err)
 	}
 }
 
@@ -909,8 +926,8 @@ func TestTartManagerInjectCACert(t *testing.T) {
 	if !strings.Contains(cmd, "/Library/Keychains/System.keychain") {
 		t.Errorf("security command should include System.keychain: %s", cmd)
 	}
-	if !strings.Contains(cmd, CACertGuestPath) {
-		t.Errorf("security command should include guest cert path %q: %s", CACertGuestPath, cmd)
+	if !strings.Contains(cmd, TartCACertGuestPath) {
+		t.Errorf("security command should include tart guest cert path %q: %s", TartCACertGuestPath, cmd)
 	}
 
 	// Verify launchctl setenv was called for env var fallback.
@@ -1044,6 +1061,7 @@ func TestTartManagerSetupNetworkRouting(t *testing.T) {
 	pfConf := writeTempPFConf(t, "# default pf rules\n")
 	runner.onCommand("pfctl -f", nil, nil)
 	runner.onCommand("pfctl -a sluice -f", nil, nil)
+	runner.onCommand("pfctl -e", nil, nil)
 
 	router := NewNetworkRouter(NetworkRouterConfig{
 		Runner:     runner,
@@ -1114,6 +1132,7 @@ func TestTartManagerSetupNetworkRoutingTun2proxyNotRunning(t *testing.T) {
 	pfConf := writeTempPFConf(t, "# default pf rules\n")
 	runner.onCommand("pfctl -f", nil, nil)
 	runner.onCommand("pfctl -a sluice -f", nil, nil)
+	runner.onCommand("pfctl -e", nil, nil)
 
 	router := NewNetworkRouter(NetworkRouterConfig{
 		Runner:     runner,
@@ -1178,5 +1197,128 @@ func TestTartManagerTeardownNetworkRoutingError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "flush pf anchor") {
 		t.Errorf("error should mention flush: %v", err)
+	}
+}
+
+func TestTartCACertGuestPath(t *testing.T) {
+	// TartCACertGuestPath should use /Volumes/ca/ (VirtioFS mount point)
+	// not /certs/ (Apple Container path).
+	if TartCACertGuestPath != "/Volumes/ca/sluice-ca.crt" {
+		t.Errorf("TartCACertGuestPath = %q, want /Volumes/ca/sluice-ca.crt", TartCACertGuestPath)
+	}
+	// Must differ from Apple Container path.
+	if TartCACertGuestPath == CACertGuestPath {
+		t.Error("TartCACertGuestPath should differ from CACertGuestPath (Apple Container uses /certs/)")
+	}
+}
+
+func TestTartCLIBin(t *testing.T) {
+	runner := newMockRunner()
+	runner.onCommand("tart --version", []byte("tart 2.15.0\n"), nil)
+	cli, _ := NewTartCLIWithBin("tart", runner)
+	if cli.Bin() != "tart" {
+		t.Errorf("Bin() = %q, want tart", cli.Bin())
+	}
+
+	runner2 := newMockRunner()
+	runner2.onCommand("/opt/homebrew/bin/tart --version", []byte("tart 2.15.0\n"), nil)
+	cli2, _ := NewTartCLIWithBin("/opt/homebrew/bin/tart", runner2)
+	if cli2.Bin() != "/opt/homebrew/bin/tart" {
+		t.Errorf("Bin() = %q, want /opt/homebrew/bin/tart", cli2.Bin())
+	}
+}
+
+func TestGatewayFromIP(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+		err   bool
+	}{
+		{"192.168.64.5", "192.168.64.1", false},
+		{"192.168.64.1", "192.168.64.1", false},
+		{"10.0.0.42", "10.0.0.1", false},
+		{"invalid", "", true},
+		{"::1", "", true},
+	}
+	for _, tt := range tests {
+		got, err := GatewayFromIP(tt.input)
+		if (err != nil) != tt.err {
+			t.Errorf("GatewayFromIP(%q) error = %v, wantErr %v", tt.input, err, tt.err)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("GatewayFromIP(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestSetupNetworkRoutingDerivesGateway(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+
+	// Mock tart ip response.
+	runner.onCommand("tart ip", []byte("192.168.64.5\n"), nil)
+	// Mock ifconfig to detect TUN interface.
+	runner.onCommand("ifconfig utun3", []byte("utun3: flags=...\n"), nil)
+	// Mock pfctl calls.
+	pfConf := writeTempPFConf(t, "# default pf rules\n")
+	runner.onCommand("pfctl -f", nil, nil)
+	runner.onCommand("pfctl -a sluice -f", nil, nil)
+	runner.onCommand("pfctl -e", nil, nil)
+
+	router := NewNetworkRouter(NetworkRouterConfig{
+		Runner:     runner,
+		AnchorName: "sluice",
+		TUNIface:   "utun3",
+		PFConfPath: pfConf,
+	})
+
+	// Pass empty tunGateway. Should derive 192.168.64.1 from VM IP 192.168.64.5.
+	err := mgr.SetupNetworkRouting(context.Background(), router, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify pfctl was called to load anchor rules.
+	if !runner.called("pfctl -a sluice -f") {
+		t.Error("expected pfctl call to load anchor rules")
+	}
+}
+
+func TestRestartWithEnvNonBlocking(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+
+	runner.onCommand("tart stop", nil, nil)
+	runner.onCommand("tart run", nil, nil)
+
+	// RestartWithEnv should return promptly (not block on tart run).
+	err := mgr.RestartWithEnv(context.Background(), map[string]string{"K": "V"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify stop and run were both called.
+	if !runner.called("tart stop openclaw") {
+		t.Error("expected stop call")
+	}
+	if !runner.called("tart run") {
+		t.Error("expected run call via startVM")
+	}
+}
+
+func TestRestartWithEnvStartVMError(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+
+	runner.onCommand("tart stop", nil, nil)
+	// Override startVM to return an error.
+	mgr.startVM = func(_ TartRunConfig) (*exec.Cmd, error) {
+		return nil, errors.New("failed to start VM process")
+	}
+
+	err := mgr.RestartWithEnv(context.Background(), map[string]string{"K": "V"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "restart VM") {
+		t.Errorf("error should mention restart VM: %v", err)
 	}
 }
