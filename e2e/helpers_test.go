@@ -157,14 +157,24 @@ func startSluice(t *testing.T, opts SluiceOpts) *SluiceProcess {
 	return proc
 }
 
-// stopSluice terminates a running sluice process.
+// stopSluice terminates a running sluice process gracefully. It sends SIGTERM
+// first to allow clean shutdown (audit log flush, DB close), then falls back
+// to SIGKILL via context cancellation if the process does not exit in time.
 func stopSluice(t *testing.T, proc *SluiceProcess) {
 	t.Helper()
-	if proc.cancel != nil {
-		proc.cancel()
+	if proc.Cmd.Process != nil {
+		_ = proc.Cmd.Process.Signal(syscall.SIGTERM)
 	}
-	// Wait for process to exit (ignore error from signal).
-	_ = proc.Cmd.Wait()
+	done := make(chan error, 1)
+	go func() { done <- proc.Cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		if proc.cancel != nil {
+			proc.cancel()
+		}
+		<-done
+	}
 }
 
 // waitForHealthy polls the health endpoint until it returns 200 or the
