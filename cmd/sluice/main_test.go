@@ -623,6 +623,7 @@ func TestDetectRuntime(t *testing.T) {
 		name            string
 		dockerAvailable bool
 		appleAvailable  bool
+		tartAvailable   bool
 		goos            string
 		want            string
 	}{
@@ -674,14 +675,48 @@ func TestDetectRuntime(t *testing.T) {
 			goos: "darwin",
 			want: "",
 		},
+		{
+			name:          "tart only on darwin not auto-selected",
+			tartAvailable: true,
+			goos:          "darwin",
+			want:          "",
+		},
+		{
+			name:            "tart with docker on darwin uses docker",
+			tartAvailable:   true,
+			dockerAvailable: true,
+			goos:            "darwin",
+			want:            "docker",
+		},
+		{
+			name:           "tart with apple on darwin uses apple",
+			tartAvailable:  true,
+			appleAvailable: true,
+			goos:           "darwin",
+			want:           "apple",
+		},
+		{
+			name:            "all three on darwin prefers apple",
+			tartAvailable:   true,
+			dockerAvailable: true,
+			appleAvailable:  true,
+			goos:            "darwin",
+			want:            "apple",
+		},
+		{
+			name:          "tart on linux ignored",
+			tartAvailable: true,
+			goos:          "linux",
+			want:          "",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := detectRuntime(tt.dockerAvailable, tt.appleAvailable, tt.goos)
+			got := detectRuntime(tt.dockerAvailable, tt.appleAvailable, tt.tartAvailable, tt.goos)
 			if got != tt.want {
-				t.Errorf("detectRuntime(%v, %v, %q) = %q, want %q",
-					tt.dockerAvailable, tt.appleAvailable, tt.goos, got, tt.want)
+				t.Errorf("detectRuntime(%v, %v, %v, %q) = %q, want %q",
+					tt.dockerAvailable, tt.appleAvailable, tt.tartAvailable, tt.goos, got, tt.want)
 			}
 		})
 	}
@@ -726,6 +761,12 @@ func TestIsAppleCLIAvailable(t *testing.T) {
 	if got {
 		t.Log("container binary found in PATH (unexpected in most test envs)")
 	}
+}
+
+// TestIsTartCLIAvailable verifies the function returns without panicking.
+func TestIsTartCLIAvailable(t *testing.T) {
+	// Just verify the function doesn't panic. tart may or may not be installed.
+	_ = isTartCLIAvailable()
 }
 
 // TestStandaloneModeStartup verifies that --runtime none produces a working

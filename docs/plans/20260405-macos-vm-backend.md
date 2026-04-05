@@ -121,12 +121,12 @@ tart exec openclaw -- security add-trusted-cert \
 - Modify: `cmd/sluice/main.go`
 - Modify: `cmd/sluice/main_test.go`
 
-- [ ] Add `RuntimeMacOS Runtime = 3` to the Runtime enum with `String()` returning `"macos"` (value 2 is already RuntimeNone)
-- [ ] Add `"macos"` to `--runtime` flag accepted values in main.go
-- [ ] Update `detectRuntime`: add `tartAvailable bool` parameter. Auto-detection priority: `apple` > `docker` (unchanged). `macos` (tart) is explicit-only via `--runtime macos` because macOS VMs are heavyweight (2-4s boot, 1.5GB+ RAM) and auto-selecting them would be surprising. Update all `detectRuntime` call sites.
-- [ ] Add `--vm-image` flag for specifying the OCI image for tart (e.g., `ghcr.io/cirruslabs/macos-sequoia-base:latest`)
-- [ ] Write tests for runtime detection with tart available / not available
-- [ ] Run tests: `go test ./... -v -timeout 30s`
+- [x] Add `RuntimeMacOS Runtime = 3` to the Runtime enum with `String()` returning `"macos"` (value 2 is already RuntimeNone)
+- [x] Add `"macos"` to `--runtime` flag accepted values in main.go
+- [x] Update `detectRuntime`: add `tartAvailable bool` parameter. Auto-detection priority: `apple` > `docker` (unchanged). `macos` (tart) is explicit-only via `--runtime macos` because macOS VMs are heavyweight (2-4s boot, 1.5GB+ RAM) and auto-selecting them would be surprising. Update all `detectRuntime` call sites.
+- [x] Add `--vm-image` flag for specifying the OCI image for tart (e.g., `ghcr.io/cirruslabs/macos-sequoia-base:latest`)
+- [x] Write tests for runtime detection with tart available / not available
+- [x] Run tests: `go test ./... -v -timeout 30s`
 
 ### Task 2: Implement TartManager CLI wrapper
 

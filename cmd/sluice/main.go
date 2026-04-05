@@ -74,7 +74,8 @@ func main() {
 	telegramChatIDStr := flag.String("telegram-chat-id", os.Getenv("TELEGRAM_CHAT_ID"), "Telegram chat ID for approvals")
 	healthAddr := flag.String("health-addr", "127.0.0.1:3000", "health check HTTP listen address (serves /healthz)")
 	shutdownTimeout := flag.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout for draining in-flight connections")
-	runtimeFlag := flag.String("runtime", "auto", "container runtime: docker, apple, none, auto")
+	runtimeFlag := flag.String("runtime", "auto", "container runtime: docker, apple, macos, none, auto")
+	vmImage := flag.String("vm-image", "", "OCI image for tart macOS VM (e.g. ghcr.io/cirruslabs/macos-sequoia-base:latest)")
 	dockerSocket := flag.String("docker-socket", "", "Docker socket path (auto-detects from DOCKER_HOST or /var/run/docker.sock)")
 	containerName := flag.String("container-name", envDefault("SLUICE_AGENT_CONTAINER", "openclaw"), "agent container/VM name")
 	phantomDir := flag.String("phantom-dir", "", "shared volume path for phantom token files (enables hot-reload)")
@@ -93,12 +94,18 @@ func main() {
 
 	// Validate --runtime flag early.
 	switch *runtimeFlag {
-	case "auto", "docker", "apple", "none":
+	case "auto", "docker", "apple", "macos", "none":
 	default:
-		log.Fatalf("unknown --runtime value %q (valid: docker, apple, none, auto)", *runtimeFlag)
+		log.Fatalf("unknown --runtime value %q (valid: docker, apple, macos, none, auto)", *runtimeFlag)
 	}
 	if *runtimeFlag == "apple" && goruntime.GOOS != "darwin" {
 		log.Fatalf("--runtime apple requires macOS (current OS: %s)", goruntime.GOOS)
+	}
+	if *runtimeFlag == "macos" && goruntime.GOOS != "darwin" {
+		log.Fatalf("--runtime macos requires macOS (current OS: %s)", goruntime.GOOS)
+	}
+	if *runtimeFlag == "macos" && *vmImage == "" {
+		log.Fatalf("--runtime macos requires --vm-image (e.g. ghcr.io/cirruslabs/macos-sequoia-base:latest)")
 	}
 
 	// Open the SQLite store.
@@ -225,9 +232,11 @@ func main() {
 		selectedRuntime = detectRuntime(
 			isDockerSocketAvailable(*dockerSocket),
 			isAppleCLIAvailable(),
+			isTartCLIAvailable(),
 			goruntime.GOOS,
 		)
 	}
+	_ = vmImage // used in Task 6 when wiring TartManager startup
 	switch selectedRuntime {
 	case "docker":
 		sock, sockErr := resolveDockerSocket(*dockerSocket)
@@ -679,12 +688,19 @@ func resolveDockerSocket(explicit string) (string, error) {
 // detectRuntime returns which container runtime to use based on availability.
 // Returns "docker", "apple", or "" (no runtime found).
 // On macOS, prefers Apple Container if both are available.
-func detectRuntime(dockerAvailable, appleAvailable bool, goos string) string {
+// tartAvailable is accepted but tart (macOS VM) is never auto-selected because
+// macOS VMs are heavyweight (2-4s boot, 1.5GB+ RAM). Use --runtime macos explicitly.
+func detectRuntime(dockerAvailable, appleAvailable, tartAvailable bool, goos string) string {
 	if goos == "darwin" && appleAvailable {
 		return "apple"
 	}
 	if dockerAvailable {
 		return "docker"
+	}
+	// tartAvailable is intentionally not used for auto-detection.
+	// Log a hint when tart is available but no lighter runtime was found.
+	if goos == "darwin" && tartAvailable {
+		log.Printf("tart CLI found but not auto-selected (macOS VMs are heavyweight); use --runtime macos to enable")
 	}
 	return ""
 }
@@ -704,6 +720,12 @@ func isDockerSocketAvailable(socketFlag string) bool {
 // is in PATH.
 func isAppleCLIAvailable() bool {
 	_, err := exec.LookPath("container")
+	return err == nil
+}
+
+// isTartCLIAvailable checks whether the tart CLI binary is in PATH.
+func isTartCLIAvailable() bool {
+	_, err := exec.LookPath("tart")
 	return err == nil
 }
 
