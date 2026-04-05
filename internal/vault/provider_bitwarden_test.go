@@ -9,12 +9,12 @@ import (
 
 // mockBWClient implements bwClient for testing.
 type mockBWClient struct {
-	secrets    []bwSecretOverview
-	details    map[string]*bwSecretDetail
-	listErr    error
-	getErr     error
-	listCalls  int
-	getCalls   int
+	secrets   []bwSecretOverview
+	details   map[string]*bwSecretDetail
+	listErr   error
+	getErr    error
+	listCalls int
+	getCalls  int
 }
 
 func (m *mockBWClient) listSecrets(_ string) ([]bwSecretOverview, error) {

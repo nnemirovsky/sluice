@@ -557,7 +557,7 @@ func TestPhantomNotReplacedInNonAuthCommands(t *testing.T) {
 // subsequent line the client sends. Used to verify that phantom tokens
 // are NOT replaced when the server doesn't confirm auth continuation.
 type testSMTPRejectAuthServer struct {
-	mu          sync.Mutex
+	mu           sync.Mutex
 	capturedLine string
 }
 

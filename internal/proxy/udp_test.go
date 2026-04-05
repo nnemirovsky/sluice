@@ -13,10 +13,10 @@ import (
 func TestParseSOCKS5UDPHeader_IPv4(t *testing.T) {
 	data := []byte{
 		0x00, 0x00, // RSV
-		0x00,             // FRAG
-		0x01,             // ATYP IPv4
-		192, 168, 1, 1,   // IP
-		0x00, 0x50,       // Port 80
+		0x00,           // FRAG
+		0x01,           // ATYP IPv4
+		192, 168, 1, 1, // IP
+		0x00, 0x50, // Port 80
 		'h', 'e', 'l', 'l', 'o',
 	}
 	addr, port, payload, err := ParseSOCKS5UDPHeader(data)
@@ -322,4 +322,3 @@ destination = "any-proto.example.com"
 // NOTE: UDPRelay.Serve integration tests were removed along with the dead
 // Serve/cleanupExpired/relayResponses methods. The production UDP relay logic
 // lives in Server.handleAssociate (server.go) which is covered by server_test.go.
-

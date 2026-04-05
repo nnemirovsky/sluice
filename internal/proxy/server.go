@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,14 +20,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/things-go/go-socks5"
-	"github.com/things-go/go-socks5/statute"
-
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
+	"github.com/things-go/go-socks5"
+	"github.com/things-go/go-socks5/statute"
 )
 
 // dnsTimeout bounds how long a single DNS lookup can block. The go-socks5
@@ -48,20 +48,20 @@ const byteDetectTimeout = 200 * time.Millisecond
 
 // Config holds configuration for creating a new SOCKS5 proxy server.
 type Config struct {
-	ListenAddr    string
-	Policy        *policy.Engine
-	Audit         *audit.FileLogger
-	Broker        *channel.Broker
-	Provider      vault.Provider           // nil = no credential injection
-	Resolver      *vault.BindingResolver   // nil = no credential injection
-	VaultDir      string                   // CA cert storage dir (defaults to ~/.sluice)
-	Store         *store.Store             // nil = in-memory only (no persistence)
-	WSBlockRules    []WSBlockRuleConfig      // WebSocket content deny rules
-	WSRedactRules   []WSRedactRuleConfig     // WebSocket content redact rules
-	QUICBlockRules  []QUICBlockRuleConfig    // QUIC/HTTP3 content deny rules
-	QUICRedactRules []QUICRedactRuleConfig   // QUIC/HTTP3 content redact rules
-	DNSResolver     string                   // upstream DNS resolver for intercepted queries (default: 8.8.8.8:53)
-	SelfBypass      []string                 // host:port addresses to auto-allow without policy evaluation (sluice's own listeners)
+	ListenAddr      string
+	Policy          *policy.Engine
+	Audit           *audit.FileLogger
+	Broker          *channel.Broker
+	Provider        vault.Provider         // nil = no credential injection
+	Resolver        *vault.BindingResolver // nil = no credential injection
+	VaultDir        string                 // CA cert storage dir (defaults to ~/.sluice)
+	Store           *store.Store           // nil = in-memory only (no persistence)
+	WSBlockRules    []WSBlockRuleConfig    // WebSocket content deny rules
+	WSRedactRules   []WSRedactRuleConfig   // WebSocket content redact rules
+	QUICBlockRules  []QUICBlockRuleConfig  // QUIC/HTTP3 content deny rules
+	QUICRedactRules []QUICRedactRuleConfig // QUIC/HTTP3 content redact rules
+	DNSResolver     string                 // upstream DNS resolver for intercepted queries (default: 8.8.8.8:53)
+	SelfBypass      []string               // host:port addresses to auto-allow without policy evaluation (sluice's own listeners)
 }
 
 // Server wraps a SOCKS5 server with policy enforcement and audit logging.
@@ -85,10 +85,12 @@ type Server struct {
 
 type contextKey string
 
-const ctxKeyProtocol       contextKey = "protocol"
-const ctxKeyEngine         contextKey = "engine"
-const ctxKeyFallbackAddrs  contextKey = "fallbackAddrs"
-const ctxKeyFQDN           contextKey = "fqdn"
+const (
+	ctxKeyProtocol      contextKey = "protocol"
+	ctxKeyEngine        contextKey = "engine"
+	ctxKeyFallbackAddrs contextKey = "fallbackAddrs"
+	ctxKeyFQDN          contextKey = "fqdn"
+)
 
 // ProtocolFromContext retrieves the detected protocol from the request context.
 func ProtocolFromContext(ctx context.Context) Protocol {
@@ -431,7 +433,7 @@ func New(cfg Config) (*Server, error) {
 // setupInjection initializes the credential injection infrastructure (HTTPS
 // MITM, SSH jump host, mail proxy). Returns an error if any component fails.
 // The caller decides whether the error is fatal based on whether bindings exist.
-func (s *Server) setupInjection(cfg Config, mainLn net.Listener) error {
+func (s *Server) setupInjection(cfg Config, _ net.Listener) error {
 	vaultDir := cfg.VaultDir
 	if vaultDir == "" {
 		home, homeErr := os.UserHomeDir()
@@ -654,7 +656,8 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 		_, portStr, _ := net.SplitHostPort(addr)
 		port, _ := strconv.Atoi(portStr)
 		proto := DetectProtocol(port)
-		if proto == ProtoHTTP || proto == ProtoHTTPS {
+		switch proto {
+		case ProtoHTTP, ProtoHTTPS:
 			fqdn, _ := ctx.Value(ctxKeyFQDN).(string)
 			if fqdn == "" {
 				host, _, _ := net.SplitHostPort(addr)
@@ -678,7 +681,7 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 			} else {
 				return &pinnedConn{Conn: conn, injector: s.injector, pinID: pinID}, nil
 			}
-		} else if proto == ProtoGeneric {
+		case ProtoGeneric:
 			// Non-standard port without binding: use byte-level
 			// detection to catch HTTPS/HTTP for phantom stripping.
 			fqdn, _ := ctx.Value(ctxKeyFQDN).(string)
@@ -736,7 +739,7 @@ func (s *Server) handleWithDetection(
 	hostAddr string,
 	dialAddrs []string,
 ) {
-	defer agentConn.Close()
+	defer func() { _ = agentConn.Close() }()
 	// Signal ready immediately: byte detection requires reading client
 	// data, which only arrives after the SOCKS5 CONNECT succeeds. Any
 	// handler failures after this point close the connection, surfacing
@@ -747,9 +750,9 @@ func (s *Server) handleWithDetection(
 	// SSH, HTTP), data arrives quickly. For server-first or idle
 	// connections, the deadline fires and we fall through to direct relay.
 	peekBuf := make([]byte, 4)
-	agentConn.SetReadDeadline(time.Now().Add(byteDetectTimeout))
+	_ = agentConn.SetReadDeadline(time.Now().Add(byteDetectTimeout))
 	n, _ := io.ReadFull(agentConn, peekBuf)
-	agentConn.SetReadDeadline(time.Time{})
+	_ = agentConn.SetReadDeadline(time.Time{})
 
 	proto := DetectFromClientBytes(peekBuf[:n])
 
@@ -872,9 +875,9 @@ func (s *Server) handleServerFirstDetection(
 
 	// Peek server's first bytes with a short deadline.
 	serverBuf := make([]byte, 8)
-	upstream.SetReadDeadline(time.Now().Add(serverDetectTimeout))
+	_ = upstream.SetReadDeadline(time.Now().Add(serverDetectTimeout))
 	sn, _ := io.ReadFull(upstream, serverBuf)
-	upstream.SetReadDeadline(time.Time{})
+	_ = upstream.SetReadDeadline(time.Time{})
 
 	serverProto := DetectFromServerBytes(serverBuf[:sn])
 
@@ -899,7 +902,7 @@ func (s *Server) handleServerFirstDetection(
 	if (serverProto == ProtoIMAP || serverProto == ProtoSMTP) && s.mailProxy != nil && binding != nil {
 		// Close probe connection. The mail proxy establishes its own
 		// upstream connection to manage STARTTLS and AUTH interception.
-		upstream.Close()
+		_ = upstream.Close()
 		// Pass nil for ready: SOCKS5 CONNECT already succeeded in the
 		// parent handleWithDetection call.
 		if err := s.mailProxy.HandleConnection(agentConn, dialAddrs, hostAddr, *binding, serverProto, nil); err != nil {
@@ -915,7 +918,7 @@ func (s *Server) handleServerFirstDetection(
 		upstreamReader = io.MultiReader(bytes.NewReader(serverBuf[:sn]), upstream)
 	}
 	upConn := &bufferedConn{Reader: upstreamReader, Conn: upstream}
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 	bidirectionalRelay(agentConn, upConn)
 }
 
@@ -935,7 +938,7 @@ func relayDirect(agent io.ReadWriteCloser, dialAddrs []string) {
 		log.Printf("[DETECT] relay upstream dial failed for %v: %v", dialAddrs, err)
 		return
 	}
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 	bidirectionalRelay(agent, upstream)
 }
 
@@ -948,10 +951,10 @@ func bidirectionalRelay(a, b io.ReadWriter) {
 	<-errc
 	// One direction done. Close connections to unblock the other copy.
 	if c, ok := a.(io.Closer); ok {
-		c.Close()
+		_ = c.Close()
 	}
 	if c, ok := b.(io.Closer); ok {
-		c.Close()
+		_ = c.Close()
 	}
 	<-errc
 }
@@ -999,7 +1002,7 @@ func dialThroughInjector(injectorAddr, host string, port int, authToken, pinID s
 // then dispatches datagrams to the DNSInterceptor (port 53) or UDPRelay
 // (all other ports). The handler blocks until the TCP control connection
 // closes, at which point all UDP sessions are cleaned up.
-func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request *socks5.Request) error {
+func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *socks5.Request) error {
 	// Bind a UDP listener on the same IP as the TCP connection.
 	tcpAddr, ok := request.LocalAddr.(*net.TCPAddr)
 	if !ok {
@@ -1019,7 +1022,7 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 
 	// Tell the client where to send UDP datagrams.
 	if err := socks5.SendReply(writer, statute.RepSuccess, bindLn.LocalAddr()); err != nil {
-		bindLn.Close()
+		_ = bindLn.Close()
 		return fmt.Errorf("send reply: %w", err)
 	}
 
@@ -1030,7 +1033,7 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 	// Ensure bindLn is closed exactly once regardless of which goroutine
 	// exits first (dispatch loop vs TCP control connection reader).
 	var closeBindOnce sync.Once
-	closeBind := func() { closeBindOnce.Do(func() { bindLn.Close() }) }
+	closeBind := func() { closeBindOnce.Do(func() { _ = bindLn.Close() }) }
 
 	// Start the datagram dispatch loop in a goroutine.
 	go func() {
@@ -1040,7 +1043,7 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 				if s.quicProxy != nil {
 					s.quicProxy.UnregisterExpectedHost(sess.upstream.LocalAddr().String())
 				}
-				sess.upstream.Close()
+				_ = sess.upstream.Close()
 			}
 			mu.Unlock()
 			closeBind()
@@ -1048,10 +1051,11 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 
 		buf := make([]byte, 65535)
 		for {
-			bindLn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+			_ = bindLn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 			n, srcAddr, readErr := bindLn.ReadFrom(buf)
 			if readErr != nil {
-				if ne, ok := readErr.(net.Error); ok && ne.Timeout() {
+				var ne net.Error
+				if errors.As(readErr, &ne) && ne.Timeout() {
 					// Clean up expired sessions on timeout.
 					mu.Lock()
 					now := time.Now()
@@ -1060,7 +1064,7 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 							if s.quicProxy != nil {
 								s.quicProxy.UnregisterExpectedHost(sess.upstream.LocalAddr().String())
 							}
-							sess.upstream.Close()
+							_ = sess.upstream.Close()
 							delete(sessions, key)
 						}
 					}
@@ -1284,10 +1288,11 @@ func (s *Server) handleAssociate(ctx context.Context, writer io.Writer, request 
 func (s *Server) relayUDPResponses(upstream net.PacketConn, relay *net.UDPConn, clientAddr net.Addr) {
 	buf := make([]byte, 65535)
 	for {
-		upstream.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		_ = upstream.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		n, srcAddr, err := upstream.ReadFrom(buf)
 		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
 				continue
 			}
 			return
@@ -1309,10 +1314,11 @@ func (s *Server) relayUDPResponses(upstream net.PacketConn, relay *net.UDPConn, 
 func (s *Server) relayQUICResponses(upstream net.PacketConn, relay *net.UDPConn, clientAddr net.Addr, originalDst *net.UDPAddr) {
 	buf := make([]byte, 65535)
 	for {
-		upstream.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		_ = upstream.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		n, _, err := upstream.ReadFrom(buf)
 		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
 				continue
 			}
 			return

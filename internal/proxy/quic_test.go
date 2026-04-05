@@ -13,20 +13,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nemirovsky/sluice/internal/vault"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
-
-	"github.com/nemirovsky/sluice/internal/vault"
 )
 
 // stubQUICProvider is a minimal vault.Provider for QUIC proxy tests.
 type stubQUICProvider struct{}
 
-func (s *stubQUICProvider) Get(name string) (vault.SecureBytes, error) {
+func (s *stubQUICProvider) Get(_ string) (vault.SecureBytes, error) {
 	return vault.SecureBytes{}, nil
 }
 func (s *stubQUICProvider) List() ([]string, error) { return nil, nil }
-func (s *stubQUICProvider) Name() string             { return "stub" }
+func (s *stubQUICProvider) Name() string            { return "stub" }
 
 // mapQUICProvider returns credentials from a map, for tests that need
 // phantom token replacement.
@@ -41,6 +40,7 @@ func (m *mapQUICProvider) Get(name string) (vault.SecureBytes, error) {
 	}
 	return vault.NewSecureBytes(v), nil
 }
+
 func (m *mapQUICProvider) List() ([]string, error) {
 	var names []string
 	for k := range m.creds {
@@ -168,7 +168,7 @@ func TestQUICProxy_HandshakeSucceeds(t *testing.T) {
 	if dialErr != nil {
 		t.Fatalf("QUIC dial: %v", dialErr)
 	}
-	defer conn.CloseWithError(0, "")
+	defer func() { _ = conn.CloseWithError(0, "") }()
 
 	// Verify the TLS handshake completed with the correct SNI.
 	state := conn.ConnectionState().TLS
@@ -185,7 +185,7 @@ func TestQUICProxy_HandshakeSucceeds(t *testing.T) {
 		t.Errorf("cert CN = %q, want %q", serverCert.Subject.CommonName, "example.com")
 	}
 
-	qp.Close()
+	_ = qp.Close()
 }
 
 func TestQUICProxy_SNIExtraction(t *testing.T) {
@@ -256,11 +256,11 @@ func TestQUICProxy_SNIExtraction(t *testing.T) {
 				t.Errorf("cert CN = %q, want %q (SNI not extracted correctly)", certCN, tt.sni)
 			}
 
-			conn.CloseWithError(0, "")
+			_ = conn.CloseWithError(0, "")
 		})
 	}
 
-	qp.Close()
+	_ = qp.Close()
 }
 
 // setupQUICProxyForH3 creates a QUICProxy wired to forward HTTP/3 requests to
@@ -301,7 +301,7 @@ func setupQUICProxyForH3(
 	qp.upstreamTLSConfig = &tls.Config{
 		RootCAs: upstreamPool,
 	}
-	qp.upstreamDial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+	qp.upstreamDial = func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 		return quic.DialAddr(ctx, upstreamAddr, tlsCfg, cfg)
 	}
 
@@ -312,7 +312,7 @@ func setupQUICProxyForH3(
 // the response status, headers, and body. It creates a known local UDP socket,
 // registers it as an expected destination with the QUIC proxy, and uses
 // quic.Dial (not DialAddr) so the proxy can verify the source.
-func doH3Request(t *testing.T, qp *QUICProxy, proxyAddr string, caX509 *x509.Certificate, sni, method, path string, body []byte, extraHeaders map[string]string) (int, http.Header, string) {
+func doH3Request(t *testing.T, qp *QUICProxy, proxyAddr string, caX509 *x509.Certificate, sni, method, path string, body []byte, extraHeaders map[string]string) (int, http.Header, string) { //nolint:unparam // sni is parameterized for test readability
 	t.Helper()
 	pool := x509.NewCertPool()
 	pool.AddCert(caX509)
@@ -323,7 +323,7 @@ func doH3Request(t *testing.T, qp *QUICProxy, proxyAddr string, caX509 *x509.Cer
 	if err != nil {
 		t.Fatalf("listen local UDP: %v", err)
 	}
-	defer localConn.Close()
+	defer func() { _ = localConn.Close() }()
 	qp.RegisterExpectedHost(localConn.LocalAddr().String(), sni, 443)
 	defer qp.UnregisterExpectedHost(localConn.LocalAddr().String())
 
@@ -337,11 +337,11 @@ func doH3Request(t *testing.T, qp *QUICProxy, proxyAddr string, caX509 *x509.Cer
 			RootCAs:    pool,
 			ServerName: sni,
 		},
-		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 			return quic.Dial(ctx, localConn, proxyUDPAddr, tlsCfg, cfg)
 		},
 	}
-	defer transport.Close()
+	defer func() { _ = transport.Close() }()
 
 	reqURL := fmt.Sprintf("https://%s%s", sni, path)
 	var bodyReader io.Reader
@@ -360,7 +360,7 @@ func doH3Request(t *testing.T, qp *QUICProxy, proxyAddr string, caX509 *x509.Cer
 	if roundTripErr != nil {
 		t.Fatalf("HTTP/3 request: %v", roundTripErr)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, resp.Header, string(respBody)
@@ -401,7 +401,7 @@ func TestQUICProxy_HTTP3PhantomTokenReplacement(t *testing.T) {
 		_ = qp.ListenAndServe("127.0.0.1:0")
 	}()
 	proxyAddr := waitForQUICAddr(t, qp)
-	defer qp.Close()
+	defer func() { _ = qp.Close() }()
 
 	// Send request with phantom token in Authorization header.
 	phantomToken := PhantomToken("test_api_key")
@@ -460,7 +460,7 @@ func TestQUICProxy_HTTP3ContentDenyBlocks(t *testing.T) {
 		_ = qp.ListenAndServe("127.0.0.1:0")
 	}()
 	proxyAddr := waitForQUICAddr(t, qp)
-	defer qp.Close()
+	defer func() { _ = qp.Close() }()
 
 	// Request with banned content should be blocked.
 	status, _, _ := doH3Request(t, qp, proxyAddr, proxyCAX509,
@@ -504,7 +504,7 @@ func TestQUICProxy_HTTP3ContentRedact(t *testing.T) {
 		_ = qp.ListenAndServe("127.0.0.1:0")
 	}()
 	proxyAddr := waitForQUICAddr(t, qp)
-	defer qp.Close()
+	defer func() { _ = qp.Close() }()
 
 	status, _, body := doH3Request(t, qp, proxyAddr, proxyCAX509,
 		"api.example.com", "GET", "/v1/data",

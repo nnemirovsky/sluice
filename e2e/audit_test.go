@@ -287,7 +287,7 @@ name = "allow echo"
 	lines[1] = string(tampered)
 
 	tamperedData := strings.Join(lines, "\n") + "\n"
-	if err := os.WriteFile(proc.AuditPath, []byte(tamperedData), 0600); err != nil {
+	if err := os.WriteFile(proc.AuditPath, []byte(tamperedData), 0o600); err != nil {
 		t.Fatalf("write tampered audit log: %v", err)
 	}
 

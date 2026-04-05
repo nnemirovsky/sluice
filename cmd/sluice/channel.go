@@ -11,7 +11,7 @@ import (
 
 func handleChannelCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: sluice channel [list|add|update|remove] ...")
+		return fmt.Errorf("usage: sluice channel [list|add|update|remove]")
 	}
 
 	switch args[0] {
@@ -24,7 +24,7 @@ func handleChannelCommand(args []string) error {
 	case "remove":
 		return handleChannelRemove(args[1:])
 	default:
-		return fmt.Errorf("unknown channel command: %s\nusage: sluice channel [list|add|update|remove] ...", args[0])
+		return fmt.Errorf("unknown channel command: %s, usage: sluice channel [list|add|update|remove]", args[0])
 	}
 }
 

@@ -89,7 +89,7 @@ func TestVerifyChainTampered(t *testing.T) {
 	}
 	lines[2] = string(tampered)
 
-	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
 		t.Fatalf("write tampered file: %v", err)
 	}
 
@@ -145,7 +145,7 @@ func TestVerifyChainDeletedLine(t *testing.T) {
 
 	// Remove line at index 2.
 	remaining := append(lines[:2], lines[3:]...)
-	if err := os.WriteFile(path, []byte(strings.Join(remaining, "\n")+"\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(strings.Join(remaining, "\n")+"\n"), 0o600); err != nil {
 		t.Fatalf("write modified file: %v", err)
 	}
 
@@ -178,7 +178,7 @@ func TestVerifyChainLegacyLines(t *testing.T) {
 	legacyLine1 := `{"timestamp":"2025-01-01T00:00:00Z","destination":"old.com","port":443,"verdict":"allow"}`
 	legacyLine2 := `{"timestamp":"2025-01-02T00:00:00Z","destination":"old2.com","port":80,"verdict":"deny"}`
 
-	if err := os.WriteFile(path, []byte(legacyLine1+"\n"+legacyLine2+"\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(legacyLine1+"\n"+legacyLine2+"\n"), 0o600); err != nil {
 		t.Fatalf("write legacy lines: %v", err)
 	}
 
@@ -216,7 +216,7 @@ func TestVerifyChainEmptyFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")
 
-	if err := os.WriteFile(path, []byte(""), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(""), 0o600); err != nil {
 		t.Fatalf("write empty file: %v", err)
 	}
 

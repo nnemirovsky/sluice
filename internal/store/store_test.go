@@ -1559,7 +1559,7 @@ func TestNewStoreFilePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	if info.Mode().Perm() != 0600 {
+	if info.Mode().Perm() != 0o600 {
 		t.Errorf("file permissions = %o, want 0600", info.Mode().Perm())
 	}
 
@@ -1575,7 +1575,7 @@ func TestNewStoreFilePathExisting(t *testing.T) {
 	path := dir + "/existing.db"
 
 	// Create the file with wider permissions.
-	if err := os.WriteFile(path, nil, 0644); err != nil {
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1587,7 +1587,7 @@ func TestNewStoreFilePathExisting(t *testing.T) {
 
 	// Verify permissions were tightened.
 	info, _ := os.Stat(path)
-	if info.Mode().Perm() != 0600 {
+	if info.Mode().Perm() != 0o600 {
 		t.Errorf("file permissions = %o, want 0600", info.Mode().Perm())
 	}
 }
@@ -1596,7 +1596,7 @@ func TestMigrationCorruptedDB(t *testing.T) {
 	// Write garbage to a file and try to open as a SQLite DB.
 	dir := t.TempDir()
 	path := dir + "/corrupted.db"
-	if err := os.WriteFile(path, []byte("this is not a sqlite database"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("this is not a sqlite database"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, err := New(path)

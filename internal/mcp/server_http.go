@@ -15,7 +15,7 @@ import (
 // MCPHTTPHandler serves the MCP protocol over Streamable HTTP.
 // It handles POST for JSON-RPC requests and DELETE for session cleanup.
 // Sessions are tracked via the Mcp-Session-Id header.
-type MCPHTTPHandler struct {
+type MCPHTTPHandler struct { //nolint:revive // stuttering accepted for clarity
 	gw        *Gateway
 	sessions  sync.Map   // session ID -> *mcpSession
 	sessionMu sync.Mutex // serializes newSession to enforce cap atomically
@@ -70,8 +70,7 @@ func (h *MCPHTTPHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 	if req.Method == "initialize" {
 		sess := h.newSession()
 		w.Header().Set("Mcp-Session-Id", sess.id)
-	} else if req.Method == "notifications/initialized" {
-		// Notifications do not require a session.
+	} else if req.Method == "notifications/initialized" { //nolint:revive // notifications do not require a session
 	} else if sessionID == "" {
 		http.Error(w, "Mcp-Session-Id header required", http.StatusBadRequest)
 		return
@@ -118,7 +117,7 @@ func (h *MCPHTTPHandler) writeSSE(w http.ResponseWriter, resp *JSONRPCResponse) 
 	w.Header().Set("Connection", "keep-alive")
 
 	data, _ := json.Marshal(resp)
-	fmt.Fprintf(w, "data: %s\n\n", data)
+	_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 	flusher.Flush()
 }
 

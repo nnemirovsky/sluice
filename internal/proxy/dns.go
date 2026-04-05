@@ -207,8 +207,8 @@ func BuildNXDOMAIN(queryPacket []byte) ([]byte, error) {
 
 	// Zero out answer, authority, and additional counts.
 	binary.BigEndian.PutUint16(resp[6:8], 0)   // ANCOUNT
-	binary.BigEndian.PutUint16(resp[8:10], 0)   // NSCOUNT
-	binary.BigEndian.PutUint16(resp[10:12], 0)  // ARCOUNT
+	binary.BigEndian.PutUint16(resp[8:10], 0)  // NSCOUNT
+	binary.BigEndian.PutUint16(resp[10:12], 0) // ARCOUNT
 
 	return resp, nil
 }
@@ -275,9 +275,9 @@ func (d *DNSInterceptor) forwardToResolver(query []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dial dns resolver %s: %w", d.resolver, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
-	conn.SetDeadline(time.Now().Add(dnsQueryTimeout))
+	_ = conn.SetDeadline(time.Now().Add(dnsQueryTimeout))
 
 	if _, err := conn.Write(query); err != nil {
 		return nil, fmt.Errorf("write to dns resolver: %w", err)

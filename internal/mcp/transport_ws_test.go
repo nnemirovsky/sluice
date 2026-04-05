@@ -25,7 +25,7 @@ func mockWSMCPServer(t *testing.T) *httptest.Server {
 			t.Logf("accept: %v", err)
 			return
 		}
-		defer conn.Close(websocket.StatusNormalClosure, "")
+		defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 
 		for {
 			_, data, err := conn.Read(context.Background())
@@ -43,7 +43,7 @@ func mockWSMCPServer(t *testing.T) *httptest.Server {
 				writeWSResponse(conn, JSONRPCResponse{
 					JSONRPC: "2.0",
 					ID:      req.ID,
-					Result:  mustMarshal(InitializeResult{
+					Result: mustMarshal(InitializeResult{
 						ProtocolVersion: "2025-03-26",
 						Capabilities:    Capabilities{Tools: &ToolsCapability{}},
 						ServerInfo:      Info{Name: "mock-ws", Version: "0.1.0"},
@@ -57,7 +57,7 @@ func mockWSMCPServer(t *testing.T) *httptest.Server {
 				writeWSResponse(conn, JSONRPCResponse{
 					JSONRPC: "2.0",
 					ID:      req.ID,
-					Result:  mustMarshal(ListToolsResult{
+					Result: mustMarshal(ListToolsResult{
 						Tools: []Tool{
 							{Name: "subscribe", Description: "Subscribe to events"},
 							{Name: "query", Description: "Query data"},
@@ -69,7 +69,7 @@ func mockWSMCPServer(t *testing.T) *httptest.Server {
 				writeWSResponse(conn, JSONRPCResponse{
 					JSONRPC: "2.0",
 					ID:      req.ID,
-					Result:  mustMarshal(ToolResult{
+					Result: mustMarshal(ToolResult{
 						Content: []ToolContent{{Type: "text", Text: "result from WS upstream"}},
 					}),
 				})
@@ -96,7 +96,7 @@ func mockWSMCPServerWithNotifications(t *testing.T) *httptest.Server {
 		if err != nil {
 			return
 		}
-		defer conn.Close(websocket.StatusNormalClosure, "")
+		defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 
 		for {
 			_, data, err := conn.Read(context.Background())
@@ -114,7 +114,7 @@ func mockWSMCPServerWithNotifications(t *testing.T) *httptest.Server {
 				writeWSResponse(conn, JSONRPCResponse{
 					JSONRPC: "2.0",
 					ID:      req.ID,
-					Result:  mustMarshal(InitializeResult{
+					Result: mustMarshal(InitializeResult{
 						ProtocolVersion: "2025-03-26",
 						Capabilities:    Capabilities{Tools: &ToolsCapability{}},
 						ServerInfo:      Info{Name: "mock-ws-notif", Version: "0.1.0"},
@@ -128,7 +128,7 @@ func mockWSMCPServerWithNotifications(t *testing.T) *httptest.Server {
 				writeWSResponse(conn, JSONRPCResponse{
 					JSONRPC: "2.0",
 					ID:      req.ID,
-					Result:  mustMarshal(ListToolsResult{
+					Result: mustMarshal(ListToolsResult{
 						Tools: []Tool{{Name: "slow-op", Description: "A slow operation"}},
 					}),
 				})
@@ -140,7 +140,7 @@ func mockWSMCPServerWithNotifications(t *testing.T) *httptest.Server {
 					"method":  "notifications/progress",
 					"params":  map[string]interface{}{"progress": 50, "total": 100},
 				})
-				conn.Write(context.Background(), websocket.MessageText, notif)
+				_ = conn.Write(context.Background(), websocket.MessageText, notif)
 
 				// Send a server-initiated request (has both id and method).
 				serverReq, _ := json.Marshal(map[string]interface{}{
@@ -149,13 +149,13 @@ func mockWSMCPServerWithNotifications(t *testing.T) *httptest.Server {
 					"method":  "sampling/createMessage",
 					"params":  map[string]interface{}{},
 				})
-				conn.Write(context.Background(), websocket.MessageText, serverReq)
+				_ = conn.Write(context.Background(), websocket.MessageText, serverReq)
 
 				// Now send the actual response.
 				writeWSResponse(conn, JSONRPCResponse{
 					JSONRPC: "2.0",
 					ID:      req.ID,
-					Result:  mustMarshal(ToolResult{
+					Result: mustMarshal(ToolResult{
 						Content: []ToolContent{{Type: "text", Text: "result after notifications"}},
 					}),
 				})
@@ -196,7 +196,7 @@ func mockWSMCPServerWithDisconnect(t *testing.T) *httptest.Server {
 				writeWSResponse(conn, JSONRPCResponse{
 					JSONRPC: "2.0",
 					ID:      req.ID,
-					Result:  mustMarshal(InitializeResult{
+					Result: mustMarshal(InitializeResult{
 						ProtocolVersion: "2025-03-26",
 						Capabilities:    Capabilities{Tools: &ToolsCapability{}},
 						ServerInfo:      Info{Name: "mock-ws-disconnect", Version: "0.1.0"},
@@ -210,7 +210,7 @@ func mockWSMCPServerWithDisconnect(t *testing.T) *httptest.Server {
 				writeWSResponse(conn, JSONRPCResponse{
 					JSONRPC: "2.0",
 					ID:      req.ID,
-					Result:  mustMarshal(ListToolsResult{
+					Result: mustMarshal(ListToolsResult{
 						Tools: []Tool{{Name: "query", Description: "Query data"}},
 					}),
 				})
@@ -219,7 +219,7 @@ func mockWSMCPServerWithDisconnect(t *testing.T) *httptest.Server {
 				writeWSResponse(conn, JSONRPCResponse{
 					JSONRPC: "2.0",
 					ID:      req.ID,
-					Result:  mustMarshal(ToolResult{
+					Result: mustMarshal(ToolResult{
 						Content: []ToolContent{{Type: "text", Text: fmt.Sprintf("result-%d", connNum)}},
 					}),
 				})
@@ -227,7 +227,7 @@ func mockWSMCPServerWithDisconnect(t *testing.T) *httptest.Server {
 				// Close the connection after the first tools/call on the
 				// first connection to simulate a disconnect.
 				if connNum == 1 {
-					conn.Close(websocket.StatusGoingAway, "simulating disconnect")
+					_ = conn.Close(websocket.StatusGoingAway, "simulating disconnect")
 					return
 				}
 			}
@@ -237,7 +237,7 @@ func mockWSMCPServerWithDisconnect(t *testing.T) *httptest.Server {
 
 func writeWSResponse(conn *websocket.Conn, resp JSONRPCResponse) {
 	data, _ := json.Marshal(resp)
-	conn.Write(context.Background(), websocket.MessageText, data)
+	_ = conn.Write(context.Background(), websocket.MessageText, data)
 }
 
 func mustMarshal(v interface{}) json.RawMessage {
@@ -259,7 +259,7 @@ func TestWSUpstreamInitialize(t *testing.T) {
 		t.Fatal("expected connection to be established")
 	}
 
-	ws.Stop()
+	_ = ws.Stop()
 }
 
 func TestWSUpstreamDiscoverTools(t *testing.T) {
@@ -291,7 +291,7 @@ func TestWSUpstreamDiscoverTools(t *testing.T) {
 		t.Errorf("expected description 'Subscribe to events', got %q", tools[0].Description)
 	}
 
-	ws.Stop()
+	_ = ws.Stop()
 }
 
 func TestWSUpstreamCallTool(t *testing.T) {
@@ -321,7 +321,7 @@ func TestWSUpstreamCallTool(t *testing.T) {
 		t.Errorf("unexpected result: %+v", result)
 	}
 
-	ws.Stop()
+	_ = ws.Stop()
 }
 
 func TestWSUpstreamNotificationsSkipped(t *testing.T) {
@@ -352,7 +352,7 @@ func TestWSUpstreamNotificationsSkipped(t *testing.T) {
 		t.Errorf("expected 'result after notifications', got %q", result.Content[0].Text)
 	}
 
-	ws.Stop()
+	_ = ws.Stop()
 }
 
 func TestWSUpstreamReconnection(t *testing.T) {
@@ -404,7 +404,7 @@ func TestWSUpstreamReconnection(t *testing.T) {
 		t.Errorf("expected result-2, got %q", result2.Content[0].Text)
 	}
 
-	ws.Stop()
+	_ = ws.Stop()
 }
 
 func TestWSUpstreamStop(t *testing.T) {

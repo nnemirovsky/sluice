@@ -43,6 +43,7 @@ func (c *SocketClient) apiURL(path string) string {
 	return "http://localhost/" + dockerAPIVersion + path
 }
 
+// InspectContainer returns the state of a container by name.
 func (c *SocketClient) InspectContainer(ctx context.Context, name string) (ContainerState, error) {
 	resp, err := c.doRequest(ctx, "GET", "/containers/"+url.PathEscape(name)+"/json", nil)
 	if err != nil {
@@ -92,6 +93,7 @@ func (c *SocketClient) InspectContainer(ctx context.Context, name string) (Conta
 	}, nil
 }
 
+// StopContainer stops a running container with the given timeout.
 func (c *SocketClient) StopContainer(ctx context.Context, name string, timeoutSec int) error {
 	resp, err := c.doRequest(ctx, "POST",
 		"/containers/"+url.PathEscape(name)+"/stop?t="+strconv.Itoa(timeoutSec), nil)
@@ -107,6 +109,7 @@ func (c *SocketClient) StopContainer(ctx context.Context, name string, timeoutSe
 	return nil
 }
 
+// RemoveContainer removes a container by name.
 func (c *SocketClient) RemoveContainer(ctx context.Context, name string) error {
 	resp, err := c.doRequest(ctx, "DELETE", "/containers/"+url.PathEscape(name), nil)
 	if err != nil {
@@ -120,6 +123,7 @@ func (c *SocketClient) RemoveContainer(ctx context.Context, name string) error {
 	return nil
 }
 
+// CreateContainer creates a new container from the given spec.
 func (c *SocketClient) CreateContainer(ctx context.Context, spec ContainerSpec) (string, error) {
 	body := createRequest{
 		Image:      spec.Image,
@@ -187,6 +191,7 @@ func (c *SocketClient) CreateContainer(ctx context.Context, spec ContainerSpec) 
 	return cr.ID, nil
 }
 
+// StartContainer starts a created container by ID.
 func (c *SocketClient) StartContainer(ctx context.Context, id string) error {
 	resp, err := c.doRequest(ctx, "POST", "/containers/"+url.PathEscape(id)+"/start", nil)
 	if err != nil {
@@ -201,6 +206,7 @@ func (c *SocketClient) StartContainer(ctx context.Context, id string) error {
 	return nil
 }
 
+// ExecInContainer runs a command inside a running container.
 func (c *SocketClient) ExecInContainer(ctx context.Context, name string, cmd []string) error {
 	// Step 1: Create exec instance.
 	createBody := execCreateRequest{
@@ -298,8 +304,8 @@ func apiError(resp *http.Response) error {
 // Docker API JSON types for inspect response.
 
 type inspectResponse struct {
-	ID     string `json:"Id"`
-	State  struct {
+	ID    string `json:"Id"`
+	State struct {
 		Running bool `json:"Running"`
 	} `json:"State"`
 	Config struct {

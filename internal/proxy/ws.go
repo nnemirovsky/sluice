@@ -421,8 +421,8 @@ func (wp *WSProxy) Relay(agentConn, upstreamConn net.Conn, host string, port int
 
 	// Wait for the first direction to finish (close or error).
 	err := <-errc
-	agentConn.Close()
-	upstreamConn.Close()
+	_ = agentConn.Close()
+	_ = upstreamConn.Close()
 	<-errc // drain the second goroutine
 
 	return err

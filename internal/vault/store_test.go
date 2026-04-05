@@ -225,7 +225,7 @@ func TestLoadOrCreateIdentityCreatesNew(t *testing.T) {
 
 	// Verify file permissions are restrictive.
 	info, _ := os.Stat(keyPath)
-	if info.Mode().Perm() != 0600 {
+	if info.Mode().Perm() != 0o600 {
 		t.Errorf("key file perms = %o, want 0600", info.Mode().Perm())
 	}
 }
@@ -259,7 +259,7 @@ func TestLoadOrCreateIdentityCorruptedFile(t *testing.T) {
 	keyPath := filepath.Join(dir, "vault-key.txt")
 
 	// Write garbage.
-	os.WriteFile(keyPath, []byte("not a valid age key"), 0600)
+	_ = os.WriteFile(keyPath, []byte("not a valid age key"), 0o600)
 
 	_, err := loadOrCreateIdentity(keyPath)
 	if err == nil {
@@ -274,7 +274,7 @@ func TestLoadOrCreateIdentityUnreadableFile(t *testing.T) {
 
 	// Create a directory where the file should be. This makes ReadFile fail
 	// with a non-IsNotExist error.
-	os.MkdirAll(keyPath, 0700)
+	_ = os.MkdirAll(keyPath, 0o700)
 
 	_, err := loadOrCreateIdentity(keyPath)
 	if err == nil {

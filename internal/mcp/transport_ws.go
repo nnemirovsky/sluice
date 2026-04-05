@@ -51,9 +51,12 @@ func (w *WSUpstream) connect() error {
 	dialCtx, dialCancel := context.WithTimeout(ctx, w.timeout)
 	defer dialCancel()
 
-	conn, _, err := websocket.Dial(dialCtx, w.url, &websocket.DialOptions{
+	conn, resp, err := websocket.Dial(dialCtx, w.url, &websocket.DialOptions{
 		Subprotocols: []string{"mcp"},
 	})
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
 	if err != nil {
 		return fmt.Errorf("upstream %s: dial %s: %w", w.name, w.url, err)
 	}

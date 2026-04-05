@@ -66,7 +66,7 @@ func TestGenerateAnchorRulesDefaults(t *testing.T) {
 func writeTempPFConf(t *testing.T, content string) string {
 	t.Helper()
 	f := filepath.Join(t.TempDir(), "pf.conf")
-	if err := os.WriteFile(f, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(f, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return f

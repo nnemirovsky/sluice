@@ -15,6 +15,7 @@ import (
 // Runtime identifies the container backend in use.
 type Runtime int
 
+// Container runtime backends.
 const (
 	RuntimeDocker Runtime = 0
 	RuntimeApple  Runtime = 1
@@ -40,7 +41,7 @@ func (r Runtime) String() string {
 
 // ContainerManager abstracts container lifecycle and credential management
 // across different container runtimes (Docker, Apple Container, macOS VM).
-type ContainerManager interface {
+type ContainerManager interface { //nolint:revive // stuttering accepted for clarity
 	// ReloadSecrets writes phantom token files to a shared volume and signals
 	// the agent container to reload them. Falls back to RestartWithEnv if the
 	// agent does not support hot-reload.
@@ -72,7 +73,7 @@ type ContainerManager interface {
 }
 
 // ContainerStatus holds container health information returned by Status.
-type ContainerStatus struct {
+type ContainerStatus struct { //nolint:revive // stuttering accepted for clarity
 	ID      string
 	Running bool
 	Image   string
@@ -90,7 +91,7 @@ func WritePhantomFiles(phantomDir string, phantomEnv map[string]string) error {
 			}
 			continue
 		}
-		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
+		if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
 			return fmt.Errorf("write phantom file %s: %w", name, err)
 		}
 	}
@@ -113,7 +114,7 @@ func WriteMCPConfig(phantomDir, sluiceURL string) error {
 	}
 
 	path := filepath.Join(phantomDir, "mcp-servers.json")
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write mcp config: %w", err)
 	}
 	return nil

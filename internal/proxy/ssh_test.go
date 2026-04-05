@@ -11,9 +11,8 @@ import (
 	"net"
 	"testing"
 
-	"golang.org/x/crypto/ssh"
-
 	"github.com/nemirovsky/sluice/internal/vault"
+	"golang.org/x/crypto/ssh"
 )
 
 // tcpConnPair creates a pair of connected TCP connections. Unlike net.Pipe(),
@@ -44,9 +43,9 @@ func tcpConnPair(t *testing.T) (client, server net.Conn) {
 	return client, server
 }
 
-// generateTestSSHKey creates an ECDSA key pair and returns the SSH signer,
-// public key, and PEM-encoded private key suitable for vault storage.
-func generateTestSSHKey(t *testing.T) (ssh.Signer, ssh.PublicKey, []byte) {
+// generateTestSSHKey creates an ECDSA key pair and returns the SSH
+// public key and PEM-encoded private key suitable for vault storage.
+func generateTestSSHKey(t *testing.T) (ssh.PublicKey, []byte) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -61,7 +60,7 @@ func generateTestSSHKey(t *testing.T) (ssh.Signer, ssh.PublicKey, []byte) {
 		t.Fatal(err)
 	}
 	privPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: privDER})
-	return signer, signer.PublicKey(), privPEM
+	return signer.PublicKey(), privPEM
 }
 
 // startTestSSHServer starts an in-process SSH server that only accepts
@@ -149,7 +148,7 @@ func serveTestSSHConn(conn net.Conn, config *ssh.ServerConfig) {
 
 func TestSSHJumpHostInjectsKey(t *testing.T) {
 	// Generate SSH key pair for upstream authentication.
-	_, pubKey, privPEM := generateTestSSHKey(t)
+	pubKey, privPEM := generateTestSSHKey(t)
 
 	// Store private key in vault.
 	dir := t.TempDir()
@@ -254,8 +253,8 @@ func TestSSHJumpHostMissingCredential(t *testing.T) {
 
 func TestSSHJumpHostBadKey(t *testing.T) {
 	// Generate two different key pairs: one authorized, one not.
-	_, pubKey, _ := generateTestSSHKey(t)
-	_, _, wrongPEM := generateTestSSHKey(t)
+	pubKey, _ := generateTestSSHKey(t)
+	_, wrongPEM := generateTestSSHKey(t)
 
 	// Store the WRONG key in the vault.
 	dir := t.TempDir()
@@ -296,7 +295,7 @@ func TestSSHJumpHostBadKey(t *testing.T) {
 }
 
 func TestSSHVaultIntegrityAfterHandshake(t *testing.T) {
-	_, pubKey, privPEM := generateTestSSHKey(t)
+	pubKey, privPEM := generateTestSSHKey(t)
 
 	dir := t.TempDir()
 	store, err := vault.NewStore(dir)
@@ -371,7 +370,7 @@ func TestSSHVaultIntegrityAfterHandshake(t *testing.T) {
 // TestResolveHostKeyCallbackExplicit tests that an explicit callback is returned.
 func TestResolveHostKeyCallbackExplicit(t *testing.T) {
 	called := false
-	cb := func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+	cb := func(_ string, _ net.Addr, _ ssh.PublicKey) error {
 		called = true
 		return nil
 	}
@@ -383,7 +382,7 @@ func TestResolveHostKeyCallbackExplicit(t *testing.T) {
 	}
 
 	// Call the returned callback to verify it's our custom one.
-	got("example.com:22", nil, nil)
+	_ = got("example.com:22", nil, nil)
 	if !called {
 		t.Error("expected custom callback to be called")
 	}

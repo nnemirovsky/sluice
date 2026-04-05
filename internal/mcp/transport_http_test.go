@@ -71,7 +71,7 @@ func mockHTTPMCPServer(t *testing.T) *httptest.Server {
 				ServerInfo:      Info{Name: "mock-http", Version: "0.1.0"},
 			})
 			resp.Result = result
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 
 		case "notifications/initialized":
 			// Notification. Return empty 200.
@@ -87,7 +87,7 @@ func mockHTTPMCPServer(t *testing.T) *httptest.Server {
 				},
 			})
 			resp.Result = result
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 
 		case "tools/call":
 			w.Header().Set("Mcp-Session-Id", sessionID)
@@ -96,14 +96,14 @@ func mockHTTPMCPServer(t *testing.T) *httptest.Server {
 				Content: []ToolContent{{Type: "text", Text: "result from HTTP upstream"}},
 			})
 			resp.Result = result
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 
 		default:
 			resp := JSONRPCResponse{
 				JSONRPC: "2.0", ID: req.ID,
 				Error: &JSONRPCError{Code: -32601, Message: fmt.Sprintf("method not found: %s", req.Method)},
 			}
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 		}
 	}))
 }
@@ -292,7 +292,7 @@ func mockSSEMCPServer(t *testing.T) *httptest.Server {
 				ServerInfo:      Info{Name: "mock-sse", Version: "0.1.0"},
 			})
 			resp.Result = result
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 
 		case "notifications/initialized":
 			w.WriteHeader(http.StatusOK)
@@ -304,7 +304,7 @@ func mockSSEMCPServer(t *testing.T) *httptest.Server {
 				Tools: []Tool{{Name: "slow-op", Description: "A slow operation"}},
 			})
 			resp.Result = result
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 
 		case "tools/call":
 			// Respond with SSE stream containing progress notifications
@@ -324,7 +324,7 @@ func mockSSEMCPServer(t *testing.T) *httptest.Server {
 				"method":  "notifications/progress",
 				"params":  map[string]interface{}{"progress": 50, "total": 100},
 			})
-			fmt.Fprintf(w, "data: %s\n\n", notif)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", notif)
 			flusher.Flush()
 
 			// Send the final result matching the request ID.
@@ -334,7 +334,7 @@ func mockSSEMCPServer(t *testing.T) *httptest.Server {
 			resp := JSONRPCResponse{JSONRPC: "2.0", ID: req.ID}
 			resp.Result = result
 			respJSON, _ := json.Marshal(resp)
-			fmt.Fprintf(w, "data: %s\n\n", respJSON)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", respJSON)
 			flusher.Flush()
 		}
 	}))
@@ -413,7 +413,7 @@ func TestHTTPUpstreamConnectionRefused(t *testing.T) {
 }
 
 func TestHTTPUpstreamServerError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}))
 	defer srv.Close()

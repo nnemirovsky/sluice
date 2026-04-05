@@ -29,16 +29,16 @@ import (
 // Server implements the generated ServerInterface for the sluice REST API.
 type Server struct {
 	Unimplemented
-	store       *store.Store
-	broker      *channel.Broker
-	proxySrv    *proxy.Server
-	vault       *vault.Store
-	auditPath   string
-	enginePtr   *atomic.Pointer[policy.Engine]
-	reloadMu    *sync.Mutex
-	resolverPtr *atomic.Pointer[vault.BindingResolver]
+	store        *store.Store
+	broker       *channel.Broker
+	proxySrv     *proxy.Server
+	vault        *vault.Store
+	auditPath    string
+	enginePtr    *atomic.Pointer[policy.Engine]
+	reloadMu     *sync.Mutex
+	resolverPtr  *atomic.Pointer[vault.BindingResolver]
 	containerMgr container.ContainerManager
-	phantomDir  string
+	phantomDir   string
 }
 
 // NewServer creates a new API server. enginePtr and reloadMu are optional
@@ -159,7 +159,7 @@ func (s *Server) credMutationComplete(removedCreds ...string) error {
 }
 
 // GetHealthz returns 200 when the proxy is listening.
-func (s *Server) GetHealthz(w http.ResponseWriter, r *http.Request) {
+func (s *Server) GetHealthz(w http.ResponseWriter, _ *http.Request) {
 	status := "ok"
 	code := http.StatusOK
 	if s.proxySrv == nil || !s.proxySrv.IsListening() {
@@ -172,7 +172,7 @@ func (s *Server) GetHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetApiApprovals returns pending approval requests from the broker.
-func (s *Server) GetApiApprovals(w http.ResponseWriter, r *http.Request) {
+func (s *Server) GetApiApprovals(w http.ResponseWriter, _ *http.Request) { //nolint:revive // generated interface name
 	var approvals []ApprovalRequest
 	if s.broker != nil {
 		pending := s.broker.PendingRequests()
@@ -194,7 +194,7 @@ func (s *Server) GetApiApprovals(w http.ResponseWriter, r *http.Request) {
 }
 
 // PostApiApprovalsIdResolve resolves a pending approval request.
-func (s *Server) PostApiApprovalsIdResolve(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) PostApiApprovalsIdResolve(w http.ResponseWriter, r *http.Request, id string) { //nolint:revive // generated interface name
 	var req ResolveRequest
 	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "")
@@ -238,7 +238,7 @@ func (s *Server) PostApiApprovalsIdResolve(w http.ResponseWriter, r *http.Reques
 }
 
 // GetApiStatus returns proxy status and channel information.
-func (s *Server) GetApiStatus(w http.ResponseWriter, r *http.Request) {
+func (s *Server) GetApiStatus(w http.ResponseWriter, _ *http.Request) { //nolint:revive // generated interface name
 	listening := s.proxySrv != nil && s.proxySrv.IsListening()
 
 	pendingCount := 0
@@ -350,7 +350,7 @@ func ChannelGateMiddleware(st *store.Store) func(http.Handler) http.Handler {
 // --- Rule management handlers ---
 
 // GetApiRules returns policy rules with optional filtering.
-func (s *Server) GetApiRules(w http.ResponseWriter, r *http.Request, params GetApiRulesParams) {
+func (s *Server) GetApiRules(w http.ResponseWriter, r *http.Request, params GetApiRulesParams) { //nolint:revive // generated interface name
 	filter := store.RuleFilter{}
 	if params.Verdict != nil {
 		filter.Verdict = string(*params.Verdict)
@@ -375,7 +375,7 @@ func (s *Server) GetApiRules(w http.ResponseWriter, r *http.Request, params GetA
 }
 
 // PostApiRules adds a new policy rule and recompiles the engine.
-func (s *Server) PostApiRules(w http.ResponseWriter, r *http.Request) {
+func (s *Server) PostApiRules(w http.ResponseWriter, r *http.Request) { //nolint:revive // generated interface name
 	var req CreateRuleRequest
 	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "")
@@ -448,7 +448,7 @@ func (s *Server) PostApiRules(w http.ResponseWriter, r *http.Request) {
 }
 
 // DeleteApiRulesId removes a policy rule and recompiles the engine.
-func (s *Server) DeleteApiRulesId(w http.ResponseWriter, r *http.Request, id int64) {
+func (s *Server) DeleteApiRulesId(w http.ResponseWriter, r *http.Request, id int64) { //nolint:revive // generated interface name
 	if s.reloadMu != nil {
 		s.reloadMu.Lock()
 		defer s.reloadMu.Unlock()
@@ -473,7 +473,7 @@ func (s *Server) DeleteApiRulesId(w http.ResponseWriter, r *http.Request, id int
 }
 
 // PostApiRulesImport imports rules from a TOML file upload.
-func (s *Server) PostApiRulesImport(w http.ResponseWriter, r *http.Request) {
+func (s *Server) PostApiRulesImport(w http.ResponseWriter, r *http.Request) { //nolint:revive // generated interface name
 	if err := r.ParseMultipartForm(10 << 20); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error(), "")
 		return
@@ -484,7 +484,7 @@ func (s *Server) PostApiRulesImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing file field", "")
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	data, err := io.ReadAll(file)
 	if err != nil {
@@ -510,18 +510,18 @@ func (s *Server) PostApiRulesImport(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(ImportResult{
-		RulesInserted:    result.RulesInserted,
-		RulesSkipped:     result.RulesSkipped,
-		BindingsInserted: result.BindingsInserted,
-		BindingsSkipped:  result.BindingsSkipped,
+		RulesInserted:     result.RulesInserted,
+		RulesSkipped:      result.RulesSkipped,
+		BindingsInserted:  result.BindingsInserted,
+		BindingsSkipped:   result.BindingsSkipped,
 		UpstreamsInserted: result.UpstreamsInserted,
 		UpstreamsSkipped:  result.UpstreamsSkipped,
-		ConfigSet:        result.ConfigSet,
+		ConfigSet:         result.ConfigSet,
 	})
 }
 
 // GetApiRulesExport exports the current rules as TOML.
-func (s *Server) GetApiRulesExport(w http.ResponseWriter, r *http.Request) {
+func (s *Server) GetApiRulesExport(w http.ResponseWriter, r *http.Request) { //nolint:revive // generated interface name
 	var buf bytes.Buffer
 
 	cfg, err := s.store.GetConfig()
@@ -694,13 +694,13 @@ func (s *Server) GetApiRulesExport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/toml")
-	w.Write(buf.Bytes())
+	_, _ = w.Write(buf.Bytes())
 }
 
 // --- Config handlers ---
 
 // GetApiConfig returns the current configuration.
-func (s *Server) GetApiConfig(w http.ResponseWriter, r *http.Request) {
+func (s *Server) GetApiConfig(w http.ResponseWriter, r *http.Request) { //nolint:revive // generated interface name
 	cfg, err := s.store.GetConfig()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read config", "")
@@ -727,7 +727,7 @@ func (s *Server) GetApiConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // PatchApiConfig updates configuration and recompiles the engine.
-func (s *Server) PatchApiConfig(w http.ResponseWriter, r *http.Request) {
+func (s *Server) PatchApiConfig(w http.ResponseWriter, r *http.Request) { //nolint:revive // generated interface name
 	var req ConfigUpdate
 	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "")
@@ -765,7 +765,7 @@ func (s *Server) PatchApiConfig(w http.ResponseWriter, r *http.Request) {
 // --- Credential handlers ---
 
 // GetApiCredentials lists credential names from the vault.
-func (s *Server) GetApiCredentials(w http.ResponseWriter, r *http.Request) {
+func (s *Server) GetApiCredentials(w http.ResponseWriter, r *http.Request) { //nolint:revive // generated interface name
 	if s.vault == nil {
 		writeError(w, http.StatusServiceUnavailable, "vault not configured", "")
 		return
@@ -788,7 +788,7 @@ func (s *Server) GetApiCredentials(w http.ResponseWriter, r *http.Request) {
 
 // PostApiCredentials adds a credential to the vault. If destination is
 // provided, also creates an allow rule and binding.
-func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) {
+func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) { //nolint:revive // generated interface name
 	if s.vault == nil {
 		writeError(w, http.StatusServiceUnavailable, "vault not configured", "")
 		return
@@ -876,7 +876,7 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) {
 }
 
 // DeleteApiCredentialsName removes a credential and its associated bindings/rules.
-func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request, name string) {
+func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request, name string) { //nolint:revive // generated interface name
 	if s.vault == nil {
 		writeError(w, http.StatusServiceUnavailable, "vault not configured", "")
 		return
@@ -940,7 +940,7 @@ func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request
 // --- Binding handlers ---
 
 // GetApiBindings lists all credential bindings.
-func (s *Server) GetApiBindings(w http.ResponseWriter, r *http.Request) {
+func (s *Server) GetApiBindings(w http.ResponseWriter, r *http.Request) { //nolint:revive // generated interface name
 	rows, err := s.store.ListBindings()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list bindings", "")
@@ -957,7 +957,7 @@ func (s *Server) GetApiBindings(w http.ResponseWriter, r *http.Request) {
 }
 
 // PostApiBindings adds a new credential binding.
-func (s *Server) PostApiBindings(w http.ResponseWriter, r *http.Request) {
+func (s *Server) PostApiBindings(w http.ResponseWriter, r *http.Request) { //nolint:revive // generated interface name
 	var req CreateBindingRequest
 	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "")
@@ -1017,7 +1017,7 @@ func (s *Server) PostApiBindings(w http.ResponseWriter, r *http.Request) {
 }
 
 // DeleteApiBindingsId removes a credential binding.
-func (s *Server) DeleteApiBindingsId(w http.ResponseWriter, r *http.Request, id int64) {
+func (s *Server) DeleteApiBindingsId(w http.ResponseWriter, r *http.Request, id int64) { //nolint:revive // generated interface name
 	if s.reloadMu != nil {
 		s.reloadMu.Lock()
 		defer s.reloadMu.Unlock()
@@ -1043,7 +1043,7 @@ func (s *Server) DeleteApiBindingsId(w http.ResponseWriter, r *http.Request, id 
 // --- MCP upstream handlers ---
 
 // GetApiMcpUpstreams lists all MCP upstreams.
-func (s *Server) GetApiMcpUpstreams(w http.ResponseWriter, r *http.Request) {
+func (s *Server) GetApiMcpUpstreams(w http.ResponseWriter, r *http.Request) { //nolint:revive // generated interface name
 	rows, err := s.store.ListMCPUpstreams()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list upstreams", "")
@@ -1060,7 +1060,7 @@ func (s *Server) GetApiMcpUpstreams(w http.ResponseWriter, r *http.Request) {
 }
 
 // PostApiMcpUpstreams adds a new MCP upstream.
-func (s *Server) PostApiMcpUpstreams(w http.ResponseWriter, r *http.Request) {
+func (s *Server) PostApiMcpUpstreams(w http.ResponseWriter, r *http.Request) { //nolint:revive // generated interface name
 	var req CreateMCPUpstreamRequest
 	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "")
@@ -1120,7 +1120,7 @@ func (s *Server) PostApiMcpUpstreams(w http.ResponseWriter, r *http.Request) {
 }
 
 // DeleteApiMcpUpstreamsName removes an MCP upstream by name.
-func (s *Server) DeleteApiMcpUpstreamsName(w http.ResponseWriter, r *http.Request, name string) {
+func (s *Server) DeleteApiMcpUpstreamsName(w http.ResponseWriter, r *http.Request, name string) { //nolint:revive // generated interface name
 	deleted, err := s.store.RemoveMCPUpstream(name)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to remove upstream", "")
@@ -1137,7 +1137,7 @@ func (s *Server) DeleteApiMcpUpstreamsName(w http.ResponseWriter, r *http.Reques
 // --- Audit handlers ---
 
 // GetApiAuditRecent returns the last N audit log entries.
-func (s *Server) GetApiAuditRecent(w http.ResponseWriter, r *http.Request, params GetApiAuditRecentParams) {
+func (s *Server) GetApiAuditRecent(w http.ResponseWriter, r *http.Request, params GetApiAuditRecentParams) { //nolint:revive // generated interface name
 	if s.auditPath == "" {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode([]AuditEntry{})
@@ -1168,7 +1168,7 @@ func (s *Server) GetApiAuditRecent(w http.ResponseWriter, r *http.Request, param
 }
 
 // GetApiAuditVerify verifies the audit log hash chain.
-func (s *Server) GetApiAuditVerify(w http.ResponseWriter, r *http.Request) {
+func (s *Server) GetApiAuditVerify(w http.ResponseWriter, r *http.Request) { //nolint:revive // generated interface name
 	if s.auditPath == "" {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(VerifyResult{
@@ -1217,7 +1217,7 @@ func (s *Server) GetApiAuditVerify(w http.ResponseWriter, r *http.Request) {
 // --- Channel handlers ---
 
 // GetApiChannels lists all notification channels.
-func (s *Server) GetApiChannels(w http.ResponseWriter, r *http.Request) {
+func (s *Server) GetApiChannels(w http.ResponseWriter, r *http.Request) { //nolint:revive // generated interface name
 	rows, err := s.store.ListChannels()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list channels", "")
@@ -1234,7 +1234,7 @@ func (s *Server) GetApiChannels(w http.ResponseWriter, r *http.Request) {
 }
 
 // PatchApiChannelsId updates a notification channel.
-func (s *Server) PatchApiChannelsId(w http.ResponseWriter, r *http.Request, id int64) {
+func (s *Server) PatchApiChannelsId(w http.ResponseWriter, r *http.Request, id int64) { //nolint:revive // generated interface name
 	var req ChannelUpdate
 	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "")
@@ -1450,7 +1450,7 @@ func readRecentAuditEntries(path string, limit int) ([]AuditEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Circular buffer: keep only the last N non-empty lines.
 	ring := make([][]byte, limit)

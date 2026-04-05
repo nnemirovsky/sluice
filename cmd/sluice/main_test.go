@@ -158,7 +158,7 @@ func TestDrainSignals(t *testing.T) {
 }
 
 // TestDrainSignalsEmpty verifies drainSignals is a no-op on empty channel.
-func TestDrainSignalsEmpty(t *testing.T) {
+func TestDrainSignalsEmpty(_ *testing.T) {
 	ch := make(chan os.Signal, 5)
 	drainSignals(ch) // should not block
 }
@@ -357,7 +357,7 @@ credential = "example_key"
 header = "Authorization"
 template = "Bearer {value}"
 `
-	if err := os.WriteFile(tomlPath, []byte(tomlData), 0644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte(tomlData), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -522,8 +522,8 @@ func TestReadVaultConfig(t *testing.T) {
 	vaddr := "https://vault.example.com:8200"
 	vmount := "secret"
 	_ = db.UpdateConfig(store.ConfigUpdate{
-		VaultProvider:      &vprov,
-		VaultHashicorpAddr: &vaddr,
+		VaultProvider:       &vprov,
+		VaultHashicorpAddr:  &vaddr,
 		VaultHashicorpMount: &vmount,
 	})
 
@@ -733,7 +733,7 @@ func TestIsDockerSocketAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 
 	if !isDockerSocketAvailable(sockPath) {
 		t.Error("expected true for real Unix socket")
@@ -746,7 +746,7 @@ func TestIsDockerSocketAvailable(t *testing.T) {
 
 	// Regular file is not a socket.
 	regularPath := filepath.Join(dir, "file.txt")
-	if err := os.WriteFile(regularPath, []byte("hello"), 0644); err != nil {
+	if err := os.WriteFile(regularPath, []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if isDockerSocketAvailable(regularPath) {
@@ -765,7 +765,7 @@ func TestIsAppleCLIAvailable(t *testing.T) {
 }
 
 // TestIsTartCLIAvailable verifies the function returns without panicking.
-func TestIsTartCLIAvailable(t *testing.T) {
+func TestIsTartCLIAvailable(_ *testing.T) {
 	// Just verify the function doesn't panic. tart may or may not be installed.
 	_ = isTartCLIAvailable()
 }
@@ -835,13 +835,12 @@ func TestStandaloneModeStartup(t *testing.T) {
 	}
 }
 
-
 // TestBuildSelfBypass verifies the self-bypass address expansion.
 func TestBuildSelfBypass(t *testing.T) {
 	tests := []struct {
-		name      string
-		addr      string
-		want      []string
+		name string
+		addr string
+		want []string
 	}{
 		{
 			name: "specific IP",
@@ -1007,7 +1006,7 @@ ports = [443]
 credential = "seeded_key"
 header = "Authorization"
 `
-	if err := os.WriteFile(tomlPath, []byte(tomlData), 0644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte(tomlData), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1141,7 +1140,7 @@ default = "deny"
 destination = "seeded.example.com"
 ports = [443]
 `
-	if err := os.WriteFile(tomlPath, []byte(tomlData), 0644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte(tomlData), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1190,7 +1189,7 @@ func TestSeedStoreFromConfigMissing(t *testing.T) {
 func TestSeedStoreFromConfigMalformed(t *testing.T) {
 	dir := t.TempDir()
 	tomlPath := filepath.Join(dir, "bad.toml")
-	if err := os.WriteFile(tomlPath, []byte("not valid toml [[["), 0644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("not valid toml [[["), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1355,7 +1354,7 @@ func TestMacOSRuntimeSelectionRequiresExplicit(t *testing.T) {
 // shutdownMacOSVM accepts the expected parameter types (including nil router
 // and ownership boolean).
 var (
-	_ container.ContainerManager                                        = (*container.TartManager)(nil)
+	_ container.ContainerManager                                   = (*container.TartManager)(nil)
 	_ func(*container.TartManager, *container.NetworkRouter, bool) = shutdownMacOSVM
 )
 

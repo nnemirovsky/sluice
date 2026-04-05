@@ -641,7 +641,7 @@ func TestHashiCorpProviderListKeysNotList(t *testing.T) {
 
 func TestHashiCorpProviderConnectionTimeout(t *testing.T) {
 	// Server that never responds (sleeps longer than HTTP client timeout).
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// The provider sets a 30s client timeout, so we can't wait that long
 		// in a test. Instead, test against a closed server.
 		w.WriteHeader(http.StatusInternalServerError)

@@ -25,9 +25,8 @@ import (
 	"testing"
 	"time"
 
-	gossh "golang.org/x/crypto/ssh"
-
 	"github.com/nemirovsky/sluice/internal/vault"
+	gossh "golang.org/x/crypto/ssh"
 )
 
 // testCA holds a generated CA certificate and key for testing HTTPS MITM.
@@ -82,13 +81,13 @@ func generateTestCA(t *testing.T, dir string) *testCA {
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("create vault dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "ca-cert.pem"), certPEM, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "ca-cert.pem"), certPEM, 0o644); err != nil {
 		t.Fatalf("write CA cert: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "ca-key.pem"), keyPEM, 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "ca-key.pem"), keyPEM, 0o600); err != nil {
 		t.Fatalf("write CA key: %v", err)
 	}
 
@@ -183,7 +182,7 @@ func startCredTestSluice(t *testing.T, extraTOML string) *credTestSetup {
 	// x509.SystemCertPool() use this file instead of system roots. The sluice
 	// process's goproxy transport then trusts certs signed by the test CA.
 	caCertFile := filepath.Join(tmpDir, "ca-bundle.pem")
-	if err := os.WriteFile(caCertFile, ca.CertPEM, 0644); err != nil {
+	if err := os.WriteFile(caCertFile, ca.CertPEM, 0o644); err != nil {
 		t.Fatalf("write CA bundle: %v", err)
 	}
 
@@ -393,7 +392,7 @@ func TestCredential_RedactRulesLoaded(t *testing.T) {
 	ca := generateTestCA(t, vaultDir)
 
 	caCertFile := filepath.Join(tmpDir, "ca-bundle.pem")
-	if err := os.WriteFile(caCertFile, ca.CertPEM, 0644); err != nil {
+	if err := os.WriteFile(caCertFile, ca.CertPEM, 0o644); err != nil {
 		t.Fatalf("write CA bundle: %v", err)
 	}
 
@@ -638,18 +637,18 @@ func TestCredential_SSHInjection(t *testing.T) {
 	// Set up known_hosts so the SSH jump host trusts the test server.
 	tmpDir := t.TempDir()
 	vaultDir := filepath.Join(tmpDir, "vault")
-	if err := os.MkdirAll(vaultDir, 0700); err != nil {
+	if err := os.MkdirAll(vaultDir, 0o700); err != nil {
 		t.Fatalf("create vault dir: %v", err)
 	}
 
 	sshDir := filepath.Join(tmpDir, "fakehome", ".ssh")
-	if err := os.MkdirAll(sshDir, 0700); err != nil {
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
 		t.Fatalf("create .ssh dir: %v", err)
 	}
 
 	// Write known_hosts entry for the test SSH server.
 	knownHostsLine := fmt.Sprintf("[127.0.0.1]:%d %s\n", sshPort, strings.TrimSpace(string(gossh.MarshalAuthorizedKey(hostSigner.PublicKey()))))
-	if err := os.WriteFile(filepath.Join(sshDir, "known_hosts"), []byte(knownHostsLine), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(sshDir, "known_hosts"), []byte(knownHostsLine), 0o600); err != nil {
 		t.Fatalf("write known_hosts: %v", err)
 	}
 
@@ -710,7 +709,7 @@ template = "testuser"
 	// connect with no authentication. It authenticates to the upstream
 	// test SSH server using the vault credential.
 	clientConfig := &gossh.ClientConfig{
-		User:            "ignored", // jump host ignores this
+		User:            "ignored",            // jump host ignores this
 		Auth:            []gossh.AuthMethod{}, // no auth needed
 		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
 		Timeout:         10 * time.Second,
@@ -764,4 +763,3 @@ template = "testuser"
 	}
 	timer.Stop()
 }
-

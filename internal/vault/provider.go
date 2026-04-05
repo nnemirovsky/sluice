@@ -23,7 +23,7 @@ type Provider interface {
 
 // VaultConfig controls which credential provider is used and how it's
 // configured. Populated from the SQLite store's config table.
-type VaultConfig struct {
+type VaultConfig struct { //nolint:revive // stuttering accepted for clarity
 	Provider    string
 	Providers   []string
 	Dir         string
@@ -95,6 +95,7 @@ func NewChainProvider(providers ...Provider) *ChainProvider {
 	return &ChainProvider{providers: providers}
 }
 
+// Get tries each provider in order and returns the first successful result.
 func (c *ChainProvider) Get(name string) (SecureBytes, error) {
 	var lastErr error
 	for _, p := range c.providers {
@@ -110,6 +111,7 @@ func (c *ChainProvider) Get(name string) (SecureBytes, error) {
 	return SecureBytes{}, fmt.Errorf("no provider had credential %q: %w", name, lastErr)
 }
 
+// List returns deduplicated credential names from all providers.
 func (c *ChainProvider) List() ([]string, error) {
 	seen := make(map[string]bool)
 	var all []string
@@ -128,6 +130,7 @@ func (c *ChainProvider) List() ([]string, error) {
 	return all, nil
 }
 
+// Name returns the provider identifier.
 func (c *ChainProvider) Name() string { return "chain" }
 
 // Providers returns the inner providers for inspection (e.g. extracting

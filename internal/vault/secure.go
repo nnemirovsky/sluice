@@ -17,22 +17,22 @@ func NewSecureBytes(val string) SecureBytes {
 }
 
 // String returns the credential value as a string.
-func (s SecureBytes) String() string {
+func (s *SecureBytes) String() string {
 	return string(s.data)
 }
 
 // Bytes returns the underlying byte slice.
-func (s SecureBytes) Bytes() []byte {
+func (s *SecureBytes) Bytes() []byte {
 	return s.data
 }
 
 // Len returns the length of the credential value.
-func (s SecureBytes) Len() int {
+func (s *SecureBytes) Len() int {
 	return len(s.data)
 }
 
 // IsReleased returns true if Release has been called.
-func (s SecureBytes) IsReleased() bool {
+func (s *SecureBytes) IsReleased() bool {
 	return s.released
 }
 

@@ -7,6 +7,7 @@ package policy
 // Verdict represents the policy decision for a connection request.
 type Verdict int
 
+// Policy verdicts.
 const (
 	Allow Verdict = iota
 	Deny
@@ -43,7 +44,7 @@ type Rule struct {
 }
 
 // PolicyConfig holds top-level policy settings.
-type PolicyConfig struct {
+type PolicyConfig struct { //nolint:revive // stuttering accepted for clarity
 	Default string `toml:"default"`
 	Timeout int    `toml:"timeout_sec"`
 }

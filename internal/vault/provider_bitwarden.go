@@ -221,4 +221,3 @@ func (p *BitwardenProvider) setCacheTTL(d time.Duration) {
 	defer p.mu.Unlock()
 	p.cacheTTL = d
 }
-

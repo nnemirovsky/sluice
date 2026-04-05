@@ -11,7 +11,7 @@ import (
 
 // ContainerClient abstracts Docker Engine API operations for testability.
 // A production implementation wraps github.com/docker/docker/client.Client.
-type ContainerClient interface {
+type ContainerClient interface { //nolint:revive // stuttering accepted for clarity
 	InspectContainer(ctx context.Context, name string) (ContainerState, error)
 	StopContainer(ctx context.Context, name string, timeoutSec int) error
 	RemoveContainer(ctx context.Context, name string) error
@@ -21,7 +21,7 @@ type ContainerClient interface {
 }
 
 // ContainerState holds the result of inspecting a container.
-type ContainerState struct {
+type ContainerState struct { //nolint:revive // stuttering accepted for clarity
 	ID          string
 	Image       string
 	Env         []string
@@ -44,7 +44,7 @@ type Mount struct {
 }
 
 // ContainerSpec holds parameters for creating a container.
-type ContainerSpec struct {
+type ContainerSpec struct { //nolint:revive // stuttering accepted for clarity
 	Name        string
 	Image       string
 	Env         []string

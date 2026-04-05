@@ -38,7 +38,7 @@ func ValidTransport(t string) bool {
 // MCPUpstream is the interface satisfied by all upstream transport types
 // (stdio, HTTP, WebSocket). The gateway uses this to interact with upstreams
 // without knowing which transport is in use.
-type MCPUpstream interface {
+type MCPUpstream interface { //nolint:revive // stuttering accepted for clarity
 	Initialize() error
 	DiscoverTools() ([]Tool, error)
 	CallTool(toolName string, arguments json.RawMessage) (*JSONRPCResponse, error)
@@ -103,17 +103,17 @@ func resolveVaultEnv(env map[string]string, resolver CredentialResolver) (map[st
 // happens over JSON-RPC 2.0 via the process's stdin/stdout. A background
 // goroutine reads lines from stdout so that Send can enforce a read timeout.
 type Upstream struct {
-	name    string
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	lines   chan []byte     // lines read by the background goroutine
-	scanErr atomic.Value   // stores the scanner error, if any
-	waitCh  chan error      // receives cmd.Wait() result exactly once
-	done    chan struct{}   // closed by Stop to unblock the scanner goroutine
+	name     string
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	lines    chan []byte   // lines read by the background goroutine
+	scanErr  atomic.Value  // stores the scanner error, if any
+	waitCh   chan error    // receives cmd.Wait() result exactly once
+	done     chan struct{} // closed by Stop to unblock the scanner goroutine
 	stopOnce sync.Once
-	mu      sync.Mutex
-	nextID  atomic.Int64
-	timeout time.Duration
+	mu       sync.Mutex
+	nextID   atomic.Int64
+	timeout  time.Duration
 }
 
 const defaultUpstreamTimeout = 120 * time.Second

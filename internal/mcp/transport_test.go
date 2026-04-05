@@ -212,18 +212,18 @@ func TestRunStdioBasic(t *testing.T) {
 
 	// Send an initialize request.
 	initReq := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}` + "\n"
-	stdinW.Write([]byte(initReq))
+	_, _ = stdinW.Write([]byte(initReq))
 
 	// Send a tools/list request.
 	listReq := `{"jsonrpc":"2.0","id":2,"method":"tools/list"}` + "\n"
-	stdinW.Write([]byte(listReq))
+	_, _ = stdinW.Write([]byte(listReq))
 
 	// Send a ping.
 	pingReq := `{"jsonrpc":"2.0","id":3,"method":"ping"}` + "\n"
-	stdinW.Write([]byte(pingReq))
+	_, _ = stdinW.Write([]byte(pingReq))
 
 	// Close stdin to signal EOF.
-	stdinW.Close()
+	_ = stdinW.Close()
 
 	// Wait for RunStdio to finish.
 	select {
@@ -236,9 +236,9 @@ func TestRunStdioBasic(t *testing.T) {
 	}
 
 	// Read responses from stdout.
-	stdoutW.Close()
+	_ = stdoutW.Close()
 	var buf bytes.Buffer
-	io.Copy(&buf, stdoutR)
+	_, _ = io.Copy(&buf, stdoutR)
 
 	// Should have 3 responses (one per request).
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
@@ -278,8 +278,8 @@ func TestRunStdioParseError(t *testing.T) {
 	}()
 
 	// Send invalid JSON.
-	stdinW.Write([]byte("not json at all\n"))
-	stdinW.Close()
+	_, _ = stdinW.Write([]byte("not json at all\n"))
+	_ = stdinW.Close()
 
 	select {
 	case err := <-errCh:
@@ -290,9 +290,9 @@ func TestRunStdioParseError(t *testing.T) {
 		t.Fatal("RunStdio did not return")
 	}
 
-	stdoutW.Close()
+	_ = stdoutW.Close()
 	var buf bytes.Buffer
-	io.Copy(&buf, stdoutR)
+	_, _ = io.Copy(&buf, stdoutR)
 
 	// Should have a parse error response.
 	var resp JSONRPCResponse

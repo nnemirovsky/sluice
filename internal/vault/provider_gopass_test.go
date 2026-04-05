@@ -48,7 +48,7 @@ func TestGopassProviderGet(t *testing.T) {
 	mock := &mockGopassClient{
 		entries: map[string]string{
 			"anthropic_api_key": "sk-ant-real-123",
-			"openai_key":       "sk-openai-456",
+			"openai_key":        "sk-openai-456",
 		},
 	}
 

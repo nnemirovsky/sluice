@@ -181,13 +181,18 @@ func TestWSFrameInterceptorClose(t *testing.T) {
 	if lnErr != nil {
 		t.Fatal(lnErr)
 	}
-	defer ln.Close()
-	go func() { c, _ := ln.Accept(); if c != nil { c.Close() } }()
+	defer func() { _ = ln.Close() }()
+	go func() {
+		c, _ := ln.Accept()
+		if c != nil {
+			_ = c.Close()
+		}
+	}()
 	upstream, dErr := net.Dial("tcp", ln.Addr().String())
 	if dErr != nil {
 		t.Fatal(dErr)
 	}
-	defer upstream.Close()
+	defer func() { _ = upstream.Close() }()
 
 	fi := &wsFrameInterceptor{
 		upstream: upstream,
@@ -197,9 +202,9 @@ func TestWSFrameInterceptorClose(t *testing.T) {
 	}
 
 	// Close should not panic.
-	fi.Close()
+	_ = fi.Close()
 	// Double close should not panic.
-	fi.Close()
+	_ = fi.Close()
 }
 
 func TestPhantomSwapInHeaders(t *testing.T) {
@@ -327,9 +332,9 @@ func TestHeaderInjectionViaBindingHeader(t *testing.T) {
 
 	backendURL, _ := url.Parse(backend.URL)
 	bindings := []vault.Binding{{
-		Destination:  backendURL.Hostname(),
-		Credential:   "temp_key",
-		Header: "X-Api-Key",
+		Destination: backendURL.Hostname(),
+		Credential:  "temp_key",
+		Header:      "X-Api-Key",
 	}}
 
 	inj, store := setupTestInjector(t, bindings)
@@ -377,10 +382,10 @@ func TestHeaderInjectionWithTemplate(t *testing.T) {
 
 	backendURL, _ := url.Parse(backend.URL)
 	bindings := []vault.Binding{{
-		Destination:  backendURL.Hostname(),
-		Credential:   "github_token",
-		Header: "Authorization",
-		Template:     "Bearer {value}",
+		Destination: backendURL.Hostname(),
+		Credential:  "github_token",
+		Header:      "Authorization",
+		Template:    "Bearer {value}",
 	}}
 
 	inj, store := setupTestInjector(t, bindings)
@@ -471,9 +476,9 @@ func TestMITMHTTPS(t *testing.T) {
 
 	backendURL, _ := url.Parse(backend.URL)
 	bindings := []vault.Binding{{
-		Destination:  backendURL.Hostname(),
-		Credential:   "tls_key",
-		Header: "X-Secret",
+		Destination: backendURL.Hostname(),
+		Credential:  "tls_key",
+		Header:      "X-Secret",
 	}}
 
 	inj, store := setupTestInjector(t, bindings)
@@ -691,10 +696,10 @@ func TestBindingHeaderInjectionAndGlobalPhantomReplacement(t *testing.T) {
 
 	backendURL, _ := url.Parse(backend.URL)
 	bindings := []vault.Binding{{
-		Destination:  backendURL.Hostname(),
-		Credential:   "api_key",
-		Header: "X-Api-Key",
-		Template:     "Bearer {value}",
+		Destination: backendURL.Hostname(),
+		Credential:  "api_key",
+		Header:      "X-Api-Key",
+		Template:    "Bearer {value}",
 	}}
 
 	inj, store := setupTestInjector(t, bindings)
@@ -898,7 +903,7 @@ func TestPhantomReplacementInURLQuery(t *testing.T) {
 // receives unmasked payloads of text frames the server reads.
 func wsEchoServer(t *testing.T, receivedPayloads chan<- string) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hj, ok := w.(http.Hijacker)
 		if !ok {
 			http.Error(w, "hijack not supported", 500)
@@ -908,14 +913,14 @@ func wsEchoServer(t *testing.T, receivedPayloads chan<- string) *httptest.Server
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
 		// Write 101 Switching Protocols response.
-		bufrw.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
-		bufrw.WriteString("Upgrade: websocket\r\n")
-		bufrw.WriteString("Connection: Upgrade\r\n")
-		bufrw.WriteString("\r\n")
-		bufrw.Flush()
+		_, _ = bufrw.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
+		_, _ = bufrw.WriteString("Upgrade: websocket\r\n")
+		_, _ = bufrw.WriteString("Connection: Upgrade\r\n")
+		_, _ = bufrw.WriteString("\r\n")
+		_ = bufrw.Flush()
 
 		for {
 			frame, readErr := ReadFrame(conn)
@@ -958,18 +963,18 @@ func wsClientUpgrade(t *testing.T, proxyAddr, backendURL string) net.Conn {
 		backendURL, u.Host,
 	)
 	if _, wErr := conn.Write([]byte(req)); wErr != nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatalf("write upgrade request: %v", wErr)
 	}
 
 	br := bufio.NewReader(conn)
-	resp, rErr := http.ReadResponse(br, &http.Request{Method: "GET"})
+	resp, rErr := http.ReadResponse(br, &http.Request{Method: "GET"}) //nolint:bodyclose // WebSocket upgrade; body is the connection
 	if rErr != nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatalf("read upgrade response: %v", rErr)
 	}
 	if resp.StatusCode != 101 {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatalf("expected 101, got %d", resp.StatusCode)
 	}
 
@@ -1009,7 +1014,7 @@ func TestWSMITM_PhantomTokenReplacement(t *testing.T) {
 
 	proxyAddr := proxyServer.Listener.Addr().String()
 	wsConn := wsClientUpgrade(t, proxyAddr, backend.URL)
-	defer wsConn.Close()
+	defer func() { _ = wsConn.Close() }()
 
 	// Send text frame with phantom token.
 	phantom := PhantomToken("api_key")
@@ -1035,7 +1040,7 @@ func TestWSMITM_PhantomTokenReplacement(t *testing.T) {
 	}
 
 	// Read the echo response from upstream (through the proxy).
-	wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	respFrame, err := ReadFrame(wsConn)
 	if err != nil {
 		t.Fatalf("read echo frame: %v", err)
@@ -1050,7 +1055,7 @@ func TestWSMITM_PhantomTokenReplacement(t *testing.T) {
 
 func TestWSMITM_ContentRedaction(t *testing.T) {
 	// Backend that sends a text frame containing a sensitive API key.
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hj, ok := w.(http.Hijacker)
 		if !ok {
 			http.Error(w, "hijack not supported", 500)
@@ -1060,13 +1065,13 @@ func TestWSMITM_ContentRedaction(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
-		bufrw.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
-		bufrw.WriteString("Upgrade: websocket\r\n")
-		bufrw.WriteString("Connection: Upgrade\r\n")
-		bufrw.WriteString("\r\n")
-		bufrw.Flush()
+		_, _ = bufrw.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
+		_, _ = bufrw.WriteString("Upgrade: websocket\r\n")
+		_, _ = bufrw.WriteString("Connection: Upgrade\r\n")
+		_, _ = bufrw.WriteString("\r\n")
+		_ = bufrw.Flush()
 
 		// Wait for the client's initial frame (handshake confirmation).
 		frame, readErr := ReadFrame(conn)
@@ -1079,7 +1084,7 @@ func TestWSMITM_ContentRedaction(t *testing.T) {
 		respMsg := `{"api_key": "sk-abcdefghijklmnopqrstuvwxyz12345"}`
 		resp := &Frame{FIN: true, Opcode: OpcodeText}
 		resp.SetPayload([]byte(respMsg))
-		WriteFrame(conn, resp)
+		_ = WriteFrame(conn, resp)
 
 		// Wait for close.
 		for {
@@ -1110,7 +1115,7 @@ func TestWSMITM_ContentRedaction(t *testing.T) {
 
 	proxyAddr := proxyServer.Listener.Addr().String()
 	wsConn := wsClientUpgrade(t, proxyAddr, backend.URL)
-	defer wsConn.Close()
+	defer func() { _ = wsConn.Close() }()
 
 	// Send a text frame to trigger the backend's response.
 	initFrame := &Frame{FIN: true, Opcode: OpcodeText, Masked: true, MaskKey: [4]byte{0xAA, 0xBB, 0xCC, 0xDD}}
@@ -1120,7 +1125,7 @@ func TestWSMITM_ContentRedaction(t *testing.T) {
 	}
 
 	// Read the response frame. The API key should be redacted.
-	wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = wsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	respFrame, err := ReadFrame(wsConn)
 	if err != nil {
 		t.Fatalf("read response frame: %v", err)

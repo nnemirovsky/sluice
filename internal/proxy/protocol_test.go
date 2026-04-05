@@ -393,9 +393,9 @@ func TestDetectFromClientBytes(t *testing.T) {
 func TestTwoPhaseDetection(t *testing.T) {
 	// Two-phase detection: port-based guess + byte-level confirmation.
 	tests := []struct {
-		name     string
-		port     int
-		data     []byte
+		name      string
+		port      int
+		data      []byte
 		wantFinal Protocol
 	}{
 		{

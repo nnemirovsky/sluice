@@ -15,7 +15,7 @@ import (
 
 func handlePolicyCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: sluice policy [list|add|remove|import|export] ...")
+		return fmt.Errorf("usage: sluice policy [list|add|remove|import|export]")
 	}
 
 	switch args[0] {
@@ -30,7 +30,7 @@ func handlePolicyCommand(args []string) error {
 	case "export":
 		return handlePolicyExport(args[1:])
 	default:
-		return fmt.Errorf("unknown policy command: %s\nusage: sluice policy [list|add|remove|import|export] ...", args[0])
+		return fmt.Errorf("unknown policy command: %s (usage: sluice policy [list|add|remove|import|export])", args[0])
 	}
 }
 

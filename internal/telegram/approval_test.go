@@ -13,7 +13,6 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/container"
 	"github.com/nemirovsky/sluice/internal/policy"
@@ -60,12 +59,12 @@ func newMockTelegramAPI(t *testing.T) *mockTelegramAPI {
 		w.Header().Set("Content-Type", "application/json")
 		switch method {
 		case "getMe":
-			json.NewEncoder(w).Encode(tgResponse{
+			_ = json.NewEncoder(w).Encode(tgResponse{
 				OK:     true,
 				Result: json.RawMessage(`{"id":123456,"is_bot":true,"first_name":"TestBot","username":"test_bot"}`),
 			})
 		case "sendMessage":
-			r.ParseForm()
+			_ = r.ParseForm()
 			m.mu.Lock()
 			m.nextMsgID++
 			msgID := m.nextMsgID
@@ -75,7 +74,7 @@ func newMockTelegramAPI(t *testing.T) *mockTelegramAPI {
 			chatIDStr := r.FormValue("chat_id")
 			msg.Text = r.FormValue("text")
 			if chatIDStr != "" {
-				fmt.Sscanf(chatIDStr, "%d", &msg.ChatID)
+				_, _ = fmt.Sscanf(chatIDStr, "%d", &msg.ChatID)
 			}
 			m.mu.Lock()
 			m.sentMessages = append(m.sentMessages, msg)
@@ -83,50 +82,50 @@ func newMockTelegramAPI(t *testing.T) *mockTelegramAPI {
 
 			result := fmt.Sprintf(`{"message_id":%d,"chat":{"id":%s},"text":"%s","date":%d}`,
 				msgID, chatIDStr, escapeJSON(r.FormValue("text")), time.Now().Unix())
-			json.NewEncoder(w).Encode(tgResponse{OK: true, Result: json.RawMessage(result)})
+			_ = json.NewEncoder(w).Encode(tgResponse{OK: true, Result: json.RawMessage(result)})
 
 		case "editMessageText":
-			r.ParseForm()
+			_ = r.ParseForm()
 			m.mu.Lock()
 			m.editedMsgs = append(m.editedMsgs, tgbotapi.EditMessageTextConfig{
 				Text: r.FormValue("text"),
 			})
 			m.mu.Unlock()
 
-			json.NewEncoder(w).Encode(tgResponse{
+			_ = json.NewEncoder(w).Encode(tgResponse{
 				OK:     true,
 				Result: json.RawMessage(`{"message_id":1,"text":"edited","date":0}`),
 			})
 
 		case "answerCallbackQuery":
-			r.ParseForm()
+			_ = r.ParseForm()
 			m.mu.Lock()
 			m.callbacks = append(m.callbacks, tgbotapi.CallbackConfig{
 				CallbackQueryID: r.FormValue("callback_query_id"),
 				Text:            r.FormValue("text"),
 			})
 			m.mu.Unlock()
-			json.NewEncoder(w).Encode(tgResponse{OK: true, Result: json.RawMessage(`true`)})
+			_ = json.NewEncoder(w).Encode(tgResponse{OK: true, Result: json.RawMessage(`true`)})
 
 		case "deleteMessage":
-			r.ParseForm()
+			_ = r.ParseForm()
 			m.mu.Lock()
 			m.deletedMsgs = append(m.deletedMsgs, tgbotapi.DeleteMessageConfig{})
 			m.mu.Unlock()
-			json.NewEncoder(w).Encode(tgResponse{OK: true, Result: json.RawMessage(`true`)})
+			_ = json.NewEncoder(w).Encode(tgResponse{OK: true, Result: json.RawMessage(`true`)})
 
 		case "getUpdates":
 			// Return updates if available, otherwise empty array.
 			select {
 			case updates := <-m.updates:
 				data, _ := json.Marshal(updates)
-				json.NewEncoder(w).Encode(tgResponse{OK: true, Result: json.RawMessage(data)})
+				_ = json.NewEncoder(w).Encode(tgResponse{OK: true, Result: json.RawMessage(data)})
 			case <-time.After(100 * time.Millisecond):
-				json.NewEncoder(w).Encode(tgResponse{OK: true, Result: json.RawMessage(`[]`)})
+				_ = json.NewEncoder(w).Encode(tgResponse{OK: true, Result: json.RawMessage(`[]`)})
 			}
 
 		default:
-			json.NewEncoder(w).Encode(tgResponse{OK: true, Result: json.RawMessage(`true`)})
+			_ = json.NewEncoder(w).Encode(tgResponse{OK: true, Result: json.RawMessage(`true`)})
 		}
 	}))
 	t.Cleanup(m.server.Close)
@@ -239,9 +238,9 @@ func TestNewTelegramChannel(t *testing.T) {
 
 func TestNewTelegramChannelInvalidToken(t *testing.T) {
 	// Use a server that returns an error for getMe.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(tgResponse{
+		_ = json.NewEncoder(w).Encode(tgResponse{
 			OK:     false,
 			Result: json.RawMessage(`null`),
 		})
@@ -409,15 +408,15 @@ func TestRequestApprovalSendFailureSingleChannel(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch method {
 		case "getMe":
-			json.NewEncoder(w).Encode(tgResponse{
+			_ = json.NewEncoder(w).Encode(tgResponse{
 				OK:     true,
 				Result: json.RawMessage(`{"id":1,"is_bot":true,"first_name":"Bot","username":"bot"}`),
 			})
 		case "sendMessage":
 			// Simulate API error.
-			json.NewEncoder(w).Encode(tgResponse{OK: false, Result: json.RawMessage(`null`)})
+			_ = json.NewEncoder(w).Encode(tgResponse{OK: false, Result: json.RawMessage(`null`)})
 		default:
-			json.NewEncoder(w).Encode(tgResponse{OK: true, Result: json.RawMessage(`true`)})
+			_ = json.NewEncoder(w).Encode(tgResponse{OK: true, Result: json.RawMessage(`true`)})
 		}
 	}))
 	defer srv.Close()
@@ -514,7 +513,7 @@ func TestCancelApprovalShowsShutdownReason(t *testing.T) {
 	broker.CancelAll() // Mark broker as closed.
 
 	tc.msgMap.Store("req_shutdown", 43)
-	tc.CancelApproval("req_shutdown")
+	_ = tc.CancelApproval("req_shutdown")
 
 	time.Sleep(50 * time.Millisecond)
 	edits := mock.getEditedMessages()
@@ -581,7 +580,7 @@ func TestStopIdempotent(t *testing.T) {
 	s := newTestStore(t)
 	tc := newTestTelegramChannel(t, mock, s)
 
-	tc.Start()
+	_ = tc.Start()
 	tc.Stop()
 	tc.Stop() // Should not panic.
 }
@@ -1102,7 +1101,7 @@ func TestHandleMessageCredRotateDeletesMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	tc.commands.SetVault(vaultStore)
-	vaultStore.Add("my_key", "old_value")
+	_, _ = vaultStore.Add("my_key", "old_value")
 
 	tc.handleMessage(&tgbotapi.Message{
 		MessageID: 501,
@@ -1176,7 +1175,7 @@ func TestHandleMessageTruncatesLongResponse(t *testing.T) {
 
 	// Add many rules to generate a long response.
 	for i := 0; i < 200; i++ {
-		s.AddRule("allow", store.RuleOpts{Destination: fmt.Sprintf("very-long-domain-name-%d.example.com", i)})
+		_, _ = s.AddRule("allow", store.RuleOpts{Destination: fmt.Sprintf("very-long-domain-name-%d.example.com", i)})
 	}
 	// Recompile engine so policy show works.
 	eng, _ := policy.LoadFromStore(s)
@@ -1275,7 +1274,7 @@ func TestCredRemoveWithContainerManager(t *testing.T) {
 	h.SetPhantomDir("/tmp/phantoms")
 
 	// Add then remove.
-	vaultStore.Add("test_cred", "value")
+	_, _ = vaultStore.Add("test_cred", "value")
 	result := h.Handle(&Command{Name: "cred", Args: []string{"remove", "test_cred"}})
 	if !strings.Contains(result, "Removed credential") {
 		t.Errorf("expected remove confirmation, got: %s", result)
@@ -1298,7 +1297,7 @@ func TestCredRotateWithContainerManager(t *testing.T) {
 	h.SetPhantomDir("/tmp/phantoms")
 
 	// Add first.
-	vaultStore.Add("rotate_key", "old_value")
+	_, _ = vaultStore.Add("rotate_key", "old_value")
 
 	result := h.Handle(&Command{Name: "cred", Args: []string{"rotate", "rotate_key", "new_value"}})
 	if !strings.Contains(result, "Rotated credential") {
@@ -1685,7 +1684,7 @@ func TestRebuildResolverWithBindings(t *testing.T) {
 	h.SetResolverPtr(resolverPtr)
 
 	// Add a binding.
-	s.AddBinding("api.example.com", "my_cred", store.BindingOpts{
+	_, _ = s.AddBinding("api.example.com", "my_cred", store.BindingOpts{
 		Ports:    []int{443},
 		Header:   "Authorization",
 		Template: "Bearer {value}",
@@ -1759,7 +1758,7 @@ func (m *mockContainerMgr) Runtime() container.Runtime {
 
 // --- Helpers ---
 
-func waitForPending(t *testing.T, broker *channel.Broker, n int) {
+func waitForPending(t *testing.T, broker *channel.Broker, n int) { //nolint:unparam // n is parameterized for test readability
 	t.Helper()
 	deadline := time.After(3 * time.Second)
 	for broker.PendingCount() < n {

@@ -346,10 +346,10 @@ func (m *AppleManager) InjectCACert(ctx context.Context, hostCertPath, certDir s
 
 	// Write the cert to the shared volume so the guest can access it.
 	destPath := filepath.Join(certDir, "sluice-ca.crt")
-	if err := os.MkdirAll(certDir, 0755); err != nil {
+	if err := os.MkdirAll(certDir, 0o755); err != nil {
 		return fmt.Errorf("create cert dir %q: %w", certDir, err)
 	}
-	if err := os.WriteFile(destPath, certData, 0644); err != nil {
+	if err := os.WriteFile(destPath, certData, 0o644); err != nil {
 		return fmt.Errorf("write CA cert to shared volume: %w", err)
 	}
 

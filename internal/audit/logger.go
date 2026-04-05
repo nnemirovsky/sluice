@@ -46,7 +46,7 @@ func NewFileLogger(path string) (*FileLogger, error) {
 		return nil, fmt.Errorf("recover hash chain: %w", err)
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open audit log: %w", err)
 	}

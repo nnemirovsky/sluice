@@ -111,4 +111,3 @@ func BuildSOCKS5UDPResponse(srcAddr net.IP, srcPort int, payload []byte) []byte 
 func (r *UDPRelay) evaluateUDP(dest string, port int) policy.Verdict {
 	return r.engine.Load().EvaluateUDP(dest, port)
 }
-

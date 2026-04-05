@@ -44,3 +44,15 @@ jobs:
             echo "Run 'gofumpt -w .' to fix."
             exit 1
           fi
+
+  openapi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Lint OpenAPI spec
+        run: npx @redocly/cli lint api/openapi.yaml

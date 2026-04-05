@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,8 +9,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"context"
 
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/channel"
@@ -28,7 +27,7 @@ func (c *autoResolveChannel) RequestApproval(_ context.Context, req channel.Appr
 	return nil
 }
 func (c *autoResolveChannel) CancelApproval(_ string) error            { return nil }
-func (c *autoResolveChannel) Commands() <-chan channel.Command          { return nil }
+func (c *autoResolveChannel) Commands() <-chan channel.Command         { return nil }
 func (c *autoResolveChannel) Notify(_ context.Context, _ string) error { return nil }
 func (c *autoResolveChannel) Start() error                             { return nil }
 func (c *autoResolveChannel) Stop()                                    {}
@@ -97,7 +96,7 @@ func writeMockServerScript(t *testing.T, script string) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mock_mcp.sh")
-	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -299,7 +298,7 @@ func TestGatewayMultipleUpstreamsToolAggregation(t *testing.T) {
 // --- tools/call routing to correct upstream ---
 
 func TestGatewayToolCallRouting(t *testing.T) {
-	script1 := writeMockServer(t)        // returns "hello from mock"
+	script1 := writeMockServer(t)                        // returns "hello from mock"
 	script2 := writeMockServerScript(t, mockMCPServerFS) // returns "response from fs"
 
 	gw := newGatewayForTest(t, GatewayConfig{
@@ -1055,7 +1054,7 @@ func TestGatewayCredentialResolverInjectsEnv(t *testing.T) {
 func TestGatewayCredentialResolverFailure(t *testing.T) {
 	script := writeMockServer(t)
 
-	resolver := func(name string) (string, error) {
+	resolver := func(_ string) (string, error) {
 		return "", fmt.Errorf("vault is sealed")
 	}
 

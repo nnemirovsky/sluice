@@ -13,7 +13,7 @@ import (
 )
 
 // helper: build a raw WebSocket frame from components for testing ReadFrame.
-func buildRawFrame(fin bool, opcode byte, masked bool, maskKey [4]byte, payload []byte) []byte {
+func buildRawFrame(fin bool, opcode byte, masked bool, maskKey [4]byte, payload []byte) []byte { //nolint:unparam // fin is parameterized for test readability
 	var buf bytes.Buffer
 
 	var b0 byte
@@ -643,8 +643,8 @@ func TestWSProxy_PhantomTokenReplacement(t *testing.T) {
 	}
 
 	// Clean up: close connections.
-	agentClient.Close()
-	upstreamServer.Close()
+	_ = agentClient.Close()
+	_ = upstreamServer.Close()
 	<-relayErr
 }
 
@@ -681,8 +681,8 @@ func TestWSProxy_UnboundPhantomStripped(t *testing.T) {
 		t.Errorf("payload: got %q, want %q", payload, expected)
 	}
 
-	agentClient.Close()
-	upstreamServer.Close()
+	_ = agentClient.Close()
+	_ = upstreamServer.Close()
 	<-relayErr
 }
 
@@ -720,8 +720,8 @@ func TestWSProxy_BinaryFramePassthrough(t *testing.T) {
 		t.Errorf("binary payload modified: got %v, want %v", received.UnmaskedPayload(), binaryData)
 	}
 
-	agentClient.Close()
-	upstreamServer.Close()
+	_ = agentClient.Close()
+	_ = upstreamServer.Close()
 	<-relayErr
 }
 
@@ -749,8 +749,8 @@ func TestWSProxy_ControlFramePassthrough(t *testing.T) {
 		t.Errorf("ping payload mismatch")
 	}
 
-	agentClient.Close()
-	upstreamServer.Close()
+	_ = agentClient.Close()
+	_ = upstreamServer.Close()
 	<-relayErr
 }
 
@@ -799,8 +799,8 @@ func TestWSProxy_ContentDenyClosesConnection(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 
-	agentClient.Close()
-	upstreamServer.Close()
+	_ = agentClient.Close()
+	_ = upstreamServer.Close()
 }
 
 func TestWSProxy_ContentRedactInResponse(t *testing.T) {
@@ -841,8 +841,8 @@ func TestWSProxy_ContentRedactInResponse(t *testing.T) {
 		t.Errorf("payload: got %q, want %q", payload, expected)
 	}
 
-	agentClient.Close()
-	upstreamServer.Close()
+	_ = agentClient.Close()
+	_ = upstreamServer.Close()
 	<-relayErr
 }
 
@@ -880,8 +880,8 @@ func TestWSProxy_ContentDenyDoesNotBlockNonMatching(t *testing.T) {
 		t.Errorf("payload: got %q, want %q", payload, msg)
 	}
 
-	agentClient.Close()
-	upstreamServer.Close()
+	_ = agentClient.Close()
+	_ = upstreamServer.Close()
 	<-relayErr
 }
 
@@ -918,7 +918,7 @@ func TestWSProxy_RedactDoesNotModifyBinary(t *testing.T) {
 		t.Errorf("binary payload was modified by redact rule")
 	}
 
-	agentClient.Close()
-	upstreamServer.Close()
+	_ = agentClient.Close()
+	_ = upstreamServer.Close()
 	<-relayErr
 }

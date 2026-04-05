@@ -30,10 +30,8 @@ func newTestMCPHandler(t *testing.T) *MCPHTTPHandler {
 func postMCP(handler http.Handler, body string, headers map[string]string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	if headers != nil {
-		for k, v := range headers {
-			req.Header.Set(k, v)
-		}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)

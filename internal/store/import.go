@@ -11,13 +11,13 @@ import (
 
 // ImportResult reports what happened during a TOML import.
 type ImportResult struct {
-	RulesInserted    int
-	RulesSkipped     int
-	BindingsInserted int
-	BindingsSkipped  int
+	RulesInserted     int
+	RulesSkipped      int
+	BindingsInserted  int
+	BindingsSkipped   int
 	UpstreamsInserted int
 	UpstreamsSkipped  int
-	ConfigSet        int
+	ConfigSet         int
 }
 
 // importRule is the TOML representation of a unified rule. Exactly one of
@@ -70,14 +70,14 @@ type importPolicyConfig struct {
 
 // importVaultConfig is the TOML representation of the [vault] section.
 type importVaultConfig struct {
-	Provider    string                   `toml:"provider"`
-	Providers   []string                 `toml:"providers"`
-	Dir         string                   `toml:"dir"`
-	HashiCorp   importHashiCorpConfig    `toml:"hashicorp"`
-	OnePassword importOnePasswordConfig  `toml:"1password"`
-	Bitwarden   importBitwardenConfig    `toml:"bitwarden"`
-	KeePass     importKeePassConfig      `toml:"keepass"`
-	Gopass      importGopassConfig       `toml:"gopass"`
+	Provider    string                  `toml:"provider"`
+	Providers   []string                `toml:"providers"`
+	Dir         string                  `toml:"dir"`
+	HashiCorp   importHashiCorpConfig   `toml:"hashicorp"`
+	OnePassword importOnePasswordConfig `toml:"1password"`
+	Bitwarden   importBitwardenConfig   `toml:"bitwarden"`
+	KeePass     importKeePassConfig     `toml:"keepass"`
+	Gopass      importGopassConfig      `toml:"gopass"`
 }
 
 // importOnePasswordConfig is the TOML representation of [vault.1password].
@@ -119,13 +119,13 @@ type importHashiCorpConfig struct {
 
 // importFile is the top-level TOML structure for config import.
 type importFile struct {
-	Policy       importPolicyConfig `toml:"policy"`
-	Vault        importVaultConfig  `toml:"vault"`
-	Allow        []importRule       `toml:"allow"`
-	Deny         []importRule       `toml:"deny"`
-	Ask          []importRule       `toml:"ask"`
-	Redact       []importRedactRule `toml:"redact"`
-	Bindings     []importBinding    `toml:"binding"`
+	Policy       importPolicyConfig  `toml:"policy"`
+	Vault        importVaultConfig   `toml:"vault"`
+	Allow        []importRule        `toml:"allow"`
+	Deny         []importRule        `toml:"deny"`
+	Ask          []importRule        `toml:"ask"`
+	Redact       []importRedactRule  `toml:"redact"`
+	Bindings     []importBinding     `toml:"binding"`
 	MCPUpstreams []importMCPUpstream `toml:"mcp_upstream"`
 }
 
@@ -614,4 +614,3 @@ func updateConfigColumn(tx *sql.Tx, column, value string) error {
 	}
 	return nil
 }
-

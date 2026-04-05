@@ -25,7 +25,7 @@ const credAddSourcePrefix = "cred-add:"
 
 func handleCredCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: sluice cred [add|list|remove] ...")
+		return fmt.Errorf("usage: sluice cred [add|list|remove]")
 	}
 
 	switch args[0] {
@@ -36,7 +36,7 @@ func handleCredCommand(args []string) error {
 	case "remove":
 		return handleCredRemove(args[1:])
 	default:
-		return fmt.Errorf("unknown cred command: %s\nusage: sluice cred [add|list|remove] ...", args[0])
+		return fmt.Errorf("unknown cred command: %s (usage: sluice cred [add|list|remove] ...)", args[0])
 	}
 }
 
@@ -85,9 +85,9 @@ func openVaultStore(dbPath string) (*vault.Store, error) {
 					}
 				}
 				if !hasAge {
-					return nil, fmt.Errorf("vault_providers is configured as %v without the age backend. "+
-						"CLI credential management only supports the age backend. "+
-						"Manage credentials through the configured providers' native tools.", cfg.VaultProviders)
+					return nil, fmt.Errorf("vault_providers is configured as %v without the age backend, "+
+						"CLI credential management only supports the age backend, "+
+						"manage credentials through the configured providers' native tools", cfg.VaultProviders)
 				}
 				if !ageFirst {
 					log.Printf("warning: vault_providers is %v. The age backend is not the "+
@@ -96,8 +96,8 @@ func openVaultStore(dbPath string) (*vault.Store, error) {
 				}
 			} else if cfg.VaultProvider != "" && cfg.VaultProvider != "age" {
 				// Single provider that is not age.
-				return nil, fmt.Errorf("vault provider is %q; CLI credential management only supports the age backend. "+
-					"Manage credentials through the %s provider's native tools.", cfg.VaultProvider, cfg.VaultProvider)
+				return nil, fmt.Errorf("vault provider is %q, CLI credential management only supports the age backend, "+
+					"manage credentials through the %s provider's native tools", cfg.VaultProvider, cfg.VaultProvider)
 			}
 		}
 	}

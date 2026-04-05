@@ -12,7 +12,7 @@ import (
 	"regexp"
 	"strings"
 
-	_ "modernc.org/sqlite"
+	_ "modernc.org/sqlite" // SQLite driver registration
 )
 
 // Store wraps a SQLite database for policy and configuration persistence.
@@ -34,13 +34,13 @@ func New(path string) (*Store, error) {
 		// HashiCorp Vault tokens). If the file already exists, tighten
 		// permissions in case it was created with a wider umask.
 		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
-			f, createErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0600)
+			f, createErr := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
 			if createErr != nil {
 				return nil, fmt.Errorf("create db file %q: %w", path, createErr)
 			}
 			_ = f.Close()
 		} else if statErr == nil {
-			_ = os.Chmod(path, 0600)
+			_ = os.Chmod(path, 0o600)
 		}
 	}
 	db, err := sql.Open("sqlite", dsn)
@@ -92,11 +92,11 @@ func validVerdict(v string) bool {
 // Rule represents a row in the unified rules table.
 type Rule struct {
 	ID          int64
-	Verdict     string   // "allow", "deny", "ask", "redact"
-	Destination string   // network rules
-	Tool        string   // tool rules
-	Pattern     string   // content deny/redact rules
-	Replacement string   // only for verdict="redact"
+	Verdict     string // "allow", "deny", "ask", "redact"
+	Destination string // network rules
+	Tool        string // tool rules
+	Pattern     string // content deny/redact rules
+	Replacement string // only for verdict="redact"
 	Ports       []int
 	Protocols   []string
 	Name        string
@@ -516,7 +516,7 @@ func (s *Store) UpdateConfig(u ConfigUpdate) error {
 
 // BindingRow represents a row in the bindings table.
 type BindingRow struct {
-	ID        int64
+	ID          int64
 	Destination string
 	Ports       []int
 	Credential  string

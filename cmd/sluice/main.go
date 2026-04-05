@@ -1,3 +1,4 @@
+// Package main implements the sluice CLI.
 package main
 
 import (
@@ -669,12 +670,12 @@ func readBindings(db *store.Store) ([]vault.Binding, error) {
 	bindings := make([]vault.Binding, len(rows))
 	for i, r := range rows {
 		bindings[i] = vault.Binding{
-			Destination:  r.Destination,
-			Ports:        r.Ports,
-			Credential:   r.Credential,
-			Header: r.Header,
-			Template:     r.Template,
-			Protocols:    r.Protocols,
+			Destination: r.Destination,
+			Ports:       r.Ports,
+			Credential:  r.Credential,
+			Header:      r.Header,
+			Template:    r.Template,
+			Protocols:   r.Protocols,
 		}
 	}
 	return bindings, nil

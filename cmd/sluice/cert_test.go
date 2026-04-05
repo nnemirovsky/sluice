@@ -108,7 +108,7 @@ func TestCertGeneratePermissions(t *testing.T) {
 		t.Fatalf("stat ca-key.pem: %v", err)
 	}
 	perm := info.Mode().Perm()
-	if perm != 0600 {
+	if perm != 0o600 {
 		t.Errorf("ca-key.pem permissions: %o, want 0600", perm)
 	}
 
@@ -119,7 +119,7 @@ func TestCertGeneratePermissions(t *testing.T) {
 		t.Fatalf("stat ca-cert.pem: %v", err)
 	}
 	perm = info.Mode().Perm()
-	if perm != 0644 {
+	if perm != 0o644 {
 		t.Errorf("ca-cert.pem permissions: %o, want 0644", perm)
 	}
 }

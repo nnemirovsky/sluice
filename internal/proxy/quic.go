@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -15,11 +16,10 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
-
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/vault"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 )
 
 // maxQUICBody limits the request/response body size the QUIC proxy is willing
@@ -182,7 +182,7 @@ func (q *QUICProxy) ListenAndServe(addr string) error {
 	q.mu.Lock()
 	if q.closed {
 		q.mu.Unlock()
-		ln.Close()
+		_ = ln.Close()
 		return fmt.Errorf("quic proxy already closed")
 	}
 	q.listener = ln
@@ -234,7 +234,7 @@ func (q *QUICProxy) Close() error {
 	q.closed = true
 	q.transports.Range(func(key, value any) bool {
 		if t, ok := value.(*http3.Transport); ok {
-			t.Close()
+			_ = t.Close()
 		}
 		q.transports.Delete(key)
 		return true
@@ -264,7 +264,7 @@ func (q *QUICProxy) getOrCreateTransport(host string) *http3.Transport {
 		Dial:            q.upstreamDial,
 	}
 	if existing, loaded := q.transports.LoadOrStore(host, t); loaded {
-		t.Close()
+		_ = t.Close()
 		return existing.(*http3.Transport)
 	}
 	return t
@@ -345,7 +345,7 @@ func (q *QUICProxy) handleConnection(conn *quic.Conn) {
 	srv := &http3.Server{
 		Handler: handler,
 	}
-	if err := srv.ServeQUICConn(conn); err != nil && err != http.ErrServerClosed {
+	if err := srv.ServeQUICConn(conn); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Printf("[QUIC] serve error for %s: %v", sni, err)
 	}
 }
@@ -459,7 +459,7 @@ func (q *QUICProxy) buildHandler(upstreamHost string, destPort int) http.Handler
 			http.Error(w, "upstream request failed", http.StatusBadGateway)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		// Read upstream response body for redaction.
 		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxQUICBody+1))
@@ -594,4 +594,3 @@ func (q *QUICProxy) logAudit(host string, port int, verdict, reason string) {
 		log.Printf("audit log write error: %v", err)
 	}
 }
-

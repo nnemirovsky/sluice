@@ -126,7 +126,7 @@ func (p *KeePassProvider) loadDB() error {
 	if err != nil {
 		return fmt.Errorf("keepass: open %q: %w", p.dbPath, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
@@ -156,7 +156,7 @@ func (p *KeePassProvider) loadDB() error {
 
 	p.mu.Lock()
 	// Double-check: another goroutine may have already reloaded.
-	if info.ModTime() == p.modTime {
+	if info.ModTime().Equal(p.modTime) {
 		p.mu.Unlock()
 		return nil
 	}

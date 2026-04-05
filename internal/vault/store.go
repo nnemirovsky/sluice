@@ -25,7 +25,7 @@ type Store struct {
 // An X25519 identity key is generated on first use and stored as vault-key.txt.
 func NewStore(dir string) (*Store, error) {
 	credsDir := filepath.Join(dir, "credentials")
-	if err := os.MkdirAll(credsDir, 0700); err != nil {
+	if err := os.MkdirAll(credsDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create credentials dir: %w", err)
 	}
 
@@ -79,7 +79,7 @@ func loadOrCreateIdentity(path string) (*age.X25519Identity, error) {
 		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("close identity temp: %w", writeErr)
 	}
-	if chmodErr := os.Chmod(tmpPath, 0600); chmodErr != nil {
+	if chmodErr := os.Chmod(tmpPath, 0o600); chmodErr != nil {
 		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("chmod identity temp: %w", chmodErr)
 	}
@@ -145,7 +145,7 @@ func (s *Store) Add(name, value string) ([]byte, error) {
 		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("close temp: %w", err)
 	}
-	if err := os.Chmod(tmpPath, 0600); err != nil {
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
 		_ = os.Remove(tmpPath)
 		return nil, fmt.Errorf("chmod temp: %w", err)
 	}
@@ -242,7 +242,7 @@ func (s *Store) WriteRawCredential(name string, data []byte) error {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close temp: %w", err)
 	}
-	if err := os.Chmod(tmpPath, 0600); err != nil {
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("chmod temp: %w", err)
 	}

@@ -613,7 +613,7 @@ func TestTartManagerReloadSecretsRemoveEmpty(t *testing.T) {
 
 	// Write a file first, then remove via empty value.
 	path := filepath.Join(tmpDir, "OLD_KEY")
-	if err := os.WriteFile(path, []byte("old-value"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("old-value"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -893,7 +893,7 @@ func TestTartManagerInjectCACert(t *testing.T) {
 	hostCertDir := t.TempDir()
 	hostCertPath := filepath.Join(hostCertDir, "ca-cert.pem")
 	certContent := "-----BEGIN CERTIFICATE-----\nfake-cert-data\n-----END CERTIFICATE-----\n"
-	if err := os.WriteFile(hostCertPath, []byte(certContent), 0644); err != nil {
+	if err := os.WriteFile(hostCertPath, []byte(certContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -946,7 +946,7 @@ func TestTartManagerInjectCACertSecurityFails(t *testing.T) {
 
 	hostCertDir := t.TempDir()
 	hostCertPath := filepath.Join(hostCertDir, "ca-cert.pem")
-	if err := os.WriteFile(hostCertPath, []byte("cert-data"), 0644); err != nil {
+	if err := os.WriteFile(hostCertPath, []byte("cert-data"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -979,7 +979,7 @@ func TestTartManagerInjectCACertWriteError(t *testing.T) {
 
 	hostCertDir := t.TempDir()
 	hostCertPath := filepath.Join(hostCertDir, "ca-cert.pem")
-	if err := os.WriteFile(hostCertPath, []byte("cert-data"), 0644); err != nil {
+	if err := os.WriteFile(hostCertPath, []byte("cert-data"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -999,7 +999,7 @@ func TestTartManagerInjectCACertEnvVarNames(t *testing.T) {
 
 	hostCertDir := t.TempDir()
 	hostCertPath := filepath.Join(hostCertDir, "ca-cert.pem")
-	if err := os.WriteFile(hostCertPath, []byte("cert-data"), 0644); err != nil {
+	if err := os.WriteFile(hostCertPath, []byte("cert-data"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

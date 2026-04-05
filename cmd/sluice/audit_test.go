@@ -87,7 +87,7 @@ func TestHandleAuditVerifyBroken(t *testing.T) {
 		t.Fatal(err)
 	}
 	tampered := strings.Replace(string(data), `"prev_hash":"`, `"prev_hash":"00`, 1)
-	if err := os.WriteFile(logPath, []byte(tampered), 0600); err != nil {
+	if err := os.WriteFile(logPath, []byte(tampered), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

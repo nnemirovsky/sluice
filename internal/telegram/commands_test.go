@@ -244,7 +244,7 @@ func TestHandleAuditRecent(t *testing.T) {
 		`{"timestamp":"2026-01-01T00:00:00Z","destination":"a.com","verdict":"allow"}`+"\n"+
 			`{"timestamp":"2026-01-01T00:00:01Z","destination":"b.com","verdict":"deny"}`+"\n"+
 			`{"timestamp":"2026-01-01T00:00:02Z","destination":"c.com","verdict":"allow"}`+"\n",
-	), 0600)
+	), 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +273,7 @@ func TestHandleAuditRecent(t *testing.T) {
 func TestHandleAuditEmpty(t *testing.T) {
 	dir := t.TempDir()
 	auditFile := filepath.Join(dir, "audit.jsonl")
-	err := os.WriteFile(auditFile, []byte(""), 0600)
+	err := os.WriteFile(auditFile, []byte(""), 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -64,7 +64,7 @@ func TestRequestApproval_SyncPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedSig = r.Header.Get("X-Sluice-Signature")
 		body, _ := io.ReadAll(r.Body)
-		json.Unmarshal(body, &received)
+		_ = json.Unmarshal(body, &received)
 
 		// Verify HMAC signature.
 		mac := hmac.New(sha256.New, []byte(secret))
@@ -76,7 +76,7 @@ func TestRequestApproval_SyncPath(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(WebhookResponse{Verdict: "allow_once"})
+		_ = json.NewEncoder(w).Encode(WebhookResponse{Verdict: "allow_once"})
 	}))
 	defer srv.Close()
 
@@ -127,9 +127,9 @@ func TestRequestApproval_SyncPath(t *testing.T) {
 }
 
 func TestRequestApproval_SyncAlwaysAllow(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(WebhookResponse{Verdict: "always_allow"})
+		_ = json.NewEncoder(w).Encode(WebhookResponse{Verdict: "always_allow"})
 	}))
 	defer srv.Close()
 
@@ -156,9 +156,9 @@ func TestRequestApproval_SyncAlwaysAllow(t *testing.T) {
 }
 
 func TestRequestApproval_SyncDeny(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(WebhookResponse{Verdict: "deny"})
+		_ = json.NewEncoder(w).Encode(WebhookResponse{Verdict: "deny"})
 	}))
 	defer srv.Close()
 
@@ -189,7 +189,7 @@ func TestRequestApproval_AsyncPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload WebhookPayload
 		body, _ := io.ReadAll(r.Body)
-		json.Unmarshal(body, &payload)
+		_ = json.Unmarshal(body, &payload)
 		w.WriteHeader(http.StatusAccepted)
 
 		// Simulate async callback: resolve after a short delay.
@@ -233,7 +233,7 @@ func TestRequestApproval_AsyncPath(t *testing.T) {
 func TestRequestApproval_RetryOnServerError(t *testing.T) {
 	var attempts atomic.Int32
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		n := attempts.Add(1)
 		if n < 3 {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -241,7 +241,7 @@ func TestRequestApproval_RetryOnServerError(t *testing.T) {
 		}
 		// Third attempt succeeds.
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(WebhookResponse{Verdict: "allow_once"})
+		_ = json.NewEncoder(w).Encode(WebhookResponse{Verdict: "allow_once"})
 	}))
 	defer srv.Close()
 
@@ -319,7 +319,7 @@ func TestRequestApproval_NoSignatureWithoutSecret(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedSig = r.Header.Get("X-Sluice-Signature")
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(WebhookResponse{Verdict: "allow_once"})
+		_ = json.NewEncoder(w).Encode(WebhookResponse{Verdict: "allow_once"})
 	}))
 	defer srv.Close()
 
@@ -330,7 +330,7 @@ func TestRequestApproval_NoSignatureWithoutSecret(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		broker.Request("example.com", 80, 5*time.Second)
+		_, _ = broker.Request("example.com", 80, 5*time.Second)
 	}()
 
 	select {
@@ -353,7 +353,7 @@ func TestCancelApproval_SendsCancelNotification(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		defer mu.Unlock()
-		json.Unmarshal(body, &received)
+		_ = json.Unmarshal(body, &received)
 		if received.Type == "cancel" {
 			called = true
 		}
@@ -401,7 +401,7 @@ func TestNotify_SendsNotification(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		defer mu.Unlock()
-		json.Unmarshal(body, &received)
+		_ = json.Unmarshal(body, &received)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -427,9 +427,9 @@ func TestNotify_SendsNotification(t *testing.T) {
 
 func TestRequestApproval_InvalidSyncResponse(t *testing.T) {
 	// Webhook returns 200 but invalid JSON. The request should time out.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte("not json"))
+		_, _ = w.Write([]byte("not json"))
 	}))
 	defer srv.Close()
 
@@ -456,9 +456,9 @@ func TestRequestApproval_InvalidSyncResponse(t *testing.T) {
 }
 
 func TestRequestApproval_UnknownVerdictDefaultsToDeny(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(WebhookResponse{Verdict: "maybe"})
+		_ = json.NewEncoder(w).Encode(WebhookResponse{Verdict: "maybe"})
 	}))
 	defer srv.Close()
 
@@ -486,7 +486,7 @@ func TestRequestApproval_UnknownVerdictDefaultsToDeny(t *testing.T) {
 
 func TestRequestApproval_Timeout(t *testing.T) {
 	// Webhook returns 202 (async) but no callback ever comes.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer srv.Close()
@@ -556,7 +556,7 @@ func TestParseVerdict(t *testing.T) {
 func TestMultiChannelBroadcastWithHTTP(t *testing.T) {
 	// Set up an HTTP webhook that returns 202 (async).
 	var webhookCalled atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		webhookCalled.Add(1)
 		w.WriteHeader(http.StatusAccepted)
 	}))
@@ -608,19 +608,19 @@ func (m *mockResolveChannel) RequestApproval(_ context.Context, req channel.Appr
 	return nil
 }
 
-func (m *mockResolveChannel) CancelApproval(string) error        { return nil }
-func (m *mockResolveChannel) Commands() <-chan channel.Command    { return nil }
+func (m *mockResolveChannel) CancelApproval(string) error          { return nil }
+func (m *mockResolveChannel) Commands() <-chan channel.Command     { return nil }
 func (m *mockResolveChannel) Notify(context.Context, string) error { return nil }
-func (m *mockResolveChannel) Start() error                        { return nil }
-func (m *mockResolveChannel) Stop()                               {}
-func (m *mockResolveChannel) Type() channel.ChannelType           { return channel.ChannelTelegram }
+func (m *mockResolveChannel) Start() error                         { return nil }
+func (m *mockResolveChannel) Stop()                                {}
+func (m *mockResolveChannel) Type() channel.ChannelType            { return channel.ChannelTelegram }
 
 // TestHTTPChannelFromStoreConfig verifies that an HTTP channel can be created
 // from store channel config (the same flow as main.go).
 func TestHTTPChannelFromStoreConfig(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(WebhookResponse{Verdict: "allow_once"})
+		_ = json.NewEncoder(w).Encode(WebhookResponse{Verdict: "allow_once"})
 	}))
 	defer srv.Close()
 
@@ -663,7 +663,7 @@ func TestHTTPChannelFromStoreConfig(t *testing.T) {
 func TestRequestApproval_StopDuringRetry(t *testing.T) {
 	var attempts atomic.Int32
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		attempts.Add(1)
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -677,7 +677,7 @@ func TestRequestApproval_StopDuringRetry(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		broker.Request("example.com", 443, 10*time.Second)
+		_, _ = broker.Request("example.com", 443, 10*time.Second)
 	}()
 
 	// Give time for first attempt, then stop.

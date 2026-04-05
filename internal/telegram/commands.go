@@ -114,12 +114,12 @@ func (h *CommandHandler) rebuildResolver() error {
 	bindings := make([]vault.Binding, len(rows))
 	for i, r := range rows {
 		bindings[i] = vault.Binding{
-			Destination:  r.Destination,
-			Ports:        r.Ports,
-			Credential:   r.Credential,
-			Header: r.Header,
-			Template:     r.Template,
-			Protocols:    r.Protocols,
+			Destination: r.Destination,
+			Ports:       r.Ports,
+			Credential:  r.Credential,
+			Header:      r.Header,
+			Template:    r.Template,
+			Protocols:   r.Protocols,
 		}
 	}
 	resolver, err := vault.NewBindingResolver(bindings)
@@ -579,8 +579,7 @@ func (h *CommandHandler) handleAudit(args []string) string {
 		if count > maxAuditLines {
 			count = maxAuditLines
 		}
-	} else if len(args) >= 1 && args[0] == "recent" {
-		// default count
+	} else if len(args) >= 1 && args[0] == "recent" { //nolint:revive // default count, no action needed
 	} else if len(args) > 0 {
 		return "Usage: /audit recent [N]"
 	}

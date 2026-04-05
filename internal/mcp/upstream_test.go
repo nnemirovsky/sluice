@@ -40,7 +40,7 @@ func writeMockServer(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mock_mcp.sh")
-	if err := os.WriteFile(path, []byte(mockMCPServer), 0755); err != nil {
+	if err := os.WriteFile(path, []byte(mockMCPServer), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -273,14 +273,14 @@ func TestResolveVaultEnvWithVaultPrefix(t *testing.T) {
 }
 
 func TestResolveVaultEnvPlainPassthrough(t *testing.T) {
-	resolver := func(name string) (string, error) {
+	resolver := func(_ string) (string, error) {
 		return "", fmt.Errorf("should not be called")
 	}
 
 	env := map[string]string{
-		"PATH":    "/usr/bin",
-		"HOME":    "/home/user",
-		"DEBUG":   "true",
+		"PATH":  "/usr/bin",
+		"HOME":  "/home/user",
+		"DEBUG": "true",
 	}
 
 	resolved, err := resolveVaultEnv(env, resolver)
@@ -360,7 +360,7 @@ func TestResolveVaultEnvNilResolver(t *testing.T) {
 }
 
 func TestResolveVaultEnvEmptyMap(t *testing.T) {
-	resolver := func(name string) (string, error) {
+	resolver := func(_ string) (string, error) {
 		return "", fmt.Errorf("should not be called")
 	}
 	resolved, err := resolveVaultEnv(nil, resolver)
@@ -375,11 +375,10 @@ func TestResolveVaultEnvEmptyMap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveVaultEnv: %v", err)
 	}
-	if resolved2 != nil && len(resolved2) != 0 {
+	if len(resolved2) != 0 {
 		t.Errorf("expected empty for empty input, got %v", resolved2)
 	}
 }
-
 
 // mockMCPServerEnv echoes environment variables in the tool call response
 // so tests can verify credential injection.
@@ -412,7 +411,7 @@ func TestStartUpstreamWithVaultEnvResolution(t *testing.T) {
 	// echoes env vars in its response.
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "mock_env.sh")
-	if err := os.WriteFile(scriptPath, []byte(mockMCPServerEnv), 0755); err != nil {
+	if err := os.WriteFile(scriptPath, []byte(mockMCPServerEnv), 0o755); err != nil {
 		t.Fatal(err)
 	}
 

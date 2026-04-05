@@ -391,7 +391,7 @@ func TestDNSInterceptor_AllowedDomain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer mockDNS.Close()
+	defer func() { _ = mockDNS.Close() }()
 	mockAddr := mockDNS.LocalAddr().(*net.UDPAddr)
 
 	go func() {
@@ -405,7 +405,7 @@ func TestDNSInterceptor_AllowedDomain(t *testing.T) {
 			resp := make([]byte, n)
 			copy(resp, buf[:n])
 			resp[2] |= 0x80 // Set QR bit
-			mockDNS.WriteTo(resp, addr)
+			_, _ = mockDNS.WriteTo(resp, addr)
 		}
 	}()
 
@@ -483,7 +483,7 @@ func TestDNSInterceptor_MixedPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer mockDNS.Close()
+	defer func() { _ = mockDNS.Close() }()
 	mockAddr := mockDNS.LocalAddr().(*net.UDPAddr)
 
 	go func() {
@@ -496,7 +496,7 @@ func TestDNSInterceptor_MixedPolicy(t *testing.T) {
 			resp := make([]byte, n)
 			copy(resp, buf[:n])
 			resp[2] |= 0x80
-			mockDNS.WriteTo(resp, addr)
+			_, _ = mockDNS.WriteTo(resp, addr)
 		}
 	}()
 
@@ -562,7 +562,7 @@ func TestDNSInterceptor_AAAA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer mockDNS.Close()
+	defer func() { _ = mockDNS.Close() }()
 	mockAddr := mockDNS.LocalAddr().(*net.UDPAddr)
 
 	go func() {
@@ -575,7 +575,7 @@ func TestDNSInterceptor_AAAA(t *testing.T) {
 			resp := make([]byte, n)
 			copy(resp, buf[:n])
 			resp[2] |= 0x80
-			mockDNS.WriteTo(resp, addr)
+			_, _ = mockDNS.WriteTo(resp, addr)
 		}
 	}()
 
@@ -780,7 +780,7 @@ default = "allow"
 		t.Fatal(err)
 	}
 	addr := ln.LocalAddr().String()
-	ln.Close() // Close immediately so nothing is listening.
+	_ = ln.Close() // Close immediately so nothing is listening.
 
 	// Give the OS a moment to release the port.
 	time.Sleep(10 * time.Millisecond)

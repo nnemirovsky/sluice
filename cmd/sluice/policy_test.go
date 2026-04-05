@@ -392,7 +392,7 @@ name = "API"
 [[deny]]
 destination = "evil.example.com"
 `
-	if err := os.WriteFile(tomlPath, []byte(tomlData), 0644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte(tomlData), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -427,7 +427,7 @@ func TestHandlePolicyImportMalformed(t *testing.T) {
 	dbPath := filepath.Join(dir, "test.db")
 	tomlPath := filepath.Join(dir, "bad.toml")
 
-	if err := os.WriteFile(tomlPath, []byte("this is not valid toml [[["), 0644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte("this is not valid toml [[["), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -616,12 +616,12 @@ func TestHandlePolicyExportWithVaultConfig(t *testing.T) {
 	vrenv := "VAULT_ROLE_ID"
 	vsenv := "VAULT_SECRET_ID"
 	_ = db.UpdateConfig(store.ConfigUpdate{
-		VaultProvider:           &vp,
-		VaultHashicorpAddr:     &vaddr,
-		VaultHashicorpMount:    &vmount,
-		VaultHashicorpPrefix:   &vprefix,
-		VaultHashicorpAuth:     &vauth,
-		VaultHashicorpRoleIDEnv:  &vrenv,
+		VaultProvider:             &vp,
+		VaultHashicorpAddr:        &vaddr,
+		VaultHashicorpMount:       &vmount,
+		VaultHashicorpPrefix:      &vprefix,
+		VaultHashicorpAuth:        &vauth,
+		VaultHashicorpRoleIDEnv:   &vrenv,
 		VaultHashicorpSecretIDEnv: &vsenv,
 	})
 	_ = db.Close()
@@ -946,7 +946,7 @@ default = "ask"
 destination = "safe.example.com"
 ports = [443]
 `
-	if err := os.WriteFile(tomlPath, []byte(tomlData), 0644); err != nil {
+	if err := os.WriteFile(tomlPath, []byte(tomlData), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

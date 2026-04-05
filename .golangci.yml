@@ -1,0 +1,18 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - unparam
+    - revive
+    - errorlint
+    - recvcheck
+    - bodyclose
+
+formatters:
+  enable:
+    - gci

@@ -47,14 +47,14 @@ func LoadOrCreateCA(dir string) (tls.Certificate, *x509.Certificate, error) {
 		}
 	}
 
-	if mkErr := os.MkdirAll(dir, 0700); mkErr != nil {
+	if mkErr := os.MkdirAll(dir, 0o700); mkErr != nil {
 		return tls.Certificate{}, nil, fmt.Errorf("create CA dir: %w", mkErr)
 	}
 
 	// Acquire exclusive lock to prevent concurrent CA generation from
 	// producing mismatched key/cert pairs on disk.
 	lockPath := filepath.Join(dir, "ca.lock")
-	lockFile, lockErr := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	lockFile, lockErr := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if lockErr != nil {
 		return tls.Certificate{}, nil, fmt.Errorf("create CA lock file: %w", lockErr)
 	}
@@ -90,12 +90,12 @@ func LoadOrCreateCA(dir string) (tls.Certificate, *x509.Certificate, error) {
 	// problematic than an orphaned cert (the missing cert causes
 	// LoadX509KeyPair to fail, and the stat check detects only one file).
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	if writeErr := atomicWriteFile(keyPath, keyPEM, 0600); writeErr != nil {
+	if writeErr := atomicWriteFile(keyPath, keyPEM, 0o600); writeErr != nil {
 		return tls.Certificate{}, nil, fmt.Errorf("write CA key: %w", writeErr)
 	}
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsCert.Certificate[0]})
-	if writeErr := atomicWriteFile(certPath, certPEM, 0644); writeErr != nil {
+	if writeErr := atomicWriteFile(certPath, certPEM, 0o644); writeErr != nil {
 		_ = os.Remove(keyPath)
 		return tls.Certificate{}, nil, fmt.Errorf("write CA cert: %w", writeErr)
 	}

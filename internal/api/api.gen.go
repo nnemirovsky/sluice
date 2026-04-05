@@ -1494,7 +1494,7 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 // Base64 encoded, gzipped, json marshaled Swagger object
 var swaggerSpec = []string{
 
-"H4sIAAAAAAAC/+xcX3PbuBF/16fYcfuQm1Es55Jrp3pzPJ7GUzvncZz2IZPRwORKQgQCPABUrN70u3cA",
+	"H4sIAAAAAAAC/+xcX3PbuBF/16fYcfuQm1Es55Jrp3pzPJ7GUzvncZz2IZPRwORKQgQCPABUrN70u3cA",
 	"kOJfkaAsR/S1frKBBXbx239YELCIkZOYTuHk7enZ6duTEeVzMR0BaKoZTuETS2iAcCG4loLBLSMc4fz2",
 	"agQQogokjTUVfAp3l5/uTTvMhYSIcLKgfAF6idkMgcQQuaaEvab8Gwba9JM4lmJNGMRSPG5ORwBrlMpO",
 	"ePLm9Oz07GQEwGiAXKERCoCTCKdwc3U/GimUhtq0v4ZEsikstY6nk8mbn/9qxp6+mb49Ozuzw0qyXouA",

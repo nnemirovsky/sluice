@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,10 +12,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/nemirovsky/sluice/internal/vault"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
-
-	"github.com/nemirovsky/sluice/internal/vault"
 )
 
 // SSHJumpHost handles SSH connections by acting as a credential-injecting
@@ -22,8 +22,8 @@ import (
 // authentication), authenticates to the upstream server using credentials
 // from the vault, and relays SSH session channels between the two.
 type SSHJumpHost struct {
-	provider        vault.Provider
-	hostKey         ssh.Signer
+	provider vault.Provider
+	hostKey  ssh.Signer
 	// HostKeyCallback verifies the upstream SSH server's host key.
 	// If nil, the jump host attempts to use the system known_hosts file
 	// (~/.ssh/known_hosts). If that file does not exist, connections to
@@ -226,7 +226,8 @@ func sshRelayNewChannels(chans <-chan ssh.NewChannel, dst ssh.Conn) {
 func sshHandleChannel(newChan ssh.NewChannel, dst ssh.Conn) {
 	dstChan, dstReqs, err := dst.OpenChannel(newChan.ChannelType(), newChan.ExtraData())
 	if err != nil {
-		if openErr, ok := err.(*ssh.OpenChannelError); ok {
+		var openErr *ssh.OpenChannelError
+		if errors.As(err, &openErr) {
 			_ = newChan.Reject(openErr.Reason, openErr.Message)
 		} else {
 			_ = newChan.Reject(ssh.ConnectionFailed, err.Error())

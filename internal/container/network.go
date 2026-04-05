@@ -117,10 +117,10 @@ func (r *NetworkRouter) loadAnchorFromFile(ctx context.Context, rules string) er
 	if err != nil {
 		return fmt.Errorf("create temp pf rules file: %w", err)
 	}
-	defer os.Remove(f.Name())
+	defer func() { _ = os.Remove(f.Name()) }()
 
 	if _, err := f.WriteString(rules); err != nil {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("write pf rules: %w", err)
 	}
 	if err := f.Close(); err != nil {
@@ -166,7 +166,7 @@ func (r *NetworkRouter) ensureAnchorRef() (bool, error) {
 		}
 	}
 
-	f, err := os.OpenFile(r.pfConfPath, os.O_APPEND|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(r.pfConfPath, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return false, fmt.Errorf("open %s for append: %w", r.pfConfPath, err)
 	}
@@ -198,7 +198,7 @@ func (r *NetworkRouter) removeAnchorRef() error {
 		}
 	}
 
-	return os.WriteFile(r.pfConfPath, []byte(strings.Join(filtered, "\n")), 0644)
+	return os.WriteFile(r.pfConfPath, []byte(strings.Join(filtered, "\n")), 0o644)
 }
 
 // DefaultBridgeInterface returns the default bridge interface name and the

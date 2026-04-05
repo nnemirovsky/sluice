@@ -75,9 +75,9 @@ func WithMaxPending(n int) BrokerOption {
 }
 
 // WithDestinationRateLimit sets the per-destination rate limit.
-func WithDestinationRateLimit(max int, window time.Duration) BrokerOption {
+func WithDestinationRateLimit(maxReqs int, window time.Duration) BrokerOption {
 	return func(b *Broker) {
-		b.destRateMax = max
+		b.destRateMax = maxReqs
 		b.destRateWindow = window
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -557,7 +558,8 @@ func TestHandleMCPGatewayInvalidChatID(t *testing.T) {
 		"TEST_DB_PATH="+dbPath,
 	)
 	err = cmd.Run()
-	if e, ok := err.(*exec.ExitError); ok && !e.Success() {
+	var e *exec.ExitError
+	if errors.As(err, &e) && !e.Success() {
 		return
 	}
 	t.Fatal("expected non-zero exit code for invalid chat ID")
@@ -751,7 +753,7 @@ func TestWriteMCPServersJSONCustomURL(t *testing.T) {
 }
 
 // TestWriteMCPServersJSONInvalidDir verifies graceful handling of invalid dir.
-func TestWriteMCPServersJSONInvalidDir(t *testing.T) {
+func TestWriteMCPServersJSONInvalidDir(_ *testing.T) {
 	// Should not panic on unwritable path.
 	writeMCPServersJSON("/nonexistent/path/foo", "http://127.0.0.1:3000/mcp")
 }
@@ -805,7 +807,7 @@ default = "deny"
 destination = "api.example.com"
 ports = [443]
 name = "test rule"
-`), 0600); err != nil {
+`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

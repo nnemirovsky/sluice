@@ -23,9 +23,11 @@ import (
 )
 
 // buildOnce ensures the sluice binary is built exactly once per test run.
-var buildOnce sync.Once
-var builtBinary string
-var buildErr error
+var (
+	buildOnce   sync.Once
+	builtBinary string
+	buildErr    error
+)
 
 // SluiceOpts configures a sluice process for testing.
 type SluiceOpts struct {

@@ -10,7 +10,7 @@ import (
 )
 
 // ChannelType enumerates supported notification/approval channels.
-type ChannelType int
+type ChannelType int //nolint:revive // stuttering accepted for clarity
 
 const (
 	// ChannelTelegram is a Telegram bot channel.

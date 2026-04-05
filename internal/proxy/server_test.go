@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,14 +18,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
-	"golang.org/x/net/proxy"
-
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
+	"golang.org/x/net/proxy"
 )
 
 // autoResolveChannel is a mock channel that automatically resolves approval
@@ -38,12 +38,12 @@ func (c *autoResolveChannel) RequestApproval(_ context.Context, req channel.Appr
 	go c.broker.Resolve(req.ID, c.response)
 	return nil
 }
-func (c *autoResolveChannel) CancelApproval(_ string) error             { return nil }
-func (c *autoResolveChannel) Commands() <-chan channel.Command           { return nil }
-func (c *autoResolveChannel) Notify(_ context.Context, _ string) error  { return nil }
-func (c *autoResolveChannel) Start() error                              { return nil }
-func (c *autoResolveChannel) Stop()                                     {}
-func (c *autoResolveChannel) Type() channel.ChannelType                 { return channel.ChannelTelegram }
+func (c *autoResolveChannel) CancelApproval(_ string) error            { return nil }
+func (c *autoResolveChannel) Commands() <-chan channel.Command         { return nil }
+func (c *autoResolveChannel) Notify(_ context.Context, _ string) error { return nil }
+func (c *autoResolveChannel) Start() error                             { return nil }
+func (c *autoResolveChannel) Stop()                                    {}
+func (c *autoResolveChannel) Type() channel.ChannelType                { return channel.ChannelTelegram }
 
 // newAutoResolveBroker creates a Broker with a single mock channel that
 // auto-resolves every request with the given response.
@@ -845,17 +845,17 @@ func socks5UDPAssociate(proxyAddr string) (relayAddr *net.UDPAddr, controlConn n
 
 	// SOCKS5 auth negotiation: version=5, 1 method, no-auth=0x00
 	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, nil, fmt.Errorf("write auth: %w", err)
 	}
 
 	authResp := make([]byte, 2)
 	if _, err := conn.Read(authResp); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, nil, fmt.Errorf("read auth: %w", err)
 	}
 	if authResp[0] != 0x05 || authResp[1] != 0x00 {
-		conn.Close()
+		_ = conn.Close()
 		return nil, nil, fmt.Errorf("auth rejected: %x", authResp)
 	}
 
@@ -863,22 +863,22 @@ func socks5UDPAssociate(proxyAddr string) (relayAddr *net.UDPAddr, controlConn n
 	// atyp=IPv4(0x01), addr=0.0.0.0, port=0
 	req := []byte{0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
 	if _, err := conn.Write(req); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, nil, fmt.Errorf("write associate: %w", err)
 	}
 
 	// Read reply: version(1) + rep(1) + rsv(1) + atyp(1) + BND.ADDR + BND.PORT
 	header := make([]byte, 4)
 	if _, err := conn.Read(header); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, nil, fmt.Errorf("read reply header: %w", err)
 	}
 	if header[0] != 0x05 {
-		conn.Close()
+		_ = conn.Close()
 		return nil, nil, fmt.Errorf("unexpected version: %d", header[0])
 	}
 	if header[1] != 0x00 {
-		conn.Close()
+		_ = conn.Close()
 		return nil, nil, fmt.Errorf("associate rejected with reply code: 0x%02x", header[1])
 	}
 
@@ -888,7 +888,7 @@ func socks5UDPAssociate(proxyAddr string) (relayAddr *net.UDPAddr, controlConn n
 	case 0x01: // IPv4
 		addr := make([]byte, 4+2)
 		if _, err := conn.Read(addr); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, nil, fmt.Errorf("read ipv4 addr: %w", err)
 		}
 		ip = net.IP(addr[:4])
@@ -897,14 +897,14 @@ func socks5UDPAssociate(proxyAddr string) (relayAddr *net.UDPAddr, controlConn n
 	case 0x04: // IPv6
 		addr := make([]byte, 16+2)
 		if _, err := conn.Read(addr); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, nil, fmt.Errorf("read ipv6 addr: %w", err)
 		}
 		ip = net.IP(addr[:16])
 		port := binary.BigEndian.Uint16(addr[16:18])
 		return &net.UDPAddr{IP: ip, Port: int(port)}, conn, nil
 	default:
-		conn.Close()
+		_ = conn.Close()
 		return nil, nil, fmt.Errorf("unexpected atyp: %d", header[3])
 	}
 }
@@ -932,7 +932,7 @@ default = "allow"
 	if err != nil {
 		t.Fatalf("UDP ASSOCIATE should succeed: %v", err)
 	}
-	defer controlConn.Close()
+	defer func() { _ = controlConn.Close() }()
 
 	if relayAddr.Port == 0 {
 		t.Fatal("expected non-zero relay port")
@@ -946,7 +946,7 @@ func TestUDPAssociateRelaysDatagrams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echoConn.Close()
+	defer func() { _ = echoConn.Close() }()
 	echoAddr := echoConn.LocalAddr().(*net.UDPAddr)
 
 	go func() {
@@ -956,7 +956,7 @@ func TestUDPAssociateRelaysDatagrams(t *testing.T) {
 			if err != nil {
 				return
 			}
-			echoConn.WriteTo(buf[:n], addr)
+			_, _ = echoConn.WriteTo(buf[:n], addr)
 		}
 	}()
 
@@ -987,14 +987,14 @@ protocols = ["udp"]
 	if err != nil {
 		t.Fatalf("UDP ASSOCIATE: %v", err)
 	}
-	defer controlConn.Close()
+	defer func() { _ = controlConn.Close() }()
 
 	// Open a UDP socket to communicate with the relay.
 	clientConn, err := net.DialUDP("udp", nil, relayAddr)
 	if err != nil {
 		t.Fatalf("dial relay: %v", err)
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	// Build SOCKS5 UDP datagram: RSV(2) + FRAG(1) + ATYP(1) + DST.ADDR + DST.PORT + DATA
 	echoIP := echoAddr.IP.To4()
@@ -1012,7 +1012,7 @@ protocols = ["udp"]
 	}
 
 	// Read response through relay.
-	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	respBuf := make([]byte, 65535)
 	n, err := clientConn.Read(respBuf)
 	if err != nil {
@@ -1060,13 +1060,13 @@ protocols = ["udp"]
 	if err != nil {
 		t.Fatalf("UDP ASSOCIATE: %v", err)
 	}
-	defer controlConn.Close()
+	defer func() { _ = controlConn.Close() }()
 
 	clientConn, err := net.DialUDP("udp", nil, relayAddr)
 	if err != nil {
 		t.Fatalf("dial relay: %v", err)
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	// Send a datagram to a denied destination (127.0.0.1:12345).
 	payload := []byte("denied-traffic")
@@ -1084,13 +1084,14 @@ protocols = ["udp"]
 	}
 
 	// Should not receive a response since the destination is denied.
-	clientConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	_ = clientConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 	respBuf := make([]byte, 65535)
 	_, err = clientConn.Read(respBuf)
 	if err == nil {
 		t.Fatal("expected timeout reading from denied destination, got response")
 	}
-	if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+	var ne net.Error
+	if !errors.As(err, &ne) || !ne.Timeout() {
 		t.Fatalf("expected timeout error, got: %v", err)
 	}
 }
@@ -1101,7 +1102,7 @@ func TestUDPAssociateDNSInterception(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer dnsConn.Close()
+	defer func() { _ = dnsConn.Close() }()
 	dnsAddr := dnsConn.LocalAddr().(*net.UDPAddr)
 
 	go func() {
@@ -1116,7 +1117,7 @@ func TestUDPAssociateDNSInterception(t *testing.T) {
 			copy(resp, buf[:n])
 			// Set QR=1 in flags (byte 2-3).
 			resp[2] |= 0x80
-			dnsConn.WriteTo(resp, addr)
+			_, _ = dnsConn.WriteTo(resp, addr)
 		}
 	}()
 
@@ -1148,13 +1149,13 @@ protocols = ["dns"]
 	if err != nil {
 		t.Fatalf("UDP ASSOCIATE: %v", err)
 	}
-	defer controlConn.Close()
+	defer func() { _ = controlConn.Close() }()
 
 	clientConn, err := net.DialUDP("udp", nil, relayAddr)
 	if err != nil {
 		t.Fatalf("dial relay: %v", err)
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	// Build a DNS query for example.com (allowed).
 	dnsQuery := buildTestDNSQuery(0x1234, "example.com", 1) // A record
@@ -1174,7 +1175,7 @@ protocols = ["dns"]
 	}
 
 	// Read the DNS response through the relay.
-	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	respBuf := make([]byte, 65535)
 	n, err := clientConn.Read(respBuf)
 	if err != nil {
@@ -1232,13 +1233,13 @@ protocols = ["dns"]
 	if err != nil {
 		t.Fatalf("UDP ASSOCIATE: %v", err)
 	}
-	defer controlConn.Close()
+	defer func() { _ = controlConn.Close() }()
 
 	clientConn, err := net.DialUDP("udp", nil, relayAddr)
 	if err != nil {
 		t.Fatalf("dial relay: %v", err)
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	// Query for a denied domain.
 	dnsQuery := buildTestDNSQuery(0xABCD, "denied.example.com", 1)
@@ -1257,7 +1258,7 @@ protocols = ["dns"]
 	}
 
 	// Should receive an NXDOMAIN response.
-	clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = clientConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	respBuf := make([]byte, 65535)
 	n, err := clientConn.Read(respBuf)
 	if err != nil {
@@ -1479,7 +1480,7 @@ protocols = ["udp"]
 	srv.quicProxy.upstreamTLSConfig = &tls.Config{
 		RootCAs: upstreamPool,
 	}
-	srv.quicProxy.upstreamDial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+	srv.quicProxy.upstreamDial = func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 		return quic.DialAddr(ctx, upstreamAddr, tlsCfg, cfg)
 	}
 
@@ -1494,7 +1495,7 @@ protocols = ["udp"]
 	if localErr != nil {
 		t.Fatalf("listen local UDP: %v", localErr)
 	}
-	defer localConn.Close()
+	defer func() { _ = localConn.Close() }()
 	srv.quicProxy.RegisterExpectedHost(localConn.LocalAddr().String(), sni, 443)
 
 	pool := x509.NewCertPool()
@@ -1506,11 +1507,11 @@ protocols = ["udp"]
 			RootCAs:    pool,
 			ServerName: sni,
 		},
-		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 			return quic.Dial(ctx, localConn, quicUDPAddr, tlsCfg, cfg)
 		},
 	}
-	defer transport.Close()
+	defer func() { _ = transport.Close() }()
 
 	phantomToken := PhantomToken("test_cred")
 	reqURL := fmt.Sprintf("https://%s/v1/test", sni)
@@ -1524,7 +1525,7 @@ protocols = ["udp"]
 	if err != nil {
 		t.Fatalf("HTTP/3 round trip: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -1680,13 +1681,13 @@ func TestDialWithHandlerSuccess(t *testing.T) {
 		if readErr != nil {
 			return
 		}
-		handlerConn.Write(buf[:n])
-		handlerConn.Close()
+		_, _ = handlerConn.Write(buf[:n])
+		_ = handlerConn.Close()
 	})
 	if err != nil {
 		t.Fatalf("dialWithHandler: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	_, err = conn.Write([]byte("ping"))
 	if err != nil {
@@ -1719,16 +1720,16 @@ func TestDialWithHandlerBidirectional(t *testing.T) {
 	conn, err := dialWithHandler(func(handlerConn net.Conn, ready chan<- error) {
 		ready <- nil
 		// Write first, then read.
-		handlerConn.Write([]byte("from-handler"))
+		_, _ = handlerConn.Write([]byte("from-handler"))
 		buf := make([]byte, 256)
 		n, _ := handlerConn.Read(buf)
-		handlerConn.Write(append([]byte("echo:"), buf[:n]...))
-		handlerConn.Close()
+		_, _ = handlerConn.Write(append([]byte("echo:"), buf[:n]...))
+		_ = handlerConn.Close()
 	})
 	if err != nil {
 		t.Fatalf("dialWithHandler: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Read the handler's first message.
 	buf := make([]byte, 256)
@@ -1741,7 +1742,7 @@ func TestDialWithHandlerBidirectional(t *testing.T) {
 	}
 
 	// Send a response.
-	conn.Write([]byte("reply"))
+	_, _ = conn.Write([]byte("reply"))
 
 	// Read the echo.
 	n, err = conn.Read(buf)
@@ -1759,7 +1760,7 @@ func TestDialThroughInjectorSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer mockInj.Close()
+	defer func() { _ = mockInj.Close() }()
 
 	go func() {
 		for {
@@ -1768,7 +1769,7 @@ func TestDialThroughInjectorSuccess(t *testing.T) {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				br := bufio.NewReader(c)
 				req, err := http.ReadRequest(br)
 				if err != nil {
@@ -1776,17 +1777,17 @@ func TestDialThroughInjectorSuccess(t *testing.T) {
 				}
 				// Verify auth and pin headers.
 				if req.Header.Get("X-Sluice-Auth") != "test-token" {
-					io.WriteString(c, "HTTP/1.1 403 Forbidden\r\n\r\n")
+					_, _ = io.WriteString(c, "HTTP/1.1 403 Forbidden\r\n\r\n")
 					return
 				}
 				if req.Header.Get("X-Sluice-Pin") == "" {
-					io.WriteString(c, "HTTP/1.1 400 Bad Request\r\n\r\n")
+					_, _ = io.WriteString(c, "HTTP/1.1 400 Bad Request\r\n\r\n")
 					return
 				}
 				// Respond with 200 OK for CONNECT.
-				io.WriteString(c, "HTTP/1.1 200 OK\r\n\r\n")
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\n\r\n")
 				// Echo data back through the tunnel.
-				io.Copy(c, c)
+				_, _ = io.Copy(c, c)
 			}(conn)
 		}
 	}()
@@ -1795,7 +1796,7 @@ func TestDialThroughInjectorSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dialThroughInjector: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Verify the tunnel works by sending data through it.
 	_, err = conn.Write([]byte("tunnel-data"))
@@ -1818,7 +1819,7 @@ func TestDialThroughInjectorRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer mockInj.Close()
+	defer func() { _ = mockInj.Close() }()
 
 	go func() {
 		for {
@@ -1827,10 +1828,10 @@ func TestDialThroughInjectorRejected(t *testing.T) {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				br := bufio.NewReader(c)
-				http.ReadRequest(br)
-				io.WriteString(c, "HTTP/1.1 403 Forbidden\r\n\r\n")
+				_, _ = http.ReadRequest(br)
+				_, _ = io.WriteString(c, "HTTP/1.1 403 Forbidden\r\n\r\n")
 			}(conn)
 		}
 	}()
@@ -1887,7 +1888,7 @@ default = "allow"
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	// Verify all injection components were created.
 	if srv.injector == nil {
@@ -1932,7 +1933,7 @@ default = "allow"
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	// Server should still work for policy-only mode.
 	if srv.listener == nil {
@@ -1950,12 +1951,12 @@ func TestPinnedConnCloseUnpins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	go func() {
 		c, _ := ln.Accept()
 		if c != nil {
-			c.Close()
+			_ = c.Close()
 		}
 	}()
 
@@ -1971,7 +1972,7 @@ func TestPinnedConnCloseUnpins(t *testing.T) {
 		t.Fatal("pin should exist before close")
 	}
 
-	pc.Close()
+	_ = pc.Close()
 
 	// Verify pin is removed after close.
 	if _, ok := inj.pinnedIPs.Load("pin-close-test"); ok {
@@ -1979,7 +1980,7 @@ func TestPinnedConnCloseUnpins(t *testing.T) {
 	}
 
 	// Double close should not panic.
-	pc.Close()
+	_ = pc.Close()
 }
 
 func TestBufferedConnRead(t *testing.T) {
@@ -1988,13 +1989,13 @@ func TestBufferedConnRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	go func() {
 		c, _ := ln.Accept()
 		if c != nil {
-			c.Write([]byte("rest-of-data"))
-			c.Close()
+			_, _ = c.Write([]byte("rest-of-data"))
+			_ = c.Close()
 		}
 	}()
 
@@ -2002,7 +2003,7 @@ func TestBufferedConnRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 
 	// Simulate buffered bytes (like bytes peeked during detection).
 	peeked := []byte("peeked-")
@@ -2046,7 +2047,7 @@ func TestTrackedListenerAndConn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	tc := <-accepted
 	if tc == nil {
@@ -2061,7 +2062,7 @@ func TestTrackedListenerAndConn(t *testing.T) {
 		close(done)
 	}()
 
-	tc.Close()
+	_ = tc.Close()
 
 	select {
 	case <-done:
@@ -2071,9 +2072,9 @@ func TestTrackedListenerAndConn(t *testing.T) {
 	}
 
 	// Double close on tracked conn should not panic.
-	tc.Close()
+	_ = tc.Close()
 
-	tracked.Close()
+	_ = tracked.Close()
 }
 
 func TestSIGHUPEngineRecompile(t *testing.T) {
@@ -2082,15 +2083,15 @@ func TestSIGHUPEngineRecompile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echo.Close()
+	defer func() { _ = echo.Close() }()
 	go func() {
 		for {
 			conn, err := echo.Accept()
 			if err != nil {
 				return
 			}
-			conn.Write([]byte("ok"))
-			conn.Close()
+			_, _ = conn.Write([]byte("ok"))
+			_ = conn.Close()
 		}
 	}()
 
@@ -2111,7 +2112,7 @@ default = "deny"
 		t.Fatal(err)
 	}
 	go func() { _ = srv.ListenAndServe() }()
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -2125,13 +2126,13 @@ default = "deny"
 	}
 
 	// Simulate SIGHUP: swap in a new engine that allows localhost.
-	newEng, err := policy.LoadFromBytes([]byte(fmt.Sprintf(`
+	newEng, err := policy.LoadFromBytes([]byte(`
 [policy]
 default = "deny"
 
 [[allow]]
 destination = "127.0.0.1"
-`, )))
+`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2145,7 +2146,7 @@ destination = "127.0.0.1"
 	if err != nil {
 		t.Fatalf("expected connection to succeed after engine swap: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	buf := make([]byte, 10)
 	n, err := conn.Read(buf)
@@ -2162,15 +2163,15 @@ func TestSIGHUPEngineRecompileWithStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echo.Close()
+	defer func() { _ = echo.Close() }()
 	go func() {
 		for {
 			conn, err := echo.Accept()
 			if err != nil {
 				return
 			}
-			conn.Write([]byte("stored"))
-			conn.Close()
+			_, _ = conn.Write([]byte("stored"))
+			_ = conn.Close()
 		}
 	}()
 
@@ -2179,7 +2180,7 @@ func TestSIGHUPEngineRecompileWithStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	eng, err := policy.LoadFromStore(st)
 	if err != nil {
@@ -2195,7 +2196,7 @@ func TestSIGHUPEngineRecompileWithStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	go func() { _ = srv.ListenAndServe() }()
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -2222,7 +2223,7 @@ func TestSIGHUPEngineRecompileWithStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected success after store rule add: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	buf := make([]byte, 10)
 	n, err := conn.Read(buf)
@@ -2250,7 +2251,7 @@ default = "allow"
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	// UpdateInspectRules with no injector/QUIC should not panic.
 	eng.InspectBlockRules = []policy.InspectBlockRule{{Pattern: "secret", Name: "block secrets"}}
@@ -2274,7 +2275,7 @@ default = "allow"
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	// EnginePtr should return the shared pointer.
 	ptr := srv.EnginePtr()
@@ -2298,7 +2299,7 @@ default = "allow"
 	}
 	// Verify it can be locked and unlocked without deadlock.
 	mu.Lock()
-	mu.Unlock()
+	mu.Unlock() //nolint:staticcheck // SA2001: intentionally testing lock/unlock works
 
 	// Addr should be non-empty.
 	if srv.Addr() == "" {
@@ -2327,7 +2328,7 @@ default = "allow"
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	// Initially no resolver.
 	if srv.ResolverPtr().Load() != nil {
@@ -2364,7 +2365,7 @@ default = "allow"
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	broker := newAutoResolveBroker(channel.ResponseAllowOnce)
 	srv.SetBroker(broker)
@@ -2400,13 +2401,13 @@ func TestFullSOCKS5MITMPipeline(t *testing.T) {
 		mu.Lock()
 		receivedAuth = r.Header.Get("Authorization")
 		mu.Unlock()
-		w.Write([]byte("auth=" + receivedAuth))
+		_, _ = w.Write([]byte("auth=" + receivedAuth))
 	}))
 	defer backend.Close()
 
 	backendHost, backendPortStr, _ := net.SplitHostPort(backend.Listener.Addr().String())
 	backendPort := 0
-	fmt.Sscanf(backendPortStr, "%d", &backendPort)
+	_, _ = fmt.Sscanf(backendPortStr, "%d", &backendPort)
 
 	// Create a vault store with a credential.
 	vs, err := vault.NewStore(dir)
@@ -2450,7 +2451,7 @@ default = "allow"
 		t.Fatal(err)
 	}
 	go func() { _ = srv.ListenAndServe() }()
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	// Connect through the SOCKS5 proxy and make an HTTP request.
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
@@ -2475,7 +2476,7 @@ default = "allow"
 	if err != nil {
 		t.Fatalf("HTTP request through proxy: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	// The backend should have received the real credential, not the phantom.
@@ -2493,12 +2494,12 @@ func (c *slowResolveChannel) RequestApproval(_ context.Context, _ channel.Approv
 	// Never resolve. The request will time out or be cancelled by shutdown.
 	return nil
 }
-func (c *slowResolveChannel) CancelApproval(_ string) error             { return nil }
-func (c *slowResolveChannel) Commands() <-chan channel.Command           { return nil }
-func (c *slowResolveChannel) Notify(_ context.Context, _ string) error  { return nil }
-func (c *slowResolveChannel) Start() error                              { return nil }
-func (c *slowResolveChannel) Stop()                                     {}
-func (c *slowResolveChannel) Type() channel.ChannelType                 { return channel.ChannelTelegram }
+func (c *slowResolveChannel) CancelApproval(_ string) error            { return nil }
+func (c *slowResolveChannel) Commands() <-chan channel.Command         { return nil }
+func (c *slowResolveChannel) Notify(_ context.Context, _ string) error { return nil }
+func (c *slowResolveChannel) Start() error                             { return nil }
+func (c *slowResolveChannel) Stop()                                    {}
+func (c *slowResolveChannel) Type() channel.ChannelType                { return channel.ChannelTelegram }
 
 func TestGracefulShutdownWithPendingApprovals(t *testing.T) {
 	eng, err := policy.LoadFromBytes([]byte(`
@@ -2532,7 +2533,7 @@ timeout_sec = 30
 	}
 
 	go func() {
-		dialer.Dial("tcp", "93.184.216.34:80")
+		_, _ = dialer.Dial("tcp", "93.184.216.34:80")
 	}()
 
 	// Give it a moment to start the approval request.
@@ -2693,12 +2694,12 @@ func TestBidirectionalRelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln1.Close()
+	defer func() { _ = ln1.Close() }()
 	ln2, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln2.Close()
+	defer func() { _ = ln2.Close() }()
 
 	ch1 := make(chan net.Conn, 1)
 	ch2 := make(chan net.Conn, 1)
@@ -2721,9 +2722,9 @@ func TestBidirectionalRelay(t *testing.T) {
 	go bidirectionalRelay(server1, server2)
 
 	// Write through client1 and read from client2.
-	client1.Write([]byte("hello"))
+	_, _ = client1.Write([]byte("hello"))
 	buf := make([]byte, 10)
-	client2.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = client2.SetReadDeadline(time.Now().Add(2 * time.Second))
 	n, err := client2.Read(buf)
 	if err != nil {
 		t.Fatalf("read from client2: %v", err)
@@ -2733,8 +2734,8 @@ func TestBidirectionalRelay(t *testing.T) {
 	}
 
 	// Write through client2 and read from client1.
-	client2.Write([]byte("world"))
-	client1.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _ = client2.Write([]byte("world"))
+	_ = client1.SetReadDeadline(time.Now().Add(2 * time.Second))
 	n, err = client1.Read(buf)
 	if err != nil {
 		t.Fatalf("read from client1: %v", err)
@@ -2744,9 +2745,9 @@ func TestBidirectionalRelay(t *testing.T) {
 	}
 
 	// Close one end and verify relay completes.
-	client1.Close()
+	_ = client1.Close()
 	time.Sleep(50 * time.Millisecond)
-	client2.Close()
+	_ = client2.Close()
 }
 
 func TestFullSOCKS5MITMPipelineMultipleBindings(t *testing.T) {
@@ -2760,7 +2761,7 @@ func TestFullSOCKS5MITMPipelineMultipleBindings(t *testing.T) {
 		mu1.Lock()
 		received1 = r.Header.Get("Authorization")
 		mu1.Unlock()
-		w.Write([]byte("ok1"))
+		_, _ = w.Write([]byte("ok1"))
 	}))
 	defer backend1.Close()
 
@@ -2768,16 +2769,16 @@ func TestFullSOCKS5MITMPipelineMultipleBindings(t *testing.T) {
 		mu2.Lock()
 		received2 = r.Header.Get("X-Api-Key")
 		mu2.Unlock()
-		w.Write([]byte("ok2"))
+		_, _ = w.Write([]byte("ok2"))
 	}))
 	defer backend2.Close()
 
 	host1, port1Str, _ := net.SplitHostPort(backend1.Listener.Addr().String())
 	port1 := 0
-	fmt.Sscanf(port1Str, "%d", &port1)
+	_, _ = fmt.Sscanf(port1Str, "%d", &port1)
 	host2, port2Str, _ := net.SplitHostPort(backend2.Listener.Addr().String())
 	port2 := 0
-	fmt.Sscanf(port2Str, "%d", &port2)
+	_, _ = fmt.Sscanf(port2Str, "%d", &port2)
 
 	vs, err := vault.NewStore(dir)
 	if err != nil {
@@ -2818,7 +2819,7 @@ default = "allow"
 		t.Fatal(err)
 	}
 	go func() { _ = srv.ListenAndServe() }()
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -2834,7 +2835,7 @@ default = "allow"
 	if err != nil {
 		t.Fatalf("request to backend1: %v", err)
 	}
-	resp1.Body.Close()
+	_ = resp1.Body.Close()
 
 	mu1.Lock()
 	if received1 != "secret-1" {
@@ -2849,7 +2850,7 @@ default = "allow"
 	if err != nil {
 		t.Fatalf("request to backend2: %v", err)
 	}
-	resp2.Body.Close()
+	_ = resp2.Body.Close()
 
 	mu2.Lock()
 	if received2 != "secret-2" {
@@ -2864,15 +2865,15 @@ func TestProxyDirectConnectionFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echo.Close()
+	defer func() { _ = echo.Close() }()
 	go func() {
 		for {
 			conn, err := echo.Accept()
 			if err != nil {
 				return
 			}
-			conn.Write([]byte("direct"))
-			conn.Close()
+			_, _ = conn.Write([]byte("direct"))
+			_ = conn.Close()
 		}
 	}()
 
@@ -2893,7 +2894,7 @@ default = "allow"
 		t.Fatal(err)
 	}
 	go func() { _ = srv.ListenAndServe() }()
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -2904,7 +2905,7 @@ default = "allow"
 	if err != nil {
 		t.Fatalf("direct connection through proxy: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	buf := make([]byte, 10)
 	n, err := conn.Read(buf)
@@ -2933,7 +2934,7 @@ func TestProxyUnboundHTTPRoutesThroughInjector(t *testing.T) {
 
 	backendHost, backendPortStr, _ := net.SplitHostPort(backend.Listener.Addr().String())
 	backendPort := 0
-	fmt.Sscanf(backendPortStr, "%d", &backendPort)
+	_, _ = fmt.Sscanf(backendPortStr, "%d", &backendPort)
 
 	vs, err := vault.NewStore(dir)
 	if err != nil {
@@ -2968,7 +2969,7 @@ default = "allow"
 		t.Fatal(err)
 	}
 	go func() { _ = srv.ListenAndServe() }()
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -2990,7 +2991,7 @@ default = "allow"
 	if err != nil {
 		t.Fatalf("HTTP request through proxy: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	mu.Lock()
 	got := receivedCustom
@@ -3033,7 +3034,7 @@ default = "allow"
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	// Update inspect rules with new patterns.
 	eng.InspectBlockRules = []policy.InspectBlockRule{{Pattern: "secret-pattern", Name: "block secrets"}}
@@ -3050,7 +3051,7 @@ func TestRelayDirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echo.Close()
+	defer func() { _ = echo.Close() }()
 	go func() {
 		for {
 			conn, err := echo.Accept()
@@ -3059,8 +3060,8 @@ func TestRelayDirect(t *testing.T) {
 			}
 			buf := make([]byte, 256)
 			n, _ := conn.Read(buf)
-			conn.Write(buf[:n])
-			conn.Close()
+			_, _ = conn.Write(buf[:n])
+			_ = conn.Close()
 		}
 	}()
 
@@ -3069,7 +3070,7 @@ func TestRelayDirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	acceptCh := make(chan net.Conn, 1)
 	go func() { c, _ := ln.Accept(); acceptCh <- c }()
@@ -3077,15 +3078,15 @@ func TestRelayDirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 	serverConn := <-acceptCh
 
 	go relayDirect(serverConn, []string{echo.Addr().String()})
 
 	// Write through client -> relay -> echo -> relay -> client.
-	clientConn.Write([]byte("relay-test"))
+	_, _ = clientConn.Write([]byte("relay-test"))
 	buf := make([]byte, 256)
-	clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	n, err := clientConn.Read(buf)
 	if err != nil {
 		t.Fatalf("read from relay: %v", err)
@@ -3101,14 +3102,14 @@ func TestRelayDirectFailedDial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	acceptCh := make(chan net.Conn, 1)
 	go func() { c, _ := ln.Accept(); acceptCh <- c }()
 	clientConn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 	serverConn := <-acceptCh
 
 	// Use a port that nothing is listening on.
@@ -3134,13 +3135,13 @@ func TestProxyWithByteDetectionHTTP(t *testing.T) {
 		mu.Lock()
 		receivedAuth = r.Header.Get("Authorization")
 		mu.Unlock()
-		w.Write([]byte("detected"))
+		_, _ = w.Write([]byte("detected"))
 	}))
 	defer backend.Close()
 
 	host, portStr, _ := net.SplitHostPort(backend.Listener.Addr().String())
 	port := 0
-	fmt.Sscanf(portStr, "%d", &port)
+	_, _ = fmt.Sscanf(portStr, "%d", &port)
 
 	vs, err := vault.NewStore(dir)
 	if err != nil {
@@ -3182,7 +3183,7 @@ default = "allow"
 		t.Fatal(err)
 	}
 	go func() { _ = srv.ListenAndServe() }()
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -3203,7 +3204,7 @@ default = "allow"
 	if err != nil {
 		t.Fatalf("HTTP request with byte detection: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != "detected" {
@@ -3229,7 +3230,7 @@ func TestProxyGenericPortNoBindingByteDetection(t *testing.T) {
 		mu.Lock()
 		receivedHeader = r.Header.Get("X-Phantom")
 		mu.Unlock()
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	}))
 	defer backend.Close()
 
@@ -3269,7 +3270,7 @@ default = "allow"
 		t.Fatal(err)
 	}
 	go func() { _ = srv.ListenAndServe() }()
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -3293,7 +3294,7 @@ default = "allow"
 		t.Logf("HTTP request returned error (acceptable): %v", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	mu.Lock()
 	got := receivedHeader
@@ -3312,7 +3313,7 @@ func TestDialThroughInjectorBufferedResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer mockInj.Close()
+	defer func() { _ = mockInj.Close() }()
 
 	go func() {
 		for {
@@ -3321,12 +3322,12 @@ func TestDialThroughInjectorBufferedResponse(t *testing.T) {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				br := bufio.NewReader(c)
-				http.ReadRequest(br)
+				_, _ = http.ReadRequest(br)
 				// Respond with 200 OK and immediately send some tunnel data.
-				io.WriteString(c, "HTTP/1.1 200 OK\r\n\r\nbuffered-data")
-				io.Copy(c, c)
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\n\r\nbuffered-data")
+				_, _ = io.Copy(c, c)
 			}(conn)
 		}
 	}()
@@ -3335,7 +3336,7 @@ func TestDialThroughInjectorBufferedResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dialThroughInjector: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Should be able to read the buffered data that arrived with the response.
 	buf := make([]byte, 64)
@@ -3367,11 +3368,11 @@ func TestProxyWithStandardHTTPPort(t *testing.T) {
 			mu.Lock()
 			receivedAuth = r.Header.Get("Authorization")
 			mu.Unlock()
-			w.Write([]byte("port80-ok"))
+			_, _ = w.Write([]byte("port80-ok"))
 		})
-		http.Serve(ln, mux)
+		_ = http.Serve(ln, mux)
 	}()
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	vs, err := vault.NewStore(dir)
 	if err != nil {
@@ -3411,7 +3412,7 @@ default = "allow"
 		t.Fatal(err)
 	}
 	go func() { _ = srv.ListenAndServe() }()
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -3428,7 +3429,7 @@ default = "allow"
 	if err != nil {
 		t.Fatalf("HTTP on port 80: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	mu.Lock()
 	if receivedAuth != "port80-secret" {
@@ -3448,13 +3449,13 @@ func TestProxyNonStandardPortWithBinding(t *testing.T) {
 		mu.Lock()
 		receivedAuth = r.Header.Get("Authorization")
 		mu.Unlock()
-		w.Write([]byte("nonstandard-ok"))
+		_, _ = w.Write([]byte("nonstandard-ok"))
 	}))
 	defer backend.Close()
 
 	host, portStr, _ := net.SplitHostPort(backend.Listener.Addr().String())
 	port := 0
-	fmt.Sscanf(portStr, "%d", &port)
+	_, _ = fmt.Sscanf(portStr, "%d", &port)
 
 	vs, err := vault.NewStore(dir)
 	if err != nil {
@@ -3496,7 +3497,7 @@ default = "allow"
 		t.Fatal(err)
 	}
 	go func() { _ = srv.ListenAndServe() }()
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
@@ -3517,7 +3518,7 @@ default = "allow"
 	if err != nil {
 		t.Fatalf("HTTP request on non-standard port: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	mu.Lock()
 	if receivedAuth != "ns-secret" {
@@ -3561,15 +3562,15 @@ func TestHandleServerFirstDetectionSMTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer smtpLn.Close()
+	defer func() { _ = smtpLn.Close() }()
 
 	go func() {
 		conn, err := smtpLn.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
-		conn.Write([]byte("220 smtp.example.com ESMTP\r\n"))
+		defer func() { _ = conn.Close() }()
+		_, _ = conn.Write([]byte("220 smtp.example.com ESMTP\r\n"))
 		// Read and echo anything (simple relay behavior).
 		buf := make([]byte, 1024)
 		for {
@@ -3577,7 +3578,7 @@ func TestHandleServerFirstDetectionSMTP(t *testing.T) {
 			if err != nil {
 				return
 			}
-			conn.Write(buf[:n])
+			_, _ = conn.Write(buf[:n])
 		}
 	}()
 
@@ -3589,7 +3590,7 @@ func TestHandleServerFirstDetectionSMTP(t *testing.T) {
 
 	// Create a pipe pair as the "agent" connection.
 	agentConn, clientConn := net.Pipe()
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	done := make(chan struct{})
 	go func() {
@@ -3599,7 +3600,7 @@ func TestHandleServerFirstDetectionSMTP(t *testing.T) {
 	}()
 
 	// Read the SMTP banner through the relay.
-	clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	buf := make([]byte, 256)
 	n, err := clientConn.Read(buf)
 	if err != nil {
@@ -3612,7 +3613,7 @@ func TestHandleServerFirstDetectionSMTP(t *testing.T) {
 		t.Errorf("expected SMTP banner prefix, got: %q", got)
 	}
 
-	clientConn.Close()
+	_ = clientConn.Close()
 	<-done
 
 	_ = vs // keep vault reference to avoid unused
@@ -3625,7 +3626,7 @@ func TestHandleServerFirstDetectionFailedDial(t *testing.T) {
 	srv.resolver.Store(nil)
 
 	agentConn, clientConn := net.Pipe()
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	done := make(chan struct{})
 	go func() {
@@ -3648,7 +3649,7 @@ func TestHandleServerFirstDetectionNoData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer silentLn.Close()
+	defer func() { _ = silentLn.Close() }()
 
 	var upstreamConn net.Conn
 	acceptCh := make(chan struct{})
@@ -3673,7 +3674,7 @@ func TestHandleServerFirstDetectionNoData(t *testing.T) {
 	srv.resolver.Store(nil)
 
 	agentConn, clientConn := net.Pipe()
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	done := make(chan struct{})
 	go func() {
@@ -3691,12 +3692,12 @@ func TestHandleServerFirstDetectionNoData(t *testing.T) {
 	// Write some data through the agent side. The relay should eventually
 	// forward it (after the server detection timeout).
 	time.Sleep(600 * time.Millisecond) // wait past serverDetectTimeout (500ms)
-	clientConn.Write([]byte("hello"))
+	_, _ = clientConn.Write([]byte("hello"))
 
 	// Clean up by closing connections.
-	clientConn.Close()
+	_ = clientConn.Close()
 	if upstreamConn != nil {
-		upstreamConn.Close()
+		_ = upstreamConn.Close()
 	}
 
 	select {
@@ -3705,4 +3706,3 @@ func TestHandleServerFirstDetectionNoData(t *testing.T) {
 		t.Fatal("handleServerFirstDetection did not return")
 	}
 }
-

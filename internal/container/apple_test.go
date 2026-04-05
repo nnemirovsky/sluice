@@ -468,7 +468,7 @@ func TestListBadJSON(t *testing.T) {
 	}
 }
 
-func TestExecRunnerIntegration(t *testing.T) {
+func TestExecRunnerIntegration(_ *testing.T) {
 	// Verify ExecRunner satisfies CommandRunner interface.
 	var _ CommandRunner = ExecRunner{}
 }
@@ -566,7 +566,7 @@ func TestAppleManagerReloadSecretsRemoveEmpty(t *testing.T) {
 
 	// Write a file first, then remove via empty value.
 	path := filepath.Join(tmpDir, "OLD_KEY")
-	if err := os.WriteFile(path, []byte("old-value"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("old-value"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -623,11 +623,11 @@ func TestAppleManagerRestartWithEnv(t *testing.T) {
 	mgr, runner, _ := newTestAppleManager(t)
 
 	inspectJSON, _ := json.Marshal([]VMInfo{{
-		Name:  "openclaw",
-		ID:    "abc123",
-		Image: "openclaw/openclaw:latest",
-		State: VMState{Status: "running", Running: true},
-		Env:   []string{"EXISTING=keep", "UPDATE_ME=old"},
+		Name:   "openclaw",
+		ID:     "abc123",
+		Image:  "openclaw/openclaw:latest",
+		State:  VMState{Status: "running", Running: true},
+		Env:    []string{"EXISTING=keep", "UPDATE_ME=old"},
 		Mounts: []VMBind{{Source: "/host/phantoms", Destination: "/phantoms"}},
 	}})
 	runner.onCommand("container inspect", inspectJSON, nil)
@@ -910,7 +910,7 @@ func TestInjectCACertLinuxGuest(t *testing.T) {
 	hostCertDir := t.TempDir()
 	hostCertPath := filepath.Join(hostCertDir, "ca-cert.pem")
 	certContent := "-----BEGIN CERTIFICATE-----\nfake-cert-data\n-----END CERTIFICATE-----\n"
-	if err := os.WriteFile(hostCertPath, []byte(certContent), 0644); err != nil {
+	if err := os.WriteFile(hostCertPath, []byte(certContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -944,7 +944,7 @@ func TestInjectCACertMacOSGuest(t *testing.T) {
 
 	hostCertDir := t.TempDir()
 	hostCertPath := filepath.Join(hostCertDir, "ca-cert.pem")
-	if err := os.WriteFile(hostCertPath, []byte("cert-data"), 0644); err != nil {
+	if err := os.WriteFile(hostCertPath, []byte("cert-data"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -979,7 +979,7 @@ func TestInjectCACertBothTrustCommandsFail(t *testing.T) {
 
 	hostCertDir := t.TempDir()
 	hostCertPath := filepath.Join(hostCertDir, "ca-cert.pem")
-	if err := os.WriteFile(hostCertPath, []byte("cert-data"), 0644); err != nil {
+	if err := os.WriteFile(hostCertPath, []byte("cert-data"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1012,7 +1012,7 @@ func TestInjectCACertWriteError(t *testing.T) {
 
 	hostCertDir := t.TempDir()
 	hostCertPath := filepath.Join(hostCertDir, "ca-cert.pem")
-	if err := os.WriteFile(hostCertPath, []byte("cert-data"), 0644); err != nil {
+	if err := os.WriteFile(hostCertPath, []byte("cert-data"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

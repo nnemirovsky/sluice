@@ -503,7 +503,7 @@ func TestReloadSecretsWritesFiles(t *testing.T) {
 			t.Errorf("stat phantom file %s: %v", name, err)
 			continue
 		}
-		if info.Mode().Perm() != 0600 {
+		if info.Mode().Perm() != 0o600 {
 			t.Errorf("phantom file %s has mode %o, want 0600", name, info.Mode().Perm())
 		}
 	}
@@ -514,7 +514,7 @@ func TestReloadSecretsRemovesFiles(t *testing.T) {
 
 	// Pre-create a file that should be removed.
 	path := filepath.Join(dir, "OLD_TOKEN")
-	if err := os.WriteFile(path, []byte("old-value"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("old-value"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

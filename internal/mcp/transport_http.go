@@ -65,7 +65,7 @@ func (h *HTTPUpstream) Send(req JSONRPCRequest) (*JSONRPCResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("upstream %s: POST %s: %w", h.name, h.url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Store session ID from response.
 	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
@@ -279,7 +279,7 @@ func (h *HTTPUpstream) Stop() error {
 	if err != nil {
 		return fmt.Errorf("upstream %s: DELETE session: %w", h.name, err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusAccepted {
 		return fmt.Errorf("upstream %s: DELETE returned %d", h.name, resp.StatusCode)

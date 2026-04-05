@@ -155,7 +155,7 @@ func TestIsCACertExpiring_FileNotFound(t *testing.T) {
 func TestIsCACertExpiring_InvalidPEM(t *testing.T) {
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "bad.pem")
-	_ = os.WriteFile(certPath, []byte("not a pem file"), 0644)
+	_ = os.WriteFile(certPath, []byte("not a pem file"), 0o644)
 
 	_, err := IsCACertExpiring(certPath, 30*24*time.Hour)
 	if err == nil {
@@ -273,7 +273,7 @@ func writeCertWithExpiry(t *testing.T, path string, notAfter time.Time) {
 		t.Fatal(err)
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-	if err := os.WriteFile(path, certPEM, 0644); err != nil {
+	if err := os.WriteFile(path, certPEM, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -283,7 +283,7 @@ func TestAtomicWriteFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 
-	if err := atomicWriteFile(path, []byte("hello world"), 0600); err != nil {
+	if err := atomicWriteFile(path, []byte("hello world"), 0o600); err != nil {
 		t.Fatalf("atomicWriteFile: %v", err)
 	}
 
@@ -296,7 +296,7 @@ func TestAtomicWriteFile(t *testing.T) {
 	}
 
 	info, _ := os.Stat(path)
-	if info.Mode().Perm() != 0600 {
+	if info.Mode().Perm() != 0o600 {
 		t.Errorf("perms = %o, want 0600", info.Mode().Perm())
 	}
 }
@@ -306,9 +306,9 @@ func TestAtomicWriteFileOverwrite(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 
-	os.WriteFile(path, []byte("old content"), 0644)
+	_ = os.WriteFile(path, []byte("old content"), 0o644)
 
-	if err := atomicWriteFile(path, []byte("new content"), 0600); err != nil {
+	if err := atomicWriteFile(path, []byte("new content"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -320,7 +320,7 @@ func TestAtomicWriteFileOverwrite(t *testing.T) {
 
 // TestAtomicWriteFileInvalidDir verifies error on nonexistent directory.
 func TestAtomicWriteFileInvalidDir(t *testing.T) {
-	err := atomicWriteFile("/nonexistent/dir/file.txt", []byte("data"), 0600)
+	err := atomicWriteFile("/nonexistent/dir/file.txt", []byte("data"), 0o600)
 	if err == nil {
 		t.Fatal("expected error for nonexistent directory")
 	}

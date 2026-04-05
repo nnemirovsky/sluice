@@ -598,12 +598,12 @@ type mockChannel struct {
 func (m *mockChannel) RequestApproval(_ context.Context, _ channel.ApprovalRequest) error {
 	return nil
 }
-func (m *mockChannel) CancelApproval(_ string) error        { return nil }
-func (m *mockChannel) Commands() <-chan channel.Command      { return nil }
+func (m *mockChannel) CancelApproval(_ string) error            { return nil }
+func (m *mockChannel) Commands() <-chan channel.Command         { return nil }
 func (m *mockChannel) Notify(_ context.Context, _ string) error { return nil }
-func (m *mockChannel) Start() error                          { return nil }
-func (m *mockChannel) Stop()                                 {}
-func (m *mockChannel) Type() channel.ChannelType             { return m.chType }
+func (m *mockChannel) Start() error                             { return nil }
+func (m *mockChannel) Stop()                                    {}
+func (m *mockChannel) Type() channel.ChannelType                { return m.chType }
 
 // --- Rule management handler tests ---
 
@@ -892,7 +892,7 @@ destination = "evil.com"
 	if _, err := part.Write([]byte(tomlData)); err != nil {
 		t.Fatalf("write form file: %v", err)
 	}
-	writer.Close()
+	_ = writer.Close()
 
 	req := httptest.NewRequest("POST", "/api/rules/import", &buf)
 	req.Header.Set("Authorization", "Bearer tok")
@@ -924,8 +924,8 @@ func TestPostApiRulesImport_InvalidTOML(t *testing.T) {
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
 	part, _ := writer.CreateFormFile("file", "bad.toml")
-	part.Write([]byte("this is not valid [[[ toml"))
-	writer.Close()
+	_, _ = part.Write([]byte("this is not valid [[[ toml"))
+	_ = writer.Close()
 
 	req := httptest.NewRequest("POST", "/api/rules/import", &buf)
 	req.Header.Set("Authorization", "Bearer tok")
@@ -1015,7 +1015,7 @@ func TestGetApiRulesExport_Roundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new store: %v", err)
 	}
-	defer st2.Close()
+	defer func() { _ = st2.Close() }()
 
 	result, err := st2.ImportTOML(exportedTOML)
 	if err != nil {
@@ -1692,7 +1692,7 @@ func TestGetApiAuditRecent_WithEntries(t *testing.T) {
 			t.Fatalf("log: %v", err)
 		}
 	}
-	logger.Close()
+	_ = logger.Close()
 
 	srv := api.NewServer(st, nil, nil, logPath)
 
@@ -1786,7 +1786,7 @@ func TestGetApiAuditVerify_ValidChain(t *testing.T) {
 			t.Fatalf("log: %v", err)
 		}
 	}
-	logger.Close()
+	_ = logger.Close()
 
 	srv := api.NewServer(st, nil, nil, logPath)
 
@@ -1830,15 +1830,15 @@ func TestGetApiAuditVerify_BrokenChain(t *testing.T) {
 	if err := logger.Log(audit.Event{Destination: "a.com", Verdict: "allow"}); err != nil {
 		t.Fatalf("log: %v", err)
 	}
-	logger.Close()
+	_ = logger.Close()
 
 	// Append a line with a wrong prev_hash.
-	f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND, 0600)
+	f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	f.WriteString(`{"timestamp":"2026-01-01T00:00:00Z","prev_hash":"badhash","destination":"b.com","verdict":"deny"}` + "\n")
-	f.Close()
+	_, _ = f.WriteString(`{"timestamp":"2026-01-01T00:00:00Z","prev_hash":"badhash","destination":"b.com","verdict":"deny"}` + "\n")
+	_ = f.Close()
 
 	srv := api.NewServer(st, nil, nil, logPath)
 

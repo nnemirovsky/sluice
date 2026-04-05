@@ -70,7 +70,7 @@ func createTestKDBXAt(t *testing.T, dbPath, password string, entries map[string]
 	if err != nil {
 		t.Fatalf("create kdbx file: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	enc := gokeepasslib.NewEncoder(f)
 	if err := enc.Encode(db); err != nil {
@@ -454,7 +454,7 @@ func TestKeePassProviderDuplicateTitles(t *testing.T) {
 	if err := gokeepasslib.NewEncoder(f).Encode(db); err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	p, err := NewKeePassProvider(dbPath, "testpass", "")
 	if err != nil {

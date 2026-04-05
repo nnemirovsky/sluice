@@ -14,6 +14,7 @@ type Glob struct {
 	re      *regexp.Regexp
 }
 
+// CompileGlob compiles a glob pattern into a Glob matcher.
 func CompileGlob(pattern string) (*Glob, error) {
 	var re strings.Builder
 	re.WriteString("(?i)^")
@@ -58,6 +59,7 @@ func CompileGlob(pattern string) (*Glob, error) {
 	return &Glob{pattern: pattern, re: compiled}, nil
 }
 
+// Match returns true if s matches the compiled glob pattern.
 func (g *Glob) Match(s string) bool {
 	return g.re.MatchString(s)
 }

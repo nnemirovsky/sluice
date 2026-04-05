@@ -60,7 +60,7 @@ type Config struct {
 }
 
 // HTTPChannel implements channel.Channel for HTTP webhook delivery.
-type HTTPChannel struct {
+type HTTPChannel struct { //nolint:revive // stuttering accepted for clarity
 	webhookURL    string
 	webhookSecret string
 	client        *http.Client
@@ -69,8 +69,8 @@ type HTTPChannel struct {
 	done          chan struct{}
 	stopOnce      sync.Once
 
-	maxRetries    int
-	baseBackoff   time.Duration
+	maxRetries     int
+	baseBackoff    time.Duration
 	requestTimeout time.Duration
 }
 
@@ -112,7 +112,7 @@ func (h *HTTPChannel) SetBroker(b *channel.Broker) {
 // If the webhook responds with 200 and a verdict, the approval is resolved
 // synchronously. If it responds with 202, the approval waits for an async
 // callback via the API's resolve endpoint.
-func (h *HTTPChannel) RequestApproval(ctx context.Context, req channel.ApprovalRequest) error {
+func (h *HTTPChannel) RequestApproval(_ context.Context, req channel.ApprovalRequest) error {
 	h.pending.Store(req.ID, struct{}{})
 	go h.deliverApproval(req)
 	return nil
@@ -148,7 +148,7 @@ func (h *HTTPChannel) deliverApproval(req channel.ApprovalRequest) {
 		h.pending.Delete(req.ID)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -209,7 +209,7 @@ func (h *HTTPChannel) CancelApproval(id string) error {
 			log.Printf("[WARN] http channel: failed to deliver cancel for %s: %v", id, postErr)
 			return
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}()
 	return nil
 }
@@ -237,7 +237,7 @@ func (h *HTTPChannel) Notify(_ context.Context, msg string) error {
 			log.Printf("[WARN] http channel: failed to deliver notification: %v", postErr)
 			return
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}()
 	return nil
 }
@@ -294,7 +294,7 @@ func (h *HTTPChannel) postWithRetry(body []byte) (*http.Response, error) {
 		if err == nil {
 			// Treat 5xx as retriable.
 			if resp.StatusCode >= 500 {
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				lastErr = fmt.Errorf("server error: %d", resp.StatusCode)
 			} else {
 				return resp, nil

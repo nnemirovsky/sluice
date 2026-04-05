@@ -19,9 +19,11 @@ import (
 )
 
 // buildMockUpstreamOnce compiles the mock MCP upstream binary once per test run.
-var buildMockUpstreamOnce sync.Once
-var mockUpstreamBinary string
-var mockUpstreamBuildErr error
+var (
+	buildMockUpstreamOnce sync.Once
+	mockUpstreamBinary    string
+	mockUpstreamBuildErr  error
+)
 
 // buildMockUpstream compiles the mock MCP upstream binary and returns its path.
 func buildMockUpstream(t *testing.T) string {
@@ -51,9 +53,9 @@ type mcpRequest struct {
 
 // mcpResponse is a JSON-RPC 2.0 response from MCP.
 type mcpResponse struct {
-	JSONRPC string           `json:"jsonrpc"`
-	ID      json.RawMessage  `json:"id,omitempty"`
-	Result  json.RawMessage  `json:"result,omitempty"`
+	JSONRPC string            `json:"jsonrpc"`
+	ID      json.RawMessage   `json:"id,omitempty"`
+	Result  json.RawMessage   `json:"result,omitempty"`
 	Error   *mcpResponseError `json:"error,omitempty"`
 }
 

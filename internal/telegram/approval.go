@@ -15,7 +15,6 @@ import (
 	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/container"
 	"github.com/nemirovsky/sluice/internal/policy"
@@ -42,7 +41,7 @@ type ChannelConfig struct {
 // TelegramChannel implements channel.Channel for Telegram bot interaction.
 // It sends approval requests as inline keyboard messages, processes callback
 // responses, and handles admin commands.
-type TelegramChannel struct {
+type TelegramChannel struct { //nolint:revive // stuttering accepted for clarity
 	api      *tgbotapi.BotAPI
 	chatID   int64
 	broker   *channel.Broker
@@ -332,7 +331,7 @@ func (tc *TelegramChannel) handleMessage(msg *tgbotapi.Message) {
 			Name:        cmd.Name,
 			Args:        strings.Join(cmd.Args, " "),
 			ChannelType: channel.ChannelTelegram,
-			Reply: func(ctx context.Context, text string) error {
+			Reply: func(_ context.Context, text string) error {
 				reply := tgbotapi.NewMessage(tc.chatID, text)
 				_, sendErr := tc.api.Send(reply)
 				return sendErr
