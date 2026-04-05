@@ -160,7 +160,11 @@ default = "deny"
 # Network rules
 [[allow]]
 destination = "api.anthropic.com"
-ports = [443]
+protocols = ["https"]
+
+[[allow]]
+destination = "dns.google"
+protocols = ["dns"]
 
 [[ask]]
 destination = "*.openai.com"
@@ -168,6 +172,11 @@ ports = [443]
 
 [[deny]]
 destination = "169.254.169.254"   # block cloud metadata
+
+[[deny]]
+destination = "*"
+protocols = ["udp"]
+name = "block all UDP by default"
 
 # MCP tool rules
 [[allow]]
