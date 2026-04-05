@@ -192,21 +192,31 @@ func (r *NetworkRouter) removeAnchorRef() error {
 }
 
 // DefaultBridgeInterface returns the default bridge interface name and the
-// VM's IP address. Apple Container VMs typically use bridge100, so this is
-// used as a default. The actual bridge detection is done by the setup script
-// (scripts/apple-container-setup.sh) which iterates host interfaces.
-func DefaultBridgeInterface(ctx context.Context, cli *AppleCLI, vmName string) (string, string, error) {
-	info, err := cli.Inspect(ctx, vmName)
+// VM's IP address. It accepts a generic IP getter function so that both
+// AppleManager (via container inspect) and TartManager (via tart ip) can
+// use the same routing code. Apple Container and tart VMs typically use
+// bridge100, so this is used as a default. The actual bridge detection is
+// done by the setup scripts which iterate host interfaces.
+func DefaultBridgeInterface(getIP func() (string, error)) (string, string, error) {
+	ip, err := getIP()
 	if err != nil {
-		return "", "", fmt.Errorf("inspect VM %q: %w", vmName, err)
+		return "", "", fmt.Errorf("get VM IP: %w", err)
 	}
-	ip := info.Network.IPAddress
 	if ip == "" {
-		return "", "", fmt.Errorf("VM %q has no IP address", vmName)
+		return "", "", fmt.Errorf("VM has no IP address")
 	}
 	// Default to bridge100. For accurate detection, use the setup script
 	// which correlates VM IP with host interface subnets.
 	return "bridge100", ip, nil
+}
+
+// IsTUN2ProxyRunning checks whether tun2proxy is likely running by looking for
+// the specified TUN interface. Returns true if the interface exists (which
+// suggests tun2proxy created it).
+func IsTUN2ProxyRunning(ctx context.Context, runner CommandRunner, tunIface string) bool {
+	// On macOS, ifconfig <iface> returns 0 if the interface exists.
+	_, err := runner.Run(ctx, "ifconfig", tunIface)
+	return err == nil
 }
 
 // subnetFromIP derives a /24 CIDR subnet from an IP address.

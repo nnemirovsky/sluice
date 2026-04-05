@@ -1006,3 +1006,177 @@ func TestTartManagerInjectCACertEnvVarNames(t *testing.T) {
 		}
 	}
 }
+
+func TestTartManagerVMIP(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+	runner.onCommand("tart ip", []byte("192.168.64.5\n"), nil)
+
+	ip, err := mgr.VMIP(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ip != "192.168.64.5" {
+		t.Errorf("IP = %q, want 192.168.64.5", ip)
+	}
+}
+
+func TestTartManagerVMIPError(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+	runner.onCommand("tart ip", nil, errors.New("VM not running"))
+
+	_, err := mgr.VMIP(context.Background())
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "VM not running") {
+		t.Errorf("error should mention VM not running: %v", err)
+	}
+}
+
+func TestTartManagerSetupNetworkRouting(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+
+	// Mock tart ip response.
+	runner.onCommand("tart ip", []byte("192.168.64.5\n"), nil)
+	// Mock ifconfig to detect TUN interface (tun2proxy running).
+	runner.onCommand("ifconfig utun3", []byte("utun3: flags=...\n"), nil)
+	// Mock pfctl calls.
+	pfConf := writeTempPFConf(t, "# default pf rules\n")
+	runner.onCommand("pfctl -f", nil, nil)
+	runner.onCommand("pfctl -a sluice -f", nil, nil)
+
+	router := NewNetworkRouter(NetworkRouterConfig{
+		Runner:     runner,
+		AnchorName: "sluice",
+		TUNIface:   "utun3",
+		PFConfPath: pfConf,
+	})
+
+	err := mgr.SetupNetworkRouting(context.Background(), router, "192.168.64.1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify tart ip was called to get VM IP.
+	if !runner.called("tart ip openclaw") {
+		t.Error("expected tart ip call")
+	}
+
+	// Verify ifconfig was called to check TUN interface.
+	if !runner.called("ifconfig utun3") {
+		t.Error("expected ifconfig call to check TUN interface")
+	}
+
+	// Verify pfctl was called to load anchor rules.
+	if !runner.called("pfctl -a sluice -f") {
+		t.Error("expected pfctl call to load anchor rules")
+	}
+
+	// Verify anchor reference was added to pf.conf.
+	data, _ := os.ReadFile(pfConf)
+	if !strings.Contains(string(data), `anchor "sluice"`) {
+		t.Error("pf.conf should contain anchor reference after setup")
+	}
+}
+
+func TestTartManagerSetupNetworkRoutingIPError(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+
+	// tart ip fails.
+	runner.onCommand("tart ip", nil, errors.New("VM not running"))
+	// ifconfig check for TUN.
+	runner.onCommand("ifconfig utun3", []byte("utun3: flags=...\n"), nil)
+
+	router := NewNetworkRouter(NetworkRouterConfig{
+		Runner:     runner,
+		AnchorName: "sluice",
+		TUNIface:   "utun3",
+		PFConfPath: writeTempPFConf(t, ""),
+	})
+
+	err := mgr.SetupNetworkRouting(context.Background(), router, "192.168.64.1")
+	if err == nil {
+		t.Fatal("expected error when tart ip fails")
+	}
+	if !strings.Contains(err.Error(), "detect bridge interface") {
+		t.Errorf("error should mention bridge detection: %v", err)
+	}
+}
+
+func TestTartManagerSetupNetworkRoutingTun2proxyNotRunning(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+
+	// tart ip succeeds.
+	runner.onCommand("tart ip", []byte("192.168.64.5\n"), nil)
+	// ifconfig fails (TUN interface does not exist).
+	runner.onCommand("ifconfig utun3", nil, errors.New("interface does not exist"))
+	// pfctl calls succeed.
+	pfConf := writeTempPFConf(t, "# default pf rules\n")
+	runner.onCommand("pfctl -f", nil, nil)
+	runner.onCommand("pfctl -a sluice -f", nil, nil)
+
+	router := NewNetworkRouter(NetworkRouterConfig{
+		Runner:     runner,
+		AnchorName: "sluice",
+		TUNIface:   "utun3",
+		PFConfPath: pfConf,
+	})
+
+	// Should succeed even if tun2proxy is not running (just logs a warning).
+	err := mgr.SetupNetworkRouting(context.Background(), router, "192.168.64.1")
+	if err != nil {
+		t.Fatalf("should succeed even without tun2proxy: %v", err)
+	}
+
+	// pf rules should still be applied.
+	if !runner.called("pfctl -a sluice -f") {
+		t.Error("expected pfctl call even when tun2proxy is not running")
+	}
+}
+
+func TestTartManagerTeardownNetworkRouting(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+
+	runner.onCommand("pfctl -a sluice -F all", nil, nil)
+
+	pfConf := writeTempPFConf(t, "# defaults\nanchor \"sluice\"\n")
+	router := NewNetworkRouter(NetworkRouterConfig{
+		Runner:     runner,
+		AnchorName: "sluice",
+		PFConfPath: pfConf,
+	})
+
+	err := mgr.TeardownNetworkRouting(context.Background(), router)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !runner.called("pfctl -a sluice -F all") {
+		t.Error("expected pfctl flush call")
+	}
+
+	// Verify anchor reference was removed from pf.conf.
+	data, _ := os.ReadFile(pfConf)
+	if strings.Contains(string(data), `anchor "sluice"`) {
+		t.Error("pf.conf should not contain anchor reference after teardown")
+	}
+}
+
+func TestTartManagerTeardownNetworkRoutingError(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+
+	runner.onCommand("pfctl", nil, errors.New("permission denied"))
+
+	router := NewNetworkRouter(NetworkRouterConfig{
+		Runner:     runner,
+		AnchorName: "sluice",
+	})
+
+	err := mgr.TeardownNetworkRouting(context.Background(), router)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "flush pf anchor") {
+		t.Errorf("error should mention flush: %v", err)
+	}
+}

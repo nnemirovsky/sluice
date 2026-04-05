@@ -341,6 +341,51 @@ func TestSubnetFromIP(t *testing.T) {
 }
 
 func TestDefaultBridgeInterface(t *testing.T) {
+	getIP := func() (string, error) {
+		return "192.168.64.2", nil
+	}
+
+	bridge, ip, err := DefaultBridgeInterface(getIP)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if bridge != "bridge100" {
+		t.Errorf("bridge = %q, want bridge100", bridge)
+	}
+	if ip != "192.168.64.2" {
+		t.Errorf("ip = %q, want 192.168.64.2", ip)
+	}
+}
+
+func TestDefaultBridgeInterfaceNoIP(t *testing.T) {
+	getIP := func() (string, error) {
+		return "", nil
+	}
+
+	_, _, err := DefaultBridgeInterface(getIP)
+	if err == nil {
+		t.Fatal("expected error when VM has no IP")
+	}
+	if !strings.Contains(err.Error(), "no IP address") {
+		t.Errorf("error should mention no IP: %v", err)
+	}
+}
+
+func TestDefaultBridgeInterfaceGetIPError(t *testing.T) {
+	getIP := func() (string, error) {
+		return "", errors.New("VM not found")
+	}
+
+	_, _, err := DefaultBridgeInterface(getIP)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "get VM IP") {
+		t.Errorf("error should mention get VM IP: %v", err)
+	}
+}
+
+func TestDefaultBridgeInterfaceWithAppleCLI(t *testing.T) {
 	runner := newMockRunner()
 	runner.onCommand("container --version", []byte("v1.0\n"), nil)
 
@@ -355,7 +400,16 @@ func TestDefaultBridgeInterface(t *testing.T) {
 
 	cli, _ := NewAppleCLIWithBin("container", runner)
 
-	bridge, ip, err := DefaultBridgeInterface(context.Background(), cli, "openclaw")
+	// Wrap AppleCLI.Inspect as a generic IP getter.
+	getIP := func() (string, error) {
+		info, err := cli.Inspect(context.Background(), "openclaw")
+		if err != nil {
+			return "", err
+		}
+		return info.Network.IPAddress, nil
+	}
+
+	bridge, ip, err := DefaultBridgeInterface(getIP)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -367,41 +421,45 @@ func TestDefaultBridgeInterface(t *testing.T) {
 	}
 }
 
-func TestDefaultBridgeInterfaceNoIP(t *testing.T) {
+func TestDefaultBridgeInterfaceWithTartCLI(t *testing.T) {
 	runner := newMockRunner()
-	runner.onCommand("container --version", []byte("v1.0\n"), nil)
+	runner.onCommand("tart --version", []byte("tart 2.15.0\n"), nil)
+	runner.onCommand("tart ip", []byte("192.168.64.5\n"), nil)
 
-	inspectJSON, _ := json.Marshal([]VMInfo{{
-		Name:    "openclaw",
-		State:   VMState{Running: true},
-		Network: VMNet{IPAddress: ""},
-	}})
-	runner.onCommand("container inspect", inspectJSON, nil)
+	cli, _ := NewTartCLIWithBin("tart", runner)
 
-	cli, _ := NewAppleCLIWithBin("container", runner)
-
-	_, _, err := DefaultBridgeInterface(context.Background(), cli, "openclaw")
-	if err == nil {
-		t.Fatal("expected error when VM has no IP")
+	// Wrap TartCLI.IP as a generic IP getter.
+	getIP := func() (string, error) {
+		return cli.IP(context.Background(), "openclaw")
 	}
-	if !strings.Contains(err.Error(), "no IP address") {
-		t.Errorf("error should mention no IP: %v", err)
+
+	bridge, ip, err := DefaultBridgeInterface(getIP)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if bridge != "bridge100" {
+		t.Errorf("bridge = %q, want bridge100", bridge)
+	}
+	if ip != "192.168.64.5" {
+		t.Errorf("ip = %q, want 192.168.64.5", ip)
 	}
 }
 
-func TestDefaultBridgeInterfaceInspectError(t *testing.T) {
+func TestIsTUN2ProxyRunning(t *testing.T) {
 	runner := newMockRunner()
-	runner.onCommand("container --version", []byte("v1.0\n"), nil)
-	runner.onCommand("container inspect", nil, errors.New("VM not found"))
+	runner.onCommand("ifconfig utun3", []byte("utun3: flags=...\n"), nil)
 
-	cli, _ := NewAppleCLIWithBin("container", runner)
-
-	_, _, err := DefaultBridgeInterface(context.Background(), cli, "nonexistent")
-	if err == nil {
-		t.Fatal("expected error")
+	if !IsTUN2ProxyRunning(context.Background(), runner, "utun3") {
+		t.Error("expected tun2proxy to be detected as running")
 	}
-	if !strings.Contains(err.Error(), "inspect VM") {
-		t.Errorf("error should mention inspect: %v", err)
+}
+
+func TestIsTUN2ProxyNotRunning(t *testing.T) {
+	runner := newMockRunner()
+	runner.onCommand("ifconfig utun3", nil, errors.New("interface does not exist"))
+
+	if IsTUN2ProxyRunning(context.Background(), runner, "utun3") {
+		t.Error("expected tun2proxy to be detected as not running")
 	}
 }
 

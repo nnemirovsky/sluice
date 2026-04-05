@@ -180,14 +180,14 @@ tart exec openclaw -- security add-trusted-cert \
 - Modify: `internal/container/network.go` (refactor DefaultBridgeInterface to accept generic IP getter)
 - Create: `scripts/macos-vm-setup.sh`
 
-- [ ] After VM starts, get its IP via `tart ip <name>`
-- [ ] Refactor `DefaultBridgeInterface` to accept a function `func() (string, error)` for getting VM IP instead of requiring `*AppleCLI`. This allows both AppleManager and TartManager to use the same routing code.
-- [ ] Call `NetworkRouter.SetupNetworkRouting(ctx, vmIP, bridgeIface, tunGateway)` with correct signature (4 params, not 2)
-- [ ] On shutdown, call `TeardownNetworkRouting()` to clean up pf rules
-- [ ] Create `scripts/macos-vm-setup.sh` that starts tun2proxy on the host, enables IP forwarding, and documents the required setup
-- [ ] Log warning if tun2proxy is not running on host (check if TUN device exists)
-- [ ] Write tests for routing setup with mock VM IP
-- [ ] Run tests: `go test ./internal/container/ -v -timeout 30s`
+- [x] After VM starts, get its IP via `tart ip <name>`
+- [x] Refactor `DefaultBridgeInterface` to accept a function `func() (string, error)` for getting VM IP instead of requiring `*AppleCLI`. This allows both AppleManager and TartManager to use the same routing code.
+- [x] Call `NetworkRouter.SetupNetworkRouting(ctx, vmIP, bridgeIface, tunGateway)` with correct signature (4 params, not 2)
+- [x] On shutdown, call `TeardownNetworkRouting()` to clean up pf rules
+- [x] Create `scripts/macos-vm-setup.sh` that starts tun2proxy on the host, enables IP forwarding, and documents the required setup
+- [x] Log warning if tun2proxy is not running on host (check if TUN device exists)
+- [x] Write tests for routing setup with mock VM IP
+- [x] Run tests: `go test ./internal/container/ -v -timeout 30s`
 
 ### Task 6: Wire TartManager into main.go startup
 

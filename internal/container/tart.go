@@ -355,3 +355,39 @@ func (m *TartManager) InjectCACert(ctx context.Context, hostCertPath, certDir st
 func (m *TartManager) Runtime() Runtime {
 	return RuntimeMacOS
 }
+
+// VMIP returns the IP address of the managed VM via `tart ip`. This method
+// can be used as the IP getter function for DefaultBridgeInterface.
+func (m *TartManager) VMIP(ctx context.Context) (string, error) {
+	return m.cli.IP(ctx, m.vmName)
+}
+
+// SetupNetworkRouting gets the VM's IP address and sets up pf rules to route
+// VM traffic through tun2proxy to sluice's SOCKS5 proxy. The router and
+// tunGateway are provided by the caller (typically the main startup code).
+// Logs a warning if tun2proxy does not appear to be running.
+func (m *TartManager) SetupNetworkRouting(ctx context.Context, router *NetworkRouter, tunGateway string) error {
+	// Check if tun2proxy is running by looking for the TUN interface.
+	if !IsTUN2ProxyRunning(ctx, m.cli.runner, router.tunIface) {
+		log.Printf("WARNING: TUN interface %q not found. tun2proxy may not be running. "+
+			"Network routing will be configured but traffic will not flow until tun2proxy starts. "+
+			"Run: sudo tun2proxy --proxy socks5://127.0.0.1:1080 --tun %s", router.tunIface, router.tunIface)
+	}
+
+	getIP := func() (string, error) {
+		return m.VMIP(ctx)
+	}
+
+	bridgeIface, vmIP, err := DefaultBridgeInterface(getIP)
+	if err != nil {
+		return fmt.Errorf("detect bridge interface: %w", err)
+	}
+
+	return router.SetupNetworkRouting(ctx, vmIP, bridgeIface, tunGateway)
+}
+
+// TeardownNetworkRouting removes the pf anchor rules set up by
+// SetupNetworkRouting. Should be called on shutdown.
+func (m *TartManager) TeardownNetworkRouting(ctx context.Context, router *NetworkRouter) error {
+	return router.TeardownNetworkRouting(ctx)
+}
