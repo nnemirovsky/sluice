@@ -15,25 +15,30 @@ OpenClaw gets phantom tokens (random strings that look like real API keys). Slui
 
 ## How It Works
 
-```
-+-----------+     +------------+     +---------+     +----------+
-|           | MCP |   Sluice   | TCP |         |     |          |
-|  OpenClaw +---->+ MCP Gateway+---->+ Upstream |     | Telegram |
-|           |     |            |     | Servers  |     |   Bot    |
-|  (phantom |     +-----+------+     +---------+     +----+-----+
-|   tokens) |           |                                  |
-|           |     +-----v------+                    approve / deny
-|           | ALL |   Sluice   |     +---------+           |
-|           +---->+ SOCKS5     +---->+         |     +-----v-----+
-|           |     |   Proxy    |     |Internet |     |   Human   |
-+-----------+     +-----+------+     +---------+     +-----------+
-      ^                 |
-      |           +-----v------+
-  phantom         |    MITM    |
-  tokens          | credential |
-                  |  injection |
-                  +------------+
-                  phantom -> real
+```mermaid
+flowchart LR
+    subgraph Isolated["OpenClaw (isolated)"]
+        OC[OpenClaw<br/>phantom tokens]
+    end
+
+    subgraph Sluice
+        GW[MCP Gateway<br/>tool policy + inspection]
+        PX[SOCKS5 Proxy<br/>network policy + MITM]
+    end
+
+    TG[Telegram Bot<br/>approve / deny]
+    HM[Human]
+    UP[Upstream<br/>MCP Servers]
+    IN[Internet]
+
+    OC -- "MCP tool calls" --> GW
+    OC -- "all TCP/UDP<br/>(via tun2proxy)" --> PX
+    GW --> UP
+    PX -- "phantom -> real<br/>credential swap" --> IN
+    PX -. "ask verdict" .-> TG
+    TG -. "allow / deny" .-> HM
+    HM -. "respond" .-> TG
+    TG -. "resolve" .-> PX
 ```
 
 **OpenClaw** uses phantom tokens for all API calls. **tun2proxy** routes all traffic to sluice's SOCKS5 proxy (runs as a container in Docker, on the host for Apple Container/macOS VM). **Sluice** evaluates every connection against policy rules (allow / deny / ask). "Ask" verdicts send a Telegram notification with inline buttons. The MITM proxy swaps phantom tokens for real credentials in-flight. Credentials are managed via Telegram or CLI, stored encrypted with age, and hot-reloaded into OpenClaw without restarts.
