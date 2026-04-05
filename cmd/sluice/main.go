@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -79,6 +80,7 @@ func main() {
 	dockerSocket := flag.String("docker-socket", "", "Docker socket path (auto-detects from DOCKER_HOST or /var/run/docker.sock)")
 	containerName := flag.String("container-name", envDefault("SLUICE_AGENT_CONTAINER", "openclaw"), "agent container/VM name")
 	phantomDir := flag.String("phantom-dir", "", "shared volume path for phantom token files (enables hot-reload)")
+	certDir := flag.String("cert-dir", "", "shared volume path for CA certificate (enables MITM trust injection into guest)")
 	dnsResolver := flag.String("dns-resolver", "", "upstream DNS resolver address for DNS interception (default: 8.8.8.8:53)")
 	autoInjectMCP := flag.Bool("auto-inject-mcp", false, "auto-inject MCP config into agent container (default true for docker/apple runtimes)")
 	mcpBaseURL := flag.String("mcp-base-url", "", "base URL for auto-injected MCP config (e.g. http://sluice:3000); derived from --health-addr when empty")
@@ -315,6 +317,24 @@ func main() {
 	})
 	if err != nil {
 		log.Fatalf("start proxy: %v", err)
+	}
+
+	// Inject the MITM CA certificate into the agent container/VM so TLS
+	// interception is trusted. The CA cert is created by proxy.New above.
+	// Docker handles this via compose volumes so InjectCACert is a no-op.
+	// Apple Container and macOS VM update the guest trust store.
+	if containerMgr != nil && *certDir != "" {
+		hostCertPath := filepath.Join(vaultCfg.Dir, "ca-cert.pem")
+		if _, statErr := os.Stat(hostCertPath); statErr == nil {
+			ctx := context.Background()
+			if injectErr := containerMgr.InjectCACert(ctx, hostCertPath, *certDir); injectErr != nil {
+				log.Printf("WARNING: CA cert injection failed: %v", injectErr)
+			} else {
+				log.Printf("CA cert injected into agent via %s", containerMgr.Runtime())
+			}
+		} else {
+			log.Printf("WARNING: CA cert not found at %s, skipping injection", hostCertPath)
+		}
 	}
 
 	// Instantiate all enabled channels (Telegram and/or HTTP).

@@ -304,6 +304,53 @@ func (m *TartManager) Stop(ctx context.Context) error {
 	return m.cli.Stop(ctx, m.vmName)
 }
 
+// InjectCACert copies the CA certificate from hostCertPath into the shared
+// VirtioFS volume at certDir, then runs security add-trusted-cert inside the
+// macOS VM to add the cert to the System Keychain. This allows macOS-native
+// tools (e.g. URLSession, curl) to trust sluice's MITM CA. If the security
+// command fails, the cert is still available via env vars (SSL_CERT_FILE,
+// REQUESTS_CA_BUNDLE, NODE_EXTRA_CA_CERTS) set at VM startup.
+func (m *TartManager) InjectCACert(ctx context.Context, hostCertPath, certDir string) error {
+	// Read the CA cert from the host.
+	certData, err := os.ReadFile(hostCertPath)
+	if err != nil {
+		return fmt.Errorf("read CA cert %q: %w", hostCertPath, err)
+	}
+
+	// Write the cert to the shared volume so the guest can access it via VirtioFS.
+	destPath := filepath.Join(certDir, "sluice-ca.crt")
+	if err := os.MkdirAll(certDir, 0755); err != nil {
+		return fmt.Errorf("create cert dir %q: %w", certDir, err)
+	}
+	if err := os.WriteFile(destPath, certData, 0644); err != nil {
+		return fmt.Errorf("write CA cert to shared volume: %w", err)
+	}
+
+	// macOS guest: add cert to System Keychain via security add-trusted-cert.
+	_, macErr := m.cli.Exec(ctx, m.vmName, []string{
+		"security", "add-trusted-cert", "-d", "-r", "trustRoot",
+		"-k", "/Library/Keychains/System.keychain",
+		CACertGuestPath,
+	})
+	if macErr != nil {
+		// Best-effort. The cert is still usable via env vars set below.
+		log.Printf("security add-trusted-cert failed in macOS VM %q (will set env vars as fallback): %v", m.vmName, macErr)
+	}
+
+	// Write a launchd environment plist so SSL_CERT_FILE, REQUESTS_CA_BUNDLE,
+	// and NODE_EXTRA_CA_CERTS are set for all GUI and agent processes. This
+	// covers tools that do not use the macOS Keychain for TLS trust (e.g.
+	// Python requests, Node.js, OpenSSL-based tools).
+	envVars := CACertEnvVars(CACertGuestPath)
+	for k, v := range envVars {
+		_, _ = m.cli.Exec(ctx, m.vmName, []string{
+			"launchctl", "setenv", k, v,
+		})
+	}
+
+	return nil
+}
+
 // Runtime returns RuntimeMacOS.
 func (m *TartManager) Runtime() Runtime {
 	return RuntimeMacOS

@@ -606,3 +606,17 @@ func TestReloadSecretsFallbackRestartFails(t *testing.T) {
 		t.Errorf("error should propagate restart failure: %v", err)
 	}
 }
+
+func TestDockerManagerInjectCACertNoop(t *testing.T) {
+	mc := &mockClient{}
+	mgr := NewDockerManager(mc, "openclaw")
+
+	// InjectCACert should be a no-op for Docker (returns nil, no exec calls).
+	err := mgr.InjectCACert(context.Background(), "/some/cert.pem", "/some/dir")
+	if err != nil {
+		t.Fatalf("expected nil error for Docker no-op, got: %v", err)
+	}
+	if mc.execCalled {
+		t.Error("Docker InjectCACert should not exec anything")
+	}
+}

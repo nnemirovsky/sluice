@@ -863,3 +863,146 @@ func TestTartManagerRuntime(t *testing.T) {
 		t.Errorf("Runtime() = %v, want RuntimeMacOS", mgr.Runtime())
 	}
 }
+
+func TestTartManagerInjectCACert(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+
+	// security add-trusted-cert succeeds.
+	runner.onCommand("tart exec openclaw -- security", []byte("ok\n"), nil)
+	// launchctl setenv calls succeed.
+	runner.onCommand("tart exec openclaw -- launchctl", nil, nil)
+
+	// Create a fake CA cert file.
+	hostCertDir := t.TempDir()
+	hostCertPath := filepath.Join(hostCertDir, "ca-cert.pem")
+	certContent := "-----BEGIN CERTIFICATE-----\nfake-cert-data\n-----END CERTIFICATE-----\n"
+	if err := os.WriteFile(hostCertPath, []byte(certContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	destDir := t.TempDir()
+	err := mgr.InjectCACert(context.Background(), hostCertPath, destDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify cert was copied to shared volume.
+	data, err := os.ReadFile(filepath.Join(destDir, "sluice-ca.crt"))
+	if err != nil {
+		t.Fatalf("cert file not found in shared volume: %v", err)
+	}
+	if string(data) != certContent {
+		t.Errorf("cert content = %q, want %q", string(data), certContent)
+	}
+
+	// Verify security add-trusted-cert was called with correct arguments.
+	cmd := runner.callWith("tart exec openclaw -- security")
+	if cmd == "" {
+		t.Fatal("expected security exec call")
+	}
+	if !strings.Contains(cmd, "add-trusted-cert") {
+		t.Errorf("security command should include add-trusted-cert: %s", cmd)
+	}
+	if !strings.Contains(cmd, "trustRoot") {
+		t.Errorf("security command should include trustRoot: %s", cmd)
+	}
+	if !strings.Contains(cmd, "/Library/Keychains/System.keychain") {
+		t.Errorf("security command should include System.keychain: %s", cmd)
+	}
+	if !strings.Contains(cmd, CACertGuestPath) {
+		t.Errorf("security command should include guest cert path %q: %s", CACertGuestPath, cmd)
+	}
+
+	// Verify launchctl setenv was called for env var fallback.
+	if !runner.called("tart exec openclaw -- launchctl setenv") {
+		t.Error("expected launchctl setenv exec call for env var fallback")
+	}
+}
+
+func TestTartManagerInjectCACertSecurityFails(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+
+	// security add-trusted-cert fails (non-admin, guest not ready, etc.).
+	runner.onCommand("tart exec openclaw -- security", nil, errors.New("errSecAuthFailed"))
+	// launchctl setenv calls succeed (best-effort).
+	runner.onCommand("tart exec openclaw -- launchctl", nil, nil)
+
+	hostCertDir := t.TempDir()
+	hostCertPath := filepath.Join(hostCertDir, "ca-cert.pem")
+	if err := os.WriteFile(hostCertPath, []byte("cert-data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	destDir := t.TempDir()
+	err := mgr.InjectCACert(context.Background(), hostCertPath, destDir)
+	if err != nil {
+		t.Fatalf("should not error when security command fails (env vars cover it): %v", err)
+	}
+
+	// Cert should still be written to shared volume.
+	if _, err := os.Stat(filepath.Join(destDir, "sluice-ca.crt")); err != nil {
+		t.Errorf("cert file should exist in shared volume: %v", err)
+	}
+}
+
+func TestTartManagerInjectCACertMissingHostCert(t *testing.T) {
+	mgr, _, _ := newTestTartManager(t)
+
+	err := mgr.InjectCACert(context.Background(), "/nonexistent/ca-cert.pem", t.TempDir())
+	if err == nil {
+		t.Fatal("expected error for missing host cert")
+	}
+	if !strings.Contains(err.Error(), "read CA cert") {
+		t.Errorf("error should mention read CA cert: %v", err)
+	}
+}
+
+func TestTartManagerInjectCACertWriteError(t *testing.T) {
+	mgr, _, _ := newTestTartManager(t)
+
+	hostCertDir := t.TempDir()
+	hostCertPath := filepath.Join(hostCertDir, "ca-cert.pem")
+	if err := os.WriteFile(hostCertPath, []byte("cert-data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Use a non-writable path as the dest dir.
+	err := mgr.InjectCACert(context.Background(), hostCertPath, "/dev/null/impossible")
+	if err == nil {
+		t.Fatal("expected error for unwritable dest dir")
+	}
+}
+
+func TestTartManagerInjectCACertEnvVarNames(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+
+	// Both commands succeed.
+	runner.onCommand("tart exec openclaw -- security", []byte("ok\n"), nil)
+	runner.onCommand("tart exec openclaw -- launchctl", nil, nil)
+
+	hostCertDir := t.TempDir()
+	hostCertPath := filepath.Join(hostCertDir, "ca-cert.pem")
+	if err := os.WriteFile(hostCertPath, []byte("cert-data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	destDir := t.TempDir()
+	if err := mgr.InjectCACert(context.Background(), hostCertPath, destDir); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify that launchctl setenv was called for each expected env var.
+	expectedVars := []string{"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"}
+	for _, envVar := range expectedVars {
+		found := false
+		for _, call := range runner.calls {
+			if strings.Contains(call, "launchctl setenv "+envVar) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected launchctl setenv %s call", envVar)
+		}
+	}
+}

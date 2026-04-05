@@ -33,7 +33,7 @@ func (r Runtime) String() string {
 }
 
 // ContainerManager abstracts container lifecycle and credential management
-// across different container runtimes (Docker, Apple Container).
+// across different container runtimes (Docker, Apple Container, macOS VM).
 type ContainerManager interface {
 	// ReloadSecrets writes phantom token files to a shared volume and signals
 	// the agent container to reload them. Falls back to RestartWithEnv if the
@@ -46,6 +46,14 @@ type ContainerManager interface {
 	// InjectMCPConfig writes mcp-servers.json to the shared volume and signals
 	// the agent to reload MCP configuration.
 	InjectMCPConfig(phantomDir, sluiceURL string) error
+
+	// InjectCACert copies the sluice MITM CA certificate into the guest and
+	// updates the system trust store so TLS interception works. hostCertPath
+	// is the path to the CA cert on the host. certDir is the shared volume
+	// directory where the cert is written for the guest to access.
+	// Implementations should be best-effort: if trust store commands fail
+	// the cert is still available via env vars (SSL_CERT_FILE, etc.).
+	InjectCACert(ctx context.Context, hostCertPath, certDir string) error
 
 	// Status returns container health information.
 	Status(ctx context.Context) (ContainerStatus, error)

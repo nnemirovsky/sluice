@@ -188,6 +188,12 @@ func (m *DockerManager) InjectMCPConfig(phantomDir, sluiceURL string) error {
 	return nil
 }
 
+// InjectCACert is a no-op for Docker. Docker handles CA trust via compose
+// volumes and SSL_CERT_FILE env vars set at container creation time.
+func (m *DockerManager) InjectCACert(_ context.Context, _, _ string) error {
+	return nil
+}
+
 // Runtime returns RuntimeDocker.
 func (m *DockerManager) Runtime() Runtime {
 	return RuntimeDocker

@@ -166,12 +166,12 @@ tart exec openclaw -- security add-trusted-cert \
 - Modify: `internal/container/tart.go`
 - Modify: `internal/container/tart_test.go`
 
-- [ ] Add `InjectCACert(ctx context.Context, hostCertPath, guestCertDir string) error` to the `ContainerManager` interface. Implement no-op on `DockerManager` (Docker handles CA via compose volumes). Implement on `AppleManager` using `update-ca-certificates`. Implement on `TartManager` using `security add-trusted-cert`.
-- [ ] TartManager.InjectCACert: copy CA cert to VirtioFS shared volume, run `tart exec <name> -- security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain /Volumes/ca/sluice-ca.crt`
-- [ ] Set `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` env vars as fallback for tools that don't use Keychain
-- [ ] Call `containerMgr.InjectCACert()` after VM/container startup in main.go (works for all backends via interface)
-- [ ] Write tests for cert injection command generation
-- [ ] Run tests: `go test ./internal/container/ -v -timeout 30s`
+- [x] Add `InjectCACert(ctx context.Context, hostCertPath, guestCertDir string) error` to the `ContainerManager` interface. Implement no-op on `DockerManager` (Docker handles CA via compose volumes). Implement on `AppleManager` using `update-ca-certificates`. Implement on `TartManager` using `security add-trusted-cert`.
+- [x] TartManager.InjectCACert: copy CA cert to VirtioFS shared volume, run `tart exec <name> -- security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain /Volumes/ca/sluice-ca.crt`
+- [x] Set `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` env vars as fallback for tools that don't use Keychain
+- [x] Call `containerMgr.InjectCACert()` after VM/container startup in main.go (works for all backends via interface)
+- [x] Write tests for cert injection command generation
+- [x] Run tests: `go test ./internal/container/ -v -timeout 30s`
 
 ### Task 5: Network routing for macOS VM
 
