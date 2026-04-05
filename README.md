@@ -22,8 +22,8 @@ Container (Docker / Apple Container / macOS VM):
 
 Host:
   Sluice SOCKS5 Proxy       -- policy + MITM + credential injection
-  Sluice MCP Gateway         -- tool-level policy + argument inspection
-  Telegram Bot               -- human approval for "ask" verdicts
+  Sluice MCP Gateway        -- tool-level policy + argument inspection
+  Telegram Bot              -- human approval for "ask" verdicts
 ```
 
 Every connection is evaluated against policy rules (allow / deny / ask). "Ask" verdicts send a Telegram notification with inline buttons. OpenClaw blocks until the human responds. Credentials are managed via Telegram commands or CLI, stored encrypted with age, and hot-reloaded into OpenClaw without restarts.
