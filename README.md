@@ -1,242 +1,195 @@
 # Sluice
 
-[![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
-[![E2e Linux](../../actions/workflows/e2e-linux.yml/badge.svg)](../../actions/workflows/e2e-linux.yml)
-[![E2e macOS](../../actions/workflows/e2e-macos.yml/badge.svg)](../../actions/workflows/e2e-macos.yml)
+Credential-injecting approval proxy for AI agents. Sluice sits between your AI agent and the internet, ensuring every outbound connection and tool call is governed by policy, approved by a human when needed, and never exposes real credentials to the agent.
 
-Credential-injecting approval proxy for AI agents. Two layers of governance: MCP-level (semantic tool control) and network-level (all-protocol interception). Asks for human approval via Telegram, injects credentials, and forwards.
+## Why Sluice
 
-**Status:** v0.0.1-alpha. Core proxy, policy engine, MCP gateway, and Telegram approval flow functional.
+AI agents need API keys, database credentials, and service tokens to do useful work. Giving them real credentials is risky. They can leak secrets in tool outputs, exfiltrate data to unexpected endpoints, or make destructive API calls without oversight.
+
+Sluice solves this with two layers of governance:
+
+- **MCP Gateway** -- intercepts tool calls between the agent and MCP servers. Sees tool names, arguments, and responses. Blocks dangerous operations (file writes, exec, deletions) and redacts secrets from responses. Governs local tools that never touch the network.
+- **SOCKS5 Proxy** -- intercepts every TCP and UDP connection from the agent's container. Supports HTTP, HTTPS, WebSocket, gRPC, SSH, IMAP, SMTP, DNS, and QUIC/HTTP3. Injects real credentials at the network level via MITM so the agent never sees them.
+
+The agent gets phantom tokens (random strings that look like real API keys). Sluice swaps them for real credentials in-flight. If the agent leaks a phantom token, it's useless outside the proxy.
+
+## How It Works
+
+```
+Container (Docker / Apple Container / macOS VM):
+  AI Agent (OpenClaw)        -- uses phantom tokens, thinks they're real
+  tun2proxy                  -- routes all traffic to SOCKS5
+
+Host:
+  Sluice SOCKS5 Proxy        -- policy + MITM + credential injection
+  Sluice MCP Gateway          -- tool-level policy + argument inspection
+  Telegram Bot                -- human approval for "ask" verdicts
+```
+
+Every connection is evaluated against policy rules (allow / deny / ask). "Ask" verdicts send a Telegram notification with inline buttons. The agent blocks until the human responds. Credentials are managed via Telegram commands or CLI, stored encrypted with age, and hot-reloaded into the agent container without restarts.
 
 ## Quick Start
 
+### Docker (Linux)
+
+The recommended setup for Linux. Three containers share a network namespace: sluice (proxy), tun2proxy (routes all traffic through SOCKS5), and your AI agent.
+
 ```bash
+# 1. Clone and configure
+git clone https://github.com/nnemirovsky/sluice.git && cd sluice
+cp examples/config.toml config.toml  # edit policy rules
+
+# 2. Set up credentials
+export TELEGRAM_BOT_TOKEN="your-bot-token"
+export TELEGRAM_CHAT_ID="your-chat-id"
+
+# 3. Start
+docker compose up -d
+
+# 4. Add API credentials (phantom tokens auto-generated, hot-reloaded to agent)
+docker exec sluice sluice cred add anthropic_api_key \
+  --destination api.anthropic.com --ports 443 \
+  --header x-api-key
+```
+
+### Apple Container (macOS)
+
+Native macOS micro-VMs via Virtualization.framework. Lightweight isolation with sub-second boot. Runs Linux guests.
+
+```bash
+# 1. Build sluice
 go build -o sluice ./cmd/sluice/
-./sluice --db sluice.db --config examples/config.toml
+
+# 2. Start with Apple Container runtime
+./sluice --runtime apple --container-name openclaw \
+  --phantom-dir /tmp/sluice-phantoms
+
+# 3. Network routing (requires root for pf rules)
+sudo ./scripts/apple-container-setup.sh
 ```
 
-On first run with an empty database, `--config` seeds the DB from the TOML file. Subsequent runs use the SQLite store directly.
+### macOS VM (via tart)
 
-Test with curl:
+Full macOS guest VM with access to Apple frameworks (iMessage, EventKit, Keychain, Shortcuts). Use this when your agent needs to interact with Apple ecosystem services that are unavailable in Linux containers.
 
 ```bash
-curl -x socks5h://127.0.0.1:1080 https://api.anthropic.com/
+# 1. Install tart
+brew install cirruslabs/cli/tart
+
+# 2. Build sluice
+go build -o sluice ./cmd/sluice/
+
+# 3. Start with macOS VM runtime
+./sluice --runtime macos \
+  --vm-image ghcr.io/cirruslabs/macos-sequoia-base:latest \
+  --container-name openclaw \
+  --phantom-dir /tmp/sluice-phantoms
+
+# 4. Host network routing (requires root for pf rules)
+sudo ./scripts/macos-vm-setup.sh
 ```
 
-## CLI Flags
+Requires macOS with Apple Silicon (M1+). The macOS EULA allows up to 2 additional macOS VMs per Apple-branded host.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--listen` | `127.0.0.1:1080` | SOCKS5 listen address |
-| `--db` | `sluice.db` | Path to SQLite policy database |
-| `--config` | (none) | TOML seed file (imported only when DB is empty) |
-| `--audit` | `audit.jsonl` | Path to audit log file |
-| `--telegram-token` | `$TELEGRAM_BOT_TOKEN` | Telegram bot token for approval flow |
-| `--telegram-chat-id` | `$TELEGRAM_CHAT_ID` | Telegram chat ID for approvals |
-| `--health-addr` | `127.0.0.1:3000` | Health check HTTP address |
-| `--shutdown-timeout` | `10s` | Graceful shutdown timeout |
-| `--runtime` | `auto` | Container runtime: `docker`, `apple`, `none`, `auto` |
-| `--container-name` | `openclaw` | Agent container name (env: `SLUICE_AGENT_CONTAINER`) |
-| `--docker-socket` | (auto-detect) | Docker socket path for container management |
-| `--phantom-dir` | (none) | Shared volume path for phantom token files (enables hot-reload) |
+## Policy
 
-## CLI Subcommands
-
-### Policy management
-
-```
-sluice policy list [--verdict allow|deny|ask|redact] [--db sluice.db]
-sluice policy add allow <destination> [--ports 443,80] [--name "reason"]
-sluice policy add deny <destination> [--name "reason"]
-sluice policy add ask <destination> [--ports 443] [--name "reason"]
-sluice policy remove <id>
-sluice policy import <path.toml>
-sluice policy export
-```
-
-### MCP upstream management
-
-```
-sluice mcp add <name> --command <cmd> [--args "arg1,arg2"] [--env "KEY=VAL,..."] [--timeout 120]
-sluice mcp list
-sluice mcp remove <name>
-sluice mcp                          # start MCP gateway
-```
-
-### Credential management
-
-```
-sluice cred add <name> [--destination host] [--ports 443] [--header Authorization] [--template "Bearer {value}"]
-sluice cred list
-sluice cred remove <name>
-```
-
-When `--destination` is provided, `sluice cred add` also creates an allow rule and binding in the store.
-
-### Other subcommands
-
-```
-sluice cert generate                # generate CA certificate for HTTPS MITM
-sluice audit verify                 # verify audit log hash chain integrity
-```
-
-## Policy Store
-
-All runtime policy state is stored in a SQLite database (default: `sluice.db`). TOML files are used only for initial seeding via `sluice policy import`. The CLI, Telegram commands, and approval buttons all write to the same database. Changes persist across restarts.
-
-### TOML Seed File Format
+All policy is stored in SQLite and persists across restarts. Seed from TOML on first run, then manage via CLI or Telegram.
 
 ```toml
 [policy]
-default = "deny"       # "allow", "deny", or "ask"
-timeout_sec = 120       # timeout for ask verdicts
+default = "deny"
 
-[vault]
-provider = "age"
-
-# Network rules (destination field)
-
+# Network rules
 [[allow]]
 destination = "api.anthropic.com"
 ports = [443]
-
-[[allow]]
-destination = "*.github.com"    # glob: * matches within one DNS label
-ports = [443, 80]
-
-[[deny]]
-destination = "169.254.169.254" # block metadata endpoint
 
 [[ask]]
 destination = "*.openai.com"
 ports = [443]
 
-# Tool rules (tool field)
+[[deny]]
+destination = "169.254.169.254"   # block cloud metadata
 
+# MCP tool rules
 [[allow]]
 tool = "github__list_*"
-name = "read-only github list"
 
 [[deny]]
 tool = "exec__*"
-name = "block all exec"
 
-# Content inspection rules (pattern field)
-
+# Content inspection
 [[deny]]
 pattern = "(?i)(sk-[a-zA-Z0-9_-]{20,})"
-name = "api key in tool arguments"
+name = "block API keys in tool arguments"
 
 [[redact]]
 pattern = "(?i)(sk-[a-zA-Z0-9_-]{20,})"
-replacement = "[REDACTED_API_KEY]"
-name = "api key in responses"
+replacement = "[REDACTED]"
+name = "redact API keys in responses"
 ```
 
-Rules use a unified format. Each `[[allow]]`, `[[deny]]`, `[[ask]]`, or `[[redact]]` entry carries exactly one of: `destination` (network rule), `tool` (MCP tool rule), or `pattern` (content inspection rule). The section name determines the verdict.
+Glob patterns: `*` matches within a single DNS label. `**` matches across dots. Evaluation order: deny, allow, ask, default.
 
-Glob patterns: `*` matches within a single DNS label (not across dots). `**` matches across dots (any depth of subdomains). `?` matches a single non-dot character. Matching is case-insensitive (RFC 4343). An empty ports list matches all ports.
+## Credential Providers
 
-Evaluation order: deny rules first, then allow, then ask, then the default verdict.
+Sluice supports multiple credential backends. Set `provider` in `[vault]` config:
 
-## Telegram Approval Bot
+| Provider | Auth | Notes |
+|----------|------|-------|
+| `age` (default) | Auto-generated X25519 key | Local encrypted files, no dependencies |
+| `env` | Environment variables | Credential name maps to env var |
+| `hashicorp` | Token or AppRole | HashiCorp Vault KV v2 |
+| `1password` | Service Account token | Via official Go SDK |
+| `bitwarden` | Access token | Via `bws` CLI |
+| `keepass` | Password + optional key file | Local .kdbx files, auto-reloads on change |
+| `gopass` | CLI auth | Via `gopass` binary |
 
-When configured, connections matching `ask` policy rules trigger an approval request via Telegram. The bot sends an inline keyboard message to the configured chat with three options: Allow Once, Always Allow, and Deny.
+Chain multiple providers with `providers = ["1password", "age"]`. First provider with the credential wins.
 
-The connection blocks until the user responds or the timeout expires (controlled by `timeout_sec`, default 120s). On timeout, the connection is denied.
+## Telegram Bot
 
-"Always Allow" writes a persistent allow rule to the SQLite store with `source="approval"`. The rule survives restarts.
-
-Without Telegram configured, all `ask` verdicts are treated as `deny`.
-
-### Telegram Commands
-
-Commands are only accepted from the configured chat ID.
+Manage sluice from your phone. Approve connections, add credentials, update policy.
 
 | Command | Description |
 |---------|-------------|
 | `/policy show` | List current rules |
-| `/policy allow <dest>` | Add allow rule (persisted to SQLite) |
-| `/policy deny <dest>` | Add deny rule (persisted to SQLite) |
-| `/policy remove <id>` | Remove rule by ID |
-| `/cred add <name> <value>` | Add credential |
-| `/cred list` | List credential names |
-| `/cred rotate <name> <value>` | Replace credential |
-| `/cred remove <name>` | Remove credential |
-| `/status` | Show proxy status |
-| `/audit recent [N]` | Show last N audit entries (default 10) |
-| `/help` | Show available commands |
-
-Policy changes via Telegram are persisted to the SQLite store and survive restarts.
-
-## Hot Reload
-
-Send SIGHUP to recompile the policy engine from the SQLite store without restarting the proxy. Existing connections are not affected. New connections use the updated policy. SIGHUP also updates the policy engine used by Telegram command handlers.
-
-Telegram bot credentials are read from environment variables (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) at startup and cannot be hot-reloaded. Changing Telegram credentials requires a full restart.
-
-```bash
-kill -HUP $(pgrep sluice)
-```
+| `/policy allow <dest>` | Add allow rule |
+| `/policy deny <dest>` | Add deny rule |
+| `/cred add <name>` | Add credential (value sent as next message, auto-deleted) |
+| `/cred rotate <name>` | Replace credential, hot-reload agent |
+| `/status` | Proxy stats and pending approvals |
+| `/audit recent [N]` | Last N audit entries |
 
 ## Audit Log
 
-JSON Lines format written to the audit file path. Each line includes a `prev_hash` field with the blake3 hash of the previous line for tamper detection. Verify the chain with:
+Tamper-evident JSON Lines log with blake3 hash chaining. Every connection, tool call, approval, and denial is recorded.
 
 ```bash
-sluice audit verify
+sluice audit verify   # check hash chain integrity
 ```
 
-## Docker Compose
+## Protocol Support
 
-Three-container architecture: sluice + tun2proxy + openclaw. All agent traffic is routed through sluice's SOCKS5 proxy via TUN device. Phantom tokens are delivered to the agent via a shared volume (`sluice-phantoms`). See `compose.yml` for details.
-
-## Apple Container
-
-Apple Container (macOS Virtualization.framework micro-VMs) is supported as an alternative to Docker. It provides native macOS isolation with access to Apple frameworks (EventKit, Messages, CallKit) that Linux containers cannot reach.
-
-```bash
-./sluice --runtime apple --container-name openclaw
-```
-
-Traffic routing uses macOS pf rules to redirect VM bridge traffic through tun2proxy on the host to sluice's SOCKS5 proxy. APNS traffic (port 5223) is detected as a distinct protocol for policy rules.
-
-See `docs/apple-container-quickstart.md` for full setup instructions.
-
-## Standalone Mode
-
-Run sluice as a proxy without any container runtime:
-
-```bash
-./sluice --runtime none --listen 127.0.0.1:1080
-```
-
-Then configure your application to use the proxy:
-
-```bash
-export ALL_PROXY=socks5://localhost:1080
-```
-
-Credential injection (MITM proxy) and MCP gateway work normally. Only container lifecycle management is disabled.
-
-## Testing
-
-```bash
-make test              # unit tests
-make test-coverage     # unit tests with HTML coverage report
-make test-e2e          # all e2e tests
-make test-e2e-docker   # Linux e2e tests via Docker Compose (builds containers)
-make test-e2e-linux    # Linux e2e tests (go test with linux build tag)
-make test-e2e-macos    # macOS e2e tests (Apple Container)
-```
-
-E2e tests use build tags (`e2e`, `linux`, `darwin`) and live in `e2e/`. CI enforces a minimum 75% coverage threshold.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for details on writing tests.
+| Protocol | Credential Injection | Content Inspection |
+|----------|---------------------|--------------------|
+| HTTP/HTTPS | MITM phantom swap | Full request/response |
+| gRPC | Header phantom swap | Metadata |
+| WebSocket | Handshake + text frames | Text frame content |
+| SSH | Jump host, key from vault | -- |
+| IMAP/SMTP | AUTH command proxy | -- |
+| DNS | -- | Domain-level policy |
+| QUIC/HTTP3 | HTTP/3 MITM | Full request/response |
 
 ## Requirements
 
-- Go 1.22+
-- Telegram bot token (from @BotFather) for the approval flow (optional)
-- Docker (optional, for container deployment)
-- macOS with Apple Container runtime (optional, for Apple Container deployment)
+| Runtime | Requirements |
+|---------|-------------|
+| Docker | Docker Engine |
+| Apple Container | macOS, `container` CLI |
+| macOS VM | macOS, Apple Silicon, `tart` CLI |
+| All | Telegram bot token (optional, for approval flow) |
+
+## License
+
+See [LICENSE](LICENSE).
