@@ -24,6 +24,10 @@ jobs:
       - name: Check coverage threshold
         run: |
           total=$(go tool cover -func=coverage.out | grep '^total:' | awk '{print $NF}' | tr -d '%')
+          if [ -z "$total" ]; then
+            echo "Failed to parse coverage from coverage.out"
+            exit 1
+          fi
           echo "Total coverage: ${total}%"
           if awk "BEGIN{exit !($total < 80)}"; then
             echo "Coverage ${total}% is below 80% threshold"
