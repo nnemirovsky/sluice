@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -2699,9 +2700,10 @@ func TestBidirectionalRelay(t *testing.T) {
 	}
 	defer ln2.Close()
 
-	var server1, server2 net.Conn
-	go func() { server1, _ = ln1.Accept() }()
-	go func() { server2, _ = ln2.Accept() }()
+	ch1 := make(chan net.Conn, 1)
+	ch2 := make(chan net.Conn, 1)
+	go func() { c, _ := ln1.Accept(); ch1 <- c }()
+	go func() { c, _ := ln2.Accept(); ch2 <- c }()
 
 	client1, err := net.Dial("tcp", ln1.Addr().String())
 	if err != nil {
@@ -2712,7 +2714,8 @@ func TestBidirectionalRelay(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	time.Sleep(50 * time.Millisecond) // let accepts complete
+	server1 := <-ch1
+	server2 := <-ch2
 
 	// Relay between server1 and server2.
 	go bidirectionalRelay(server1, server2)
@@ -3068,14 +3071,14 @@ func TestRelayDirect(t *testing.T) {
 	}
 	defer ln.Close()
 
-	var serverConn net.Conn
-	go func() { serverConn, _ = ln.Accept() }()
+	acceptCh := make(chan net.Conn, 1)
+	go func() { c, _ := ln.Accept(); acceptCh <- c }()
 	clientConn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer clientConn.Close()
-	time.Sleep(50 * time.Millisecond)
+	serverConn := <-acceptCh
 
 	go relayDirect(serverConn, []string{echo.Addr().String()})
 
@@ -3099,14 +3102,14 @@ func TestRelayDirectFailedDial(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	var serverConn net.Conn
-	go func() { serverConn, _ = ln.Accept() }()
+	acceptCh := make(chan net.Conn, 1)
+	go func() { c, _ := ln.Accept(); acceptCh <- c }()
 	clientConn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer clientConn.Close()
-	time.Sleep(50 * time.Millisecond)
+	serverConn := <-acceptCh
 
 	// Use a port that nothing is listening on.
 	done := make(chan struct{})
@@ -3549,3 +3552,157 @@ func TestIsPrivateIP(t *testing.T) {
 		}
 	}
 }
+
+// TestHandleServerFirstDetectionSMTP tests that server-first detection correctly
+// identifies an SMTP server banner and routes through the mail proxy when available.
+func TestHandleServerFirstDetectionSMTP(t *testing.T) {
+	// Start a mock upstream server that sends an SMTP banner.
+	smtpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer smtpLn.Close()
+
+	go func() {
+		conn, err := smtpLn.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		conn.Write([]byte("220 smtp.example.com ESMTP\r\n"))
+		// Read and echo anything (simple relay behavior).
+		buf := make([]byte, 1024)
+		for {
+			n, err := conn.Read(buf)
+			if err != nil {
+				return
+			}
+			conn.Write(buf[:n])
+		}
+	}()
+
+	dir := t.TempDir()
+	vs, _ := vault.NewStore(dir)
+
+	srv := &Server{}
+	srv.resolver.Store(nil) // no resolver
+
+	// Create a pipe pair as the "agent" connection.
+	agentConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// handleServerFirstDetection with no mail proxy: should fall back to relay.
+		srv.handleServerFirstDetection(agentConn, nil, smtpLn.Addr().String(), []string{smtpLn.Addr().String()})
+	}()
+
+	// Read the SMTP banner through the relay.
+	clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 256)
+	n, err := clientConn.Read(buf)
+	if err != nil {
+		t.Fatalf("read from relay: %v", err)
+	}
+	// handleServerFirstDetection peeks only 8 bytes from the server for
+	// protocol detection, so we see the first 8 bytes of the banner first.
+	got := string(buf[:n])
+	if !strings.HasPrefix(got, "220 smtp") {
+		t.Errorf("expected SMTP banner prefix, got: %q", got)
+	}
+
+	clientConn.Close()
+	<-done
+
+	_ = vs // keep vault reference to avoid unused
+}
+
+// TestHandleServerFirstDetectionFailedDial tests that a failed upstream dial
+// is handled gracefully without panic.
+func TestHandleServerFirstDetectionFailedDial(t *testing.T) {
+	srv := &Server{}
+	srv.resolver.Store(nil)
+
+	agentConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.handleServerFirstDetection(agentConn, nil, "127.0.0.1:1", []string{"127.0.0.1:1"})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("handleServerFirstDetection did not return")
+	}
+}
+
+// TestHandleServerFirstDetectionNoData tests behavior when the upstream sends
+// no banner within the timeout (should fall back to generic relay).
+func TestHandleServerFirstDetectionNoData(t *testing.T) {
+	// Start a server that accepts but sends nothing.
+	silentLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer silentLn.Close()
+
+	var upstreamConn net.Conn
+	acceptCh := make(chan struct{})
+	go func() {
+		c, err := silentLn.Accept()
+		if err != nil {
+			return
+		}
+		upstreamConn = c
+		close(acceptCh)
+		// Hold open but send nothing.
+		buf := make([]byte, 1024)
+		for {
+			_, err := c.Read(buf)
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	srv := &Server{}
+	srv.resolver.Store(nil)
+
+	agentConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.handleServerFirstDetection(agentConn, nil, silentLn.Addr().String(), []string{silentLn.Addr().String()})
+	}()
+
+	// Wait for upstream accept.
+	select {
+	case <-acceptCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream accept timeout")
+	}
+
+	// Write some data through the agent side. The relay should eventually
+	// forward it (after the server detection timeout).
+	time.Sleep(600 * time.Millisecond) // wait past serverDetectTimeout (500ms)
+	clientConn.Write([]byte("hello"))
+
+	// Clean up by closing connections.
+	clientConn.Close()
+	if upstreamConn != nil {
+		upstreamConn.Close()
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleServerFirstDetection did not return")
+	}
+}
+

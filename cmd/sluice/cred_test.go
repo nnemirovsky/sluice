@@ -48,6 +48,124 @@ func captureStdout(t *testing.T, fn func()) string {
 	return buf.String()
 }
 
+// TestOpenVaultStoreNoDB tests openVaultStore with empty dbPath (uses default home dir).
+func TestOpenVaultStoreNoDB(t *testing.T) {
+	// Set HOME to a writable temp dir so the default vault path is writable.
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	vs, err := openVaultStore("")
+	if err != nil {
+		t.Fatalf("openVaultStore with empty path: %v", err)
+	}
+	if vs == nil {
+		t.Fatal("expected non-nil vault store")
+	}
+}
+
+// TestOpenVaultStoreWithVaultDir tests openVaultStore reads vault_dir from DB.
+func TestOpenVaultStoreWithVaultDir(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	vs, err := openVaultStore(dbPath)
+	if err != nil {
+		t.Fatalf("openVaultStore: %v", err)
+	}
+	if vs == nil {
+		t.Fatal("expected non-nil vault store")
+	}
+}
+
+// TestOpenVaultStoreNonAgeProvider tests that non-age provider returns error.
+func TestOpenVaultStoreNonAgeProvider(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := "hashicorp"
+	if err := db.UpdateConfig(store.ConfigUpdate{VaultProvider: &provider}); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	_, err = openVaultStore(dbPath)
+	if err == nil {
+		t.Fatal("expected error for non-age provider")
+	}
+	if !strings.Contains(err.Error(), "hashicorp") {
+		t.Errorf("error should mention the configured provider, got: %v", err)
+	}
+}
+
+// TestOpenVaultStoreChainWithoutAge tests that chain provider without age errors.
+func TestOpenVaultStoreChainWithoutAge(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers := []string{"hashicorp", "env"}
+	if err := db.UpdateConfig(store.ConfigUpdate{VaultProviders: &providers}); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	_, err = openVaultStore(dbPath)
+	if err == nil {
+		t.Fatal("expected error for chain without age")
+	}
+	if !strings.Contains(err.Error(), "without the age backend") {
+		t.Errorf("expected 'without the age backend' in error, got: %v", err)
+	}
+}
+
+// TestOpenVaultStoreChainAgeNotFirst tests warning when age is not first in chain.
+func TestOpenVaultStoreChainAgeNotFirst(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vaultDir := dir
+	providers := []string{"env", "age"}
+	if err := db.UpdateConfig(store.ConfigUpdate{VaultDir: &vaultDir, VaultProviders: &providers}); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	// Should succeed (warning is logged, not returned as error).
+	vs, err := openVaultStore(dbPath)
+	if err != nil {
+		t.Fatalf("openVaultStore with age not first: %v", err)
+	}
+	if vs == nil {
+		t.Fatal("expected non-nil vault store")
+	}
+}
+
+// TestOpenVaultStoreNonexistentDB tests that a non-existent DB path
+// falls through to default (the file simply doesn't exist yet).
+func TestOpenVaultStoreNonexistentDB(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "doesnotexist.db")
+
+	// Set HOME to a writable temp dir for the default vault path.
+	t.Setenv("HOME", dir)
+
+	vs, err := openVaultStore(dbPath)
+	if err != nil {
+		t.Fatalf("openVaultStore with nonexistent DB: %v", err)
+	}
+	if vs == nil {
+		t.Fatal("expected non-nil vault store")
+	}
+}
+
 // TestHandleCredAdd tests adding a credential via piped stdin.
 func TestHandleCredAdd(t *testing.T) {
 	dir := t.TempDir()

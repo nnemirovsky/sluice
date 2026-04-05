@@ -955,3 +955,133 @@ func TestGenerateHostCert(t *testing.T) {
 		t.Errorf("host cert not valid under CA: %v", err)
 	}
 }
+
+// TestProcessServerLineSTARTTLS tests the STARTTLS state machine in processServerLine.
+func TestProcessServerLineSTARTTLS(t *testing.T) {
+	t.Run("smtp_starttls_accepted", func(t *testing.T) {
+		sess := &mailSession{proto: ProtoSMTP}
+		sess.starttlsPending = true
+
+		sess.processServerLine("220 Ready to start TLS\r\n")
+
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		if sess.starttlsPending {
+			t.Error("starttlsPending should be false after 220")
+		}
+		if !sess.starttlsConfirmed {
+			t.Error("starttlsConfirmed should be true after 220")
+		}
+	})
+
+	t.Run("smtp_starttls_rejected", func(t *testing.T) {
+		sess := &mailSession{proto: ProtoSMTP}
+		sess.starttlsPending = true
+
+		sess.processServerLine("502 Command not implemented\r\n")
+
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		if sess.starttlsPending {
+			t.Error("starttlsPending should be false after 502")
+		}
+		if sess.starttlsConfirmed {
+			t.Error("starttlsConfirmed should be false after rejection")
+		}
+	})
+
+	t.Run("imap_starttls_accepted", func(t *testing.T) {
+		sess := &mailSession{proto: ProtoIMAP}
+		sess.starttlsPending = true
+
+		sess.processServerLine("a001 OK Begin TLS\r\n")
+
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		if sess.starttlsPending {
+			t.Error("starttlsPending should be false")
+		}
+		if !sess.starttlsConfirmed {
+			t.Error("starttlsConfirmed should be true")
+		}
+	})
+
+	t.Run("imap_starttls_rejected", func(t *testing.T) {
+		sess := &mailSession{proto: ProtoIMAP}
+		sess.starttlsPending = true
+
+		sess.processServerLine("a001 NO TLS not available\r\n")
+
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		if sess.starttlsPending {
+			t.Error("starttlsPending should be false")
+		}
+		if sess.starttlsConfirmed {
+			t.Error("starttlsConfirmed should be false")
+		}
+	})
+
+	t.Run("imap_starttls_untagged_ignored", func(t *testing.T) {
+		sess := &mailSession{proto: ProtoIMAP}
+		sess.starttlsPending = true
+
+		// Untagged response (starts with *) should not resolve STARTTLS.
+		sess.processServerLine("* OK still waiting\r\n")
+
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		if !sess.starttlsPending {
+			t.Error("starttlsPending should still be true for untagged response")
+		}
+	})
+}
+
+// TestProcessServerLineContinuationPrompts tests continuation prompt detection.
+func TestProcessServerLineContinuationPrompts(t *testing.T) {
+	t.Run("smtp_334_prompt", func(t *testing.T) {
+		sess := &mailSession{proto: ProtoSMTP}
+		sess.pendingPrompts = 1
+
+		sess.processServerLine("334 \r\n")
+
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		if sess.pendingPrompts != 0 {
+			t.Errorf("pendingPrompts = %d, want 0", sess.pendingPrompts)
+		}
+		if sess.continuationsArmed != 1 {
+			t.Errorf("continuationsArmed = %d, want 1", sess.continuationsArmed)
+		}
+	})
+
+	t.Run("imap_continuation", func(t *testing.T) {
+		sess := &mailSession{proto: ProtoIMAP}
+		sess.pendingPrompts = 1
+
+		sess.processServerLine("+ \r\n")
+
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		if sess.pendingPrompts != 0 {
+			t.Errorf("pendingPrompts = %d, want 0", sess.pendingPrompts)
+		}
+		if sess.continuationsArmed != 1 {
+			t.Errorf("continuationsArmed = %d, want 1", sess.continuationsArmed)
+		}
+	})
+
+	t.Run("no_pending_prompts", func(t *testing.T) {
+		sess := &mailSession{proto: ProtoSMTP}
+		sess.pendingPrompts = 0
+
+		// Should be a no-op when no prompts are pending.
+		sess.processServerLine("334 \r\n")
+
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		if sess.continuationsArmed != 0 {
+			t.Error("should not arm continuations when no prompts pending")
+		}
+	})
+}

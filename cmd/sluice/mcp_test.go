@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -700,6 +701,195 @@ func TestHandleMCPAddDefaultTransportIsStdio(t *testing.T) {
 	}
 	if upstreams[0].Transport != "stdio" {
 		t.Errorf("expected transport stdio, got %q", upstreams[0].Transport)
+	}
+}
+
+// TestWriteMCPServersJSON verifies that the helper writes a valid JSON file.
+func TestWriteMCPServersJSON(t *testing.T) {
+	dir := t.TempDir()
+	writeMCPServersJSON(dir, "http://127.0.0.1:3000/mcp")
+
+	data, err := os.ReadFile(filepath.Join(dir, "mcp-servers.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var parsed map[string]map[string]string
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+
+	sluice, ok := parsed["sluice"]
+	if !ok {
+		t.Fatal("expected 'sluice' key in mcp-servers.json")
+	}
+	if sluice["url"] != "http://127.0.0.1:3000/mcp" {
+		t.Errorf("url = %q, want %q", sluice["url"], "http://127.0.0.1:3000/mcp")
+	}
+	if sluice["transport"] != "streamable-http" {
+		t.Errorf("transport = %q, want %q", sluice["transport"], "streamable-http")
+	}
+}
+
+// TestWriteMCPServersJSONCustomURL tests with a custom URL.
+func TestWriteMCPServersJSONCustomURL(t *testing.T) {
+	dir := t.TempDir()
+	writeMCPServersJSON(dir, "https://sluice.example.com/mcp")
+
+	data, err := os.ReadFile(filepath.Join(dir, "mcp-servers.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var parsed map[string]map[string]string
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if parsed["sluice"]["url"] != "https://sluice.example.com/mcp" {
+		t.Errorf("url = %q, want custom URL", parsed["sluice"]["url"])
+	}
+}
+
+// TestWriteMCPServersJSONInvalidDir verifies graceful handling of invalid dir.
+func TestWriteMCPServersJSONInvalidDir(t *testing.T) {
+	// Should not panic on unwritable path.
+	writeMCPServersJSON("/nonexistent/path/foo", "http://127.0.0.1:3000/mcp")
+}
+
+// TestHandleMCPGatewayInvalidDB verifies error on bad database path.
+func TestHandleMCPGatewayInvalidDB(t *testing.T) {
+	err := handleMCPGateway([]string{"--db", "/nonexistent/dir/sluice.db"})
+	if err == nil {
+		t.Fatal("expected error for invalid DB path")
+	}
+}
+
+// TestHandleMCPGatewayEmptyDB verifies the gateway can start with an empty DB
+// and no upstreams. It uses stdin close to trigger immediate exit.
+func TestHandleMCPGatewayEmptyDB(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Pre-create the DB so it's valid.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	// Close stdin immediately to make RunStdio return.
+	oldStdin := os.Stdin
+	r, w, _ := os.Pipe()
+	os.Stdin = r
+	_ = w.Close() // close immediately so scanner sees EOF
+	defer func() { os.Stdin = oldStdin }()
+
+	err = handleMCPGateway([]string{"--db", dbPath})
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+// TestHandleMCPGatewayWithConfigSeed verifies that --config seeds an empty DB.
+func TestHandleMCPGatewayWithConfigSeed(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	configPath := filepath.Join(dir, "config.toml")
+
+	// Write a minimal config file.
+	if err := os.WriteFile(configPath, []byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "api.example.com"
+ports = [443]
+name = "test rule"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-create the DB.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	// Close stdin immediately.
+	oldStdin := os.Stdin
+	r, w, _ := os.Pipe()
+	os.Stdin = r
+	_ = w.Close()
+	defer func() { os.Stdin = oldStdin }()
+
+	err = handleMCPGateway([]string{"--db", dbPath, "--config", configPath})
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	// Verify the config was imported.
+	db, err = store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rules, err := db.ListRules(store.RuleFilter{Verdict: "allow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 allow rule after seed, got %d", len(rules))
+	}
+	if rules[0].Destination != "api.example.com" {
+		t.Errorf("rule destination = %q, want %q", rules[0].Destination, "api.example.com")
+	}
+}
+
+// TestHandleMCPGatewayWithAudit verifies audit logger setup.
+func TestHandleMCPGatewayWithAudit(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	auditPath := filepath.Join(dir, "audit.jsonl")
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	oldStdin := os.Stdin
+	r, w, _ := os.Pipe()
+	os.Stdin = r
+	_ = w.Close()
+	defer func() { os.Stdin = oldStdin }()
+
+	err = handleMCPGateway([]string{"--db", dbPath, "--audit", auditPath})
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	// Verify audit file was created.
+	if _, err := os.Stat(auditPath); err != nil {
+		t.Errorf("audit file should have been created: %v", err)
+	}
+}
+
+// TestHandleMCPCommandUnknown verifies error on unrecognized subcommand.
+func TestHandleMCPCommandUnknown(t *testing.T) {
+	err := handleMCPCommand([]string{"bogus"})
+	if err == nil {
+		t.Fatal("expected error for unknown subcommand")
+	}
+}
+
+// TestHandleMCPCommandRoutesToGateway verifies flag-style args start the gateway.
+func TestHandleMCPCommandRoutesToGateway(t *testing.T) {
+	// --db with an invalid path should fail fast.
+	err := handleMCPCommand([]string{"--db", "/nonexistent/dir/sluice.db"})
+	if err == nil {
+		t.Fatal("expected error for invalid DB path through command routing")
 	}
 }
 
