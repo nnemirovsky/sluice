@@ -1,23 +1,23 @@
 # Sluice
 
-Credential-injecting approval proxy for AI agents. Sluice sits between your AI agent and the internet, ensuring every outbound connection and tool call is governed by policy, approved by a human when needed, and never exposes real credentials to the agent.
+Governance and credential injection proxy for [OpenClaw](https://github.com/nnemirovsky/openclaw). Sluice sits between OpenClaw and the internet, ensuring every outbound connection and MCP tool call is governed by policy, approved by a human when needed, and never exposes real credentials to the agent.
 
 ## Why Sluice
 
-AI agents need API keys, database credentials, and service tokens to do useful work. Giving them real credentials is risky. They can leak secrets in tool outputs, exfiltrate data to unexpected endpoints, or make destructive API calls without oversight.
+OpenClaw needs API keys, database credentials, and service tokens to do useful work. Giving it real credentials is risky. It can leak secrets in tool outputs, exfiltrate data to unexpected endpoints, or make destructive API calls without oversight.
 
 Sluice solves this with two layers of governance:
 
-- **MCP Gateway** -- intercepts tool calls between the agent and MCP servers. Sees tool names, arguments, and responses. Blocks dangerous operations (file writes, exec, deletions) and redacts secrets from responses. Governs local tools that never touch the network.
-- **SOCKS5 Proxy** -- intercepts every TCP and UDP connection from the agent's container. Supports HTTP, HTTPS, WebSocket, gRPC, SSH, IMAP, SMTP, DNS, and QUIC/HTTP3. Injects real credentials at the network level via MITM so the agent never sees them.
+- **MCP Gateway** -- intercepts tool calls between OpenClaw and MCP servers. Sees tool names, arguments, and responses. Blocks dangerous operations (file writes, exec, deletions) and redacts secrets from responses. Governs local tools that never touch the network.
+- **SOCKS5 Proxy** -- intercepts every TCP and UDP connection from OpenClaw's container. Supports HTTP, HTTPS, WebSocket, gRPC, SSH, IMAP, SMTP, DNS, and QUIC/HTTP3. Injects real credentials at the network level via MITM so OpenClaw never sees them.
 
-The agent gets phantom tokens (random strings that look like real API keys). Sluice swaps them for real credentials in-flight. If the agent leaks a phantom token, it's useless outside the proxy.
+OpenClaw gets phantom tokens (random strings that look like real API keys). Sluice swaps them for real credentials in-flight. If OpenClaw leaks a phantom token, it's useless outside the proxy.
 
 ## How It Works
 
 ```
 Container (Docker / Apple Container / macOS VM):
-  AI Agent (OpenClaw)        -- uses phantom tokens, thinks they're real
+  OpenClaw                   -- uses phantom tokens, thinks they're real
   tun2proxy                  -- routes all traffic to SOCKS5
 
 Host:
@@ -26,13 +26,13 @@ Host:
   Telegram Bot               -- human approval for "ask" verdicts
 ```
 
-Every connection is evaluated against policy rules (allow / deny / ask). "Ask" verdicts send a Telegram notification with inline buttons. The agent blocks until the human responds. Credentials are managed via Telegram commands or CLI, stored encrypted with age, and hot-reloaded into the agent container without restarts.
+Every connection is evaluated against policy rules (allow / deny / ask). "Ask" verdicts send a Telegram notification with inline buttons. OpenClaw blocks until the human responds. Credentials are managed via Telegram commands or CLI, stored encrypted with age, and hot-reloaded into OpenClaw without restarts.
 
 ## Quick Start
 
 ### Docker (Linux)
 
-The recommended setup for Linux. Three containers share a network namespace: sluice (proxy), tun2proxy (routes all traffic through SOCKS5), and your AI agent.
+The recommended setup for Linux. Three containers share a network namespace: sluice (proxy), tun2proxy (routes all traffic through SOCKS5), and OpenClaw.
 
 ```bash
 # 1. Clone and configure
@@ -46,7 +46,7 @@ cp examples/config.toml config.toml  # edit policy rules
 # 3. Start (sluice + tun2proxy + openclaw)
 docker compose up -d
 
-# 4. Add API credentials (phantom tokens auto-generated, hot-reloaded to agent)
+# 4. Add API credentials (phantom tokens auto-generated, hot-reloaded to OpenClaw)
 docker exec sluice sluice cred add anthropic_api_key \
   --destination api.anthropic.com --ports 443 \
   --header x-api-key
@@ -54,7 +54,7 @@ docker exec sluice sluice cred add anthropic_api_key \
 
 ### Apple Container (macOS)
 
-Native macOS micro-VMs via Virtualization.framework. Lightweight isolation with sub-second boot. Runs Linux guests.
+Native macOS micro-VMs via Virtualization.framework. Lightweight isolation with sub-second boot. Runs Linux guests. OpenClaw runs inside the micro-VM with all traffic routed through sluice.
 
 ```bash
 # 1. Download sluice binary (see Releases page for latest version)
@@ -77,7 +77,7 @@ container run --name openclaw \
 
 ### macOS VM (via tart)
 
-Full macOS guest VM with access to Apple frameworks (iMessage, EventKit, Keychain, Shortcuts). Use this when your agent needs to interact with Apple ecosystem services that are unavailable in Linux containers.
+Full macOS guest VM with access to Apple frameworks (iMessage, EventKit, Keychain, Shortcuts). Use this when OpenClaw needs to interact with Apple ecosystem services that are unavailable in Linux containers. Sluice manages the VM lifecycle and routes all traffic through the proxy.
 
 ```bash
 # 1. Install tart and download sluice binary
@@ -100,7 +100,7 @@ Requires macOS with Apple Silicon (M1+). The macOS EULA allows up to 2 additiona
 
 ### Standalone (binary)
 
-Download a pre-built binary from [Releases](https://github.com/nnemirovsky/sluice/releases) and run sluice as a standalone proxy. No container runtime needed. Configure your application to route through sluice manually.
+Download a pre-built binary from [Releases](https://github.com/nnemirovsky/sluice/releases) and run sluice as a standalone proxy. No container runtime needed. Point OpenClaw at sluice manually.
 
 Available binaries: `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`.
 
@@ -112,8 +112,8 @@ chmod +x sluice
 # Run standalone
 ./sluice --runtime none --listen 127.0.0.1:1080 --config examples/config.toml
 
-# Point your application at the proxy
-export ALL_PROXY=socks5://localhost:1080
+# Point OpenClaw at the proxy
+ALL_PROXY=socks5://localhost:1080 openclaw
 ```
 
 Credential injection (MITM) and MCP gateway work normally. Only container lifecycle management (hot-reload, restart) is disabled.
@@ -184,7 +184,7 @@ Manage sluice from your phone. Approve connections, add credentials, update poli
 | `/policy allow <dest>` | Add allow rule |
 | `/policy deny <dest>` | Add deny rule |
 | `/cred add <name>` | Add credential (value sent as next message, auto-deleted) |
-| `/cred rotate <name>` | Replace credential, hot-reload agent |
+| `/cred rotate <name>` | Replace credential, hot-reload OpenClaw |
 | `/status` | Proxy stats and pending approvals |
 | `/audit recent [N]` | Last N audit entries |
 
