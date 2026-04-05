@@ -282,14 +282,14 @@ macOS-specific tests using Apple Container runtime. Gated behind build tag and r
 **Files:**
 - Create: `e2e/apple_test.go` (build tag: `//go:build e2e && darwin`)
 
-- [ ] Skip if `container` CLI not available (`t.Skip("Apple Container not installed")`)
-- [ ] Test: sluice starts with `--runtime apple`, VM boots with correct env vars
-- [ ] Test: pf rules applied (verify bridge interface routing)
-- [ ] Test: traffic from Apple Container VM routes through sluice SOCKS5
-- [ ] Test: credential injection works through the pf + tun2proxy chain
-- [ ] Test: CA cert trusted by VM (HTTPS request succeeds through MITM)
-- [ ] Test: cleanup on shutdown (pf rules removed, VM stopped)
-- [ ] Run: `go test -tags="e2e darwin" ./e2e/ -v -timeout 300s`
+- [x] Skip if `container` CLI not available (`t.Skip("Apple Container not installed")`)
+- [x] Test: sluice starts with `--runtime apple`, VM boots with correct env vars
+- [x] Test: pf rules applied (verify bridge interface routing)
+- [x] Test: traffic from Apple Container VM routes through sluice SOCKS5
+- [x] Test: credential injection works through the pf + tun2proxy chain
+- [x] Test: CA cert trusted by VM (HTTPS request succeeds through MITM)
+- [x] Test: cleanup on shutdown (pf rules removed, VM stopped)
+- [x] Run: `go test -tags="e2e darwin" ./e2e/ -v -timeout 300s`
 
 ### Task 13: GitHub Actions workflows for e2e tests
 
