@@ -91,6 +91,26 @@ sudo ./scripts/macos-vm-setup.sh
 
 Requires macOS with Apple Silicon (M1+). The macOS EULA allows up to 2 additional macOS VMs per Apple-branded host.
 
+### Standalone (binary)
+
+Download a pre-built binary from [Releases](https://github.com/nnemirovsky/sluice/releases) and run sluice as a standalone proxy. No container runtime needed. Configure your application to route through sluice manually.
+
+Available binaries: `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`.
+
+```bash
+# Download (replace VERSION and OS/ARCH)
+curl -L -o sluice https://github.com/nnemirovsky/sluice/releases/download/vVERSION/sluice_VERSION_OS_ARCH
+chmod +x sluice
+
+# Run standalone
+./sluice --runtime none --listen 127.0.0.1:1080 --config examples/config.toml
+
+# Point your application at the proxy
+export ALL_PROXY=socks5://localhost:1080
+```
+
+Credential injection (MITM) and MCP gateway work normally. Only container lifecycle management (hot-reload, restart) is disabled.
+
 ## Policy
 
 All policy is stored in SQLite and persists across restarts. Seed from TOML on first run, then manage via CLI or Telegram.
