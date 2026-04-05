@@ -21,9 +21,9 @@ Container (Docker / Apple Container / macOS VM):
   tun2proxy                  -- routes all traffic to SOCKS5
 
 Host:
-  Sluice SOCKS5 Proxy        -- policy + MITM + credential injection
-  Sluice MCP Gateway          -- tool-level policy + argument inspection
-  Telegram Bot                -- human approval for "ask" verdicts
+  Sluice SOCKS5 Proxy       -- policy + MITM + credential injection
+  Sluice MCP Gateway         -- tool-level policy + argument inspection
+  Telegram Bot               -- human approval for "ask" verdicts
 ```
 
 Every connection is evaluated against policy rules (allow / deny / ask). "Ask" verdicts send a Telegram notification with inline buttons. The agent blocks until the human responds. Credentials are managed via Telegram commands or CLI, stored encrypted with age, and hot-reloaded into the agent container without restarts.
@@ -39,11 +39,11 @@ The recommended setup for Linux. Three containers share a network namespace: slu
 git clone https://github.com/nnemirovsky/sluice.git && cd sluice
 cp examples/config.toml config.toml  # edit policy rules
 
-# 2. Set up credentials
-export TELEGRAM_BOT_TOKEN="your-bot-token"
-export TELEGRAM_CHAT_ID="your-chat-id"
+# 2. Set Telegram credentials in compose.yml (environment section of sluice service)
+#    TELEGRAM_BOT_TOKEN: "your-bot-token"
+#    TELEGRAM_CHAT_ID: "your-chat-id"
 
-# 3. Start
+# 3. Start (sluice + tun2proxy + openclaw)
 docker compose up -d
 
 # 4. Add API credentials (phantom tokens auto-generated, hot-reloaded to agent)
@@ -57,15 +57,22 @@ docker exec sluice sluice cred add anthropic_api_key \
 Native macOS micro-VMs via Virtualization.framework. Lightweight isolation with sub-second boot. Runs Linux guests.
 
 ```bash
-# 1. Build sluice
-go build -o sluice ./cmd/sluice/
+# 1. Download sluice binary (see Releases page for latest version)
+curl -L -o sluice https://github.com/nnemirovsky/sluice/releases/latest/download/sluice_darwin_arm64
+chmod +x sluice
 
-# 2. Start with Apple Container runtime
+# 2. Start sluice with Apple Container runtime
 ./sluice --runtime apple --container-name openclaw \
-  --phantom-dir /tmp/sluice-phantoms
+  --phantom-dir /tmp/sluice-phantoms \
+  --config examples/config.toml
 
 # 3. Network routing (requires root for pf rules)
 sudo ./scripts/apple-container-setup.sh
+
+# 4. Start OpenClaw in Apple Container
+container run --name openclaw \
+  -v /tmp/sluice-phantoms:/phantoms \
+  ghcr.io/openclaw/openclaw:latest
 ```
 
 ### macOS VM (via tart)
@@ -73,19 +80,19 @@ sudo ./scripts/apple-container-setup.sh
 Full macOS guest VM with access to Apple frameworks (iMessage, EventKit, Keychain, Shortcuts). Use this when your agent needs to interact with Apple ecosystem services that are unavailable in Linux containers.
 
 ```bash
-# 1. Install tart
+# 1. Install tart and download sluice binary
 brew install cirruslabs/cli/tart
+curl -L -o sluice https://github.com/nnemirovsky/sluice/releases/latest/download/sluice_darwin_arm64
+chmod +x sluice
 
-# 2. Build sluice
-go build -o sluice ./cmd/sluice/
-
-# 3. Start with macOS VM runtime
+# 2. Start sluice with macOS VM runtime (clones and boots the VM)
 ./sluice --runtime macos \
   --vm-image ghcr.io/cirruslabs/macos-sequoia-base:latest \
   --container-name openclaw \
-  --phantom-dir /tmp/sluice-phantoms
+  --phantom-dir /tmp/sluice-phantoms \
+  --config examples/config.toml
 
-# 4. Host network routing (requires root for pf rules)
+# 3. Host network routing (requires root for pf rules)
 sudo ./scripts/macos-vm-setup.sh
 ```
 
