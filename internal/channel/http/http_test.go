@@ -97,7 +97,7 @@ func TestRequestApproval_SyncPath(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		resp, reqErr = broker.Request("api.github.com", 443, 5*time.Second)
+		resp, reqErr = broker.Request("api.github.com", 443, "", 5*time.Second)
 	}()
 
 	select {
@@ -141,7 +141,7 @@ func TestRequestApproval_SyncAlwaysAllow(t *testing.T) {
 	var resp channel.Response
 	go func() {
 		defer close(done)
-		resp, _ = broker.Request("example.com", 80, 5*time.Second)
+		resp, _ = broker.Request("example.com", 80, "", 5*time.Second)
 	}()
 
 	select {
@@ -170,7 +170,7 @@ func TestRequestApproval_SyncDeny(t *testing.T) {
 	var resp channel.Response
 	go func() {
 		defer close(done)
-		resp, _ = broker.Request("example.com", 80, 5*time.Second)
+		resp, _ = broker.Request("example.com", 80, "", 5*time.Second)
 	}()
 
 	select {
@@ -209,7 +209,7 @@ func TestRequestApproval_AsyncPath(t *testing.T) {
 	var resp channel.Response
 	go func() {
 		defer close(done)
-		resp, _ = broker.Request("api.github.com", 443, 5*time.Second)
+		resp, _ = broker.Request("api.github.com", 443, "", 5*time.Second)
 	}()
 
 	// Give time for the webhook delivery, then resolve externally.
@@ -254,7 +254,7 @@ func TestRequestApproval_RetryOnServerError(t *testing.T) {
 	var resp channel.Response
 	go func() {
 		defer close(done)
-		resp, _ = broker.Request("example.com", 443, 10*time.Second)
+		resp, _ = broker.Request("example.com", 443, "", 10*time.Second)
 	}()
 
 	select {
@@ -295,7 +295,7 @@ func TestRequestApproval_AllRetriesFail(t *testing.T) {
 	var resp channel.Response
 	go func() {
 		defer close(done)
-		resp, _ = broker.Request("example.com", 443, 5*time.Second)
+		resp, _ = broker.Request("example.com", 443, "", 5*time.Second)
 	}()
 
 	select {
@@ -330,7 +330,7 @@ func TestRequestApproval_NoSignatureWithoutSecret(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = broker.Request("example.com", 80, 5*time.Second)
+		_, _ = broker.Request("example.com", 80, "", 5*time.Second)
 	}()
 
 	select {
@@ -441,7 +441,7 @@ func TestRequestApproval_InvalidSyncResponse(t *testing.T) {
 	var resp channel.Response
 	go func() {
 		defer close(done)
-		resp, _ = broker.Request("example.com", 80, 500*time.Millisecond)
+		resp, _ = broker.Request("example.com", 80, "", 500*time.Millisecond)
 	}()
 
 	select {
@@ -470,7 +470,7 @@ func TestRequestApproval_UnknownVerdictDefaultsToDeny(t *testing.T) {
 	var resp channel.Response
 	go func() {
 		defer close(done)
-		resp, _ = broker.Request("example.com", 80, 5*time.Second)
+		resp, _ = broker.Request("example.com", 80, "", 5*time.Second)
 	}()
 
 	select {
@@ -500,7 +500,7 @@ func TestRequestApproval_Timeout(t *testing.T) {
 	var reqErr error
 	go func() {
 		defer close(done)
-		resp, reqErr = broker.Request("example.com", 80, 300*time.Millisecond)
+		resp, reqErr = broker.Request("example.com", 80, "", 300*time.Millisecond)
 	}()
 
 	select {
@@ -574,7 +574,7 @@ func TestMultiChannelBroadcastWithHTTP(t *testing.T) {
 	var resp channel.Response
 	go func() {
 		defer close(done)
-		resp, _ = broker.Request("api.github.com", 443, 5*time.Second)
+		resp, _ = broker.Request("api.github.com", 443, "", 5*time.Second)
 	}()
 
 	select {
@@ -646,7 +646,7 @@ func TestHTTPChannelFromStoreConfig(t *testing.T) {
 	var resp channel.Response
 	go func() {
 		defer close(done)
-		resp, _ = broker.Request("test.com", 443, 5*time.Second)
+		resp, _ = broker.Request("test.com", 443, "", 5*time.Second)
 	}()
 
 	select {
@@ -677,7 +677,7 @@ func TestRequestApproval_StopDuringRetry(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = broker.Request("example.com", 443, 10*time.Second)
+		_, _ = broker.Request("example.com", 443, "", 10*time.Second)
 	}()
 
 	// Give time for first attempt, then stop.

@@ -107,9 +107,19 @@ func (b *Broker) now() time.Time {
 	return time.Now()
 }
 
+// RequestOption configures optional fields on an ApprovalRequest.
+type RequestOption func(*ApprovalRequest)
+
+// WithToolArgs sets the truncated tool arguments on an MCP approval request.
+func WithToolArgs(args string) RequestOption {
+	return func(r *ApprovalRequest) {
+		r.ToolArgs = args
+	}
+}
+
 // Request sends an approval request to all channels and blocks until one
 // responds or the timeout expires. Returns the first response received.
-func (b *Broker) Request(dest string, port int, timeout time.Duration) (Response, error) {
+func (b *Broker) Request(dest string, port int, protocol string, timeout time.Duration, opts ...RequestOption) (Response, error) {
 	id := fmt.Sprintf("req_%d", b.nextID.Add(1))
 	ch := make(chan Response, 1)
 
@@ -158,7 +168,11 @@ func (b *Broker) Request(dest string, port int, timeout time.Duration) (Response
 		ID:          id,
 		Destination: dest,
 		Port:        port,
+		Protocol:    protocol,
 		CreatedAt:   b.now(),
+	}
+	for _, opt := range opts {
+		opt(&req)
 	}
 	b.waiters[id] = waiter{ch: ch, req: req}
 	b.mu.Unlock()

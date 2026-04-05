@@ -261,7 +261,8 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 		} else {
 			log.Printf("[ASK] %s:%d (waiting for Telegram approval)", dest, port)
 			timeout := time.Duration(eng.TimeoutSec) * time.Second
-			resp, err := r.broker.Request(dest, port, timeout)
+			proto := DetectProtocol(port)
+			resp, err := r.broker.Request(dest, port, proto.String(), timeout)
 			if err != nil {
 				effectiveVerdict = policy.Deny
 				reason = fmt.Sprintf("approval timeout: %v", err)

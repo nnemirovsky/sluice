@@ -358,7 +358,7 @@ func TestRequestApproval(t *testing.T) {
 	var resp channel.Response
 	var reqErr error
 	go func() {
-		resp, reqErr = broker.Request("evil.com", 443, 5*time.Second)
+		resp, reqErr = broker.Request("evil.com", 443, "", 5*time.Second)
 		close(done)
 	}()
 
@@ -443,7 +443,7 @@ func TestRequestApprovalSendFailureSingleChannel(t *testing.T) {
 	tc.SetBroker(broker)
 
 	// In single-channel mode, send failure should auto-deny.
-	resp, err := broker.Request("fail.com", 443, 3*time.Second)
+	resp, err := broker.Request("fail.com", 443, "", 3*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -636,7 +636,7 @@ func TestHandleCallbackAllowOnce(t *testing.T) {
 
 	done := make(chan channel.Response, 1)
 	go func() {
-		resp, _ := broker.Request("test.com", 443, 5*time.Second)
+		resp, _ := broker.Request("test.com", 443, "", 5*time.Second)
 		done <- resp
 	}()
 
@@ -673,7 +673,7 @@ func TestHandleCallbackAlwaysAllow(t *testing.T) {
 
 	done := make(chan channel.Response, 1)
 	go func() {
-		resp, _ := broker.Request("test.com", 443, 5*time.Second)
+		resp, _ := broker.Request("test.com", 443, "", 5*time.Second)
 		done <- resp
 	}()
 
@@ -707,7 +707,7 @@ func TestHandleCallbackDeny(t *testing.T) {
 
 	done := make(chan channel.Response, 1)
 	go func() {
-		resp, _ := broker.Request("test.com", 443, 5*time.Second)
+		resp, _ := broker.Request("test.com", 443, "", 5*time.Second)
 		done <- resp
 	}()
 
@@ -741,7 +741,7 @@ func TestHandleCallbackUnauthorizedChat(t *testing.T) {
 
 	done := make(chan channel.Response, 1)
 	go func() {
-		resp, _ := broker.Request("test.com", 443, 500*time.Millisecond)
+		resp, _ := broker.Request("test.com", 443, "", 500*time.Millisecond)
 		done <- resp
 	}()
 
@@ -854,7 +854,7 @@ func TestHandleCallbackTimedOutRequest(t *testing.T) {
 	tc.SetBroker(broker)
 
 	// Create a request and let it time out.
-	_, _ = broker.Request("timeout.com", 443, 50*time.Millisecond)
+	_, _ = broker.Request("timeout.com", 443, "", 50*time.Millisecond)
 	time.Sleep(150 * time.Millisecond)
 
 	// The request timed out, so the callback should report "Request timed out".
@@ -891,7 +891,7 @@ func TestStaleApprovalCleanup(t *testing.T) {
 	// Request that times out while the Telegram API call is in flight.
 	// The sendApprovalMessage should detect the timed-out state and edit
 	// the message to show "(request timed out)".
-	resp, _ := broker.Request("stale.com", 443, 50*time.Millisecond)
+	resp, _ := broker.Request("stale.com", 443, "", 50*time.Millisecond)
 	if resp != channel.ResponseDeny {
 		t.Errorf("expected Deny on timeout, got %v", resp)
 	}

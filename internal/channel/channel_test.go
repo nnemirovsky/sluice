@@ -145,7 +145,7 @@ func TestBrokerBroadcastToAllChannels(t *testing.T) {
 
 	broker = NewBroker([]Channel{ch1, ch2})
 
-	resp, err := broker.Request("evil.com", 443, 5*time.Second)
+	resp, err := broker.Request("evil.com", 443, "", 5*time.Second)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestBrokerFirstResponseWins(t *testing.T) {
 
 	broker = NewBroker([]Channel{ch1, ch2})
 
-	resp, err := broker.Request("evil.com", 443, 5*time.Second)
+	resp, err := broker.Request("evil.com", 443, "", 5*time.Second)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestBrokerCancelOnOtherChannels(t *testing.T) {
 
 	broker = NewBroker([]Channel{ch1, ch2})
 
-	_, err := broker.Request("evil.com", 443, 5*time.Second)
+	_, err := broker.Request("evil.com", 443, "", 5*time.Second)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestBrokerSimultaneousResolve(t *testing.T) {
 	done := make(chan struct{})
 	var resp Response
 	go func() {
-		resp, _ = broker.Request("evil.com", 443, 5*time.Second)
+		resp, _ = broker.Request("evil.com", 443, "", 5*time.Second)
 		close(done)
 	}()
 
@@ -305,7 +305,7 @@ func TestBrokerPendingLimitExceeded(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = broker.Request("example.com", 443, 2*time.Second)
+			_, _ = broker.Request("example.com", 443, "", 2*time.Second)
 		}()
 	}
 	// Wait until all 3 are registered as waiters.
@@ -314,7 +314,7 @@ func TestBrokerPendingLimitExceeded(t *testing.T) {
 	}
 
 	// The 4th request should be auto-denied.
-	resp, err := broker.Request("example.com", 443, time.Second)
+	resp, err := broker.Request("example.com", 443, "", time.Second)
 	if resp != ResponseDeny {
 		t.Errorf("expected Deny, got %v", resp)
 	}
@@ -355,7 +355,7 @@ func TestBrokerPendingLimitZeroMeansUnlimited(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := broker.Request("example.com", 443, 5*time.Second)
+			_, err := broker.Request("example.com", 443, "", 5*time.Second)
 			if errors.Is(err, ErrPendingLimitExceeded) {
 				t.Error("should not hit pending limit with MaxPending=0")
 			}
@@ -384,14 +384,14 @@ func TestBrokerDestinationRateLimiting(t *testing.T) {
 
 	// First 3 requests to the same destination should succeed.
 	for i := 0; i < 3; i++ {
-		_, err := broker.Request("api.example.com", 443, time.Second)
+		_, err := broker.Request("api.example.com", 443, "", time.Second)
 		if err != nil {
 			t.Fatalf("request %d: unexpected error: %v", i, err)
 		}
 	}
 
 	// 4th request within the same window should be rate limited.
-	resp, err := broker.Request("api.example.com", 443, time.Second)
+	resp, err := broker.Request("api.example.com", 443, "", time.Second)
 	if resp != ResponseDeny {
 		t.Errorf("expected Deny, got %v", resp)
 	}
@@ -400,14 +400,14 @@ func TestBrokerDestinationRateLimiting(t *testing.T) {
 	}
 
 	// A different destination should still work.
-	_, err = broker.Request("other.example.com", 443, time.Second)
+	_, err = broker.Request("other.example.com", 443, "", time.Second)
 	if err != nil {
 		t.Fatalf("different destination should not be rate limited: %v", err)
 	}
 
 	// Advance time past the window. The original destination should work again.
 	fakeNow = fakeNow.Add(61 * time.Second)
-	_, err = broker.Request("api.example.com", 443, time.Second)
+	_, err = broker.Request("api.example.com", 443, "", time.Second)
 	if err != nil {
 		t.Fatalf("after window expiry, request should succeed: %v", err)
 	}
@@ -431,7 +431,7 @@ func TestBrokerDestinationRateLimitDisabled(t *testing.T) {
 
 	// Should accept many requests without rate limiting.
 	for i := 0; i < 20; i++ {
-		_, err := broker.Request("api.example.com", 443, time.Second)
+		_, err := broker.Request("api.example.com", 443, "", time.Second)
 		if err != nil {
 			t.Fatalf("request %d: unexpected error: %v", i, err)
 		}
@@ -454,7 +454,7 @@ func TestBrokerCancelAllDeniesAllPending(t *testing.T) {
 	// Start n requests that will block waiting for approval.
 	for i := 0; i < n; i++ {
 		go func() {
-			resp, err := broker.Request("cancel-test.com", 443, 5*time.Second)
+			resp, err := broker.Request("cancel-test.com", 443, "", 5*time.Second)
 			results <- result{resp, err}
 		}()
 	}
@@ -489,7 +489,7 @@ func TestBrokerCancelAllRejectsNewRequests(t *testing.T) {
 	broker.CancelAll()
 
 	start := time.Now()
-	resp, err := broker.Request("post-cancel.com", 443, 5*time.Second)
+	resp, err := broker.Request("post-cancel.com", 443, "", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if resp != ResponseDeny {
@@ -511,7 +511,7 @@ func TestBrokerCancelAllCallsCancelOnChannels(t *testing.T) {
 
 	// Send a request that blocks.
 	go func() {
-		_, _ = broker.Request("test.com", 443, 5*time.Second)
+		_, _ = broker.Request("test.com", 443, "", 5*time.Second)
 	}()
 
 	// Wait for it to register.
@@ -539,7 +539,7 @@ func TestBrokerTimeout(t *testing.T) {
 	ch1 := newMockChannel(ChannelTelegram)
 	broker := NewBroker([]Channel{ch1})
 
-	resp, err := broker.Request("slow.com", 443, 50*time.Millisecond)
+	resp, err := broker.Request("slow.com", 443, "", 50*time.Millisecond)
 	if err == nil {
 		t.Fatalf("expected timeout error, got response %v", resp)
 	}
@@ -553,7 +553,7 @@ func TestBrokerTimeoutCallsCancelOnChannels(t *testing.T) {
 	ch2 := newMockChannel(ChannelHTTP)
 	broker := NewBroker([]Channel{ch1, ch2})
 
-	_, _ = broker.Request("slow.com", 443, 50*time.Millisecond)
+	_, _ = broker.Request("slow.com", 443, "", 50*time.Millisecond)
 
 	// Give cancellations time to propagate.
 	time.Sleep(20 * time.Millisecond)
@@ -571,7 +571,7 @@ func TestBrokerTimeoutCallsCancelOnChannels(t *testing.T) {
 func TestBrokerNoChannelsTimesOut(t *testing.T) {
 	broker := NewBroker(nil)
 
-	resp, err := broker.Request("no-channels.com", 443, 50*time.Millisecond)
+	resp, err := broker.Request("no-channels.com", 443, "", 50*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected timeout error with no channels")
 	}
@@ -593,7 +593,7 @@ func TestBrokerHasWaiterAndTimedOut(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		_, _ = broker.Request("test.com", 443, 50*time.Millisecond)
+		_, _ = broker.Request("test.com", 443, "", 50*time.Millisecond)
 		close(done)
 	}()
 
@@ -647,7 +647,7 @@ func TestBrokerEmptyChannelSlice(t *testing.T) {
 	// Empty slice (not nil) should behave the same as nil channels.
 	broker := NewBroker([]Channel{})
 
-	resp, err := broker.Request("empty-slice.com", 443, 50*time.Millisecond)
+	resp, err := broker.Request("empty-slice.com", 443, "", 50*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected timeout error with empty channel slice")
 	}
@@ -684,7 +684,7 @@ func TestBrokerChannelPanicRecovery(t *testing.T) {
 	broker = NewBroker([]Channel{panicCh, goodCh})
 
 	// The panicking channel should not prevent the good channel from resolving.
-	resp, err := broker.Request("panic-test.com", 443, 5*time.Second)
+	resp, err := broker.Request("panic-test.com", 443, "", 5*time.Second)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
@@ -705,7 +705,7 @@ func TestBrokerAllChannelsPanic(t *testing.T) {
 	broker := NewBroker([]Channel{panicCh1, panicCh2})
 
 	// With all channels panicking, the request should time out.
-	resp, err := broker.Request("all-panic.com", 443, 50*time.Millisecond)
+	resp, err := broker.Request("all-panic.com", 443, "", 50*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected timeout error when all channels panic")
 	}
@@ -720,7 +720,7 @@ func TestBrokerPendingRequests(t *testing.T) {
 
 	// Start a request that blocks.
 	go func() {
-		_, _ = broker.Request("pending-test.com", 443, 5*time.Second)
+		_, _ = broker.Request("pending-test.com", 443, "", 5*time.Second)
 	}()
 
 	// Wait for it to register.
@@ -780,7 +780,7 @@ func TestBrokerChannelErrorDoesNotBlockOthers(t *testing.T) {
 
 	broker = NewBroker([]Channel{ch1, ch2})
 
-	resp, err := broker.Request("test.com", 443, 5*time.Second)
+	resp, err := broker.Request("test.com", 443, "", 5*time.Second)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}

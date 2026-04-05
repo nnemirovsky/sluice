@@ -29,7 +29,9 @@ type WebhookPayload struct {
 	Type        string    `json:"type"`
 	Destination string    `json:"destination"`
 	Port        int       `json:"port"`
-	Tool        string    `json:"tool"`
+	Protocol    string    `json:"protocol,omitempty"`
+	Tool        string    `json:"tool,omitempty"`
+	ToolArgs    string    `json:"tool_args,omitempty"`
 	Timestamp   time.Time `json:"timestamp"`
 }
 
@@ -129,8 +131,12 @@ func (h *HTTPChannel) deliverApproval(req channel.ApprovalRequest) {
 		Type:        "approval",
 		Destination: req.Destination,
 		Port:        req.Port,
-		Tool:        "",
+		Protocol:    req.Protocol,
+		ToolArgs:    req.ToolArgs,
 		Timestamp:   req.CreatedAt,
+	}
+	if req.Protocol == "mcp" {
+		payload.Tool = req.Destination
 	}
 
 	body, err := json.Marshal(payload)

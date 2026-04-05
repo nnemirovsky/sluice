@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/nemirovsky/sluice/internal/channel"
 )
 
 func TestSanitizeError(t *testing.T) {
@@ -44,15 +46,72 @@ func TestSanitizeError(t *testing.T) {
 }
 
 func TestFormatApprovalMessage(t *testing.T) {
-	msg := FormatApprovalMessage("api.evil.com", 443)
-	if msg == "" {
-		t.Fatal("expected non-empty message")
-	}
-	// Should contain the destination
-	if !strings.Contains(msg, "api.evil.com") {
-		t.Error("message should contain destination")
-	}
-	if !strings.Contains(msg, "443") {
-		t.Error("message should contain port")
-	}
+	t.Run("network connection", func(t *testing.T) {
+		req := channel.ApprovalRequest{
+			Destination: "api.evil.com",
+			Port:        443,
+			Protocol:    "https",
+		}
+		msg := FormatApprovalMessage(req)
+		if msg == "" {
+			t.Fatal("expected non-empty message")
+		}
+		if !strings.Contains(msg, "api.evil.com") {
+			t.Error("message should contain destination")
+		}
+		if !strings.Contains(msg, "443") {
+			t.Error("message should contain port")
+		}
+		if !strings.Contains(msg, "https://") {
+			t.Error("message should contain protocol scheme")
+		}
+		if !strings.Contains(msg, "OpenClaw wants to connect") {
+			t.Error("message should use network connection wording")
+		}
+	})
+
+	t.Run("network connection with empty protocol", func(t *testing.T) {
+		req := channel.ApprovalRequest{
+			Destination: "example.com",
+			Port:        8080,
+		}
+		msg := FormatApprovalMessage(req)
+		if !strings.Contains(msg, "tcp://") {
+			t.Error("empty protocol should default to tcp")
+		}
+	})
+
+	t.Run("mcp tool call", func(t *testing.T) {
+		req := channel.ApprovalRequest{
+			Destination: "github__delete_repository",
+			Port:        0,
+			Protocol:    "mcp",
+			ToolArgs:    `{"owner":"test","repo":"my-repo"}`,
+		}
+		msg := FormatApprovalMessage(req)
+		if !strings.Contains(msg, "github__delete_repository") {
+			t.Error("message should contain tool name")
+		}
+		if !strings.Contains(msg, "OpenClaw wants to call tool") {
+			t.Error("message should use MCP tool call wording")
+		}
+		if !strings.Contains(msg, `{"owner":"test","repo":"my-repo"}`) {
+			t.Error("message should contain tool arguments")
+		}
+		if !strings.Contains(msg, "Allow this tool call?") {
+			t.Error("message should ask about tool call, not connection")
+		}
+	})
+
+	t.Run("mcp tool call without args", func(t *testing.T) {
+		req := channel.ApprovalRequest{
+			Destination: "github__list_repos",
+			Port:        0,
+			Protocol:    "mcp",
+		}
+		msg := FormatApprovalMessage(req)
+		if strings.Contains(msg, "Arguments:") {
+			t.Error("message should not contain Arguments section when ToolArgs is empty")
+		}
+	})
 }

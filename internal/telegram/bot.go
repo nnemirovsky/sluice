@@ -3,6 +3,8 @@ package telegram
 import (
 	"fmt"
 	"regexp"
+
+	"github.com/nemirovsky/sluice/internal/channel"
 )
 
 // tokenPattern matches Telegram bot tokens embedded in URLs or error messages.
@@ -21,8 +23,21 @@ func sanitizeError(err error) string {
 // We leave a small margin for the truncation notice.
 const telegramMaxMessage = 4000
 
-// FormatApprovalMessage builds the Telegram message text for a connection
-// approval request.
-func FormatApprovalMessage(dest string, port int) string {
-	return fmt.Sprintf("Agent wants to connect to:\n\n%s:%d\n\nAllow this connection?", dest, port)
+// FormatApprovalMessage builds the Telegram message text for an approval
+// request. MCP tool calls (protocol == "mcp") show the tool name and
+// arguments. Network connections show the protocol, destination, and port.
+func FormatApprovalMessage(req channel.ApprovalRequest) string {
+	if req.Protocol == "mcp" {
+		msg := fmt.Sprintf("OpenClaw wants to call tool:\n\n%s", req.Destination)
+		if req.ToolArgs != "" {
+			msg += fmt.Sprintf("\n\nArguments:\n%s", req.ToolArgs)
+		}
+		msg += "\n\nAllow this tool call?"
+		return msg
+	}
+	proto := req.Protocol
+	if proto == "" {
+		proto = "tcp"
+	}
+	return fmt.Sprintf("OpenClaw wants to connect to:\n\n%s://%s:%d\n\nAllow this connection?", proto, req.Destination, req.Port)
 }

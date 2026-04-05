@@ -322,7 +322,7 @@ func TestGetApiApprovals_WithPending(t *testing.T) {
 
 	// Fire a request in a goroutine (blocks until resolved or timeout)
 	go func() {
-		_, _ = broker.Request("api.github.com", 443, 30*time.Second)
+		_, _ = broker.Request("api.github.com", 443, "", 30*time.Second)
 	}()
 
 	// Wait briefly for the request to register
@@ -371,7 +371,7 @@ func TestPostResolve_Success(t *testing.T) {
 	// Create a pending request
 	resultCh := make(chan channel.Response, 1)
 	go func() {
-		resp, _ := broker.Request("example.com", 443, 30*time.Second)
+		resp, _ := broker.Request("example.com", 443, "", 30*time.Second)
 		resultCh <- resp
 	}()
 	time.Sleep(50 * time.Millisecond)
@@ -486,7 +486,7 @@ func TestPostResolve_AlwaysAllow(t *testing.T) {
 
 	resultCh := make(chan channel.Response, 1)
 	go func() {
-		resp, _ := broker.Request("example.com", 443, 30*time.Second)
+		resp, _ := broker.Request("example.com", 443, "", 30*time.Second)
 		resultCh <- resp
 	}()
 	time.Sleep(50 * time.Millisecond)

@@ -124,7 +124,7 @@ func (tc *TelegramChannel) sendApprovalMessage(req channel.ApprovalRequest) {
 		return
 	}
 
-	msg := tgbotapi.NewMessage(tc.chatID, FormatApprovalMessage(req.Destination, req.Port))
+	msg := tgbotapi.NewMessage(tc.chatID, FormatApprovalMessage(req))
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("Allow Once", req.ID+"|allow_once"),
@@ -151,7 +151,7 @@ func (tc *TelegramChannel) sendApprovalMessage(req channel.ApprovalRequest) {
 	// see a stale prompt.
 	if tc.broker != nil && tc.broker.WasTimedOut(req.ID) {
 		edit := tgbotapi.NewEditMessageText(tc.chatID, sent.MessageID,
-			FormatApprovalMessage(req.Destination, req.Port)+"\n\n(request timed out)")
+			FormatApprovalMessage(req)+"\n\n(request timed out)")
 		if _, editErr := tc.api.Send(edit); editErr == nil {
 			tc.broker.ClearTimedOut(req.ID)
 		}

@@ -60,6 +60,8 @@ type ApprovalRequest struct {
 	ID          string
 	Destination string
 	Port        int
+	Protocol    string // detected protocol (e.g. "https", "ssh", "mcp")
+	ToolArgs    string // truncated tool arguments (MCP only)
 	CreatedAt   time.Time
 }
 

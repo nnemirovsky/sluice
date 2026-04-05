@@ -179,7 +179,7 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 		}
 		log.Printf("[MCP ASK] %s (args: %s)", req.Name, argsStr)
 		timeout := time.Duration(gw.timeoutSec) * time.Second
-		resp, err := gw.broker.Request(fmt.Sprintf("MCP:%s", req.Name), 0, timeout)
+		resp, err := gw.broker.Request(req.Name, 0, "mcp", timeout, channel.WithToolArgs(argsStr))
 		if err != nil {
 			gw.logAudit(req.Name, "tool_call", policy.Deny)
 			return &ToolResult{
