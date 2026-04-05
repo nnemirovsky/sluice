@@ -134,16 +134,16 @@ tart exec openclaw -- security add-trusted-cert \
 - Create: `internal/container/tart.go`
 - Create: `internal/container/tart_test.go`
 
-- [ ] Implement `TartManager` struct using the existing `CommandRunner` interface for testability (same pattern as `AppleManager`)
-- [ ] Implement `tart clone` for creating VM from OCI image
-- [ ] Implement `tart run` with `--dir` flags for VirtioFS volumes and `--no-graphics` for headless. IMPORTANT: `tart run` is a BLOCKING command (unlike `container run`). Must use `cmd.Start()` (not `cmd.Run()`) and manage the process in a background goroutine. Add a `StartBackground(name string, args ...string) (*exec.Cmd, error)` method to CommandRunner or use a separate launch path.
-- [ ] Implement `tart exec` for running commands inside the VM (requires tart agent in guest image)
-- [ ] Implement `tart stop` and `tart delete` for lifecycle management
-- [ ] Implement `tart list --format json` and `tart ip` for status and IP retrieval (parse JSON output, not table)
-- [ ] Check if `tart` binary exists on creation (clear error if not installed)
-- [ ] Write tests with mock CommandRunner (capture commands, return canned output)
-- [ ] Write tests for error cases (binary not found, VM not running, exec failure)
-- [ ] Run tests: `go test ./internal/container/ -v -timeout 30s`
+- [x] Implement `TartManager` struct using the existing `CommandRunner` interface for testability (same pattern as `AppleManager`)
+- [x] Implement `tart clone` for creating VM from OCI image
+- [x] Implement `tart run` with `--dir` flags for VirtioFS volumes and `--no-graphics` for headless. IMPORTANT: `tart run` is a BLOCKING command (unlike `container run`). Must use `cmd.Start()` (not `cmd.Run()`) and manage the process in a background goroutine. Add a `StartBackground(name string, args ...string) (*exec.Cmd, error)` method to CommandRunner or use a separate launch path.
+- [x] Implement `tart exec` for running commands inside the VM (requires tart agent in guest image)
+- [x] Implement `tart stop` and `tart delete` for lifecycle management
+- [x] Implement `tart list --format json` and `tart ip` for status and IP retrieval (parse JSON output, not table)
+- [x] Check if `tart` binary exists on creation (clear error if not installed)
+- [x] Write tests with mock CommandRunner (capture commands, return canned output)
+- [x] Write tests for error cases (binary not found, VM not running, exec failure)
+- [x] Run tests: `go test ./internal/container/ -v -timeout 30s`
 
 ### Task 3: Implement ContainerManager interface
 
