@@ -28,12 +28,7 @@ archives:
     name_template: "sluice_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 changelog:
-  sort: asc
-  filters:
-    exclude:
-      - "^docs:"
-      - "^test:"
-      - "^ci:"
+  disable: true
 
 release:
   github:
