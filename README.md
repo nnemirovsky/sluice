@@ -2,24 +2,27 @@
 
 Governance and credential injection proxy for [OpenClaw](https://github.com/openclaw/openclaw). Keeps real secrets out of the agent, enforces per-request policy on every connection and tool call, and puts a human in the loop when it matters.
 
+## Features
+
+- **Phantom token credential injection.** OpenClaw gets fake API keys. Sluice swaps them for real credentials in-flight via MITM. Leaked tokens are useless outside the proxy.
+- **Two-layer governance.** MCP gateway intercepts tool calls (names, arguments, responses). SOCKS5 proxy intercepts all network traffic (HTTP, HTTPS, WebSocket, gRPC, SSH, IMAP, SMTP, DNS, QUIC/HTTP3).
+- **Human-in-the-loop approval.** "Ask" policy rules trigger Telegram or webhook notifications. OpenClaw blocks until a human responds.
+- **Policy engine.** Glob-based rules for destinations, protocols, ports, and MCP tools. Content inspection blocks secrets in arguments and redacts them from responses.
+- **7 credential backends.** age (default), HashiCorp Vault, 1Password, Bitwarden, KeePass, gopass, environment variables. Chain multiple providers.
+- **Hot credential reload.** Add or rotate credentials via Telegram or CLI. Phantom tokens are regenerated and pushed to OpenClaw without restarts.
+- **Tamper-evident audit log.** Every connection, tool call, and approval decision is logged with blake3 hash chaining.
+- **4 deployment modes.** Docker, Apple Container (macOS micro-VMs), macOS VM via tart (Apple framework access), or standalone binary.
+
 ## Why Sluice
 
-AI agents need credentials to be useful. Giving them real credentials is dangerous.
+AI agents need credentials to be useful. Giving them real credentials is dangerous. They can leak secrets in tool outputs, connect to unexpected endpoints, or make destructive API calls without oversight.
 
-**The problem:** OpenClaw makes API calls, opens network connections, and invokes MCP tools. Without governance, it can leak secrets in tool outputs, connect to unexpected endpoints, or make destructive API calls. No existing tool combines credential isolation, human approval, all-protocol interception, and MCP-level governance in one place.
-
-**The solution:** Sluice intercepts everything at two layers and never gives OpenClaw real credentials.
+No existing tool combines credential isolation, human approval, all-protocol interception, and MCP-level governance in one place. Sluice intercepts everything at two layers and never gives OpenClaw real credentials.
 
 | Layer | What it sees | What it governs |
 |-------|-------------|-----------------|
 | **MCP Gateway** | Tool names, arguments, responses | File writes, exec, deletions, any MCP tool call |
 | **SOCKS5 Proxy** | Every TCP and UDP connection | HTTP, HTTPS, WebSocket, gRPC, SSH, IMAP, SMTP, DNS, QUIC/HTTP3 |
-
-**Phantom token swap:** OpenClaw gets phantom tokens that look like real API keys. Sluice's MITM proxy swaps them for real credentials in-flight. If a phantom token leaks, it is useless outside the proxy.
-
-**Human approval:** Connections and tool calls matching "ask" policy rules trigger a notification via Telegram or HTTP webhook. OpenClaw blocks until a human responds with Allow or Deny.
-
-**Credential isolation:** Real secrets live in an encrypted vault (age, HashiCorp Vault, 1Password, Bitwarden, KeePass, or gopass). They are decrypted into zeroed memory only at injection time and never exposed to the agent process.
 
 ## How It Works
 
