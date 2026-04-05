@@ -509,6 +509,185 @@ func TestHashiCorpProviderInterfaceCompliance(t *testing.T) {
 	}
 }
 
+func TestHashiCorpProviderMalformedResponse(t *testing.T) {
+	// Server returns data where "data" nested key is not a map.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Vault-Token") == "" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"data":     "not-a-map",
+				"metadata": map[string]interface{}{"version": 1},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	p, err := NewHashiCorpProvider(HashiCorpConfig{
+		Addr:  srv.URL,
+		Token: "test-token",
+	})
+	if err != nil {
+		t.Fatalf("NewHashiCorpProvider: %v", err)
+	}
+
+	_, err = p.Get("malformed")
+	if err == nil {
+		t.Fatal("expected error for malformed data field")
+	}
+	if !strings.Contains(err.Error(), "not a map") {
+		t.Errorf("error = %q, want it to contain 'not a map'", err.Error())
+	}
+}
+
+func TestHashiCorpProviderValueNotString(t *testing.T) {
+	// Server returns a "value" key that is not a string.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Vault-Token") == "" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"data":     map[string]interface{}{"value": 12345},
+				"metadata": map[string]interface{}{"version": 1},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	p, err := NewHashiCorpProvider(HashiCorpConfig{
+		Addr:  srv.URL,
+		Token: "test-token",
+	})
+	if err != nil {
+		t.Fatalf("NewHashiCorpProvider: %v", err)
+	}
+
+	_, err = p.Get("numeric_value")
+	if err == nil {
+		t.Fatal("expected error for non-string value")
+	}
+	if !strings.Contains(err.Error(), "not a string") {
+		t.Errorf("error = %q, want it to contain 'not a string'", err.Error())
+	}
+}
+
+func TestHashiCorpProviderNoDataField(t *testing.T) {
+	// Server returns data without the nested "data" key.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Vault-Token") == "" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"metadata": map[string]interface{}{"version": 1},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	p, err := NewHashiCorpProvider(HashiCorpConfig{
+		Addr:  srv.URL,
+		Token: "test-token",
+	})
+	if err != nil {
+		t.Fatalf("NewHashiCorpProvider: %v", err)
+	}
+
+	_, err = p.Get("no_data_key")
+	if err == nil {
+		t.Fatal("expected error for missing data field")
+	}
+	if !strings.Contains(err.Error(), "no data field") {
+		t.Errorf("error = %q, want it to contain 'no data field'", err.Error())
+	}
+}
+
+func TestHashiCorpProviderListKeysNotList(t *testing.T) {
+	// Server returns "keys" that is not a list.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Vault-Token") == "" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"data": map[string]interface{}{
+				"keys": "not-a-list",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	p, err := NewHashiCorpProvider(HashiCorpConfig{
+		Addr:  srv.URL,
+		Token: "test-token",
+	})
+	if err != nil {
+		t.Fatalf("NewHashiCorpProvider: %v", err)
+	}
+
+	_, err = p.List()
+	if err == nil {
+		t.Fatal("expected error for non-list keys")
+	}
+	if !strings.Contains(err.Error(), "not a list") {
+		t.Errorf("error = %q, want it to contain 'not a list'", err.Error())
+	}
+}
+
+func TestHashiCorpProviderConnectionTimeout(t *testing.T) {
+	// Server that never responds (sleeps longer than HTTP client timeout).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The provider sets a 30s client timeout, so we can't wait that long
+		// in a test. Instead, test against a closed server.
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	// Close immediately so connections are refused.
+	srv.Close()
+
+	p, err := NewHashiCorpProvider(HashiCorpConfig{
+		Addr:  srv.URL,
+		Token: "test-token",
+	})
+	if err != nil {
+		t.Fatalf("NewHashiCorpProvider: %v", err)
+	}
+
+	// Get should fail with a connection error.
+	_, err = p.Get("some_key")
+	if err == nil {
+		t.Fatal("expected error when server is down")
+	}
+}
+
+func TestHashiCorpProviderEmptyCredentialName(t *testing.T) {
+	secrets := map[string]map[string]string{
+		"secret/data/test": {"value": "val"},
+	}
+	srv := newMockVaultServer(t, secrets, nil, "")
+	defer srv.Close()
+
+	p, err := NewHashiCorpProvider(HashiCorpConfig{
+		Addr:  srv.URL,
+		Token: "test-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = p.Get("")
+	if err == nil {
+		t.Fatal("expected error for empty credential name")
+	}
+	if !strings.Contains(err.Error(), "must not be empty") {
+		t.Errorf("error = %q, want it to contain 'must not be empty'", err.Error())
+	}
+}
+
 func TestHashiCorpProviderPathTraversal(t *testing.T) {
 	secrets := map[string]map[string]string{
 		"test": {"value": "val"},

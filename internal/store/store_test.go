@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 )
@@ -1544,6 +1545,235 @@ func TestListChannelsWithWebhookFields(t *testing.T) {
 	}
 }
 
+func TestNewStoreFilePath(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/test.db"
+	s, err := New(path)
+	if err != nil {
+		t.Fatalf("New with file path: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	// Verify the file was created with restricted permissions.
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("file permissions = %o, want 0600", info.Mode().Perm())
+	}
+
+	// Verify the store is functional.
+	_, err = s.AddRule("allow", RuleOpts{Destination: "test.com"})
+	if err != nil {
+		t.Fatalf("add rule to file store: %v", err)
+	}
+}
+
+func TestNewStoreFilePathExisting(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/existing.db"
+
+	// Create the file with wider permissions.
+	if err := os.WriteFile(path, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(path)
+	if err != nil {
+		t.Fatalf("New with existing file: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	// Verify permissions were tightened.
+	info, _ := os.Stat(path)
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("file permissions = %o, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestMigrationCorruptedDB(t *testing.T) {
+	// Write garbage to a file and try to open as a SQLite DB.
+	dir := t.TempDir()
+	path := dir + "/corrupted.db"
+	if err := os.WriteFile(path, []byte("this is not a sqlite database"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := New(path)
+	if err == nil {
+		t.Fatal("expected error for corrupted DB file")
+	}
+}
+
+func TestConcurrentImport(t *testing.T) {
+	s := newTestStore(t)
+
+	toml1 := []byte(`
+[[allow]]
+destination = "api.one.com"
+ports = [443]
+`)
+	toml2 := []byte(`
+[[allow]]
+destination = "api.two.com"
+ports = [443]
+`)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, errs[0] = s.ImportTOML(toml1)
+	}()
+	go func() {
+		defer wg.Done()
+		_, errs[1] = s.ImportTOML(toml2)
+	}()
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("import %d: %v", i, err)
+		}
+	}
+
+	rules, err := s.ListRules(RuleFilter{Type: "network"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 2 {
+		t.Errorf("expected 2 rules after concurrent import, got %d", len(rules))
+	}
+}
+
+func TestConfigAllFields(t *testing.T) {
+	s := newTestStore(t)
+
+	// Set every field.
+	verdict := "allow"
+	timeout := 30
+	provider := "1password"
+	dir := "/opt/vault"
+	providers := []string{"1password", "env"}
+	hcAddr := "https://vault.prod.com:8200"
+	hcMount := "kv-v2"
+	hcPrefix := "prod/"
+	hcAuth := "approle"
+	hcToken := "hvs.prod-token"
+	hcRoleID := "role-prod"
+	hcSecretID := "secret-prod"
+	hcRoleIDEnv := "MY_ROLE"
+	hcSecretIDEnv := "MY_SECRET"
+	opToken := "ops-token-xyz"
+	opVault := "production"
+	opField := "password"
+	bwToken := "bws-access-token"
+	bwOrgID := "org-uuid-123"
+	kpPath := "/secure/db.kdbx"
+	kpKeyFile := "/secure/key.keyx"
+	gpStore := "/data/gopass"
+
+	err := s.UpdateConfig(ConfigUpdate{
+		DefaultVerdict:            &verdict,
+		TimeoutSec:                &timeout,
+		VaultProvider:             &provider,
+		VaultDir:                  &dir,
+		VaultProviders:            &providers,
+		VaultHashicorpAddr:        &hcAddr,
+		VaultHashicorpMount:       &hcMount,
+		VaultHashicorpPrefix:      &hcPrefix,
+		VaultHashicorpAuth:        &hcAuth,
+		VaultHashicorpToken:       &hcToken,
+		VaultHashicorpRoleID:      &hcRoleID,
+		VaultHashicorpSecretID:    &hcSecretID,
+		VaultHashicorpRoleIDEnv:   &hcRoleIDEnv,
+		VaultHashicorpSecretIDEnv: &hcSecretIDEnv,
+		Vault1PasswordToken:       &opToken,
+		Vault1PasswordVault:       &opVault,
+		Vault1PasswordField:       &opField,
+		VaultBitwardenToken:       &bwToken,
+		VaultBitwardenOrgID:       &bwOrgID,
+		VaultKeePassPath:          &kpPath,
+		VaultKeePassKeyFile:       &kpKeyFile,
+		VaultGopassStore:          &gpStore,
+	})
+	if err != nil {
+		t.Fatalf("update all: %v", err)
+	}
+
+	cfg, err := s.GetConfig()
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if cfg.DefaultVerdict != verdict {
+		t.Errorf("DefaultVerdict = %q", cfg.DefaultVerdict)
+	}
+	if cfg.TimeoutSec != timeout {
+		t.Errorf("TimeoutSec = %d", cfg.TimeoutSec)
+	}
+	if cfg.VaultProvider != provider {
+		t.Errorf("VaultProvider = %q", cfg.VaultProvider)
+	}
+	if cfg.VaultDir != dir {
+		t.Errorf("VaultDir = %q", cfg.VaultDir)
+	}
+	if len(cfg.VaultProviders) != 2 || cfg.VaultProviders[0] != "1password" || cfg.VaultProviders[1] != "env" {
+		t.Errorf("VaultProviders = %v", cfg.VaultProviders)
+	}
+	if cfg.VaultHashicorpAddr != hcAddr {
+		t.Errorf("VaultHashicorpAddr = %q", cfg.VaultHashicorpAddr)
+	}
+	if cfg.VaultHashicorpMount != hcMount {
+		t.Errorf("VaultHashicorpMount = %q", cfg.VaultHashicorpMount)
+	}
+	if cfg.VaultHashicorpPrefix != hcPrefix {
+		t.Errorf("VaultHashicorpPrefix = %q", cfg.VaultHashicorpPrefix)
+	}
+	if cfg.VaultHashicorpAuth != hcAuth {
+		t.Errorf("VaultHashicorpAuth = %q", cfg.VaultHashicorpAuth)
+	}
+	if cfg.VaultHashicorpToken != hcToken {
+		t.Errorf("VaultHashicorpToken = %q", cfg.VaultHashicorpToken)
+	}
+	if cfg.VaultHashicorpRoleID != hcRoleID {
+		t.Errorf("VaultHashicorpRoleID = %q", cfg.VaultHashicorpRoleID)
+	}
+	if cfg.VaultHashicorpSecretID != hcSecretID {
+		t.Errorf("VaultHashicorpSecretID = %q", cfg.VaultHashicorpSecretID)
+	}
+	if cfg.VaultHashicorpRoleIDEnv != hcRoleIDEnv {
+		t.Errorf("VaultHashicorpRoleIDEnv = %q", cfg.VaultHashicorpRoleIDEnv)
+	}
+	if cfg.VaultHashicorpSecretIDEnv != hcSecretIDEnv {
+		t.Errorf("VaultHashicorpSecretIDEnv = %q", cfg.VaultHashicorpSecretIDEnv)
+	}
+	if cfg.Vault1PasswordToken != opToken {
+		t.Errorf("Vault1PasswordToken = %q", cfg.Vault1PasswordToken)
+	}
+	if cfg.Vault1PasswordVault != opVault {
+		t.Errorf("Vault1PasswordVault = %q", cfg.Vault1PasswordVault)
+	}
+	if cfg.Vault1PasswordField != opField {
+		t.Errorf("Vault1PasswordField = %q", cfg.Vault1PasswordField)
+	}
+	if cfg.VaultBitwardenToken != bwToken {
+		t.Errorf("VaultBitwardenToken = %q", cfg.VaultBitwardenToken)
+	}
+	if cfg.VaultBitwardenOrgID != bwOrgID {
+		t.Errorf("VaultBitwardenOrgID = %q", cfg.VaultBitwardenOrgID)
+	}
+	if cfg.VaultKeePassPath != kpPath {
+		t.Errorf("VaultKeePassPath = %q", cfg.VaultKeePassPath)
+	}
+	if cfg.VaultKeePassKeyFile != kpKeyFile {
+		t.Errorf("VaultKeePassKeyFile = %q", cfg.VaultKeePassKeyFile)
+	}
+	if cfg.VaultGopassStore != gpStore {
+		t.Errorf("VaultGopassStore = %q", cfg.VaultGopassStore)
+	}
+}
+
 func TestAddChannelWithoutOpts(t *testing.T) {
 	s := newTestStore(t)
 	// Verify that the variadic opts parameter works when omitted.
@@ -1554,5 +1784,183 @@ func TestAddChannelWithoutOpts(t *testing.T) {
 	ch, _ := s.GetChannel(id)
 	if ch.WebhookURL != "" || ch.WebhookSecret != "" {
 		t.Error("channel without opts should have empty webhook fields")
+	}
+}
+
+func TestListBindingsByCredential(t *testing.T) {
+	s := newTestStore(t)
+	_, _ = s.AddBinding("api.one.com", "cred_a", BindingOpts{Ports: []int{443}})
+	_, _ = s.AddBinding("api.two.com", "cred_a", BindingOpts{Ports: []int{443}})
+	_, _ = s.AddBinding("api.three.com", "cred_b", BindingOpts{Ports: []int{443}})
+
+	bindings, err := s.ListBindingsByCredential("cred_a")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(bindings) != 2 {
+		t.Errorf("expected 2 bindings for cred_a, got %d", len(bindings))
+	}
+
+	bindings, err = s.ListBindingsByCredential("nonexistent")
+	if err != nil {
+		t.Fatalf("list nonexistent: %v", err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 bindings for nonexistent, got %d", len(bindings))
+	}
+}
+
+func TestRemoveBindingsByCredential(t *testing.T) {
+	s := newTestStore(t)
+	_, _ = s.AddBinding("api.one.com", "cred_a", BindingOpts{})
+	_, _ = s.AddBinding("api.two.com", "cred_a", BindingOpts{})
+	_, _ = s.AddBinding("api.three.com", "cred_b", BindingOpts{})
+
+	n, err := s.RemoveBindingsByCredential("cred_a")
+	if err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("expected 2 removed, got %d", n)
+	}
+
+	all, _ := s.ListBindings()
+	if len(all) != 1 {
+		t.Errorf("expected 1 remaining binding, got %d", len(all))
+	}
+	if all[0].Credential != "cred_b" {
+		t.Errorf("remaining binding should be cred_b, got %q", all[0].Credential)
+	}
+}
+
+func TestRemoveRulesByName(t *testing.T) {
+	s := newTestStore(t)
+	_, _ = s.AddRule("allow", RuleOpts{Destination: "a.com", Name: "test-rule"})
+	_, _ = s.AddRule("deny", RuleOpts{Destination: "b.com", Name: "test-rule"})
+	_, _ = s.AddRule("allow", RuleOpts{Destination: "c.com", Name: "other-rule"})
+
+	n, err := s.RemoveRulesByName("test-rule")
+	if err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("expected 2 removed, got %d", n)
+	}
+
+	rules, _ := s.ListRules(RuleFilter{})
+	if len(rules) != 1 {
+		t.Errorf("expected 1 remaining rule, got %d", len(rules))
+	}
+}
+
+func TestIsEmpty(t *testing.T) {
+	s := newTestStore(t)
+
+	empty, err := s.IsEmpty()
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if !empty {
+		t.Error("new store should be empty")
+	}
+
+	_, _ = s.AddRule("allow", RuleOpts{Destination: "test.com"})
+	empty, err = s.IsEmpty()
+	if err != nil {
+		t.Fatalf("check after add: %v", err)
+	}
+	if empty {
+		t.Error("store with rule should not be empty")
+	}
+}
+
+func TestIsEmptyWithBinding(t *testing.T) {
+	s := newTestStore(t)
+	_, _ = s.AddBinding("test.com", "cred", BindingOpts{})
+
+	empty, err := s.IsEmpty()
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if empty {
+		t.Error("store with binding should not be empty")
+	}
+}
+
+func TestIsEmptyWithUpstream(t *testing.T) {
+	s := newTestStore(t)
+	_, _ = s.AddMCPUpstream("test", "echo", MCPUpstreamOpts{})
+
+	empty, err := s.IsEmpty()
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if empty {
+		t.Error("store with upstream should not be empty")
+	}
+}
+
+func TestAddRuleAndBinding(t *testing.T) {
+	s := newTestStore(t)
+	ruleID, bindingID, err := s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{Destination: "api.example.com", Ports: []int{443}, Name: "api access"},
+		"api_key",
+		BindingOpts{Ports: []int{443}, Header: "Authorization", Template: "Bearer {value}"},
+	)
+	if err != nil {
+		t.Fatalf("AddRuleAndBinding: %v", err)
+	}
+	if ruleID < 1 {
+		t.Errorf("expected positive rule ID, got %d", ruleID)
+	}
+	if bindingID < 1 {
+		t.Errorf("expected positive binding ID, got %d", bindingID)
+	}
+
+	// Verify rule was created.
+	rules, _ := s.ListRules(RuleFilter{Type: "network"})
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rules))
+	}
+	if rules[0].Destination != "api.example.com" {
+		t.Errorf("rule destination = %q", rules[0].Destination)
+	}
+
+	// Verify binding was created.
+	bindings, _ := s.ListBindings()
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if bindings[0].Credential != "api_key" {
+		t.Errorf("binding credential = %q", bindings[0].Credential)
+	}
+}
+
+func TestAddRuleAndBindingValidation(t *testing.T) {
+	s := newTestStore(t)
+
+	// Missing verdict.
+	_, _, err := s.AddRuleAndBinding("", RuleOpts{Destination: "test.com"}, "cred", BindingOpts{})
+	if err == nil {
+		t.Error("expected error for empty verdict")
+	}
+
+	// Invalid verdict.
+	_, _, err = s.AddRuleAndBinding("bogus", RuleOpts{Destination: "test.com"}, "cred", BindingOpts{})
+	if err == nil {
+		t.Error("expected error for invalid verdict")
+	}
+
+	// Missing destination.
+	_, _, err = s.AddRuleAndBinding("allow", RuleOpts{}, "cred", BindingOpts{})
+	if err == nil {
+		t.Error("expected error for empty destination")
+	}
+
+	// Missing credential.
+	_, _, err = s.AddRuleAndBinding("allow", RuleOpts{Destination: "test.com"}, "", BindingOpts{})
+	if err == nil {
+		t.Error("expected error for empty credential")
 	}
 }

@@ -212,14 +212,21 @@ func (b *Broker) Request(dest string, port int, timeout time.Duration) (Response
 	}
 }
 
-// broadcast sends the approval request to all channels. Errors from
-// individual channels are logged but do not prevent other channels from
+// broadcast sends the approval request to all channels. Errors and panics
+// from individual channels are logged but do not prevent other channels from
 // receiving the request.
 func (b *Broker) broadcast(req ApprovalRequest) {
 	for _, ch := range b.channels {
-		if err := ch.RequestApproval(context.Background(), req); err != nil {
-			log.Printf("[WARN] channel failed to send approval request %s: %v", req.ID, err)
-		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[WARN] channel panicked during approval request %s: %v", req.ID, r)
+				}
+			}()
+			if err := ch.RequestApproval(context.Background(), req); err != nil {
+				log.Printf("[WARN] channel failed to send approval request %s: %v", req.ID, err)
+			}
+		}()
 	}
 }
 

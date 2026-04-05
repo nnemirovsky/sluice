@@ -142,17 +142,17 @@ Bring vault, store, mcp, channel packages to 85%+.
 **Files:**
 - Modify: test files in vault, store, mcp, channel packages
 
-- [ ] `internal/vault`: test HashiCorp provider edge cases (token renewal failure, connection timeout, malformed response)
-- [ ] `internal/vault`: test ChainProvider with all providers failing (verify error propagation)
-- [ ] `internal/vault`: test SecureBytes release and re-use after release
-- [ ] `internal/store`: test migration on corrupted DB (verify graceful error)
-- [ ] `internal/store`: test concurrent import (two goroutines importing simultaneously)
-- [ ] `internal/store`: test all config fields (get/update each typed field)
-- [ ] `internal/mcp`: test gateway with upstream that crashes mid-call (verify error handling)
-- [ ] `internal/mcp`: test tool namespace collision (two upstreams with same tool name)
-- [ ] `internal/channel`: test broker with zero channels (verify error)
-- [ ] `internal/channel`: test broker with channel that panics (verify recovery)
-- [ ] Run tests: `go test ./... -v -timeout 60s -cover`
+- [x] `internal/vault`: test HashiCorp provider edge cases (token renewal failure, connection timeout, malformed response)
+- [x] `internal/vault`: test ChainProvider with all providers failing (verify error propagation)
+- [x] `internal/vault`: test SecureBytes release and re-use after release
+- [x] `internal/store`: test migration on corrupted DB (verify graceful error)
+- [x] `internal/store`: test concurrent import (two goroutines importing simultaneously)
+- [x] `internal/store`: test all config fields (get/update each typed field)
+- [x] `internal/mcp`: test gateway with upstream that crashes mid-call (verify error handling)
+- [x] `internal/mcp`: test tool namespace collision (two upstreams with same tool name)
+- [x] `internal/channel`: test broker with zero channels (verify error)
+- [x] `internal/channel`: test broker with channel that panics (verify recovery)
+- [x] Run tests: `go test ./... -v -timeout 60s -cover`
 
 ### Task 6: Create e2e test infrastructure
 

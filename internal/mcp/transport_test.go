@@ -146,6 +146,36 @@ func TestHandleRequestUnknownNotification(t *testing.T) {
 	}
 }
 
+func TestHandleRequestPing(t *testing.T) {
+	gw := newTestGateway()
+	req := JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`6`),
+		Method:  "ping",
+	}
+
+	resp := gw.handleRequest(req)
+	if resp == nil {
+		t.Fatal("expected response, got nil")
+	}
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %s", resp.Error.Message)
+	}
+}
+
+func TestMarshalResultError(t *testing.T) {
+	// marshalResult should handle marshal errors gracefully.
+	// Use a value that can't be marshaled to JSON.
+	ch := make(chan int) // channels are not JSON-serializable
+	resp := marshalResult(json.RawMessage(`1`), ch)
+	if resp.Error == nil {
+		t.Fatal("expected error for unmarshalable value")
+	}
+	if resp.Error.Code != -32603 {
+		t.Errorf("error code = %d, want -32603", resp.Error.Code)
+	}
+}
+
 func TestHandleRequestToolsCallUnknownTool(t *testing.T) {
 	gw := newTestGateway()
 	req := JSONRPCRequest{

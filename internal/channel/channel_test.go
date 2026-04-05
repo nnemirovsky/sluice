@@ -643,6 +643,127 @@ func TestBrokerChannels(t *testing.T) {
 
 // --- Channel error does not block other channels ---
 
+func TestBrokerEmptyChannelSlice(t *testing.T) {
+	// Empty slice (not nil) should behave the same as nil channels.
+	broker := NewBroker([]Channel{})
+
+	resp, err := broker.Request("empty-slice.com", 443, 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout error with empty channel slice")
+	}
+	if resp != ResponseDeny {
+		t.Errorf("expected Deny, got %v", resp)
+	}
+
+	if len(broker.Channels()) != 0 {
+		t.Errorf("expected 0 channels, got %d", len(broker.Channels()))
+	}
+}
+
+// panicChannel is a mock that panics during RequestApproval.
+type panicChannel struct {
+	mockChannel
+}
+
+func (p *panicChannel) RequestApproval(_ context.Context, _ ApprovalRequest) error {
+	panic("channel exploded")
+}
+
+func TestBrokerChannelPanicRecovery(t *testing.T) {
+	panicCh := &panicChannel{mockChannel: mockChannel{typ: ChannelTelegram}}
+	goodCh := newMockChannel(ChannelHTTP)
+
+	var broker *Broker
+	goodCh.onRequest = func(req ApprovalRequest) {
+		go func() {
+			time.Sleep(5 * time.Millisecond)
+			broker.Resolve(req.ID, ResponseAllowOnce)
+		}()
+	}
+
+	broker = NewBroker([]Channel{panicCh, goodCh})
+
+	// The panicking channel should not prevent the good channel from resolving.
+	resp, err := broker.Request("panic-test.com", 443, 5*time.Second)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if resp != ResponseAllowOnce {
+		t.Errorf("expected AllowOnce, got %v", resp)
+	}
+
+	// The good channel should have received the request.
+	if len(goodCh.getRequests()) != 1 {
+		t.Errorf("good channel should have received 1 request, got %d", len(goodCh.getRequests()))
+	}
+}
+
+func TestBrokerAllChannelsPanic(t *testing.T) {
+	panicCh1 := &panicChannel{mockChannel: mockChannel{typ: ChannelTelegram}}
+	panicCh2 := &panicChannel{mockChannel: mockChannel{typ: ChannelHTTP}}
+
+	broker := NewBroker([]Channel{panicCh1, panicCh2})
+
+	// With all channels panicking, the request should time out.
+	resp, err := broker.Request("all-panic.com", 443, 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout error when all channels panic")
+	}
+	if resp != ResponseDeny {
+		t.Errorf("expected Deny on timeout, got %v", resp)
+	}
+}
+
+func TestBrokerPendingRequests(t *testing.T) {
+	ch1 := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch1})
+
+	// Start a request that blocks.
+	go func() {
+		_, _ = broker.Request("pending-test.com", 443, 5*time.Second)
+	}()
+
+	// Wait for it to register.
+	for broker.PendingCount() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+
+	reqs := broker.PendingRequests()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 pending request, got %d", len(reqs))
+	}
+	if reqs[0].Destination != "pending-test.com" {
+		t.Errorf("destination = %q, want 'pending-test.com'", reqs[0].Destination)
+	}
+	if reqs[0].Port != 443 {
+		t.Errorf("port = %d, want 443", reqs[0].Port)
+	}
+	if reqs[0].ID == "" {
+		t.Error("request ID should not be empty")
+	}
+
+	// Resolve to clean up.
+	broker.Resolve(reqs[0].ID, ResponseDeny)
+}
+
+func TestBrokerIsClosed(t *testing.T) {
+	ch1 := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch1})
+
+	if broker.IsClosed() {
+		t.Error("broker should not be closed initially")
+	}
+
+	broker.CancelAll()
+
+	if !broker.IsClosed() {
+		t.Error("broker should be closed after CancelAll")
+	}
+
+	// Double CancelAll should not panic.
+	broker.CancelAll()
+}
+
 func TestBrokerChannelErrorDoesNotBlockOthers(t *testing.T) {
 	ch1 := newMockChannel(ChannelTelegram)
 	ch1.requestErr = errors.New("telegram API down")

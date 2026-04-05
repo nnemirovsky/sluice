@@ -88,6 +88,87 @@ func TestRemoveCredential(t *testing.T) {
 	}
 }
 
+func TestReadRawCredential(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a credential normally.
+	ciphertext, err := store.Add("raw_test", "raw_secret_value")
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	// ReadRawCredential should return the encrypted bytes.
+	raw, err := store.ReadRawCredential("raw_test")
+	if err != nil {
+		t.Fatalf("ReadRawCredential: %v", err)
+	}
+	if len(raw) == 0 {
+		t.Fatal("expected non-empty raw credential")
+	}
+	// Raw bytes should match what Add returned.
+	if len(ciphertext) != len(raw) {
+		t.Errorf("ciphertext length mismatch: Add=%d, ReadRaw=%d", len(ciphertext), len(raw))
+	}
+
+	// Nonexistent credential returns nil, nil.
+	raw, err = store.ReadRawCredential("nonexistent")
+	if err != nil {
+		t.Fatalf("ReadRawCredential nonexistent: %v", err)
+	}
+	if raw != nil {
+		t.Errorf("expected nil for nonexistent, got %d bytes", len(raw))
+	}
+}
+
+func TestWriteRawCredential(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add a credential, read raw, then write raw to a new name.
+	if _, err := store.Add("original", "original_value"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := store.ReadRawCredential("original")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write the encrypted bytes to a new name.
+	if err := store.WriteRawCredential("copy", raw); err != nil {
+		t.Fatalf("WriteRawCredential: %v", err)
+	}
+
+	// The copy should decrypt to the same value.
+	val, err := store.Get("copy")
+	if err != nil {
+		t.Fatalf("Get copy: %v", err)
+	}
+	defer val.Release()
+	if val.String() != "original_value" {
+		t.Errorf("expected 'original_value', got %q", val.String())
+	}
+}
+
+func TestWriteRawCredentialPathTraversal(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = store.WriteRawCredential("../escape", []byte("data"))
+	if err == nil {
+		t.Error("expected error for path traversal in WriteRawCredential")
+	}
+}
+
 func TestPathTraversalPrevented(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStore(dir)
