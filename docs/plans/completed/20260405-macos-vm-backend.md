@@ -217,11 +217,11 @@ tart exec openclaw -- security add-trusted-cert \
 
 ### Task 8: [Final] Update documentation
 
-- [ ] Update CLAUDE.md: document macOS VM backend, tart CLI, --runtime macos
-- [ ] Update CLAUDE.md: correct Apple framework access claims (macOS VM only, not Apple Container)
-- [ ] Update CLAUDE.md: add RuntimeMacOS to runtime comparison table
-- [ ] Update CONTRIBUTING.md: note tart requirement for macOS VM testing
-- [ ] Move this plan to `docs/plans/completed/`
+- [x] Update CLAUDE.md: document macOS VM backend, tart CLI, --runtime macos
+- [x] Update CLAUDE.md: correct Apple framework access claims (macOS VM only, not Apple Container)
+- [x] Update CLAUDE.md: add RuntimeMacOS to runtime comparison table
+- [x] Update CONTRIBUTING.md: note tart requirement for macOS VM testing
+- [x] Move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

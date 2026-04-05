@@ -55,7 +55,7 @@ CI runs e2e tests via `.github/workflows/e2e-linux.yml` and `.github/workflows/e
 
 ## Project Structure
 
-- `cmd/sluice/main.go` - CLI entrypoint with flag parsing, runtime selection (--runtime docker|apple|none|auto), and signal handling
+- `cmd/sluice/main.go` - CLI entrypoint with flag parsing, runtime selection (--runtime docker|apple|macos|none|auto), and signal handling
 - `cmd/sluice/cred.go` - CLI subcommand handler for credential management (add/list/remove with optional policy+binding auto-creation)
 - `cmd/sluice/audit.go` - CLI subcommand handler for audit log verification (`audit verify`)
 - `cmd/sluice/cert.go` - CLI subcommand handler for CA certificate generation (`cert generate`)
@@ -107,7 +107,7 @@ CI runs e2e tests via `.github/workflows/e2e-linux.yml` and `.github/workflows/e
 - `internal/telegram/approval.go` - TelegramChannel implementing channel.Channel interface
 - `internal/telegram/bot.go` - Telegram message formatting utilities and token sanitization
 - `internal/telegram/commands.go` - Telegram admin commands (/policy, /cred, /status, /audit, /help) backed by SQLite store
-- `internal/container/types.go` - ContainerManager interface shared by Docker and Apple Container backends, Runtime enum (Docker=0, Apple=1, None=2), ContainerStatus struct
+- `internal/container/types.go` - ContainerManager interface shared by Docker, Apple Container, and macOS VM (tart) backends, Runtime enum (Docker=0, Apple=1, None=2, MacOS=3), ContainerStatus struct
 - `internal/container/apple.go` - Apple Container backend: AppleCLI wrapping `container` CLI via os/exec, AppleManager implementing ContainerManager, CA cert injection
 - `internal/container/apple_test.go` - Tests for AppleCLI, AppleManager, and CA cert injection with mock CommandRunner
 - `internal/container/tart.go` - macOS VM backend: TartCLI wrapping `tart` CLI for Virtualization.framework VMs with Bin() accessor and StartVM() for non-blocking background launch, TartManager implementing ContainerManager with VirtioFS volume sharing, tart-specific CA cert guest path (TartCACertGuestPath = /Volumes/ca/sluice-ca.crt), Keychain-based CA cert injection, and background VM process management via startVM function field
@@ -123,6 +123,7 @@ CI runs e2e tests via `.github/workflows/e2e-linux.yml` and `.github/workflows/e
 - `compose.e2e.yml` - Three-container e2e setup (sluice + tun2proxy + test-runner) for Linux integration tests
 - `scripts/docker-entrypoint.sh` - Container entrypoint with CA cert generation and copy to shared volume
 - `scripts/apple-container-setup.sh` - macOS setup script for Apple Container: pf rules, tun2proxy, IP forwarding
+- `scripts/macos-vm-setup.sh` - macOS setup script for tart VM backend: tun2proxy, pf rules, IP forwarding, tart dependency check
 - `scripts/setup-vault.sh` - Interactive credential and CA setup script
 - `scripts/gen-phantom-env.sh` - Phantom token env file generator for openclaw container
 - `examples/config.toml` - Example TOML seed file for initial DB population via `sluice policy import`
@@ -746,7 +747,7 @@ See `compose.yml` in the repo root. Key features:
 
 ## Apple Container Support
 
-Apple Container (macOS Virtualization.framework micro-VMs) is supported as an alternative to Docker. It gives native macOS isolation with access to Apple frameworks (EventKit, Messages, CallKit) that are unavailable in Linux containers.
+Apple Container (macOS Virtualization.framework micro-VMs) is supported as an alternative to Docker. It runs Linux guests with lightweight hypervisor isolation. Apple Container does NOT provide access to Apple frameworks (iMessage, EventKit, Keychain, Shortcuts). For Apple framework access, use the macOS VM backend (`--runtime macos`).
 
 ### Runtime selection
 
@@ -754,23 +755,25 @@ The `--runtime` flag selects the container backend:
 
 | Flag value | Description |
 |-----------|-------------|
-| `auto` (default) | Auto-detect: checks for `container` CLI (Apple) and Docker socket. Prefers Apple on macOS if both are available. |
+| `auto` (default) | Auto-detect: checks for `container` CLI (Apple) and Docker socket. Prefers Apple on macOS if both are available. Never auto-selects `macos`. |
 | `docker` | Use Docker backend. Requires Docker socket. |
-| `apple` | Use Apple Container backend. Requires macOS and `container` CLI. |
+| `apple` | Use Apple Container backend. Requires macOS and `container` CLI. Runs Linux guests. |
+| `macos` | Use macOS VM backend via `tart`. Requires macOS with Apple Silicon and `tart` CLI (`brew install cirruslabs/cli/tart`). Runs macOS guests with full Apple framework access. Explicit-only (not auto-detected) because macOS VMs are heavyweight (2-4s boot, 1.5GB+ RAM). Use `--vm-image` to specify the OCI image (must include tart agent). Use `--cert-dir` for CA cert shared volume path. |
 | `none` | Standalone mode. No container management. User configures `ALL_PROXY=socks5://localhost:1080` manually. |
 
 ### ContainerManager interface
 
-Both Docker and Apple Container backends implement `container.ContainerManager` (defined in `internal/container/types.go`). Telegram commands, MCP injection, and credential management code works with any backend through this interface.
+Docker, Apple Container, and macOS VM (tart) backends all implement `container.ContainerManager` (defined in `internal/container/types.go`). Telegram commands, MCP injection, and credential management code works with any backend through this interface.
 
 ### Apple Container architecture
 
 ```
 Apple Container:
-  OpenClaw micro-VM (bridge100) -> pf route-to -> tun2proxy on host -> SOCKS5 -> sluice on host -> internet
+  OpenClaw Linux micro-VM (bridge100) -> pf route-to -> tun2proxy on host -> SOCKS5 -> sluice on host -> internet
 ```
 
 Key differences from Docker:
+- Runs Linux guests (not macOS). No Apple framework access.
 - `/dev/net/tun` is not supported inside Apple Container guests. tun2proxy runs on the host.
 - macOS pf rules redirect VM bridge traffic through the host TUN device.
 - VM management via `container` CLI (run, exec, stop, rm, inspect, ls) wrapped by `internal/container/apple.go`.

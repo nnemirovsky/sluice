@@ -49,8 +49,9 @@ When writing new e2e tests, use the helpers in `e2e/helpers_test.go` (startSluic
 
 ### macOS-specific tests
 
-- Apple Container integration tests (`internal/container/`) use mock `CommandRunner` by default and run on all platforms
+- Apple Container and macOS VM (tart) integration tests (`internal/container/`) use mock `CommandRunner` by default and run on all platforms
 - Full integration tests requiring a real Apple Container runtime are in `e2e/apple_test.go` (see `docs/apple-container-quickstart.md`)
+- macOS VM tests require `tart` CLI (`brew install cirruslabs/cli/tart`) and Apple Silicon. Unit tests use mocked `CommandRunner` and run everywhere. E2e tests with a real macOS VM require `tart` installed and a compatible OCI image.
 
 ## Commit Messages
 
@@ -108,7 +109,7 @@ Do not edit `internal/api/api.gen.go` manually. It is regenerated from the spec.
 - `internal/channel/http/` -- HTTP webhook channel (HMAC-signed delivery, sync/async approval)
 - `internal/telegram/` -- TelegramChannel implementation of channel.Channel interface
 - `internal/audit/` -- Append-only JSON lines logger with blake3 hash chaining
-- `internal/container/` -- ContainerManager interface, Apple Container backend (CLI wrapper, pf routing, CA cert injection)
+- `internal/container/` -- ContainerManager interface, Apple Container backend, macOS VM (tart) backend (CLI wrappers, pf routing, CA cert injection)
 - `internal/docker/` -- Docker container backend implementing ContainerManager with hot credential reload
 - `cmd/sluice/` -- CLI entrypoint and subcommands (policy, mcp, cred, cert, audit, channel) with `--runtime` flag for backend selection
 
