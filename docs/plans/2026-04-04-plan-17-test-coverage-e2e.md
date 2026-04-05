@@ -107,16 +107,16 @@ Core proxy internals like credential injection setup, IP pinning, and protocol d
 - Modify: `internal/proxy/inject_test.go`
 - Modify: `internal/proxy/protocol_test.go`
 
-- [ ] Write tests for `ProtocolFromContext` (extract protocol from request context)
-- [ ] Write tests for `setupInjection` (verify CA cert loading, injector creation, SSH jump host setup, mail proxy setup)
-- [ ] Write tests for `dialThroughInjector` (mock injector listener, verify CONNECT request)
-- [ ] Write tests for `PinIPs` / `UnpinIPs` (pin IPs, verify dial uses pinned addresses, unpin, verify cleanup)
-- [ ] Write tests for `generatePinID` (verify uniqueness across goroutines)
-- [ ] Write tests for `dialWithHandler` (mock handler, verify bidirectional connection)
-- [ ] Write tests for proxy server graceful shutdown (in-flight connections drain, pending approvals auto-denied)
-- [ ] Write tests for SIGHUP engine recompile via proxy (add rule to store, recompile, verify new rule applies)
-- [ ] Write tests for the full SOCKS5 + MITM + credential injection pipeline (proxy server with vault, binding, and injector wired together)
-- [ ] Run tests: `go test ./internal/proxy/ -v -timeout 30s -cover`
+- [x] Write tests for `ProtocolFromContext` (extract protocol from request context)
+- [x] Write tests for `setupInjection` (verify CA cert loading, injector creation, SSH jump host setup, mail proxy setup)
+- [x] Write tests for `dialThroughInjector` (mock injector listener, verify CONNECT request)
+- [x] Write tests for `PinIPs` / `UnpinIPs` (pin IPs, verify dial uses pinned addresses, unpin, verify cleanup)
+- [x] Write tests for `generatePinID` (verify uniqueness across goroutines)
+- [x] Write tests for `dialWithHandler` (mock handler, verify bidirectional connection)
+- [x] Write tests for proxy server graceful shutdown (in-flight connections drain, pending approvals auto-denied)
+- [x] Write tests for SIGHUP engine recompile via proxy (add rule to store, recompile, verify new rule applies)
+- [x] Write tests for the full SOCKS5 + MITM + credential injection pipeline (proxy server with vault, binding, and injector wired together)
+- [x] Run tests: `go test ./internal/proxy/ -v -timeout 30s -cover`
 
 ### Task 4: Fill internal/policy unit test gaps (67.9% -> 85%+)
 

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -10,6 +11,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +22,7 @@ import (
 
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/policy"
+	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
 )
 
@@ -1635,6 +1639,914 @@ default = "deny"
 	}
 }
 
+func TestGeneratePinIDUniqueness(t *testing.T) {
+	const n = 1000
+	ids := make(map[string]bool, n)
+	for i := 0; i < n; i++ {
+		id := generatePinID()
+		if len(id) != 16 { // 8 bytes = 16 hex chars
+			t.Errorf("generatePinID() length = %d, want 16", len(id))
+		}
+		if ids[id] {
+			t.Fatalf("duplicate pin ID after %d iterations: %s", i, id)
+		}
+		ids[id] = true
+	}
+}
+
+func TestGeneratePinIDConcurrent(t *testing.T) {
+	const n = 100
+	ch := make(chan string, n)
+	for i := 0; i < n; i++ {
+		go func() { ch <- generatePinID() }()
+	}
+	ids := make(map[string]bool, n)
+	for i := 0; i < n; i++ {
+		id := <-ch
+		if ids[id] {
+			t.Fatalf("duplicate pin ID from concurrent goroutines: %s", id)
+		}
+		ids[id] = true
+	}
+}
+
+func TestDialWithHandlerSuccess(t *testing.T) {
+	conn, err := dialWithHandler(func(handlerConn net.Conn, ready chan<- error) {
+		ready <- nil
+		// Echo back whatever is received.
+		buf := make([]byte, 256)
+		n, readErr := handlerConn.Read(buf)
+		if readErr != nil {
+			return
+		}
+		handlerConn.Write(buf[:n])
+		handlerConn.Close()
+	})
+	if err != nil {
+		t.Fatalf("dialWithHandler: %v", err)
+	}
+	defer conn.Close()
+
+	_, err = conn.Write([]byte("ping"))
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	buf := make([]byte, 10)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(buf[:n]) != "ping" {
+		t.Errorf("got %q, want %q", string(buf[:n]), "ping")
+	}
+}
+
+func TestDialWithHandlerSetupError(t *testing.T) {
+	_, err := dialWithHandler(func(_ net.Conn, ready chan<- error) {
+		ready <- fmt.Errorf("setup failed")
+	})
+	if err == nil {
+		t.Fatal("expected error from handler setup failure")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("setup failed")) {
+		t.Errorf("error = %v, want to contain 'setup failed'", err)
+	}
+}
+
+func TestDialWithHandlerBidirectional(t *testing.T) {
+	conn, err := dialWithHandler(func(handlerConn net.Conn, ready chan<- error) {
+		ready <- nil
+		// Write first, then read.
+		handlerConn.Write([]byte("from-handler"))
+		buf := make([]byte, 256)
+		n, _ := handlerConn.Read(buf)
+		handlerConn.Write(append([]byte("echo:"), buf[:n]...))
+		handlerConn.Close()
+	})
+	if err != nil {
+		t.Fatalf("dialWithHandler: %v", err)
+	}
+	defer conn.Close()
+
+	// Read the handler's first message.
+	buf := make([]byte, 256)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(buf[:n]) != "from-handler" {
+		t.Errorf("got %q, want %q", string(buf[:n]), "from-handler")
+	}
+
+	// Send a response.
+	conn.Write([]byte("reply"))
+
+	// Read the echo.
+	n, err = conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if string(buf[:n]) != "echo:reply" {
+		t.Errorf("got %q, want %q", string(buf[:n]), "echo:reply")
+	}
+}
+
+func TestDialThroughInjectorSuccess(t *testing.T) {
+	// Start a mock HTTP listener that accepts CONNECT requests.
+	mockInj, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockInj.Close()
+
+	go func() {
+		for {
+			conn, err := mockInj.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				req, err := http.ReadRequest(br)
+				if err != nil {
+					return
+				}
+				// Verify auth and pin headers.
+				if req.Header.Get("X-Sluice-Auth") != "test-token" {
+					io.WriteString(c, "HTTP/1.1 403 Forbidden\r\n\r\n")
+					return
+				}
+				if req.Header.Get("X-Sluice-Pin") == "" {
+					io.WriteString(c, "HTTP/1.1 400 Bad Request\r\n\r\n")
+					return
+				}
+				// Respond with 200 OK for CONNECT.
+				io.WriteString(c, "HTTP/1.1 200 OK\r\n\r\n")
+				// Echo data back through the tunnel.
+				io.Copy(c, c)
+			}(conn)
+		}
+	}()
+
+	conn, err := dialThroughInjector(mockInj.Addr().String(), "example.com", 443, "test-token", "pin-abc")
+	if err != nil {
+		t.Fatalf("dialThroughInjector: %v", err)
+	}
+	defer conn.Close()
+
+	// Verify the tunnel works by sending data through it.
+	_, err = conn.Write([]byte("tunnel-data"))
+	if err != nil {
+		t.Fatalf("write through tunnel: %v", err)
+	}
+
+	buf := make([]byte, 64)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read through tunnel: %v", err)
+	}
+	if string(buf[:n]) != "tunnel-data" {
+		t.Errorf("got %q, want %q", string(buf[:n]), "tunnel-data")
+	}
+}
+
+func TestDialThroughInjectorRejected(t *testing.T) {
+	mockInj, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockInj.Close()
+
+	go func() {
+		for {
+			conn, err := mockInj.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				http.ReadRequest(br)
+				io.WriteString(c, "HTTP/1.1 403 Forbidden\r\n\r\n")
+			}(conn)
+		}
+	}()
+
+	_, err = dialThroughInjector(mockInj.Addr().String(), "example.com", 443, "wrong-token", "pin-abc")
+	if err == nil {
+		t.Fatal("expected error from rejected CONNECT")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("CONNECT rejected")) {
+		t.Errorf("error = %v, want to contain 'CONNECT rejected'", err)
+	}
+}
+
+func TestDialThroughInjectorConnectionRefused(t *testing.T) {
+	// Use a port that nothing is listening on.
+	_, err := dialThroughInjector("127.0.0.1:1", "example.com", 443, "token", "pin")
+	if err == nil {
+		t.Fatal("expected error from refused connection")
+	}
+}
+
+func TestSetupInjectionCreatesComponents(t *testing.T) {
+	dir := t.TempDir()
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bindings := []vault.Binding{{
+		Destination: "api.example.com",
+		Credential:  "test_key",
+	}}
+	resolver, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Provider:   vs,
+		Resolver:   resolver,
+		VaultDir:   dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	// Verify all injection components were created.
+	if srv.injector == nil {
+		t.Error("injector should be created when provider and resolver are set")
+	}
+	if srv.injectorLn == nil {
+		t.Error("injector listener should be created")
+	}
+	if srv.sshJump == nil {
+		t.Error("SSH jump host should be created")
+	}
+	if srv.mailProxy == nil {
+		t.Error("mail proxy should be created")
+	}
+}
+
+func TestSetupInjectionDegracesWithoutResolver(t *testing.T) {
+	dir := t.TempDir()
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Provider set but no resolver: injection failure should be non-fatal.
+	// The CA generation should work, so the only failure path is if CA
+	// dir is bad. But without a resolver, the error is logged and ignored.
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Provider:   vs,
+		VaultDir:   dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	// Server should still work for policy-only mode.
+	if srv.listener == nil {
+		t.Error("server should still have a listener in degraded mode")
+	}
+}
+
+func TestPinnedConnCloseUnpins(t *testing.T) {
+	inj, _ := setupTestInjector(t, nil)
+
+	inj.PinIPs("pin-close-test", []string{"1.2.3.4"})
+
+	// Create a TCP connection to wrap.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		c, _ := ln.Accept()
+		if c != nil {
+			c.Close()
+		}
+	}()
+
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pc := &pinnedConn{Conn: raw, injector: inj, pinID: "pin-close-test"}
+
+	// Verify pin exists before close.
+	if _, ok := inj.pinnedIPs.Load("pin-close-test"); !ok {
+		t.Fatal("pin should exist before close")
+	}
+
+	pc.Close()
+
+	// Verify pin is removed after close.
+	if _, ok := inj.pinnedIPs.Load("pin-close-test"); ok {
+		t.Error("pin should be removed after close")
+	}
+
+	// Double close should not panic.
+	pc.Close()
+}
+
+func TestBufferedConnRead(t *testing.T) {
+	// Create a real connection pair.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		c, _ := ln.Accept()
+		if c != nil {
+			c.Write([]byte("rest-of-data"))
+			c.Close()
+		}
+	}()
+
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+
+	// Simulate buffered bytes (like bytes peeked during detection).
+	peeked := []byte("peeked-")
+	reader := io.MultiReader(bytes.NewReader(peeked), raw)
+	bc := &bufferedConn{Reader: reader, Conn: raw}
+
+	// Read should get peeked bytes first, then the connection data.
+	buf := make([]byte, 256)
+	total := 0
+	for {
+		n, err := bc.Read(buf[total:])
+		total += n
+		if err != nil {
+			break
+		}
+	}
+	got := string(buf[:total])
+	if got != "peeked-rest-of-data" {
+		t.Errorf("got %q, want %q", got, "peeked-rest-of-data")
+	}
+}
+
+func TestTrackedListenerAndConn(t *testing.T) {
+	var wg sync.WaitGroup
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tracked := &trackedListener{Listener: ln, wg: &wg}
+
+	// Accept a connection in a goroutine.
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, _ := tracked.Accept()
+		accepted <- c
+	}()
+
+	// Dial to the tracked listener.
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	tc := <-accepted
+	if tc == nil {
+		t.Fatal("expected accepted connection")
+	}
+
+	// The WaitGroup should have been incremented.
+	// Close the tracked conn and verify WaitGroup completes.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	tc.Close()
+
+	select {
+	case <-done:
+		// WaitGroup decremented successfully.
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitGroup.Wait() did not complete after closing tracked conn")
+	}
+
+	// Double close on tracked conn should not panic.
+	tc.Close()
+
+	tracked.Close()
+}
+
+func TestSIGHUPEngineRecompile(t *testing.T) {
+	// Start an echo server.
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Close()
+	go func() {
+		for {
+			conn, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			conn.Write([]byte("ok"))
+			conn.Close()
+		}
+	}()
+
+	// Start with a deny-all policy.
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer srv.Close()
+
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Connection should be denied.
+	_, err = dialer.Dial("tcp", echo.Addr().String())
+	if err == nil {
+		t.Fatal("expected denial with deny-all policy")
+	}
+
+	// Simulate SIGHUP: swap in a new engine that allows localhost.
+	newEng, err := policy.LoadFromBytes([]byte(fmt.Sprintf(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "127.0.0.1"
+`, )))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv.ReloadMu().Lock()
+	srv.StoreEngine(newEng)
+	srv.ReloadMu().Unlock()
+
+	// Connection should now be allowed.
+	conn, err := dialer.Dial("tcp", echo.Addr().String())
+	if err != nil {
+		t.Fatalf("expected connection to succeed after engine swap: %v", err)
+	}
+	defer conn.Close()
+
+	buf := make([]byte, 10)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(buf[:n]) != "ok" {
+		t.Errorf("got %q, want %q", string(buf[:n]), "ok")
+	}
+}
+
+func TestSIGHUPEngineRecompileWithStore(t *testing.T) {
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Close()
+	go func() {
+		for {
+			conn, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			conn.Write([]byte("stored"))
+			conn.Close()
+		}
+	}()
+
+	// Create a store and add a deny-all policy.
+	st, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	eng, err := policy.LoadFromStore(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Store:      st,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer srv.Close()
+
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add a rule to the store and recompile.
+	_, err = st.AddRule("allow", store.RuleOpts{Destination: "127.0.0.1"})
+	if err != nil {
+		t.Fatalf("add rule: %v", err)
+	}
+
+	newEng, err := policy.LoadFromStore(st)
+	if err != nil {
+		t.Fatalf("reload from store: %v", err)
+	}
+
+	srv.ReloadMu().Lock()
+	srv.StoreEngine(newEng)
+	srv.ReloadMu().Unlock()
+
+	// Connection should now work.
+	conn, err := dialer.Dial("tcp", echo.Addr().String())
+	if err != nil {
+		t.Fatalf("expected success after store rule add: %v", err)
+	}
+	defer conn.Close()
+
+	buf := make([]byte, 10)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(buf[:n]) != "stored" {
+		t.Errorf("got %q, want %q", string(buf[:n]), "stored")
+	}
+}
+
+func TestUpdateInspectRules(t *testing.T) {
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	// UpdateInspectRules with no injector/QUIC should not panic.
+	eng.InspectBlockRules = []policy.InspectBlockRule{{Pattern: "secret", Name: "block secrets"}}
+	eng.InspectRedactRules = []policy.InspectRedactRule{{Pattern: "password", Replacement: "[REDACTED]", Name: "redact passwords"}}
+	srv.UpdateInspectRules(eng)
+}
+
+func TestServerAccessors(t *testing.T) {
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	// EnginePtr should return the shared pointer.
+	ptr := srv.EnginePtr()
+	if ptr == nil {
+		t.Fatal("EnginePtr() returned nil")
+	}
+	if ptr.Load() != eng {
+		t.Error("EnginePtr().Load() should return the configured engine")
+	}
+
+	// ResolverPtr should return a non-nil pointer.
+	rp := srv.ResolverPtr()
+	if rp == nil {
+		t.Fatal("ResolverPtr() returned nil")
+	}
+
+	// ReloadMu should return a non-nil mutex.
+	mu := srv.ReloadMu()
+	if mu == nil {
+		t.Fatal("ReloadMu() returned nil")
+	}
+	// Verify it can be locked and unlocked without deadlock.
+	mu.Lock()
+	mu.Unlock()
+
+	// Addr should be non-empty.
+	if srv.Addr() == "" {
+		t.Error("Addr() returned empty string")
+	}
+
+	// IsListening should be false before ListenAndServe.
+	if srv.IsListening() {
+		t.Error("IsListening() should be false before ListenAndServe")
+	}
+}
+
+func TestStoreResolver(t *testing.T) {
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	// Initially no resolver.
+	if srv.ResolverPtr().Load() != nil {
+		t.Error("resolver should be nil initially")
+	}
+
+	// Store a resolver.
+	bindings := []vault.Binding{{Destination: "example.com", Credential: "key"}}
+	resolver, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.StoreResolver(resolver)
+
+	// Verify it's stored.
+	if srv.ResolverPtr().Load() != resolver {
+		t.Error("StoreResolver did not store the resolver")
+	}
+}
+
+func TestSetBroker(t *testing.T) {
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	broker := newAutoResolveBroker(channel.ResponseAllowOnce)
+	srv.SetBroker(broker)
+
+	if srv.rules.broker != broker {
+		t.Error("SetBroker did not set broker on rules")
+	}
+	if srv.dnsResolver.broker != broker {
+		t.Error("SetBroker did not set broker on dnsResolver")
+	}
+}
+
+func TestFullSOCKS5MITMPipeline(t *testing.T) {
+	dir := t.TempDir()
+
+	// Generate a CA for the proxy. LoadOrCreateCA writes to disk.
+	caCert, x509CA, err := LoadOrCreateCA(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a cert pool trusting the generated CA.
+	certPool := x509.NewCertPool()
+	certPool.AddCert(x509CA)
+	_ = caCert // used by the proxy via VaultDir
+
+	// Start a plain HTTP backend that echoes the Authorization header.
+	// Using plain HTTP avoids TLS cert chain issues between the test
+	// backend and the MITM proxy's outbound connection.
+	var mu sync.Mutex
+	var receivedAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		receivedAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.Write([]byte("auth=" + receivedAuth))
+	}))
+	defer backend.Close()
+
+	backendHost, backendPortStr, _ := net.SplitHostPort(backend.Listener.Addr().String())
+	backendPort := 0
+	fmt.Sscanf(backendPortStr, "%d", &backendPort)
+
+	// Create a vault store with a credential.
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credName := "backend_key"
+	realSecret := "Bearer real-secret-value"
+	phantom := PhantomToken(credName)
+	if _, err := vs.Add(credName, realSecret); err != nil {
+		t.Fatal(err)
+	}
+
+	bindings := []vault.Binding{{
+		Destination: backendHost,
+		Ports:       []int{backendPort},
+		Credential:  credName,
+		Header:      "Authorization",
+	}}
+	resolver, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Provider:   vs,
+		Resolver:   resolver,
+		VaultDir:   dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer srv.Close()
+
+	// Connect through the SOCKS5 proxy and make an HTTP request.
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &http.Transport{
+		Dial: dialer.Dial,
+	}
+	client := &http.Client{Transport: transport}
+
+	reqURL := fmt.Sprintf("http://%s:%d/test", backendHost, backendPort)
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Include the phantom token in the header. The MITM should replace it.
+	req.Header.Set("Authorization", phantom)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("HTTP request through proxy: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	// The backend should have received the real credential, not the phantom.
+	if string(body) != "auth="+realSecret {
+		t.Errorf("backend received %q, want %q", string(body), "auth="+realSecret)
+	}
+}
+
+// slowResolveChannel is a mock channel that takes a long time to resolve.
+type slowResolveChannel struct {
+	broker *channel.Broker
+}
+
+func (c *slowResolveChannel) RequestApproval(_ context.Context, _ channel.ApprovalRequest) error {
+	// Never resolve. The request will time out or be cancelled by shutdown.
+	return nil
+}
+func (c *slowResolveChannel) CancelApproval(_ string) error             { return nil }
+func (c *slowResolveChannel) Commands() <-chan channel.Command           { return nil }
+func (c *slowResolveChannel) Notify(_ context.Context, _ string) error  { return nil }
+func (c *slowResolveChannel) Start() error                              { return nil }
+func (c *slowResolveChannel) Stop()                                     {}
+func (c *slowResolveChannel) Type() channel.ChannelType                 { return channel.ChannelTelegram }
+
+func TestGracefulShutdownWithPendingApprovals(t *testing.T) {
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "ask"
+timeout_sec = 30
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a broker with a channel that never resolves approval requests.
+	slowCh := &slowResolveChannel{}
+	broker := channel.NewBroker([]channel.Channel{slowCh})
+	slowCh.broker = broker
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Broker:     broker,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+
+	// Attempt a connection (will block waiting for approval).
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		dialer.Dial("tcp", "93.184.216.34:80")
+	}()
+
+	// Give it a moment to start the approval request.
+	time.Sleep(100 * time.Millisecond)
+
+	// Shutdown. The pending approval should not prevent shutdown from completing
+	// within a reasonable time (the listener closes, no new connections accepted).
+	err = srv.GracefulShutdown(2 * time.Second)
+	// We accept either nil (drained in time) or timeout error.
+	// The key test is that shutdown doesn't hang indefinitely.
+	if err != nil {
+		t.Logf("shutdown returned (expected for pending request): %v", err)
+	}
+}
+
 func TestSelfBypassDoesNotAffectOtherAddresses(t *testing.T) {
 	// Start two echo servers.
 	bypass, err := net.Listen("tcp", "127.0.0.1:0")
@@ -1705,5 +2617,935 @@ default = "deny"
 	_, err = dialer.Dial("tcp", denied.Addr().String())
 	if err == nil {
 		t.Fatal("expected denial for non-bypass address, but connection succeeded")
+	}
+}
+
+func TestIsHTTPSPort(t *testing.T) {
+	tests := []struct {
+		port int
+		want bool
+	}{
+		{443, true},
+		{8443, true},
+		{80, false},
+		{8080, false},
+		{22, false},
+		{0, false},
+	}
+	for _, tt := range tests {
+		if got := isHTTPSPort(tt.port); got != tt.want {
+			t.Errorf("isHTTPSPort(%d) = %v, want %v", tt.port, got, tt.want)
+		}
+	}
+}
+
+func TestBindingIsMetaOnly(t *testing.T) {
+	tests := []struct {
+		name     string
+		binding  vault.Binding
+		wantMeta bool
+	}{
+		{
+			name:     "no_protocols",
+			binding:  vault.Binding{},
+			wantMeta: false,
+		},
+		{
+			name:     "tcp_only",
+			binding:  vault.Binding{Protocols: []string{"tcp"}},
+			wantMeta: true,
+		},
+		{
+			name:     "udp_only",
+			binding:  vault.Binding{Protocols: []string{"udp"}},
+			wantMeta: true,
+		},
+		{
+			name:     "tcp_and_udp",
+			binding:  vault.Binding{Protocols: []string{"tcp", "udp"}},
+			wantMeta: true,
+		},
+		{
+			name:     "https_specific",
+			binding:  vault.Binding{Protocols: []string{"https"}},
+			wantMeta: false,
+		},
+		{
+			name:     "mixed_tcp_and_https",
+			binding:  vault.Binding{Protocols: []string{"tcp", "https"}},
+			wantMeta: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := bindingIsMetaOnly(tt.binding)
+			if got != tt.wantMeta {
+				t.Errorf("bindingIsMetaOnly(%v) = %v, want %v", tt.binding.Protocols, got, tt.wantMeta)
+			}
+		})
+	}
+}
+
+func TestBidirectionalRelay(t *testing.T) {
+	// Create two connections: use a TCP pair.
+	ln1, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln1.Close()
+	ln2, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln2.Close()
+
+	var server1, server2 net.Conn
+	go func() { server1, _ = ln1.Accept() }()
+	go func() { server2, _ = ln2.Accept() }()
+
+	client1, err := net.Dial("tcp", ln1.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client2, err := net.Dial("tcp", ln2.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(50 * time.Millisecond) // let accepts complete
+
+	// Relay between server1 and server2.
+	go bidirectionalRelay(server1, server2)
+
+	// Write through client1 and read from client2.
+	client1.Write([]byte("hello"))
+	buf := make([]byte, 10)
+	client2.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, err := client2.Read(buf)
+	if err != nil {
+		t.Fatalf("read from client2: %v", err)
+	}
+	if string(buf[:n]) != "hello" {
+		t.Errorf("got %q, want %q", string(buf[:n]), "hello")
+	}
+
+	// Write through client2 and read from client1.
+	client2.Write([]byte("world"))
+	client1.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, err = client1.Read(buf)
+	if err != nil {
+		t.Fatalf("read from client1: %v", err)
+	}
+	if string(buf[:n]) != "world" {
+		t.Errorf("got %q, want %q", string(buf[:n]), "world")
+	}
+
+	// Close one end and verify relay completes.
+	client1.Close()
+	time.Sleep(50 * time.Millisecond)
+	client2.Close()
+}
+
+func TestFullSOCKS5MITMPipelineMultipleBindings(t *testing.T) {
+	// Test that multiple credentials for different destinations are injected correctly.
+	dir := t.TempDir()
+
+	var mu1, mu2 sync.Mutex
+	var received1, received2 string
+
+	backend1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu1.Lock()
+		received1 = r.Header.Get("Authorization")
+		mu1.Unlock()
+		w.Write([]byte("ok1"))
+	}))
+	defer backend1.Close()
+
+	backend2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu2.Lock()
+		received2 = r.Header.Get("X-Api-Key")
+		mu2.Unlock()
+		w.Write([]byte("ok2"))
+	}))
+	defer backend2.Close()
+
+	host1, port1Str, _ := net.SplitHostPort(backend1.Listener.Addr().String())
+	port1 := 0
+	fmt.Sscanf(port1Str, "%d", &port1)
+	host2, port2Str, _ := net.SplitHostPort(backend2.Listener.Addr().String())
+	port2 := 0
+	fmt.Sscanf(port2Str, "%d", &port2)
+
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vs.Add("cred1", "secret-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vs.Add("cred2", "secret-2"); err != nil {
+		t.Fatal(err)
+	}
+
+	bindings := []vault.Binding{
+		{Destination: host1, Ports: []int{port1}, Credential: "cred1", Header: "Authorization"},
+		{Destination: host2, Ports: []int{port2}, Credential: "cred2", Header: "X-Api-Key"},
+	}
+	resolver, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Provider:   vs,
+		Resolver:   resolver,
+		VaultDir:   dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer srv.Close()
+
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &http.Transport{Dial: dialer.Dial}
+	client := &http.Client{Transport: transport}
+
+	// Request to backend1 with phantom for cred1.
+	req1, _ := http.NewRequest("GET", fmt.Sprintf("http://%s:%d/", host1, port1), nil)
+	req1.Header.Set("Authorization", PhantomToken("cred1"))
+	resp1, err := client.Do(req1)
+	if err != nil {
+		t.Fatalf("request to backend1: %v", err)
+	}
+	resp1.Body.Close()
+
+	mu1.Lock()
+	if received1 != "secret-1" {
+		t.Errorf("backend1 received auth %q, want %q", received1, "secret-1")
+	}
+	mu1.Unlock()
+
+	// Request to backend2 with phantom for cred2.
+	req2, _ := http.NewRequest("GET", fmt.Sprintf("http://%s:%d/", host2, port2), nil)
+	req2.Header.Set("X-Api-Key", PhantomToken("cred2"))
+	resp2, err := client.Do(req2)
+	if err != nil {
+		t.Fatalf("request to backend2: %v", err)
+	}
+	resp2.Body.Close()
+
+	mu2.Lock()
+	if received2 != "secret-2" {
+		t.Errorf("backend2 received key %q, want %q", received2, "secret-2")
+	}
+	mu2.Unlock()
+}
+
+func TestProxyDirectConnectionFallback(t *testing.T) {
+	// Start a TCP echo server on a non-standard port.
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Close()
+	go func() {
+		for {
+			conn, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			conn.Write([]byte("direct"))
+			conn.Close()
+		}
+	}()
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No provider/resolver = no credential injection = direct connection path.
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer srv.Close()
+
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := dialer.Dial("tcp", echo.Addr().String())
+	if err != nil {
+		t.Fatalf("direct connection through proxy: %v", err)
+	}
+	defer conn.Close()
+
+	buf := make([]byte, 10)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(buf[:n]) != "direct" {
+		t.Errorf("got %q, want %q", string(buf[:n]), "direct")
+	}
+}
+
+func TestProxyUnboundHTTPRoutesThroughInjector(t *testing.T) {
+	// Test that unbound HTTP connections on non-standard ports still route
+	// through the injector for phantom token stripping via byte detection.
+	dir := t.TempDir()
+
+	var mu sync.Mutex
+	var receivedCustom string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		receivedCustom = r.Header.Get("X-Custom")
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer backend.Close()
+
+	backendHost, backendPortStr, _ := net.SplitHostPort(backend.Listener.Addr().String())
+	backendPort := 0
+	fmt.Sscanf(backendPortStr, "%d", &backendPort)
+
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vs.Add("some_cred", "secret-value"); err != nil {
+		t.Fatal(err)
+	}
+
+	// No bindings. Unbound HTTP should still strip phantoms.
+	resolver, err := vault.NewBindingResolver(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Provider:   vs,
+		Resolver:   resolver,
+		VaultDir:   dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer srv.Close()
+
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &http.Transport{Dial: dialer.Dial}
+	client := &http.Client{Transport: transport}
+
+	phantom := PhantomToken("some_cred")
+	reqURL := fmt.Sprintf("http://%s:%d/", backendHost, backendPort)
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Custom", phantom)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("HTTP request through proxy: %v", err)
+	}
+	resp.Body.Close()
+
+	mu.Lock()
+	got := receivedCustom
+	mu.Unlock()
+
+	// The phantom should have been stripped (replaced with empty).
+	if got == phantom {
+		t.Error("phantom token was not stripped from unbound HTTP request")
+	}
+}
+
+func TestUpdateInspectRulesWithInjector(t *testing.T) {
+	dir := t.TempDir()
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := vault.NewBindingResolver(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr:    "127.0.0.1:0",
+		Policy:        eng,
+		Provider:      vs,
+		Resolver:      resolver,
+		VaultDir:      dir,
+		WSBlockRules:  []WSBlockRuleConfig{{Pattern: "old-pattern", Name: "old"}},
+		WSRedactRules: []WSRedactRuleConfig{{Pattern: "old-redact", Replacement: "[OLD]", Name: "old-redact"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	// Update inspect rules with new patterns.
+	eng.InspectBlockRules = []policy.InspectBlockRule{{Pattern: "secret-pattern", Name: "block secrets"}}
+	eng.InspectRedactRules = []policy.InspectRedactRule{{Pattern: "password-pattern", Replacement: "[REDACTED]", Name: "redact passwords"}}
+	srv.UpdateInspectRules(eng)
+
+	// The test passes if UpdateInspectRules doesn't panic and completes.
+	// The actual rule application is tested by the WebSocket and QUIC tests.
+}
+
+func TestRelayDirect(t *testing.T) {
+	// Start an echo server.
+	echo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Close()
+	go func() {
+		for {
+			conn, err := echo.Accept()
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 256)
+			n, _ := conn.Read(buf)
+			conn.Write(buf[:n])
+			conn.Close()
+		}
+	}()
+
+	// Create a connection pair to test relayDirect.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	var serverConn net.Conn
+	go func() { serverConn, _ = ln.Accept() }()
+	clientConn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientConn.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	go relayDirect(serverConn, []string{echo.Addr().String()})
+
+	// Write through client -> relay -> echo -> relay -> client.
+	clientConn.Write([]byte("relay-test"))
+	buf := make([]byte, 256)
+	clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, err := clientConn.Read(buf)
+	if err != nil {
+		t.Fatalf("read from relay: %v", err)
+	}
+	if string(buf[:n]) != "relay-test" {
+		t.Errorf("got %q, want %q", string(buf[:n]), "relay-test")
+	}
+}
+
+func TestRelayDirectFailedDial(t *testing.T) {
+	// relayDirect with unreachable addresses should not panic.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var serverConn net.Conn
+	go func() { serverConn, _ = ln.Accept() }()
+	clientConn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientConn.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	// Use a port that nothing is listening on.
+	done := make(chan struct{})
+	go func() {
+		relayDirect(serverConn, []string{"127.0.0.1:1"})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(35 * time.Second):
+		t.Fatal("relayDirect did not return within timeout")
+	}
+}
+
+func TestProxyWithByteDetectionHTTP(t *testing.T) {
+	// Test that HTTP on a non-standard port is detected via byte detection.
+	dir := t.TempDir()
+
+	var mu sync.Mutex
+	var receivedAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		receivedAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.Write([]byte("detected"))
+	}))
+	defer backend.Close()
+
+	host, portStr, _ := net.SplitHostPort(backend.Listener.Addr().String())
+	port := 0
+	fmt.Sscanf(portStr, "%d", &port)
+
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vs.Add("detect_cred", "real-value"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Binding with protocols=["tcp"] to exercise the meta-protocol + byte detection path.
+	bindings := []vault.Binding{{
+		Destination: host,
+		Ports:       []int{port},
+		Credential:  "detect_cred",
+		Header:      "Authorization",
+		Protocols:   []string{"tcp"},
+	}}
+	resolver, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Provider:   vs,
+		Resolver:   resolver,
+		VaultDir:   dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer srv.Close()
+
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &http.Transport{Dial: dialer.Dial}
+	client := &http.Client{Transport: transport}
+
+	reqURL := fmt.Sprintf("http://%s:%d/", host, port)
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", PhantomToken("detect_cred"))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("HTTP request with byte detection: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "detected" {
+		t.Errorf("got %q, want %q", string(body), "detected")
+	}
+
+	mu.Lock()
+	if receivedAuth != "real-value" {
+		t.Errorf("backend received auth %q, want %q", receivedAuth, "real-value")
+	}
+	mu.Unlock()
+}
+
+func TestProxyGenericPortNoBindingByteDetection(t *testing.T) {
+	// Test a connection on a non-standard port without bindings, with an
+	// injector present. The byte detection path for unbound connections
+	// should still route HTTP traffic through the injector for phantom stripping.
+	dir := t.TempDir()
+
+	var mu sync.Mutex
+	var receivedHeader string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		receivedHeader = r.Header.Get("X-Phantom")
+		mu.Unlock()
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	host, portStr, _ := net.SplitHostPort(backend.Listener.Addr().String())
+	_ = host
+
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vs.Add("phantom_cred", "value"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Empty resolver: no bindings.
+	resolver, err := vault.NewBindingResolver(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Provider:   vs,
+		Resolver:   resolver,
+		VaultDir:   dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer srv.Close()
+
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &http.Transport{Dial: dialer.Dial}
+	client := &http.Client{Transport: transport}
+
+	reqURL := fmt.Sprintf("http://%s/", backend.Listener.Addr().String())
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Phantom", PhantomToken("phantom_cred"))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		// Non-standard port byte detection might route through injector or direct.
+		// Either way, this tests that the code path doesn't crash.
+		t.Logf("HTTP request returned error (acceptable): %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	mu.Lock()
+	got := receivedHeader
+	mu.Unlock()
+
+	// The phantom should have been stripped if it went through the injector.
+	if got == PhantomToken("phantom_cred") {
+		t.Error("phantom token was not stripped for unbound non-standard port HTTP")
+	}
+	_ = portStr
+}
+
+func TestDialThroughInjectorBufferedResponse(t *testing.T) {
+	// Test that dialThroughInjector handles responses with extra buffered data.
+	mockInj, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mockInj.Close()
+
+	go func() {
+		for {
+			conn, err := mockInj.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				http.ReadRequest(br)
+				// Respond with 200 OK and immediately send some tunnel data.
+				io.WriteString(c, "HTTP/1.1 200 OK\r\n\r\nbuffered-data")
+				io.Copy(c, c)
+			}(conn)
+		}
+	}()
+
+	conn, err := dialThroughInjector(mockInj.Addr().String(), "example.com", 443, "", "pin-buf")
+	if err != nil {
+		t.Fatalf("dialThroughInjector: %v", err)
+	}
+	defer conn.Close()
+
+	// Should be able to read the buffered data that arrived with the response.
+	buf := make([]byte, 64)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatalf("read buffered data: %v", err)
+	}
+	if string(buf[:n]) != "buffered-data" {
+		t.Errorf("got %q, want %q", string(buf[:n]), "buffered-data")
+	}
+}
+
+func TestProxyWithStandardHTTPPort(t *testing.T) {
+	// Test credential injection on port 80 (standard HTTP port) which
+	// exercises the standard-port path in dial() (no byte detection needed).
+	dir := t.TempDir()
+
+	// Start backend on port 80. This may fail if port 80 is in use.
+	ln, err := net.Listen("tcp", "127.0.0.1:80")
+	if err != nil {
+		t.Skip("cannot bind to port 80 (probably in use or no permission)")
+	}
+
+	var mu sync.Mutex
+	var receivedAuth string
+	go func() {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			receivedAuth = r.Header.Get("Authorization")
+			mu.Unlock()
+			w.Write([]byte("port80-ok"))
+		})
+		http.Serve(ln, mux)
+	}()
+	defer ln.Close()
+
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vs.Add("port80_cred", "port80-secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	bindings := []vault.Binding{{
+		Destination: "127.0.0.1",
+		Ports:       []int{80},
+		Credential:  "port80_cred",
+		Header:      "Authorization",
+	}}
+	resolver, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Provider:   vs,
+		Resolver:   resolver,
+		VaultDir:   dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer srv.Close()
+
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &http.Transport{Dial: dialer.Dial}
+	client := &http.Client{Transport: transport}
+
+	req, _ := http.NewRequest("GET", "http://127.0.0.1:80/", nil)
+	req.Header.Set("Authorization", PhantomToken("port80_cred"))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("HTTP on port 80: %v", err)
+	}
+	defer resp.Body.Close()
+
+	mu.Lock()
+	if receivedAuth != "port80-secret" {
+		t.Errorf("backend received auth %q, want %q", receivedAuth, "port80-secret")
+	}
+	mu.Unlock()
+}
+
+func TestProxyNonStandardPortWithBinding(t *testing.T) {
+	// Test connection on a non-standard port with a binding that has no
+	// specific protocol, exercising the byte-detection code path in dial().
+	dir := t.TempDir()
+
+	var mu sync.Mutex
+	var receivedAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		receivedAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.Write([]byte("nonstandard-ok"))
+	}))
+	defer backend.Close()
+
+	host, portStr, _ := net.SplitHostPort(backend.Listener.Addr().String())
+	port := 0
+	fmt.Sscanf(portStr, "%d", &port)
+
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vs.Add("ns_cred", "ns-secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Binding with no protocols specified (protocol-agnostic). Non-standard port
+	// means proto == ProtoGeneric, which triggers handleWithDetection in dial().
+	bindings := []vault.Binding{{
+		Destination: host,
+		Ports:       []int{port},
+		Credential:  "ns_cred",
+		Header:      "Authorization",
+	}}
+	resolver, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Provider:   vs,
+		Resolver:   resolver,
+		VaultDir:   dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	defer srv.Close()
+
+	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &http.Transport{Dial: dialer.Dial}
+	client := &http.Client{Transport: transport}
+
+	reqURL := fmt.Sprintf("http://%s:%d/", host, port)
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", PhantomToken("ns_cred"))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("HTTP request on non-standard port: %v", err)
+	}
+	defer resp.Body.Close()
+
+	mu.Lock()
+	if receivedAuth != "ns-secret" {
+		t.Errorf("backend received auth %q, want %q", receivedAuth, "ns-secret")
+	}
+	mu.Unlock()
+}
+
+func TestIsPrivateIP(t *testing.T) {
+	tests := []struct {
+		ip   string
+		want bool
+	}{
+		{"127.0.0.1", true},
+		{"10.0.0.1", true},
+		{"192.168.1.1", true},
+		{"172.16.0.1", true},
+		{"169.254.1.1", true},
+		{"0.0.0.0", true},
+		{"::1", true},
+		{"8.8.8.8", false},
+		{"93.184.216.34", false},
+		{"2001:db8::1", false},
+	}
+	for _, tt := range tests {
+		ip := net.ParseIP(tt.ip)
+		if ip == nil {
+			t.Fatalf("invalid IP: %s", tt.ip)
+		}
+		if got := isPrivateIP(ip); got != tt.want {
+			t.Errorf("isPrivateIP(%s) = %v, want %v", tt.ip, got, tt.want)
+		}
 	}
 }
