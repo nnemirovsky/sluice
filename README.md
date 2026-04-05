@@ -225,7 +225,8 @@ Credential injection (MITM proxy) and MCP gateway work normally. Only container 
 make test              # unit tests
 make test-coverage     # unit tests with HTML coverage report
 make test-e2e          # all e2e tests
-make test-e2e-linux    # Linux e2e tests (Docker compose integration)
+make test-e2e-docker   # Linux e2e tests via Docker Compose (builds containers)
+make test-e2e-linux    # Linux e2e tests (go test with linux build tag)
 make test-e2e-macos    # macOS e2e tests (Apple Container)
 ```
 

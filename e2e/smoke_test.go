@@ -24,11 +24,14 @@ func TestSmoke_HealthzReturns200(t *testing.T) {
 func TestSmoke_SOCKS5Listening(t *testing.T) {
 	proc := startSluice(t, SluiceOpts{})
 
-	// Verify we can establish a SOCKS5 connection to the proxy port.
+	// Verify we can actually dial through the SOCKS5 proxy to the health endpoint.
 	dialer := connectSOCKS5(t, proc.ProxyAddr)
-	if dialer == nil {
-		t.Fatal("SOCKS5 dialer is nil")
+	_, port := mustSplitAddr(t, proc.HealthURL)
+	conn, err := dialer.Dial("tcp", "127.0.0.1:"+port)
+	if err != nil {
+		t.Fatalf("dial through SOCKS5 proxy: %v", err)
 	}
+	conn.Close()
 }
 
 func TestSmoke_WithConfigSeed(t *testing.T) {

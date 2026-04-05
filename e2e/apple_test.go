@@ -96,8 +96,7 @@ func setupAppleEnv(t *testing.T) *appleEnv {
 
 	// Start sluice with apple runtime.
 	proc := startSluice(t, SluiceOpts{
-		ConfigTOML:  appleE2EConfigTOML,
-		RuntimeNone: true, // we manage the VM ourselves in tests
+		ConfigTOML: appleE2EConfigTOML,
 		ExtraArgs: []string{
 			"--phantom-dir", phantomDir,
 		},

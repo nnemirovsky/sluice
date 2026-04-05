@@ -49,6 +49,7 @@ E2e test files:
 - `e2e/audit_test.go` -- audit log integrity and hash chain verification
 - `e2e/docker_test.go` -- Docker compose integration (linux only)
 - `e2e/apple_test.go` -- Apple Container integration (darwin only)
+- `e2e/testdata/mock_mcp_upstream.go` -- mock MCP upstream server (JSON-RPC over stdio) for gateway e2e tests
 
 CI runs e2e tests via `.github/workflows/e2e-linux.yml` and `.github/workflows/e2e-macos.yml`.
 
@@ -114,8 +115,10 @@ CI runs e2e tests via `.github/workflows/e2e-linux.yml` and `.github/workflows/e
 - `internal/docker/manager.go` - Docker container manager implementing container.ContainerManager for credential hot-reload via shared volume + docker exec, with restart fallback
 - `internal/docker/socket_client.go` - Docker socket HTTP client for container lifecycle and exec operations
 - `Dockerfile` - Multi-stage build for Sluice container
+- `Dockerfile.e2e` - Go test runner image for Docker Compose e2e tests
 - `compose.yml` - Three-container setup (sluice + tun2proxy + openclaw) with shared phantom volume
 - `compose.dev.yml` - Development compose with build-from-source
+- `compose.e2e.yml` - Three-container e2e setup (sluice + tun2proxy + test-runner) for Linux integration tests
 - `scripts/docker-entrypoint.sh` - Container entrypoint with CA cert generation and copy to shared volume
 - `scripts/apple-container-setup.sh` - macOS setup script for Apple Container: pf rules, tun2proxy, IP forwarding
 - `scripts/setup-vault.sh` - Interactive credential and CA setup script

@@ -39,9 +39,6 @@ type SluiceOpts struct {
 	// Env adds extra environment variables to the sluice process in
 	// "KEY=VALUE" format. These are appended to os.Environ().
 	Env []string
-
-	// RuntimeNone disables container management (--runtime none). Defaults to true.
-	RuntimeNone bool
 }
 
 // SluiceProcess holds handles to a running sluice instance.

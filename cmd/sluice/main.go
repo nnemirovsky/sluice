@@ -54,7 +54,9 @@ func main() {
 			}
 			return
 		case "audit":
-			handleAuditCommand(os.Args[2:])
+			if err := handleAuditCommand(os.Args[2:]); err != nil {
+				log.Fatalf("audit: %v", err)
+			}
 			return
 		case "channel":
 			if err := handleChannelCommand(os.Args[2:]); err != nil {

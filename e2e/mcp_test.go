@@ -694,9 +694,9 @@ name = "allow all mock tools"
 		},
 	})
 	if resp.Error != nil {
-		// JSON-RPC level error is also acceptable for timeout.
-		if !strings.Contains(resp.Error.Message, "timeout") {
-			t.Logf("JSON-RPC error (acceptable): %s", resp.Error.Message)
+		// JSON-RPC level error is acceptable only if it indicates a timeout.
+		if !strings.Contains(resp.Error.Message, "timeout") && !strings.Contains(resp.Error.Message, "deadline") {
+			t.Fatalf("expected timeout-related JSON-RPC error, got: %s", resp.Error.Message)
 		}
 		return
 	}

@@ -752,7 +752,7 @@ template = "testuser"
 	select {
 	case <-sshDone:
 	case <-timer.C:
-		t.Log("SSH server goroutine did not finish within timeout")
+		t.Error("SSH server goroutine did not finish within timeout")
 	}
 	timer.Stop()
 }
