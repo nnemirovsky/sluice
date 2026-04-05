@@ -26,8 +26,10 @@ test-e2e:
 
 # E2e tests via Docker Compose (Linux)
 test-e2e-docker:
-	docker compose -f compose.e2e.yml up --build --abort-on-container-exit --exit-code-from test-runner
-	docker compose -f compose.e2e.yml down -v
+	docker compose -f compose.e2e.yml up --build --abort-on-container-exit --exit-code-from test-runner; \
+	rc=$$?; \
+	docker compose -f compose.e2e.yml down -v || { echo "WARNING: docker compose down -v failed, resources may be left behind" >&2; [ $$rc -eq 0 ] && rc=1; }; \
+	exit $$rc
 
 # E2e tests (Linux, runs Go tests with linux build tag)
 test-e2e-linux:
