@@ -1,0 +1,8 @@
+FROM golang:1.26-alpine
+RUN apk add --no-cache gcc musl-dev
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go build -o /sluice ./cmd/sluice/
+CMD ["go", "test", "-tags=e2e linux", "-v", "-count=1", "-timeout=300s", "./e2e/"]

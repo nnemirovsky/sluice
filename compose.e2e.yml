@@ -1,0 +1,69 @@
+# E2e test compose file. Builds sluice from source and runs e2e tests
+# inside a test-runner container that shares the network with tun2proxy,
+# so all test traffic routes through sluice's SOCKS5 proxy.
+#
+# Usage: docker compose -f compose.e2e.yml up --build --abort-on-container-exit --exit-code-from test-runner
+services:
+  sluice:
+    build: .
+    restart: "no"
+    environment:
+      - SLUICE_AGENT_CONTAINER=test-runner
+    volumes:
+      - sluice-vault:/home/sluice/.sluice
+      - sluice-audit:/var/log/sluice
+      - sluice-ca:/home/sluice/ca
+      - sluice-phantoms:/home/sluice/phantoms
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks: [internal, external]
+
+  tun2proxy:
+    image: ghcr.io/tun2proxy/tun2proxy-ubuntu:latest
+    restart: "no"
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    command: ["--proxy", "socks5://sluice:1080", "--setup"]
+    healthcheck:
+      test: ["CMD-SHELL", "ip link show tun0 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks: [internal]
+    depends_on:
+      sluice:
+        condition: service_healthy
+
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    restart: "no"
+    network_mode: "service:tun2proxy"
+    environment:
+      - SLUICE_E2E_PROXY_ADDR=sluice:1080
+      - SLUICE_E2E_HEALTH_ADDR=sluice:3000
+      - SSL_CERT_FILE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
+    volumes:
+      - sluice-ca:/usr/local/share/ca-certificates/sluice:ro
+      - sluice-phantoms:/phantoms:ro
+    depends_on:
+      tun2proxy:
+        condition: service_healthy
+
+networks:
+  internal:
+    internal: true
+  external: {}
+
+volumes:
+  sluice-vault:
+  sluice-audit:
+  sluice-ca:
+  sluice-phantoms:

@@ -184,15 +184,15 @@ test-e2e-macos:
 	go test -tags="e2e darwin" ./e2e/ -v -count=1 -timeout=300s
 ```
 
-- [ ] Create `compose.e2e.yml` with three services: sluice (build from source), tun2proxy, test-runner (runs `go test -tags="e2e linux"` inside the compose network). Test-runner uses `network_mode: "service:tun2proxy"` so its traffic routes through sluice.
-- [ ] Create `e2e/doc.go` with `//go:build e2e` and package documentation
-- [ ] Create `e2e/helpers_test.go` with shared utilities: `startSluice(t, opts)`, `stopSluice(t)`, `connectSOCKS5(t, addr)`, `importConfig(t, toml)`, `waitForHealthy(t, addr)`
-- [ ] Helper: `startSluice` spawns sluice binary with temp DB, temp config, temp audit log. Returns cleanup func.
-- [ ] Helper: `connectSOCKS5` creates a SOCKS5 dialer to sluice's proxy port
-- [ ] Helper: `startEchoServer(t)` starts an HTTP/HTTPS echo server for proxy tests
-- [ ] Add Makefile targets for e2e tests
-- [ ] Write a smoke test: start sluice, check /healthz returns 200, stop
-- [ ] Run: `go test -tags=e2e ./e2e/ -v -timeout 60s`
+- [x] Create `compose.e2e.yml` with three services: sluice (build from source), tun2proxy, test-runner (runs `go test -tags="e2e linux"` inside the compose network). Test-runner uses `network_mode: "service:tun2proxy"` so its traffic routes through sluice.
+- [x] Create `e2e/doc.go` with `//go:build e2e` and package documentation
+- [x] Create `e2e/helpers_test.go` with shared utilities: `startSluice(t, opts)`, `stopSluice(t)`, `connectSOCKS5(t, addr)`, `importConfig(t, toml)`, `waitForHealthy(t, addr)`
+- [x] Helper: `startSluice` spawns sluice binary with temp DB, temp config, temp audit log. Returns cleanup func.
+- [x] Helper: `connectSOCKS5` creates a SOCKS5 dialer to sluice's proxy port
+- [x] Helper: `startEchoServer(t)` starts an HTTP/HTTPS echo server for proxy tests
+- [x] Add Makefile targets for e2e tests
+- [x] Write a smoke test: start sluice, check /healthz returns 200, stop
+- [x] Run: `go test -tags=e2e ./e2e/ -v -timeout 60s`
 
 ### Task 7: E2e tests -- proxy and policy enforcement
 

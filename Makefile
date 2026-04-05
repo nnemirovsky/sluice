@@ -1,4 +1,4 @@
-.PHONY: build test test-coverage lint fmt tidy install clean release release-snapshot generate lint-api help
+.PHONY: build test test-coverage test-e2e test-e2e-docker test-e2e-macos lint fmt tidy install clean release release-snapshot generate lint-api help
 
 # Build
 build:
@@ -19,6 +19,19 @@ test:
 test-coverage:
 	go test ./... -coverprofile=coverage.out
 	go tool cover -html=coverage.out -o coverage.html
+
+# E2e tests (local, all platforms)
+test-e2e:
+	go test -tags=e2e ./e2e/ -v -count=1 -timeout=300s
+
+# E2e tests via Docker Compose (Linux)
+test-e2e-docker:
+	docker compose -f compose.e2e.yml up --build --abort-on-container-exit --exit-code-from test-runner
+	docker compose -f compose.e2e.yml down -v
+
+# E2e tests (macOS with Apple Container)
+test-e2e-macos:
+	go test -tags="e2e darwin" ./e2e/ -v -count=1 -timeout=300s
 
 # Lint
 lint:
@@ -62,6 +75,9 @@ help:
 	@echo "Test & Lint"
 	@echo "  make test               Run all tests"
 	@echo "  make test-coverage      Generate coverage report"
+	@echo "  make test-e2e           Run e2e tests locally"
+	@echo "  make test-e2e-docker    Run e2e tests via Docker Compose (Linux)"
+	@echo "  make test-e2e-macos     Run e2e tests (macOS with Apple Container)"
 	@echo "  make lint               Run golangci-lint"
 	@echo "  make fmt                Format with gofumpt"
 	@echo "  make tidy               Run go mod tidy"
