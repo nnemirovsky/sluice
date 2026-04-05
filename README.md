@@ -16,17 +16,27 @@ OpenClaw gets phantom tokens (random strings that look like real API keys). Slui
 ## How It Works
 
 ```
-Container (Docker / Apple Container / macOS VM):
-  OpenClaw                   -- uses phantom tokens, thinks they're real
-  tun2proxy                  -- routes all traffic to SOCKS5
-
-Host:
-  Sluice SOCKS5 Proxy       -- policy + MITM + credential injection
-  Sluice MCP Gateway        -- tool-level policy + argument inspection
-  Telegram Bot              -- human approval for "ask" verdicts
++-----------+     +------------+     +---------+     +----------+
+|           | MCP |   Sluice   | TCP |         |     |          |
+|  OpenClaw +---->+ MCP Gateway+---->+ Upstream |     | Telegram |
+|           |     |            |     | Servers  |     |   Bot    |
+|  (phantom |     +-----+------+     +---------+     +----+-----+
+|   tokens) |           |                                  |
+|           |     +-----v------+                    approve / deny
+|           | ALL |   Sluice   |     +---------+           |
+|           +---->+ SOCKS5     +---->+         |     +-----v-----+
+|           |     |   Proxy    |     |Internet |     |   Human   |
++-----------+     +-----+------+     +---------+     +-----------+
+      ^                 |
+      |           +-----v------+
+  phantom         |    MITM    |
+  tokens          | credential |
+                  |  injection |
+                  +------------+
+                  phantom -> real
 ```
 
-Every connection is evaluated against policy rules (allow / deny / ask). "Ask" verdicts send a Telegram notification with inline buttons. OpenClaw blocks until the human responds. Credentials are managed via Telegram commands or CLI, stored encrypted with age, and hot-reloaded into OpenClaw without restarts.
+**OpenClaw** uses phantom tokens for all API calls. **tun2proxy** routes all traffic to sluice's SOCKS5 proxy (runs as a container in Docker, on the host for Apple Container/macOS VM). **Sluice** evaluates every connection against policy rules (allow / deny / ask). "Ask" verdicts send a Telegram notification with inline buttons. The MITM proxy swaps phantom tokens for real credentials in-flight. Credentials are managed via Telegram or CLI, stored encrypted with age, and hot-reloaded into OpenClaw without restarts.
 
 ## Quick Start
 
