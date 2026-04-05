@@ -253,12 +253,12 @@ Test the full audit trail from proxy events to hash chain verification.
 **Files:**
 - Create: `e2e/audit_test.go`
 
-- [ ] Test: proxy connections create audit entries (allowed + denied)
-- [ ] Test: MCP tool calls create audit entries
-- [ ] Test: audit log hash chain is valid after multiple operations (`sluice audit verify` exits 0)
-- [ ] Test: tampering detection (modify a line, verify returns non-zero exit)
-- [ ] Test: audit log continuity across sluice restart (stop, start, write more, verify chain unbroken)
-- [ ] Run: `go test -tags=e2e ./e2e/ -v -timeout 120s`
+- [x] Test: proxy connections create audit entries (allowed + denied)
+- [x] Test: MCP tool calls create audit entries
+- [x] Test: audit log hash chain is valid after multiple operations (`sluice audit verify` exits 0)
+- [x] Test: tampering detection (modify a line, verify returns non-zero exit)
+- [x] Test: audit log continuity across sluice restart (stop, start, write more, verify chain unbroken)
+- [x] Run: `go test -tags=e2e ./e2e/ -v -timeout 120s`
 
 ### Task 11: E2e tests -- Docker-specific (Linux)
 
