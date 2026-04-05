@@ -1,17 +1,25 @@
 # Sluice
 
-Governance and credential injection proxy for [OpenClaw](https://github.com/openclaw/openclaw). Sluice sits between OpenClaw and the internet, ensuring every outbound connection and MCP tool call is governed by policy, approved by a human when needed, and never exposes real credentials to the agent.
+Governance and credential injection proxy for [OpenClaw](https://github.com/openclaw/openclaw). Keeps real secrets out of the agent, enforces per-request policy on every connection and tool call, and puts a human in the loop when it matters.
 
 ## Why Sluice
 
-OpenClaw needs API keys, database credentials, and service tokens to do useful work. Giving it real credentials is risky. It can leak secrets in tool outputs, exfiltrate data to unexpected endpoints, or make destructive API calls without oversight.
+AI agents need credentials to be useful. Giving them real credentials is dangerous.
 
-Sluice solves this with two layers of governance:
+**The problem:** OpenClaw makes API calls, opens network connections, and invokes MCP tools. Without governance, it can leak secrets in tool outputs, connect to unexpected endpoints, or make destructive API calls. No existing tool combines credential isolation, human approval, all-protocol interception, and MCP-level governance in one place.
 
-- **MCP Gateway** -- intercepts tool calls between OpenClaw and MCP servers. Sees tool names, arguments, and responses. Blocks dangerous operations (file writes, exec, deletions) and redacts secrets from responses. Governs local tools that never touch the network.
-- **SOCKS5 Proxy** -- intercepts every TCP and UDP connection from OpenClaw's container. Supports HTTP, HTTPS, WebSocket, gRPC, SSH, IMAP, SMTP, DNS, and QUIC/HTTP3. Injects real credentials at the network level via MITM so OpenClaw never sees them.
+**The solution:** Sluice intercepts everything at two layers and never gives OpenClaw real credentials.
 
-OpenClaw gets phantom tokens (random strings that look like real API keys). Sluice swaps them for real credentials in-flight. If OpenClaw leaks a phantom token, it's useless outside the proxy.
+| Layer | What it sees | What it governs |
+|-------|-------------|-----------------|
+| **MCP Gateway** | Tool names, arguments, responses | File writes, exec, deletions, any MCP tool call |
+| **SOCKS5 Proxy** | Every TCP and UDP connection | HTTP, HTTPS, WebSocket, gRPC, SSH, IMAP, SMTP, DNS, QUIC/HTTP3 |
+
+**Phantom token swap:** OpenClaw gets phantom tokens that look like real API keys. Sluice's MITM proxy swaps them for real credentials in-flight. If a phantom token leaks, it is useless outside the proxy.
+
+**Human approval:** Connections and tool calls matching "ask" policy rules trigger a notification via Telegram or HTTP webhook. OpenClaw blocks until a human responds with Allow or Deny.
+
+**Credential isolation:** Real secrets live in an encrypted vault (age, HashiCorp Vault, 1Password, Bitwarden, KeePass, or gopass). They are decrypted into zeroed memory only at injection time and never exposed to the agent process.
 
 ## How It Works
 
@@ -46,7 +54,11 @@ flowchart LR
     Approval -. "resolve" .-> Sluice
 ```
 
-**OpenClaw** uses phantom tokens for all API calls. **tun2proxy** routes all traffic to sluice's SOCKS5 proxy (runs as a container in Docker, on the host for Apple Container/macOS VM). Both the MCP gateway and SOCKS5 proxy evaluate requests against policy rules (allow / deny / ask). "Ask" verdicts are broadcast to all configured approval channels (Telegram, HTTP webhooks). The first channel to respond wins. The MITM proxy swaps phantom tokens for real credentials in-flight. Credentials are managed via approval channels or CLI, stored encrypted with age, and hot-reloaded into OpenClaw without restarts.
+**Traffic flow:** OpenClaw runs in an isolated container (Docker, Apple Container, or macOS VM). All network traffic is routed through tun2proxy to sluice's SOCKS5 proxy. MCP tool calls go through the MCP gateway. Both layers evaluate every request against policy rules.
+
+**Policy verdicts:** Each rule resolves to allow, deny, or ask. "Ask" verdicts are broadcast to all configured approval channels. The first channel to respond wins. Credentials are managed via Telegram commands or CLI, stored encrypted, and hot-reloaded into OpenClaw without restarts.
+
+**Audit trail:** Every connection, tool call, approval, and denial is logged with blake3 hash chaining for tamper detection.
 
 ## Quick Start
 
