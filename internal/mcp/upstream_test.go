@@ -465,3 +465,22 @@ func TestStartUpstreamWithVaultEnvResolution(t *testing.T) {
 		t.Fatalf("Initialize: %v", err)
 	}
 }
+
+func TestValidTransport(t *testing.T) {
+	tests := []struct {
+		transport string
+		valid     bool
+	}{
+		{"stdio", true},
+		{"http", true},
+		{"websocket", true},
+		{"", false},
+		{"grpc", false},
+		{"tcp", false},
+	}
+	for _, tt := range tests {
+		if got := ValidTransport(tt.transport); got != tt.valid {
+			t.Errorf("ValidTransport(%q) = %v, want %v", tt.transport, got, tt.valid)
+		}
+	}
+}

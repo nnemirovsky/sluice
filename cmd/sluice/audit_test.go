@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -42,7 +41,10 @@ func TestHandleAuditVerifyValid(t *testing.T) {
 	os.Stdout = outW
 	defer func() { os.Stdout = oldStdout }()
 
-	handleAuditVerify(logPath)
+	if err := handleAuditVerify(logPath); err != nil {
+		os.Stdout = oldStdout
+		t.Fatalf("expected no error for valid log: %v", err)
+	}
 
 	_ = outW.Close()
 	var buf bytes.Buffer
@@ -61,7 +63,7 @@ func TestHandleAuditVerifyValid(t *testing.T) {
 	}
 }
 
-// TestHandleAuditVerifyBroken verifies exit 1 when the audit log has a broken hash chain.
+// TestHandleAuditVerifyBroken verifies error return when the audit log has a broken hash chain.
 func TestHandleAuditVerifyBroken(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "broken-audit.jsonl")
@@ -89,63 +91,30 @@ func TestHandleAuditVerifyBroken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if os.Getenv("TEST_AUDIT_SUBPROCESS") == "broken" {
-		handleAuditVerify(os.Getenv("TEST_AUDIT_PATH"))
-		return
+	if err := handleAuditVerify(logPath); err == nil {
+		t.Fatal("expected error for broken hash chain")
 	}
-
-	cmd := exec.Command(os.Args[0], "-test.run=TestHandleAuditVerifyBroken")
-	cmd.Env = append(os.Environ(), "TEST_AUDIT_SUBPROCESS=broken", "TEST_AUDIT_PATH="+logPath)
-	err = cmd.Run()
-	if e, ok := err.(*exec.ExitError); ok && !e.Success() {
-		return // expected exit 1 due to broken links
-	}
-	t.Fatal("expected non-zero exit code for broken audit chain")
 }
 
-// TestHandleAuditVerifyMissing verifies exit 1 when the audit file does not exist.
+// TestHandleAuditVerifyMissing verifies error return when the audit file does not exist.
 func TestHandleAuditVerifyMissing(t *testing.T) {
-	if os.Getenv("TEST_AUDIT_SUBPROCESS") == "missing" {
-		handleAuditVerify("/nonexistent/path/audit.jsonl")
-		return
+	if err := handleAuditVerify("/nonexistent/path/audit.jsonl"); err == nil {
+		t.Fatal("expected error for missing file")
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=TestHandleAuditVerifyMissing")
-	cmd.Env = append(os.Environ(), "TEST_AUDIT_SUBPROCESS=missing")
-	err := cmd.Run()
-	if e, ok := err.(*exec.ExitError); ok && !e.Success() {
-		return
-	}
-	t.Fatal("expected non-zero exit code for missing file")
 }
 
-// TestHandleAuditNoArgs verifies exit 1 when no subcommand is given.
+// TestHandleAuditNoArgs verifies error return when no subcommand is given.
 func TestHandleAuditNoArgs(t *testing.T) {
-	if os.Getenv("TEST_AUDIT_SUBPROCESS") == "no_args" {
-		handleAuditCommand([]string{})
-		return
+	if err := handleAuditCommand([]string{}); err == nil {
+		t.Fatal("expected error for no args")
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=TestHandleAuditNoArgs")
-	cmd.Env = append(os.Environ(), "TEST_AUDIT_SUBPROCESS=no_args")
-	err := cmd.Run()
-	if e, ok := err.(*exec.ExitError); ok && !e.Success() {
-		return
-	}
-	t.Fatal("expected non-zero exit code")
 }
 
-// TestHandleAuditUnknownSubcommand verifies exit 1 for unknown subcommand.
+// TestHandleAuditUnknownSubcommand verifies error return for unknown subcommand.
 func TestHandleAuditUnknownSubcommand(t *testing.T) {
-	if os.Getenv("TEST_AUDIT_SUBPROCESS") == "unknown" {
-		handleAuditCommand([]string{"bogus"})
-		return
+	if err := handleAuditCommand([]string{"bogus"}); err == nil {
+		t.Fatal("expected error for unknown subcommand")
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=TestHandleAuditUnknownSubcommand")
-	cmd.Env = append(os.Environ(), "TEST_AUDIT_SUBPROCESS=unknown")
-	err := cmd.Run()
-	if e, ok := err.(*exec.ExitError); ok && !e.Success() {
-		return
-	}
-	t.Fatal("expected non-zero exit code")
 }
 
 // TestHandleAuditVerifyDefaultPath verifies that handleAuditCommand passes the
@@ -173,7 +142,10 @@ func TestHandleAuditVerifyDefaultPath(t *testing.T) {
 	os.Stdout = outW
 	defer func() { os.Stdout = oldStdout }()
 
-	handleAuditVerify(logPath)
+	if err := handleAuditVerify(logPath); err != nil {
+		os.Stdout = oldStdout
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	_ = outW.Close()
 	var buf bytes.Buffer

@@ -277,3 +277,99 @@ func writeCertWithExpiry(t *testing.T, path string, notAfter time.Time) {
 		t.Fatal(err)
 	}
 }
+
+// TestAtomicWriteFile verifies atomic file writing.
+func TestAtomicWriteFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+
+	if err := atomicWriteFile(path, []byte("hello world"), 0600); err != nil {
+		t.Fatalf("atomicWriteFile: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "hello world" {
+		t.Errorf("got %q, want %q", string(data), "hello world")
+	}
+
+	info, _ := os.Stat(path)
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("perms = %o, want 0600", info.Mode().Perm())
+	}
+}
+
+// TestAtomicWriteFileOverwrite verifies that overwriting an existing file works.
+func TestAtomicWriteFileOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.txt")
+
+	os.WriteFile(path, []byte("old content"), 0644)
+
+	if err := atomicWriteFile(path, []byte("new content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(path)
+	if string(data) != "new content" {
+		t.Errorf("got %q, want %q", string(data), "new content")
+	}
+}
+
+// TestAtomicWriteFileInvalidDir verifies error on nonexistent directory.
+func TestAtomicWriteFileInvalidDir(t *testing.T) {
+	err := atomicWriteFile("/nonexistent/dir/file.txt", []byte("data"), 0600)
+	if err == nil {
+		t.Fatal("expected error for nonexistent directory")
+	}
+}
+
+// TestGenerateHostCertBasic verifies host certificate generation.
+func TestGenerateHostCertBasic(t *testing.T) {
+	caCert, _, err := GenerateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hostCert, err := GenerateHostCert(caCert, "example.com")
+	if err != nil {
+		t.Fatalf("GenerateHostCert: %v", err)
+	}
+
+	if hostCert.Certificate == nil {
+		t.Fatal("expected non-nil certificate")
+	}
+
+	// Parse the leaf and verify it's for the right host.
+	leaf, err := x509.ParseCertificate(hostCert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaf.Subject.CommonName != "example.com" {
+		t.Errorf("CN = %q, want %q", leaf.Subject.CommonName, "example.com")
+	}
+	if len(leaf.DNSNames) == 0 || leaf.DNSNames[0] != "example.com" {
+		t.Errorf("SAN = %v, want [example.com]", leaf.DNSNames)
+	}
+}
+
+// TestGenerateHostCertIPAddress verifies host cert for IP address.
+func TestGenerateHostCertIPAddress(t *testing.T) {
+	caCert, _, err := GenerateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hostCert, err := GenerateHostCert(caCert, "192.168.1.1")
+	if err != nil {
+		t.Fatalf("GenerateHostCert: %v", err)
+	}
+
+	leaf, _ := x509.ParseCertificate(hostCert.Certificate[0])
+	// GenerateHostCert uses DNSNames for all hosts including IPs.
+	if leaf.Subject.CommonName != "192.168.1.1" {
+		t.Errorf("CN = %q, want %q", leaf.Subject.CommonName, "192.168.1.1")
+	}
+}

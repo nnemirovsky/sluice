@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"sort"
 	"strconv"
@@ -14,50 +13,49 @@ import (
 	"github.com/nemirovsky/sluice/internal/store"
 )
 
-func handlePolicyCommand(args []string) {
+func handlePolicyCommand(args []string) error {
 	if len(args) == 0 {
-		fmt.Println("usage: sluice policy [list|add|remove|import|export] ...")
-		os.Exit(1)
+		return fmt.Errorf("usage: sluice policy [list|add|remove|import|export] ...")
 	}
 
 	switch args[0] {
 	case "list":
-		handlePolicyList(args[1:])
+		return handlePolicyList(args[1:])
 	case "add":
-		handlePolicyAdd(args[1:])
+		return handlePolicyAdd(args[1:])
 	case "remove":
-		handlePolicyRemove(args[1:])
+		return handlePolicyRemove(args[1:])
 	case "import":
-		handlePolicyImport(args[1:])
+		return handlePolicyImport(args[1:])
 	case "export":
-		handlePolicyExport(args[1:])
+		return handlePolicyExport(args[1:])
 	default:
-		fmt.Printf("unknown policy command: %s\n", args[0])
-		fmt.Println("usage: sluice policy [list|add|remove|import|export] ...")
-		os.Exit(1)
+		return fmt.Errorf("unknown policy command: %s\nusage: sluice policy [list|add|remove|import|export] ...", args[0])
 	}
 }
 
-func handlePolicyList(args []string) {
-	fs := flag.NewFlagSet("policy list", flag.ExitOnError)
+func handlePolicyList(args []string) error {
+	fs := flag.NewFlagSet("policy list", flag.ContinueOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
 	verdict := fs.String("verdict", "", "filter by verdict (allow, deny, ask)")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	db, err := store.New(*dbPath)
 	if err != nil {
-		log.Fatalf("open store: %v", err)
+		return fmt.Errorf("open store: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 
 	rules, err := db.ListRules(store.RuleFilter{Verdict: *verdict})
 	if err != nil {
-		log.Fatalf("list rules: %v", err)
+		return fmt.Errorf("list rules: %w", err)
 	}
 
 	if len(rules) == 0 {
 		fmt.Println("no rules found")
-		return
+		return nil
 	}
 
 	for _, r := range rules {
@@ -86,34 +84,34 @@ func handlePolicyList(args []string) {
 		}
 		fmt.Printf("[%d] %s %s%s%s%s [%s]\n", r.ID, r.Verdict, target, ports, proto, name, r.Source)
 	}
+	return nil
 }
 
-func handlePolicyAdd(args []string) {
+func handlePolicyAdd(args []string) error {
 	if len(args) == 0 {
-		fmt.Println("usage: sluice policy add <allow|deny|ask> <destination> [--ports 443,80] [--name \"reason\"]")
-		os.Exit(1)
+		return fmt.Errorf("usage: sluice policy add <allow|deny|ask> <destination> [--ports 443,80] [--name \"reason\"]")
 	}
 
 	verdict := args[0]
 	if verdict != "allow" && verdict != "deny" && verdict != "ask" {
-		fmt.Printf("invalid verdict: %s (must be allow, deny, or ask)\n", verdict)
-		os.Exit(1)
+		return fmt.Errorf("invalid verdict: %s (must be allow, deny, or ask)", verdict)
 	}
 
-	fs := flag.NewFlagSet("policy add", flag.ExitOnError)
+	fs := flag.NewFlagSet("policy add", flag.ContinueOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
 	portsStr := fs.String("ports", "", "comma-separated port list (e.g. 443,80)")
 	note := fs.String("name", "", "human-readable name")
-	_ = fs.Parse(args[1:])
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
 
 	if fs.NArg() == 0 {
-		fmt.Println("usage: sluice policy add <allow|deny|ask> <destination> [--ports 443,80] [--name \"reason\"]")
-		os.Exit(1)
+		return fmt.Errorf("usage: sluice policy add <allow|deny|ask> <destination> [--ports 443,80] [--name \"reason\"]")
 	}
 	destination := fs.Arg(0)
 
 	if _, err := policy.CompileGlob(destination); err != nil {
-		log.Fatalf("invalid destination pattern %q: %v", destination, err)
+		return fmt.Errorf("invalid destination pattern %q: %w", destination, err)
 	}
 
 	var ports []int
@@ -122,10 +120,10 @@ func handlePolicyAdd(args []string) {
 			ps = strings.TrimSpace(ps)
 			p, err := strconv.Atoi(ps)
 			if err != nil {
-				log.Fatalf("invalid port %q: %v", ps, err)
+				return fmt.Errorf("invalid port %q: %w", ps, err)
 			}
 			if p < 1 || p > 65535 {
-				log.Fatalf("port %d out of range (1-65535)", p)
+				return fmt.Errorf("port %d out of range (1-65535)", p)
 			}
 			ports = append(ports, p)
 		}
@@ -133,74 +131,77 @@ func handlePolicyAdd(args []string) {
 
 	db, err := store.New(*dbPath)
 	if err != nil {
-		log.Fatalf("open store: %v", err)
+		return fmt.Errorf("open store: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 
 	id, err := db.AddRule(verdict, store.RuleOpts{Destination: destination, Ports: ports, Name: *note})
 	if err != nil {
-		log.Fatalf("add rule: %v", err)
+		return fmt.Errorf("add rule: %w", err)
 	}
 	fmt.Printf("added %s rule [%d] for %s\n", verdict, id, destination)
+	return nil
 }
 
-func handlePolicyRemove(args []string) {
-	fs := flag.NewFlagSet("policy remove", flag.ExitOnError)
+func handlePolicyRemove(args []string) error {
+	fs := flag.NewFlagSet("policy remove", flag.ContinueOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if fs.NArg() == 0 {
-		fmt.Println("usage: sluice policy remove <id>")
-		os.Exit(1)
+		return fmt.Errorf("usage: sluice policy remove <id>")
 	}
 
 	id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
 	if err != nil {
-		log.Fatalf("invalid rule ID %q: %v", fs.Arg(0), err)
+		return fmt.Errorf("invalid rule ID %q: %w", fs.Arg(0), err)
 	}
 
 	db, err := store.New(*dbPath)
 	if err != nil {
-		log.Fatalf("open store: %v", err)
+		return fmt.Errorf("open store: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 
 	deleted, err := db.RemoveRule(id)
 	if err != nil {
-		log.Fatalf("remove rule: %v", err)
+		return fmt.Errorf("remove rule: %w", err)
 	}
 	if !deleted {
-		fmt.Printf("no rule with ID %d\n", id)
-		os.Exit(1)
+		return fmt.Errorf("no rule with ID %d", id)
 	}
 	fmt.Printf("removed rule [%d]\n", id)
+	return nil
 }
 
-func handlePolicyImport(args []string) {
-	fs := flag.NewFlagSet("policy import", flag.ExitOnError)
+func handlePolicyImport(args []string) error {
+	fs := flag.NewFlagSet("policy import", flag.ContinueOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if fs.NArg() == 0 {
-		fmt.Println("usage: sluice policy import <path.toml>")
-		os.Exit(1)
+		return fmt.Errorf("usage: sluice policy import <path.toml>")
 	}
 
 	tomlPath := fs.Arg(0)
 	data, err := os.ReadFile(tomlPath)
 	if err != nil {
-		log.Fatalf("read TOML file: %v", err)
+		return fmt.Errorf("read TOML file: %w", err)
 	}
 
 	db, err := store.New(*dbPath)
 	if err != nil {
-		log.Fatalf("open store: %v", err)
+		return fmt.Errorf("open store: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 
 	result, err := db.ImportTOML(data)
 	if err != nil {
-		log.Fatalf("import: %v", err)
+		return fmt.Errorf("import: %w", err)
 	}
 
 	fmt.Printf("imported: %d rules (%d skipped), %d bindings (%d skipped), %d upstreams (%d skipped), %d config\n",
@@ -209,23 +210,26 @@ func handlePolicyImport(args []string) {
 		result.UpstreamsInserted, result.UpstreamsSkipped,
 		result.ConfigSet,
 	)
+	return nil
 }
 
-func handlePolicyExport(args []string) {
-	fs := flag.NewFlagSet("policy export", flag.ExitOnError)
+func handlePolicyExport(args []string) error {
+	fs := flag.NewFlagSet("policy export", flag.ContinueOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	db, err := store.New(*dbPath)
 	if err != nil {
-		log.Fatalf("open store: %v", err)
+		return fmt.Errorf("open store: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 
 	// Config section.
 	cfg, err := db.GetConfig()
 	if err != nil {
-		log.Fatalf("read config: %v", err)
+		return fmt.Errorf("read config: %w", err)
 	}
 	if cfg.DefaultVerdict != "" || cfg.TimeoutSec != 0 {
 		fmt.Println("[policy]")
@@ -346,9 +350,9 @@ func handlePolicyExport(args []string) {
 
 	// Network rules.
 	for _, verdict := range []string{"allow", "deny", "ask"} {
-		rules, err := db.ListRules(store.RuleFilter{Verdict: verdict, Type: "network"})
-		if err != nil {
-			log.Fatalf("list %s rules: %v", verdict, err)
+		rules, listErr := db.ListRules(store.RuleFilter{Verdict: verdict, Type: "network"})
+		if listErr != nil {
+			return fmt.Errorf("list %s rules: %w", verdict, listErr)
 		}
 		for _, r := range rules {
 			fmt.Printf("[[%s]]\n", verdict)
@@ -370,9 +374,9 @@ func handlePolicyExport(args []string) {
 
 	// Tool rules (exported as [[allow]], [[deny]], [[ask]] with tool field).
 	for _, verdict := range []string{"allow", "deny", "ask"} {
-		toolRules, err := db.ListRules(store.RuleFilter{Verdict: verdict, Type: "tool"})
-		if err != nil {
-			log.Fatalf("list tool %s rules: %v", verdict, err)
+		toolRules, listErr := db.ListRules(store.RuleFilter{Verdict: verdict, Type: "tool"})
+		if listErr != nil {
+			return fmt.Errorf("list tool %s rules: %w", verdict, listErr)
 		}
 		for _, r := range toolRules {
 			fmt.Printf("[[%s]]\n", verdict)
@@ -387,7 +391,7 @@ func handlePolicyExport(args []string) {
 	// Content deny rules (pattern-based, exported as [[deny]] with pattern field).
 	denyPatterns, err := db.ListRules(store.RuleFilter{Verdict: "deny", Type: "pattern"})
 	if err != nil {
-		log.Fatalf("list deny pattern rules: %v", err)
+		return fmt.Errorf("list deny pattern rules: %w", err)
 	}
 	for _, r := range denyPatterns {
 		fmt.Println("[[deny]]")
@@ -401,7 +405,7 @@ func handlePolicyExport(args []string) {
 	// Redact rules (exported as [[redact]]).
 	redactRules, err := db.ListRules(store.RuleFilter{Verdict: "redact", Type: "pattern"})
 	if err != nil {
-		log.Fatalf("list redact rules: %v", err)
+		return fmt.Errorf("list redact rules: %w", err)
 	}
 	for _, r := range redactRules {
 		fmt.Println("[[redact]]")
@@ -418,7 +422,7 @@ func handlePolicyExport(args []string) {
 	// Bindings.
 	bindings, err := db.ListBindings()
 	if err != nil {
-		log.Fatalf("list bindings: %v", err)
+		return fmt.Errorf("list bindings: %w", err)
 	}
 	for _, b := range bindings {
 		fmt.Println("[[binding]]")
@@ -444,7 +448,7 @@ func handlePolicyExport(args []string) {
 	// MCP upstreams.
 	upstreams, err := db.ListMCPUpstreams()
 	if err != nil {
-		log.Fatalf("list upstreams: %v", err)
+		return fmt.Errorf("list upstreams: %w", err)
 	}
 	for _, u := range upstreams {
 		fmt.Println("[[mcp_upstream]]")
@@ -474,4 +478,5 @@ func handlePolicyExport(args []string) {
 		}
 		fmt.Println()
 	}
+	return nil
 }

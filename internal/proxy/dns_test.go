@@ -792,3 +792,132 @@ default = "allow"
 		t.Error("expected error when resolver is unreachable")
 	}
 }
+
+// TestParseDNSNameEdgeCases tests DNS name parsing edge cases.
+func TestParseDNSNameEdgeCases(t *testing.T) {
+	t.Run("empty_root", func(t *testing.T) {
+		// Root label (single zero byte).
+		data := []byte{0x00}
+		name, off, err := parseDNSName(data, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name != "" {
+			t.Errorf("got %q, want empty string for root", name)
+		}
+		if off != 1 {
+			t.Errorf("offset = %d, want 1", off)
+		}
+	})
+
+	t.Run("truncated_label", func(t *testing.T) {
+		// Label says 10 bytes but only 3 are available.
+		data := []byte{0x0A, 'a', 'b', 'c'}
+		_, _, err := parseDNSName(data, 0)
+		if err == nil {
+			t.Error("expected error for truncated label")
+		}
+	})
+
+	t.Run("reserved_label_type", func(t *testing.T) {
+		// Bits 7-6 = 01 (reserved).
+		data := []byte{0x40, 0x00}
+		_, _, err := parseDNSName(data, 0)
+		if err == nil {
+			t.Error("expected error for reserved label type")
+		}
+	})
+
+	t.Run("pointer_loop", func(t *testing.T) {
+		// Two compression pointers pointing at each other.
+		data := []byte{0xC0, 0x02, 0xC0, 0x00}
+		_, _, err := parseDNSName(data, 0)
+		if err == nil {
+			t.Error("expected error for pointer loop")
+		}
+	})
+
+	t.Run("truncated_pointer", func(t *testing.T) {
+		// Pointer with only one byte.
+		data := []byte{0xC0}
+		_, _, err := parseDNSName(data, 0)
+		if err == nil {
+			t.Error("expected error for truncated pointer")
+		}
+	})
+
+	t.Run("offset_past_end", func(t *testing.T) {
+		data := []byte{0x03, 'c', 'o', 'm', 0x00}
+		_, _, err := parseDNSName(data, 10)
+		if err == nil {
+			t.Error("expected error for offset past end")
+		}
+	})
+
+	t.Run("valid_with_pointer", func(t *testing.T) {
+		// "www" -> pointer to "example.com" at offset 0.
+		// Build: example.com\0 at offset 0, then www + pointer at offset 13.
+		data := []byte{
+			// "example.com\0" at offset 0
+			7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0,
+			// "www" + pointer to offset 0
+			3, 'w', 'w', 'w', 0xC0, 0x00,
+		}
+		name, off, err := parseDNSName(data, 13)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name != "www.example.com" {
+			t.Errorf("got %q, want %q", name, "www.example.com")
+		}
+		// Return offset: 13 (start) + 1 (length) + 3 ("www") + 2 (pointer) = 19
+		if off != 19 {
+			t.Errorf("offset = %d, want 19", off)
+		}
+	})
+}
+
+// TestHandleQueryDenyRule tests that a deny rule causes NXDOMAIN.
+func TestHandleQueryDenyRule(t *testing.T) {
+	eng, _ := policy.LoadFromBytes([]byte(`[policy]
+default = "deny"
+`))
+
+	var enginePtr atomic.Pointer[policy.Engine]
+	enginePtr.Store(eng)
+
+	interceptor := NewDNSInterceptor(&enginePtr, nil, "8.8.8.8:53")
+	query := buildDNSQuery(0x1234, "blocked.example.com", dnsTypeA)
+
+	resp, err := interceptor.HandleQuery(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify it's an NXDOMAIN response (rcode = 3).
+	if len(resp) < 4 {
+		t.Fatal("response too short")
+	}
+	rcode := resp[3] & 0x0F
+	if rcode != 3 {
+		t.Errorf("rcode = %d, want 3 (NXDOMAIN)", rcode)
+	}
+}
+
+// TestHandleQueryTruncatedPacket tests graceful handling of truncated queries.
+func TestHandleQueryTruncatedPacket(t *testing.T) {
+	eng, _ := policy.LoadFromBytes([]byte(`[policy]
+default = "allow"
+`))
+
+	var enginePtr atomic.Pointer[policy.Engine]
+	enginePtr.Store(eng)
+
+	interceptor := NewDNSInterceptor(&enginePtr, nil, "8.8.8.8:53")
+
+	// Packet too short for DNS header.
+	_, err := interceptor.HandleQuery([]byte{0x00, 0x01})
+	if err == nil {
+		t.Error("expected error for truncated packet")
+	}
+}

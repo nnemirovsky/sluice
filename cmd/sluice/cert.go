@@ -3,34 +3,30 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 
 	"github.com/nemirovsky/sluice/internal/proxy"
 )
 
-func handleCertCommand(args []string) {
+func handleCertCommand(args []string) error {
 	if len(args) == 0 {
-		fmt.Println("usage: sluice cert [generate]")
-		os.Exit(1)
+		return fmt.Errorf("usage: sluice cert [generate]")
 	}
 
 	switch args[0] {
 	case "generate":
-		handleCertGenerate(args[1:])
+		return handleCertGenerate(args[1:])
 	default:
-		fmt.Printf("unknown cert command: %s\n", args[0])
-		fmt.Println("usage: sluice cert [generate]")
-		os.Exit(1)
+		return fmt.Errorf("unknown cert command: %s\nusage: sluice cert [generate]", args[0])
 	}
 }
 
-func handleCertGenerate(args []string) {
-	fs := flag.NewFlagSet("cert generate", flag.ExitOnError)
+func handleCertGenerate(args []string) error {
+	fs := flag.NewFlagSet("cert generate", flag.ContinueOnError)
 	outDir := fs.String("out", "", "output directory for CA cert and key (default: $SLUICE_VAULT_DIR or ~/.sluice)")
 	if err := fs.Parse(args); err != nil {
-		log.Fatalf("parse flags: %v", err)
+		return err
 	}
 
 	dir := *outDir
@@ -40,18 +36,19 @@ func handleCertGenerate(args []string) {
 	if dir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			log.Fatalf("determine home dir: %v", err)
+			return fmt.Errorf("determine home dir: %w", err)
 		}
 		dir = filepath.Join(home, ".sluice")
 	}
 
 	_, _, err := proxy.LoadOrCreateCA(dir)
 	if err != nil {
-		log.Fatalf("generate CA: %v", err)
+		return fmt.Errorf("generate CA: %w", err)
 	}
 
 	certPath := filepath.Join(dir, "ca-cert.pem")
 	fmt.Printf("CA certificate: %s\n", certPath)
 	fmt.Printf("CA private key: %s\n", filepath.Join(dir, "ca-key.pem"))
 	fmt.Println("Mount ca-cert.pem into agent containers as a trusted root CA.")
+	return nil
 }

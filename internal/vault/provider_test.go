@@ -393,6 +393,114 @@ func TestChainProviderWithMockBitwardenAndEnv(t *testing.T) {
 	}
 }
 
+func TestChainProviderAllFailing(t *testing.T) {
+	// All providers fail with different errors. Verify the last error propagates.
+	t.Setenv("VAULT_TOKEN", "")
+	t.Setenv("VAULT_ADDR", "")
+
+	env := &EnvProvider{}
+	// Neither provider has "nonexistent_key".
+	dir := t.TempDir()
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	chain := NewChainProvider(env, store)
+	_, err = chain.Get("nonexistent_key")
+	if err == nil {
+		t.Fatal("expected error when all providers fail")
+	}
+	if got := err.Error(); got == "" {
+		t.Error("error should have a meaningful message")
+	}
+	// The error should mention the credential name.
+	if got := err.Error(); !containsSubstring(got, "nonexistent_key") {
+		t.Errorf("error %q should mention the credential name", got)
+	}
+}
+
+func TestChainProviderEmpty(t *testing.T) {
+	// Chain with no providers at all.
+	chain := NewChainProvider()
+	_, err := chain.Get("any_key")
+	if err == nil {
+		t.Fatal("expected error from empty chain")
+	}
+	if got := err.Error(); !containsSubstring(got, "no providers configured") {
+		t.Errorf("error %q should mention 'no providers configured'", got)
+	}
+}
+
+func TestChainProviderListMergesAndDedupes(t *testing.T) {
+	// Two age stores with overlapping credential names.
+	dir1 := t.TempDir()
+	store1, err := NewStore(dir1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store1.Add("shared_key", "val1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store1.Add("unique_a", "val2"); err != nil {
+		t.Fatal(err)
+	}
+
+	dir2 := t.TempDir()
+	store2, err := NewStore(dir2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store2.Add("shared_key", "val3"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store2.Add("unique_b", "val4"); err != nil {
+		t.Fatal(err)
+	}
+
+	chain := NewChainProvider(store1, store2)
+	names, err := chain.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// shared_key should appear only once.
+	if len(names) != 3 {
+		t.Errorf("expected 3 unique names, got %d: %v", len(names), names)
+	}
+}
+
+func TestChainProviderProviders(t *testing.T) {
+	env := &EnvProvider{}
+	dir := t.TempDir()
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := NewChainProvider(env, store)
+	providers := chain.Providers()
+	if len(providers) != 2 {
+		t.Errorf("expected 2 providers, got %d", len(providers))
+	}
+	if providers[0].Name() != "env" {
+		t.Errorf("first provider = %q, want 'env'", providers[0].Name())
+	}
+	if providers[1].Name() != "age" {
+		t.Errorf("second provider = %q, want 'age'", providers[1].Name())
+	}
+}
+
+func containsSubstring(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsCheck(s, substr))
+}
+func containsCheck(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
 func TestChainProviderWithMockGopassAndAge(t *testing.T) {
 	mockGP := &mockGopassClient{
 		entries: map[string]string{

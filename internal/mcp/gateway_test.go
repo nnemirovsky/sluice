@@ -1149,3 +1149,137 @@ func TestGatewayRestartUpstreamNotFound(t *testing.T) {
 		t.Fatal("expected error for nonexistent upstream")
 	}
 }
+
+// --- Upstream crash mid-call ---
+
+// mockMCPServerCrash handles initialize and tools/list, then exits (crashes)
+// before responding to tools/call.
+const mockMCPServerCrash = `#!/bin/bash
+while IFS= read -r line; do
+  method=$(echo "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  id=$(echo "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$method" in
+    initialize)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"crasher\",\"version\":\"0.1.0\"}}}"
+      ;;
+    notifications/initialized)
+      ;;
+    tools/list)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[{\"name\":\"boom\",\"description\":\"Will crash\"}]}}"
+      ;;
+    tools/call)
+      # Exit without responding to simulate a crash.
+      exit 1
+      ;;
+  esac
+done
+`
+
+func TestGatewayUpstreamCrashMidCall(t *testing.T) {
+	script := writeMockServerScript(t, mockMCPServerCrash)
+
+	gw := newGatewayForTest(t, GatewayConfig{
+		Upstreams: []UpstreamConfig{{
+			Name:       "crasher",
+			Command:    "bash",
+			Args:       []string{script},
+			TimeoutSec: 5,
+		}},
+	})
+
+	tools := gw.Tools()
+	if len(tools) != 1 || tools[0].Name != "crasher__boom" {
+		t.Fatalf("expected tool 'crasher__boom', got %v", tools)
+	}
+
+	// The tool call should return an error because the upstream crashes.
+	result, err := gw.HandleToolCall(CallToolParams{
+		Name:      "crasher__boom",
+		Arguments: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("HandleToolCall should not return Go error, got: %v", err)
+	}
+	if !result.IsError {
+		t.Error("expected IsError when upstream crashes mid-call")
+	}
+	if len(result.Content) == 0 || !strings.Contains(result.Content[0].Text, "Upstream error") {
+		t.Errorf("error message should mention upstream error, got: %v", result.Content)
+	}
+}
+
+// --- Tool namespace collision ---
+
+// mockMCPServerCollision returns a tool named "list" (same as the other upstream).
+const mockMCPServerCollision = `#!/bin/bash
+while IFS= read -r line; do
+  method=$(echo "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  id=$(echo "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$method" in
+    initialize)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"collision\",\"version\":\"0.1.0\"}}}"
+      ;;
+    notifications/initialized)
+      ;;
+    tools/list)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[{\"name\":\"list\",\"description\":\"List items\"}]}}"
+      ;;
+    tools/call)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"collision response\"}]}}"
+      ;;
+  esac
+done
+`
+
+func TestGatewayToolNamespacePreventsCollision(t *testing.T) {
+	// Two upstreams both exposing a tool named "list". Namespacing should
+	// produce "svc_a__list" and "svc_b__list" with no collision.
+	script1 := writeMockServerScript(t, mockMCPServerCollision)
+	script2 := writeMockServerScript(t, mockMCPServerCollision)
+
+	gw := newGatewayForTest(t, GatewayConfig{
+		Upstreams: []UpstreamConfig{
+			{Name: "svc_a", Command: "bash", Args: []string{script1}},
+			{Name: "svc_b", Command: "bash", Args: []string{script2}},
+		},
+	})
+
+	tools := gw.Tools()
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(tools))
+	}
+
+	names := make(map[string]bool)
+	for _, tool := range tools {
+		names[tool.Name] = true
+	}
+	if !names["svc_a__list"] {
+		t.Error("missing svc_a__list")
+	}
+	if !names["svc_b__list"] {
+		t.Error("missing svc_b__list")
+	}
+
+	// Verify routing: each call goes to the correct upstream.
+	result1, err := gw.HandleToolCall(CallToolParams{
+		Name:      "svc_a__list",
+		Arguments: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("HandleToolCall svc_a__list: %v", err)
+	}
+	if result1.IsError {
+		t.Errorf("expected success, got error: %s", result1.Content[0].Text)
+	}
+
+	result2, err := gw.HandleToolCall(CallToolParams{
+		Name:      "svc_b__list",
+		Arguments: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("HandleToolCall svc_b__list: %v", err)
+	}
+	if result2.IsError {
+		t.Errorf("expected success, got error: %s", result2.Content[0].Text)
+	}
+}

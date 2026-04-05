@@ -367,3 +367,50 @@ func TestSSHVaultIntegrityAfterHandshake(t *testing.T) {
 	}
 	after.Release()
 }
+
+// TestResolveHostKeyCallbackExplicit tests that an explicit callback is returned.
+func TestResolveHostKeyCallbackExplicit(t *testing.T) {
+	called := false
+	cb := func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		called = true
+		return nil
+	}
+
+	h := &SSHJumpHost{HostKeyCallback: cb}
+	got, err := h.resolveHostKeyCallback()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Call the returned callback to verify it's our custom one.
+	got("example.com:22", nil, nil)
+	if !called {
+		t.Error("expected custom callback to be called")
+	}
+}
+
+// TestResolveHostKeyCallbackNoKnownHosts tests fallback when no known_hosts exists.
+func TestResolveHostKeyCallbackNoKnownHosts(t *testing.T) {
+	// Set HOME to a dir without .ssh/known_hosts.
+	t.Setenv("HOME", t.TempDir())
+
+	h := &SSHJumpHost{}
+	_, err := h.resolveHostKeyCallback()
+	if err == nil {
+		t.Fatal("expected error when no known_hosts and no explicit callback")
+	}
+}
+
+// TestGenerateSSHHostKey tests SSH host key generation.
+func TestGenerateSSHHostKey(t *testing.T) {
+	signer, err := GenerateSSHHostKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signer == nil {
+		t.Fatal("expected non-nil signer")
+	}
+	if signer.PublicKey() == nil {
+		t.Error("expected non-nil public key")
+	}
+}

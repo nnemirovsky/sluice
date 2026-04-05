@@ -24,13 +24,33 @@ make test   # all unit tests
 
 ## Testing
 
-- **Unit tests** (`make test`) -- runs all tests with `-v -count=1`
-- **Coverage** (`make test-coverage`) -- generates HTML coverage report
+### Unit tests
+
+- `make test` -- runs all unit tests with `-v -count=1`
+- `make test-coverage` -- generates HTML coverage report in `coverage.html`
+- CI enforces a minimum 75% overall coverage threshold
+
+### End-to-end tests
+
+E2e tests live in `e2e/` and require the `e2e` build tag. They start a real sluice binary and test the full proxy, credential injection, MCP gateway, and audit log flows.
+
+```bash
+make test-e2e          # run all e2e tests locally
+make test-e2e-docker   # run Linux e2e tests via Docker Compose
+make test-e2e-macos    # run macOS e2e tests (Apple Container)
+```
+
+Build tags:
+- `e2e` -- required for all e2e tests
+- `e2e && linux` -- Docker compose integration tests (requires Docker)
+- `e2e && darwin` -- Apple Container tests (requires macOS with `container` CLI)
+
+When writing new e2e tests, use the helpers in `e2e/helpers_test.go` (startSluice, connectSOCKS5, startEchoServer, etc.) to avoid boilerplate.
 
 ### macOS-specific tests
 
 - Apple Container integration tests (`internal/container/`) use mock `CommandRunner` by default and run on all platforms
-- Full integration tests requiring a real Apple Container runtime are manual (see `docs/apple-container-quickstart.md`)
+- Full integration tests requiring a real Apple Container runtime are in `e2e/apple_test.go` (see `docs/apple-container-quickstart.md`)
 
 ## Commit Messages
 

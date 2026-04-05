@@ -1,0 +1,53 @@
+name: E2E Tests (macOS)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e-macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check Apple Container availability
+        id: check-apple
+        run: |
+          if command -v container &> /dev/null; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Apple Container CLI not found, tests will be skipped gracefully"
+          fi
+
+      - name: Build sluice
+        run: go build -o bin/sluice ./cmd/sluice
+
+      - name: Run e2e tests
+        run: |
+          set -o pipefail
+          sudo -E go test -tags="e2e darwin" ./e2e/ -v -count=1 -timeout=300s -json 2>&1 | tee test-output.json
+        if: steps.check-apple.outputs.available == 'true'
+
+      - name: Skip notice
+        if: steps.check-apple.outputs.available != 'true'
+        run: echo "::warning::Apple Container not available on this runner. All darwin e2e tests were skipped."
+
+      - name: Verify Apple Container tests actually ran
+        if: steps.check-apple.outputs.available == 'true'
+        run: |
+          # Count Apple-specific test pass events (test-level only, not package-level).
+          # Package-level events lack a "Test" field, so grep for both "pass" and "Apple".
+          apple_passed=$(grep '"Action":"pass"' test-output.json | grep -c '"Test":"TestApple' || true)
+          apple_skipped=$(grep '"Action":"skip"' test-output.json | grep -c '"Test":"TestApple' || true)
+          echo "Apple Container tests - Passed: $apple_passed, Skipped: $apple_skipped"
+          if [ "$apple_passed" -eq 0 ]; then
+            echo "::error::No Apple Container e2e tests passed. All were skipped or failed."
+            exit 1
+          fi

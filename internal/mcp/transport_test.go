@@ -1,8 +1,13 @@
 package mcp
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
+	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/nemirovsky/sluice/internal/policy"
 )
@@ -143,6 +148,256 @@ func TestHandleRequestUnknownNotification(t *testing.T) {
 	resp := gw.handleRequest(req)
 	if resp != nil {
 		t.Fatalf("expected nil for notification without ID, got %+v", resp)
+	}
+}
+
+func TestHandleRequestPing(t *testing.T) {
+	gw := newTestGateway()
+	req := JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`6`),
+		Method:  "ping",
+	}
+
+	resp := gw.handleRequest(req)
+	if resp == nil {
+		t.Fatal("expected response, got nil")
+	}
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %s", resp.Error.Message)
+	}
+}
+
+func TestMarshalResultError(t *testing.T) {
+	// marshalResult should handle marshal errors gracefully.
+	// Use a value that can't be marshaled to JSON.
+	ch := make(chan int) // channels are not JSON-serializable
+	resp := marshalResult(json.RawMessage(`1`), ch)
+	if resp.Error == nil {
+		t.Fatal("expected error for unmarshalable value")
+	}
+	if resp.Error.Code != -32603 {
+		t.Errorf("error code = %d, want -32603", resp.Error.Code)
+	}
+}
+
+// TestRunStdioBasic tests RunStdio with piped stdin/stdout.
+func TestRunStdioBasic(t *testing.T) {
+	gw := newTestGateway()
+
+	// Create pipes to replace stdin/stdout.
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldStdin := os.Stdin
+	oldStdout := os.Stdout
+	os.Stdin = stdinR
+	os.Stdout = stdoutW
+	defer func() {
+		os.Stdin = oldStdin
+		os.Stdout = oldStdout
+	}()
+
+	// Run the gateway in a goroutine.
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- gw.RunStdio()
+	}()
+
+	// Send an initialize request.
+	initReq := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}` + "\n"
+	stdinW.Write([]byte(initReq))
+
+	// Send a tools/list request.
+	listReq := `{"jsonrpc":"2.0","id":2,"method":"tools/list"}` + "\n"
+	stdinW.Write([]byte(listReq))
+
+	// Send a ping.
+	pingReq := `{"jsonrpc":"2.0","id":3,"method":"ping"}` + "\n"
+	stdinW.Write([]byte(pingReq))
+
+	// Close stdin to signal EOF.
+	stdinW.Close()
+
+	// Wait for RunStdio to finish.
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("RunStdio error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunStdio did not return after stdin close")
+	}
+
+	// Read responses from stdout.
+	stdoutW.Close()
+	var buf bytes.Buffer
+	io.Copy(&buf, stdoutR)
+
+	// Should have 3 responses (one per request).
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 response lines, got %d: %s", len(lines), buf.String())
+	}
+
+	// Verify first response is initialize result.
+	var initResp JSONRPCResponse
+	if err := json.Unmarshal([]byte(lines[0]), &initResp); err != nil {
+		t.Fatalf("parse init response: %v", err)
+	}
+	if initResp.Error != nil {
+		t.Errorf("init response error: %s", initResp.Error.Message)
+	}
+}
+
+// TestRunStdioParseError tests RunStdio with malformed JSON input.
+func TestRunStdioParseError(t *testing.T) {
+	gw := newTestGateway()
+
+	stdinR, stdinW, _ := os.Pipe()
+	stdoutR, stdoutW, _ := os.Pipe()
+
+	oldStdin := os.Stdin
+	oldStdout := os.Stdout
+	os.Stdin = stdinR
+	os.Stdout = stdoutW
+	defer func() {
+		os.Stdin = oldStdin
+		os.Stdout = oldStdout
+	}()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- gw.RunStdio()
+	}()
+
+	// Send invalid JSON.
+	stdinW.Write([]byte("not json at all\n"))
+	stdinW.Close()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("RunStdio error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunStdio did not return")
+	}
+
+	stdoutW.Close()
+	var buf bytes.Buffer
+	io.Copy(&buf, stdoutR)
+
+	// Should have a parse error response.
+	var resp JSONRPCResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	if resp.Error == nil {
+		t.Fatal("expected error response for malformed JSON")
+	}
+	if resp.Error.Code != -32700 {
+		t.Errorf("error code = %d, want -32700", resp.Error.Code)
+	}
+}
+
+// TestReadSSEResponse tests SSE response parsing.
+func TestReadSSEResponse(t *testing.T) {
+	h := &HTTPUpstream{name: "test"}
+
+	// Build SSE stream with matching response.
+	sse := "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n"
+	resp, err := h.readSSEResponse(strings.NewReader(sse), json.RawMessage(`1`))
+	if err != nil {
+		t.Fatalf("readSSEResponse: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	if resp.Error != nil {
+		t.Errorf("unexpected error: %s", resp.Error.Message)
+	}
+}
+
+// TestReadSSEResponseSkipsNotifications tests that notifications are skipped.
+func TestReadSSEResponseSkipsNotifications(t *testing.T) {
+	h := &HTTPUpstream{name: "test"}
+
+	// Notification (no id) followed by the real response.
+	sse := "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n" +
+		"data: {\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"done\":true}}\n\n"
+
+	resp, err := h.readSSEResponse(strings.NewReader(sse), json.RawMessage(`5`))
+	if err != nil {
+		t.Fatalf("readSSEResponse: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+}
+
+// TestReadSSEResponseSkipsMismatchedID tests that mismatched IDs are skipped.
+func TestReadSSEResponseSkipsMismatchedID(t *testing.T) {
+	h := &HTTPUpstream{name: "test"}
+
+	sse := "data: {\"jsonrpc\":\"2.0\",\"id\":99,\"result\":{}}\n\n" +
+		"data: {\"jsonrpc\":\"2.0\",\"id\":42,\"result\":{\"match\":true}}\n\n"
+
+	resp, err := h.readSSEResponse(strings.NewReader(sse), json.RawMessage(`42`))
+	if err != nil {
+		t.Fatalf("readSSEResponse: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+}
+
+// TestReadSSEResponseNoMatch tests error when stream ends without a match.
+func TestReadSSEResponseNoMatch(t *testing.T) {
+	h := &HTTPUpstream{name: "test"}
+
+	sse := "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n"
+	_, err := h.readSSEResponse(strings.NewReader(sse), json.RawMessage(`999`))
+	if err == nil {
+		t.Fatal("expected error for no matching response")
+	}
+}
+
+// TestReadSSEResponseTrailingData tests data without trailing blank line.
+func TestReadSSEResponseTrailingData(t *testing.T) {
+	h := &HTTPUpstream{name: "test"}
+
+	// Data without trailing blank line (no final empty line).
+	sse := "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"trailing\":true}}"
+	resp, err := h.readSSEResponse(strings.NewReader(sse), json.RawMessage(`1`))
+	if err != nil {
+		t.Fatalf("readSSEResponse: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response from trailing data")
+	}
+}
+
+// TestProcessSSEDataServerRequest tests that server-initiated requests are skipped.
+func TestProcessSSEDataServerRequest(t *testing.T) {
+	h := &HTTPUpstream{name: "test"}
+
+	data := `{"jsonrpc":"2.0","id":1,"method":"server/ping"}`
+	resp, done, err := h.processSSEData(data, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		t.Error("server request should be skipped, not matched")
+	}
+	if resp != nil {
+		t.Error("expected nil response for server request")
 	}
 }
 

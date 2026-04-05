@@ -3,11 +3,13 @@ package mcp
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nemirovsky/sluice/internal/policy"
 )
@@ -535,5 +537,70 @@ func TestMCPHTTPStreamedResponse(t *testing.T) {
 	// SSE events end with double newline.
 	if !strings.HasSuffix(body2, "\n\n") {
 		t.Fatalf("expected SSE event to end with double newline, got %q", body2)
+	}
+}
+
+func TestPruneOldestSession(t *testing.T) {
+	handler := newTestMCPHandler(t)
+
+	// Manually create sessions with known timestamps.
+	sess1 := &mcpSession{id: "old", createdAt: time.Now().Add(-10 * time.Minute)}
+	sess1.lastAccessedAt.Store(time.Now().Add(-10 * time.Minute).UnixNano())
+	handler.sessions.Store("old", sess1)
+
+	sess2 := &mcpSession{id: "new", createdAt: time.Now()}
+	sess2.lastAccessedAt.Store(time.Now().UnixNano())
+	handler.sessions.Store("new", sess2)
+
+	if handler.SessionCount() != 2 {
+		t.Fatalf("expected 2 sessions, got %d", handler.SessionCount())
+	}
+
+	handler.pruneOldestSession()
+
+	if handler.SessionCount() != 1 {
+		t.Fatalf("expected 1 session after prune, got %d", handler.SessionCount())
+	}
+
+	// The older session should have been pruned.
+	if _, ok := handler.sessions.Load("old"); ok {
+		t.Error("oldest session should have been pruned")
+	}
+	if _, ok := handler.sessions.Load("new"); !ok {
+		t.Error("newer session should still exist")
+	}
+}
+
+func TestNewSessionPrunesWhenFull(t *testing.T) {
+	handler := newTestMCPHandler(t)
+
+	// Fill up to maxSessions by manually adding sessions.
+	for i := 0; i < maxSessions; i++ {
+		sess := &mcpSession{id: fmt.Sprintf("sess_%d", i), createdAt: time.Now()}
+		sess.lastAccessedAt.Store(time.Now().UnixNano())
+		handler.sessions.Store(sess.id, sess)
+	}
+
+	if handler.SessionCount() != maxSessions {
+		t.Fatalf("expected %d sessions, got %d", maxSessions, handler.SessionCount())
+	}
+
+	// Creating a new session should trigger prune.
+	newSess := handler.newSession()
+	if newSess == nil {
+		t.Fatal("expected non-nil session")
+	}
+	// Count should still be maxSessions (one pruned + one added = net zero change).
+	if handler.SessionCount() != maxSessions {
+		t.Errorf("expected %d sessions after prune+add, got %d", maxSessions, handler.SessionCount())
+	}
+}
+
+func TestPruneOldestSessionEmpty(t *testing.T) {
+	handler := newTestMCPHandler(t)
+	// Pruning an empty session map should not panic.
+	handler.pruneOldestSession()
+	if handler.SessionCount() != 0 {
+		t.Errorf("expected 0 sessions, got %d", handler.SessionCount())
 	}
 }

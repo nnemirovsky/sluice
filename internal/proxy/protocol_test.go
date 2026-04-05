@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"testing"
@@ -676,6 +677,41 @@ func TestServerFirstTwoPhaseDetection(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProtocolFromContext(t *testing.T) {
+	t.Run("with_protocol_set", func(t *testing.T) {
+		ctx := context.WithValue(context.Background(), ctxKeyProtocol, ProtoHTTPS)
+		got := ProtocolFromContext(ctx)
+		if got != ProtoHTTPS {
+			t.Errorf("ProtocolFromContext() = %s, want %s", got, ProtoHTTPS)
+		}
+	})
+
+	t.Run("without_protocol_returns_generic", func(t *testing.T) {
+		got := ProtocolFromContext(context.Background())
+		if got != ProtoGeneric {
+			t.Errorf("ProtocolFromContext(empty) = %s, want %s", got, ProtoGeneric)
+		}
+	})
+
+	t.Run("wrong_type_returns_generic", func(t *testing.T) {
+		ctx := context.WithValue(context.Background(), ctxKeyProtocol, "not_a_protocol")
+		got := ProtocolFromContext(ctx)
+		if got != ProtoGeneric {
+			t.Errorf("ProtocolFromContext(wrong type) = %s, want %s", got, ProtoGeneric)
+		}
+	})
+
+	t.Run("all_protocols_round_trip_through_context", func(t *testing.T) {
+		for _, proto := range []Protocol{ProtoHTTP, ProtoSSH, ProtoIMAP, ProtoSMTP, ProtoWS, ProtoWSS, ProtoGRPC, ProtoDNS, ProtoQUIC, ProtoAPNS, ProtoTCP, ProtoUDP} {
+			ctx := context.WithValue(context.Background(), ctxKeyProtocol, proto)
+			got := ProtocolFromContext(ctx)
+			if got != proto {
+				t.Errorf("ProtocolFromContext(%s) = %s", proto, got)
+			}
+		}
+	})
 }
 
 func TestIsQUICPacket(t *testing.T) {

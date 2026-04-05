@@ -3,55 +3,52 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
-	"os"
 	"strconv"
 
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/store"
 )
 
-func handleChannelCommand(args []string) {
+func handleChannelCommand(args []string) error {
 	if len(args) == 0 {
-		fmt.Println("usage: sluice channel [list|add|update|remove] ...")
-		os.Exit(1)
+		return fmt.Errorf("usage: sluice channel [list|add|update|remove] ...")
 	}
 
 	switch args[0] {
 	case "list":
-		handleChannelList(args[1:])
+		return handleChannelList(args[1:])
 	case "add":
-		handleChannelAdd(args[1:])
+		return handleChannelAdd(args[1:])
 	case "update":
-		handleChannelUpdate(args[1:])
+		return handleChannelUpdate(args[1:])
 	case "remove":
-		handleChannelRemove(args[1:])
+		return handleChannelRemove(args[1:])
 	default:
-		fmt.Printf("unknown channel command: %s\n", args[0])
-		fmt.Println("usage: sluice channel [list|add|update|remove] ...")
-		os.Exit(1)
+		return fmt.Errorf("unknown channel command: %s\nusage: sluice channel [list|add|update|remove] ...", args[0])
 	}
 }
 
-func handleChannelList(args []string) {
-	fs := flag.NewFlagSet("channel list", flag.ExitOnError)
+func handleChannelList(args []string) error {
+	fs := flag.NewFlagSet("channel list", flag.ContinueOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	db, err := store.New(*dbPath)
 	if err != nil {
-		log.Fatalf("open store: %v", err)
+		return fmt.Errorf("open store: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 
 	channels, err := db.ListChannels()
 	if err != nil {
-		log.Fatalf("list channels: %v", err)
+		return fmt.Errorf("list channels: %w", err)
 	}
 
 	if len(channels) == 0 {
 		fmt.Println("no channels configured")
-		return
+		return nil
 	}
 
 	for _, ch := range channels {
@@ -69,19 +66,21 @@ func handleChannelList(args []string) {
 		}
 		fmt.Printf("[%d] %s %s%s\n", ch.ID, typeName, status, extra)
 	}
+	return nil
 }
 
-func handleChannelAdd(args []string) {
-	fs := flag.NewFlagSet("channel add", flag.ExitOnError)
+func handleChannelAdd(args []string) error {
+	fs := flag.NewFlagSet("channel add", flag.ContinueOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
 	chType := fs.String("type", "", "channel type (telegram or http)")
 	url := fs.String("url", "", "webhook URL (required for http type)")
 	secret := fs.String("secret", "", "webhook HMAC secret (optional, for http type)")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if *chType == "" {
-		fmt.Println("usage: sluice channel add --type <telegram|http> [--url <url>] [--secret <secret>]")
-		os.Exit(1)
+		return fmt.Errorf("usage: sluice channel add --type <telegram|http> [--url <url>] [--secret <secret>]")
 	}
 
 	var typeInt int
@@ -91,17 +90,15 @@ func handleChannelAdd(args []string) {
 	case "http":
 		typeInt = int(channel.ChannelHTTP)
 		if *url == "" {
-			fmt.Println("--url is required for http channel type")
-			os.Exit(1)
+			return fmt.Errorf("--url is required for http channel type")
 		}
 	default:
-		fmt.Printf("invalid channel type: %s (must be telegram or http)\n", *chType)
-		os.Exit(1)
+		return fmt.Errorf("invalid channel type: %s (must be telegram or http)", *chType)
 	}
 
 	db, err := store.New(*dbPath)
 	if err != nil {
-		log.Fatalf("open store: %v", err)
+		return fmt.Errorf("open store: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 
@@ -112,50 +109,51 @@ func handleChannelAdd(args []string) {
 
 	id, err := db.AddChannel(typeInt, true, opts)
 	if err != nil {
-		log.Fatalf("add channel: %v", err)
+		return fmt.Errorf("add channel: %w", err)
 	}
 	fmt.Printf("added %s channel [%d]\n", *chType, id)
+	return nil
 }
 
-func handleChannelUpdate(args []string) {
-	fs := flag.NewFlagSet("channel update", flag.ExitOnError)
+func handleChannelUpdate(args []string) error {
+	fs := flag.NewFlagSet("channel update", flag.ContinueOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
 	enabled := fs.String("enabled", "", "set enabled state (true or false)")
 	url := fs.String("url", "", "update webhook URL")
 	secret := fs.String("secret", "", "update webhook HMAC secret")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if fs.NArg() == 0 {
-		fmt.Println("usage: sluice channel update <id> [--enabled true|false] [--url <url>] [--secret <secret>]")
-		os.Exit(1)
+		return fmt.Errorf("usage: sluice channel update <id> [--enabled true|false] [--url <url>] [--secret <secret>]")
 	}
 
 	id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
 	if err != nil {
-		log.Fatalf("invalid channel ID %q: %v", fs.Arg(0), err)
+		return fmt.Errorf("invalid channel ID %q: %w", fs.Arg(0), err)
 	}
 
 	db, err := store.New(*dbPath)
 	if err != nil {
-		log.Fatalf("open store: %v", err)
+		return fmt.Errorf("open store: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 
 	// Check that channel exists.
 	ch, err := db.GetChannel(id)
 	if err != nil {
-		log.Fatalf("get channel: %v", err)
+		return fmt.Errorf("get channel: %w", err)
 	}
 	if ch == nil {
-		fmt.Printf("no channel with ID %d\n", id)
-		os.Exit(1)
+		return fmt.Errorf("no channel with ID %d", id)
 	}
 
 	update := store.ChannelUpdate{}
 	if *enabled != "" {
 		val, parseErr := strconv.ParseBool(*enabled)
 		if parseErr != nil {
-			log.Fatalf("invalid --enabled value %q: must be true or false", *enabled)
+			return fmt.Errorf("invalid --enabled value %q: must be true or false", *enabled)
 		}
 		update.Enabled = &val
 	}
@@ -167,61 +165,61 @@ func handleChannelUpdate(args []string) {
 	}
 
 	if err := db.UpdateChannel(id, update); err != nil {
-		log.Fatalf("update channel: %v", err)
+		return fmt.Errorf("update channel: %w", err)
 	}
 	fmt.Printf("updated channel [%d]\n", id)
+	return nil
 }
 
-func handleChannelRemove(args []string) {
-	fs := flag.NewFlagSet("channel remove", flag.ExitOnError)
+func handleChannelRemove(args []string) error {
+	fs := flag.NewFlagSet("channel remove", flag.ContinueOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if fs.NArg() == 0 {
-		fmt.Println("usage: sluice channel remove <id>")
-		os.Exit(1)
+		return fmt.Errorf("usage: sluice channel remove <id>")
 	}
 
 	id, err := strconv.ParseInt(fs.Arg(0), 10, 64)
 	if err != nil {
-		log.Fatalf("invalid channel ID %q: %v", fs.Arg(0), err)
+		return fmt.Errorf("invalid channel ID %q: %w", fs.Arg(0), err)
 	}
 
 	db, err := store.New(*dbPath)
 	if err != nil {
-		log.Fatalf("open store: %v", err)
+		return fmt.Errorf("open store: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 
 	// Prevent removing the last enabled channel.
 	ch, err := db.GetChannel(id)
 	if err != nil {
-		log.Fatalf("get channel: %v", err)
+		return fmt.Errorf("get channel: %w", err)
 	}
 	if ch == nil {
-		fmt.Printf("no channel with ID %d\n", id)
-		os.Exit(1)
+		return fmt.Errorf("no channel with ID %d", id)
 	}
 	if ch.Enabled {
 		count, countErr := db.CountEnabledChannels()
 		if countErr != nil {
-			log.Fatalf("count enabled channels: %v", countErr)
+			return fmt.Errorf("count enabled channels: %w", countErr)
 		}
 		if count <= 1 {
-			fmt.Println("cannot remove the last enabled channel")
-			os.Exit(1)
+			return fmt.Errorf("cannot remove the last enabled channel")
 		}
 	}
 
 	deleted, err := db.RemoveChannel(id)
 	if err != nil {
-		log.Fatalf("remove channel: %v", err)
+		return fmt.Errorf("remove channel: %w", err)
 	}
 	if !deleted {
-		fmt.Printf("no channel with ID %d\n", id)
-		os.Exit(1)
+		return fmt.Errorf("no channel with ID %d", id)
 	}
 	fmt.Printf("removed channel [%d]\n", id)
+	return nil
 }
 
 func channelTypeName(t int) string {

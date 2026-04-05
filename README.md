@@ -1,5 +1,9 @@
 # Sluice
 
+[![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+[![E2e Linux](../../actions/workflows/e2e-linux.yml/badge.svg)](../../actions/workflows/e2e-linux.yml)
+[![E2e macOS](../../actions/workflows/e2e-macos.yml/badge.svg)](../../actions/workflows/e2e-macos.yml)
+
 Credential-injecting approval proxy for AI agents. Two layers of governance: MCP-level (semantic tool control) and network-level (all-protocol interception). Asks for human approval via Telegram, injects credentials, and forwards.
 
 **Status:** v0.0.1-alpha. Core proxy, policy engine, MCP gateway, and Telegram approval flow functional.
@@ -214,6 +218,21 @@ export ALL_PROXY=socks5://localhost:1080
 ```
 
 Credential injection (MITM proxy) and MCP gateway work normally. Only container lifecycle management is disabled.
+
+## Testing
+
+```bash
+make test              # unit tests
+make test-coverage     # unit tests with HTML coverage report
+make test-e2e          # all e2e tests
+make test-e2e-docker   # Linux e2e tests via Docker Compose (builds containers)
+make test-e2e-linux    # Linux e2e tests (go test with linux build tag)
+make test-e2e-macos    # macOS e2e tests (Apple Container)
+```
+
+E2e tests use build tags (`e2e`, `linux`, `darwin`) and live in `e2e/`. CI enforces a minimum 75% coverage threshold.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for details on writing tests.
 
 ## Requirements
 

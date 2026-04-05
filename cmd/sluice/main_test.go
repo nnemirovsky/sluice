@@ -898,6 +898,332 @@ func TestSelfBypassFromURL(t *testing.T) {
 	}
 }
 
+// TestEnvDefault verifies the envDefault helper function.
+func TestEnvDefault(t *testing.T) {
+	// With no env var set, should return fallback.
+	got := envDefault("TEST_ENVDEFAULT_NOTSET_XYZ", "fallback")
+	if got != "fallback" {
+		t.Errorf("envDefault with unset var: got %q, want %q", got, "fallback")
+	}
+
+	// With env var set, should return env value.
+	t.Setenv("TEST_ENVDEFAULT_SET_XYZ", "from-env")
+	got = envDefault("TEST_ENVDEFAULT_SET_XYZ", "fallback")
+	if got != "from-env" {
+		t.Errorf("envDefault with set var: got %q, want %q", got, "from-env")
+	}
+
+	// Empty env var should return fallback (empty string is falsy).
+	t.Setenv("TEST_ENVDEFAULT_EMPTY_XYZ", "")
+	got = envDefault("TEST_ENVDEFAULT_EMPTY_XYZ", "fallback")
+	if got != "fallback" {
+		t.Errorf("envDefault with empty var: got %q, want %q", got, "fallback")
+	}
+}
+
+// TestStartupFlagCombinations verifies that flag parsing accepts the expected
+// flags. We cannot run full main() (it blocks on signal), but we can test
+// the supporting functions that process flag values.
+func TestStartupFlagCombinations(t *testing.T) {
+	// Test that various helper functions work with flag-like inputs.
+
+	// buildSelfBypass with various health-addr formats.
+	bypass := buildSelfBypass("0.0.0.0:3000")
+	if len(bypass) != 2 {
+		t.Errorf("expected 2 bypass entries for 0.0.0.0, got %d", len(bypass))
+	}
+
+	bypass = buildSelfBypass("127.0.0.1:3000")
+	if len(bypass) != 1 || bypass[0] != "127.0.0.1:3000" {
+		t.Errorf("expected [127.0.0.1:3000], got %v", bypass)
+	}
+
+	// selfBypassFromURL with custom base URL.
+	hp := selfBypassFromURL("http://sluice:3000/mcp", "0.0.0.0:3000")
+	if hp != "sluice:3000" {
+		t.Errorf("expected sluice:3000, got %q", hp)
+	}
+}
+
+// TestAutoSeedOnEmptyDB verifies that when a DB is empty and a config path
+// is provided, the TOML is imported as seed data.
+func TestAutoSeedOnEmptyDB(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "seed-test.db")
+	tomlPath := filepath.Join(dir, "seed.toml")
+
+	tomlData := `[policy]
+default = "deny"
+
+[[allow]]
+destination = "seeded.example.com"
+ports = [443]
+
+[[binding]]
+destination = "seeded.example.com"
+ports = [443]
+credential = "seeded_key"
+header = "Authorization"
+`
+	if err := os.WriteFile(tomlPath, []byte(tomlData), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Open store and seed from TOML (mirrors main() auto-seed logic).
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	empty, err := db.IsEmpty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !empty {
+		t.Fatal("expected empty store")
+	}
+
+	data, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := db.ImportTOML(data)
+	if err != nil {
+		t.Fatalf("import TOML: %v", err)
+	}
+	if result.RulesInserted != 1 {
+		t.Errorf("expected 1 rule, got %d", result.RulesInserted)
+	}
+	if result.BindingsInserted != 1 {
+		t.Errorf("expected 1 binding, got %d", result.BindingsInserted)
+	}
+
+	// Build engine to verify policy works after seeding.
+	eng, err := policy.LoadFromStore(db)
+	if err != nil {
+		t.Fatalf("load from store: %v", err)
+	}
+	if eng.Default != policy.Deny {
+		t.Errorf("expected default Deny, got %s", eng.Default)
+	}
+	v := eng.Evaluate("seeded.example.com", 443)
+	if v != policy.Allow {
+		t.Errorf("expected Allow for seeded.example.com:443, got %s", v)
+	}
+
+	// Verify non-empty now.
+	empty, err = db.IsEmpty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty {
+		t.Error("expected non-empty store after import")
+	}
+}
+
+// TestAutoSeedSkipsNonEmptyDB verifies that auto-seed does not run
+// when the DB already has data.
+func TestAutoSeedSkipsNonEmptyDB(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "nonempty.db")
+
+	// Create a non-empty DB.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = db.AddRule("allow", store.RuleOpts{Destination: "existing.example.com"})
+	_ = db.Close()
+
+	// Re-open and check IsEmpty.
+	db, err = store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	empty, err := db.IsEmpty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty {
+		t.Error("expected non-empty store")
+	}
+
+	// Auto-seed logic should not run since DB is not empty.
+	// Verify existing rule is preserved.
+	rules, _ := db.ListRules(store.RuleFilter{})
+	if len(rules) != 1 || rules[0].Destination != "existing.example.com" {
+		t.Errorf("existing rule should be preserved, got: %v", rules)
+	}
+}
+
+// TestAutoSeedMissingConfigFile verifies that a missing config file
+// does not cause an error (it's logged as a warning).
+func TestAutoSeedMissingConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	empty, _ := db.IsEmpty()
+	if !empty {
+		t.Fatal("expected empty store")
+	}
+
+	// Attempting to read a non-existent config file.
+	_, readErr := os.ReadFile(filepath.Join(dir, "nonexistent.toml"))
+	if readErr == nil {
+		t.Fatal("expected error for missing file")
+	}
+	// Main() logic: if os.IsNotExist(err) -> log and continue, don't fatal.
+	if !os.IsNotExist(readErr) {
+		t.Errorf("expected IsNotExist, got: %v", readErr)
+	}
+}
+
+// TestSeedStoreFromConfig verifies the extracted seed helper function.
+func TestSeedStoreFromConfig(t *testing.T) {
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "seed.toml")
+
+	tomlData := `[policy]
+default = "deny"
+
+[[allow]]
+destination = "seeded.example.com"
+ports = [443]
+`
+	if err := os.WriteFile(tomlPath, []byte(tomlData), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Test: seed empty store.
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if err := seedStoreFromConfig(db, tomlPath); err != nil {
+		t.Fatalf("seedStoreFromConfig: %v", err)
+	}
+
+	rules, _ := db.ListRules(store.RuleFilter{})
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule after seed, got %d", len(rules))
+	}
+	if rules[0].Destination != "seeded.example.com" {
+		t.Errorf("destination = %q, want seeded.example.com", rules[0].Destination)
+	}
+
+	// Test: non-empty store skips seed.
+	if err := seedStoreFromConfig(db, tomlPath); err != nil {
+		t.Fatalf("seedStoreFromConfig on non-empty: %v", err)
+	}
+	rules, _ = db.ListRules(store.RuleFilter{})
+	if len(rules) != 1 {
+		t.Errorf("expected 1 rule (no re-seed), got %d", len(rules))
+	}
+}
+
+func TestSeedStoreFromConfigMissing(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Missing file should not return error (just logs).
+	if err := seedStoreFromConfig(db, "/nonexistent/seed.toml"); err != nil {
+		t.Fatalf("expected nil for missing file, got: %v", err)
+	}
+}
+
+func TestSeedStoreFromConfigMalformed(t *testing.T) {
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "bad.toml")
+	if err := os.WriteFile(tomlPath, []byte("not valid toml [[["), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if err := seedStoreFromConfig(db, tomlPath); err == nil {
+		t.Fatal("expected error for malformed TOML")
+	}
+}
+
+// TestBuildInspectRuleConfigs verifies the inspect rule conversion helper.
+func TestBuildInspectRuleConfigs(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	dv := "deny"
+	_ = db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dv})
+	_, _ = db.AddRule("deny", store.RuleOpts{Pattern: "(?i)secret", Name: "block secrets"})
+	_, _ = db.AddRule("redact", store.RuleOpts{Pattern: "(?i)token", Replacement: "[REDACTED]", Name: "redact tokens"})
+
+	eng, err := policy.LoadFromStore(db)
+	if err != nil {
+		t.Fatalf("load policy: %v", err)
+	}
+
+	wsBlock, wsRedact, quicBlock, quicRedact := buildInspectRuleConfigs(eng)
+
+	if len(wsBlock) != 1 {
+		t.Errorf("expected 1 ws block rule, got %d", len(wsBlock))
+	} else if wsBlock[0].Pattern != "(?i)secret" {
+		t.Errorf("ws block pattern = %q", wsBlock[0].Pattern)
+	}
+
+	if len(wsRedact) != 1 {
+		t.Errorf("expected 1 ws redact rule, got %d", len(wsRedact))
+	} else if wsRedact[0].Replacement != "[REDACTED]" {
+		t.Errorf("ws redact replacement = %q", wsRedact[0].Replacement)
+	}
+
+	if len(quicBlock) != 1 {
+		t.Errorf("expected 1 quic block rule, got %d", len(quicBlock))
+	}
+	if len(quicRedact) != 1 {
+		t.Errorf("expected 1 quic redact rule, got %d", len(quicRedact))
+	}
+}
+
+func TestBuildInspectRuleConfigsEmpty(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	dv := "deny"
+	_ = db.UpdateConfig(store.ConfigUpdate{DefaultVerdict: &dv})
+
+	eng, err := policy.LoadFromStore(db)
+	if err != nil {
+		t.Fatalf("load policy: %v", err)
+	}
+
+	wsBlock, wsRedact, quicBlock, quicRedact := buildInspectRuleConfigs(eng)
+	if len(wsBlock) != 0 || len(wsRedact) != 0 || len(quicBlock) != 0 || len(quicRedact) != 0 {
+		t.Error("expected all empty for engine without inspect rules")
+	}
+}
+
 // TestStandaloneModeCredentialInjection verifies that credential injection
 // (vault + binding resolver) works without a container manager, since the
 // MITM proxy handles injection independently.

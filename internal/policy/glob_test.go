@@ -58,3 +58,23 @@ func TestGlobMatch(t *testing.T) {
 		})
 	}
 }
+
+func TestGlobString(t *testing.T) {
+	patterns := []string{
+		"api.anthropic.com",
+		"*.github.com",
+		"**.example.com",
+		"a.**.b.com",
+		"a?.com",
+		"169.254.169.254",
+	}
+	for _, p := range patterns {
+		g, err := CompileGlob(p)
+		if err != nil {
+			t.Fatalf("CompileGlob(%q): %v", p, err)
+		}
+		if got := g.String(); got != p {
+			t.Errorf("Glob(%q).String() = %q, want %q", p, got, p)
+		}
+	}
+}

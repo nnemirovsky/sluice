@@ -61,6 +61,147 @@ func setupTestInjectorWithWS(
 	return NewInjector(store, &resolverPtr, caCert, "", wsProxy), store
 }
 
+func TestPinIPsStoreAndRetrieve(t *testing.T) {
+	inj, _ := setupTestInjector(t, nil)
+
+	ips := []string{"1.2.3.4", "5.6.7.8"}
+	inj.PinIPs("pin-1", ips)
+
+	got, ok := inj.pinnedIPs.Load("pin-1")
+	if !ok {
+		t.Fatal("expected pin-1 to be stored")
+	}
+	stored := got.([]string)
+	if len(stored) != 2 || stored[0] != "1.2.3.4" || stored[1] != "5.6.7.8" {
+		t.Errorf("stored IPs = %v, want [1.2.3.4 5.6.7.8]", stored)
+	}
+}
+
+func TestUnpinIPsRemovesEntry(t *testing.T) {
+	inj, _ := setupTestInjector(t, nil)
+
+	inj.PinIPs("pin-2", []string{"10.0.0.1"})
+	inj.UnpinIPs("pin-2")
+
+	_, ok := inj.pinnedIPs.Load("pin-2")
+	if ok {
+		t.Error("expected pin-2 to be removed after UnpinIPs")
+	}
+}
+
+func TestUnpinIPsNonExistent(t *testing.T) {
+	inj, _ := setupTestInjector(t, nil)
+	// Should not panic when unpinning a non-existent key.
+	inj.UnpinIPs("does-not-exist")
+}
+
+func TestPinIPsConcurrentAccess(t *testing.T) {
+	inj, _ := setupTestInjector(t, nil)
+
+	const n = 100
+	done := make(chan struct{}, n*2)
+
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("pin-%d", i)
+		go func() {
+			inj.PinIPs(id, []string{"127.0.0.1"})
+			done <- struct{}{}
+		}()
+		go func() {
+			inj.UnpinIPs(id)
+			done <- struct{}{}
+		}()
+	}
+
+	for i := 0; i < n*2; i++ {
+		<-done
+	}
+}
+
+func TestPinIPsOverwrite(t *testing.T) {
+	inj, _ := setupTestInjector(t, nil)
+
+	inj.PinIPs("pin-x", []string{"1.1.1.1"})
+	inj.PinIPs("pin-x", []string{"2.2.2.2", "3.3.3.3"})
+
+	got, ok := inj.pinnedIPs.Load("pin-x")
+	if !ok {
+		t.Fatal("expected pin-x to exist")
+	}
+	stored := got.([]string)
+	if len(stored) != 2 || stored[0] != "2.2.2.2" {
+		t.Errorf("stored IPs after overwrite = %v, want [2.2.2.2 3.3.3.3]", stored)
+	}
+}
+
+func TestPortFromRequest(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want int
+	}{
+		{"explicit_port", "http://example.com:8080/path", 8080},
+		{"https_default", "https://example.com/path", 443},
+		{"http_default", "http://example.com/path", 80},
+		{"explicit_443", "https://example.com:443/path", 443},
+		{"explicit_80", "http://example.com:80/path", 80},
+		{"custom_https_port", "https://example.com:9443/path", 9443},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequest("GET", tt.url, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := portFromRequest(req)
+			if got != tt.want {
+				t.Errorf("portFromRequest(%s) = %d, want %d", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWSFrameInterceptorClose(t *testing.T) {
+	// Create a minimal wsFrameInterceptor and verify Close releases secrets.
+	dir := t.TempDir()
+	store, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Add("close_test", "secret-val"); err != nil {
+		t.Fatal(err)
+	}
+	sb, err := store.Get("close_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a mock upstream connection.
+	ln, lnErr := net.Listen("tcp", "127.0.0.1:0")
+	if lnErr != nil {
+		t.Fatal(lnErr)
+	}
+	defer ln.Close()
+	go func() { c, _ := ln.Accept(); if c != nil { c.Close() } }()
+	upstream, dErr := net.Dial("tcp", ln.Addr().String())
+	if dErr != nil {
+		t.Fatal(dErr)
+	}
+	defer upstream.Close()
+
+	fi := &wsFrameInterceptor{
+		upstream: upstream,
+		pairs: []phantomPair{
+			{phantom: []byte("phantom"), secret: sb},
+		},
+	}
+
+	// Close should not panic.
+	fi.Close()
+	// Double close should not panic.
+	fi.Close()
+}
+
 func TestPhantomSwapInHeaders(t *testing.T) {
 	var mu sync.Mutex
 	var received http.Header

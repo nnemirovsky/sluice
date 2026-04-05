@@ -2,15 +2,13 @@ package main
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/nemirovsky/sluice/internal/audit"
 )
 
-func handleAuditCommand(args []string) {
+func handleAuditCommand(args []string) error {
 	if len(args) == 0 {
-		fmt.Println("usage: sluice audit [verify] [path]")
-		os.Exit(1)
+		return fmt.Errorf("usage: sluice audit [verify] [path]")
 	}
 
 	switch args[0] {
@@ -19,19 +17,16 @@ func handleAuditCommand(args []string) {
 		if len(args) > 1 {
 			path = args[1]
 		}
-		handleAuditVerify(path)
+		return handleAuditVerify(path)
 	default:
-		fmt.Printf("unknown audit command: %s\n", args[0])
-		fmt.Println("usage: sluice audit [verify] [path]")
-		os.Exit(1)
+		return fmt.Errorf("unknown audit command: %s\nusage: sluice audit [verify] [path]", args[0])
 	}
 }
 
-func handleAuditVerify(path string) {
+func handleAuditVerify(path string) error {
 	result, err := audit.VerifyChain(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("verify: %w", err)
 	}
 
 	fmt.Printf("Total lines:  %d\n", result.TotalLines)
@@ -44,6 +39,7 @@ func handleAuditVerify(path string) {
 	}
 
 	if len(result.BrokenLinks) > 0 {
-		os.Exit(1)
+		return fmt.Errorf("audit chain has %d broken link(s)", len(result.BrokenLinks))
 	}
+	return nil
 }

@@ -34,10 +34,14 @@ func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "cred":
-			handleCredCommand(os.Args[2:])
+			if err := handleCredCommand(os.Args[2:]); err != nil {
+				log.Fatalf("cred: %v", err)
+			}
 			return
 		case "cert":
-			handleCertCommand(os.Args[2:])
+			if err := handleCertCommand(os.Args[2:]); err != nil {
+				log.Fatalf("cert: %v", err)
+			}
 			return
 		case "mcp":
 			if err := handleMCPCommand(os.Args[2:]); err != nil {
@@ -45,13 +49,19 @@ func main() {
 			}
 			return
 		case "policy":
-			handlePolicyCommand(os.Args[2:])
+			if err := handlePolicyCommand(os.Args[2:]); err != nil {
+				log.Fatalf("policy: %v", err)
+			}
 			return
 		case "audit":
-			handleAuditCommand(os.Args[2:])
+			if err := handleAuditCommand(os.Args[2:]); err != nil {
+				log.Fatalf("audit: %v", err)
+			}
 			return
 		case "channel":
-			handleChannelCommand(os.Args[2:])
+			if err := handleChannelCommand(os.Args[2:]); err != nil {
+				log.Fatalf("channel: %v", err)
+			}
 			return
 		}
 	}
@@ -100,28 +110,8 @@ func main() {
 
 	// If --config is specified and the DB is empty, auto-import the TOML file as seed.
 	if *configPath != "" {
-		empty, err := db.IsEmpty()
-		if err != nil {
-			log.Fatalf("check store: %v", err)
-		}
-		if empty {
-			data, err := os.ReadFile(*configPath)
-			if err != nil {
-				if os.IsNotExist(err) {
-					log.Printf("config seed file %s not found, starting with empty DB", *configPath)
-				} else {
-					log.Fatalf("read config seed file: %v", err)
-				}
-			}
-			if data != nil {
-				result, err := db.ImportTOML(data)
-				if err != nil {
-					log.Fatalf("import config seed: %v", err)
-				}
-				log.Printf("seeded DB from %s: %d rules, %d bindings, %d upstreams, %d config",
-					*configPath, result.RulesInserted,
-					result.BindingsInserted, result.UpstreamsInserted, result.ConfigSet)
-			}
+		if seedErr := seedStoreFromConfig(db, *configPath); seedErr != nil {
+			log.Fatalf("seed store: %v", seedErr)
 		}
 	}
 
@@ -296,20 +286,7 @@ func main() {
 
 	// Create the proxy first so the bot can share its engine pointer and
 	// reload mutex.
-	// Convert policy engine inspect rules to protocol-specific config structs
-	// so WebSocket and QUIC content inspection is active in production.
-	var wsBlockRules []proxy.WSBlockRuleConfig
-	var wsRedactRules []proxy.WSRedactRuleConfig
-	var quicBlockRules []proxy.QUICBlockRuleConfig
-	var quicRedactRules []proxy.QUICRedactRuleConfig
-	for _, r := range eng.InspectBlockRules {
-		wsBlockRules = append(wsBlockRules, proxy.WSBlockRuleConfig{Pattern: r.Pattern, Name: r.Name})
-		quicBlockRules = append(quicBlockRules, proxy.QUICBlockRuleConfig{Pattern: r.Pattern, Name: r.Name})
-	}
-	for _, r := range eng.InspectRedactRules {
-		wsRedactRules = append(wsRedactRules, proxy.WSRedactRuleConfig{Pattern: r.Pattern, Replacement: r.Replacement, Name: r.Name})
-		quicRedactRules = append(quicRedactRules, proxy.QUICRedactRuleConfig{Pattern: r.Pattern, Replacement: r.Replacement, Name: r.Name})
-	}
+	wsBlockRules, wsRedactRules, quicBlockRules, quicRedactRules := buildInspectRuleConfigs(eng)
 
 	srv, err := proxy.New(proxy.Config{
 		ListenAddr:      *listenAddr,
@@ -817,4 +794,54 @@ func selfBypassFromURL(baseURL, healthAddr string) string {
 		hostport = net.JoinHostPort(hostport, port)
 	}
 	return hostport
+}
+
+// seedStoreFromConfig imports a TOML config file into the store if the store
+// is empty. Returns nil if the store is not empty or if the config file does
+// not exist (logged as a warning). Returns an error for other failures.
+func seedStoreFromConfig(db *store.Store, configPath string) error {
+	empty, err := db.IsEmpty()
+	if err != nil {
+		return fmt.Errorf("check store: %w", err)
+	}
+	if !empty {
+		return nil
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("config seed file %s not found, starting with empty DB", configPath)
+			return nil
+		}
+		return fmt.Errorf("read config seed file: %w", err)
+	}
+
+	result, err := db.ImportTOML(data)
+	if err != nil {
+		return fmt.Errorf("import config seed: %w", err)
+	}
+	log.Printf("seeded DB from %s: %d rules, %d bindings, %d upstreams, %d config",
+		configPath, result.RulesInserted,
+		result.BindingsInserted, result.UpstreamsInserted, result.ConfigSet)
+	return nil
+}
+
+// buildInspectRuleConfigs converts policy engine inspect rules into
+// protocol-specific config structs for WebSocket and QUIC content inspection.
+func buildInspectRuleConfigs(eng *policy.Engine) (
+	wsBlock []proxy.WSBlockRuleConfig,
+	wsRedact []proxy.WSRedactRuleConfig,
+	quicBlock []proxy.QUICBlockRuleConfig,
+	quicRedact []proxy.QUICRedactRuleConfig,
+) {
+	for _, r := range eng.InspectBlockRules {
+		wsBlock = append(wsBlock, proxy.WSBlockRuleConfig{Pattern: r.Pattern, Name: r.Name})
+		quicBlock = append(quicBlock, proxy.QUICBlockRuleConfig{Pattern: r.Pattern, Name: r.Name})
+	}
+	for _, r := range eng.InspectRedactRules {
+		wsRedact = append(wsRedact, proxy.WSRedactRuleConfig{Pattern: r.Pattern, Replacement: r.Replacement, Name: r.Name})
+		quicRedact = append(quicRedact, proxy.QUICRedactRuleConfig{Pattern: r.Pattern, Replacement: r.Replacement, Name: r.Name})
+	}
+	return
 }

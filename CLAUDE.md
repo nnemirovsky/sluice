@@ -18,6 +18,41 @@ go build -o sluice ./cmd/sluice/
 go test ./... -v -timeout 30s
 ```
 
+## E2e Tests
+
+End-to-end tests live in `e2e/` and use build tags. They start a real sluice binary, configure policies, make connections through the proxy, and verify credential injection, MCP gateway flows, and audit log integrity.
+
+Build tags:
+- `e2e` -- required for all e2e tests
+- `e2e && linux` -- Docker compose integration tests
+- `e2e && darwin` -- Apple Container tests (macOS only)
+
+```bash
+make test-e2e          # run all e2e tests locally
+make test-e2e-docker   # run Linux e2e tests via Docker Compose
+make test-e2e-macos    # run macOS e2e tests (Apple Container)
+```
+
+Or directly:
+```bash
+go test -tags=e2e ./e2e/ -v -count=1 -timeout=300s
+go test -tags="e2e linux" ./e2e/ -v -count=1 -timeout=300s
+go test -tags="e2e darwin" ./e2e/ -v -count=1 -timeout=300s
+```
+
+E2e test files:
+- `e2e/helpers_test.go` -- shared utilities (startSluice, connectSOCKS5, startEchoServer, etc.)
+- `e2e/smoke_test.go` -- basic health check smoke test
+- `e2e/proxy_test.go` -- SOCKS5 proxy and policy enforcement
+- `e2e/credential_test.go` -- phantom token injection through MITM
+- `e2e/mcp_test.go` -- MCP gateway tool call flows
+- `e2e/audit_test.go` -- audit log integrity and hash chain verification
+- `e2e/docker_test.go` -- Docker compose integration (linux only)
+- `e2e/apple_test.go` -- Apple Container integration (darwin only)
+- `e2e/testdata/mock_mcp_upstream.go` -- mock MCP upstream server (JSON-RPC over stdio) for gateway e2e tests
+
+CI runs e2e tests via `.github/workflows/e2e-linux.yml` and `.github/workflows/e2e-macos.yml`.
+
 ## Project Structure
 
 - `cmd/sluice/main.go` - CLI entrypoint with flag parsing, runtime selection (--runtime docker|apple|none|auto), and signal handling
@@ -80,8 +115,10 @@ go test ./... -v -timeout 30s
 - `internal/docker/manager.go` - Docker container manager implementing container.ContainerManager for credential hot-reload via shared volume + docker exec, with restart fallback
 - `internal/docker/socket_client.go` - Docker socket HTTP client for container lifecycle and exec operations
 - `Dockerfile` - Multi-stage build for Sluice container
+- `Dockerfile.e2e` - Go test runner image for Docker Compose e2e tests
 - `compose.yml` - Three-container setup (sluice + tun2proxy + openclaw) with shared phantom volume
 - `compose.dev.yml` - Development compose with build-from-source
+- `compose.e2e.yml` - Three-container e2e setup (sluice + tun2proxy + test-runner) for Linux integration tests
 - `scripts/docker-entrypoint.sh` - Container entrypoint with CA cert generation and copy to shared volume
 - `scripts/apple-container-setup.sh` - macOS setup script for Apple Container: pf rules, tun2proxy, IP forwarding
 - `scripts/setup-vault.sh` - Interactive credential and CA setup script

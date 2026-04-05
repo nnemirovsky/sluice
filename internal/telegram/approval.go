@@ -36,6 +36,7 @@ type ChannelConfig struct {
 	Store        *store.Store
 	PhantomDir   string
 	OnEngineSwap func(eng *policy.Engine) // called after policy mutations to update dependent state
+	APIEndpoint  string                   // custom Telegram API endpoint (for testing); empty uses default
 }
 
 // TelegramChannel implements channel.Channel for Telegram bot interaction.
@@ -55,7 +56,13 @@ type TelegramChannel struct {
 // NewTelegramChannel creates a TelegramChannel. Call SetBroker after creating
 // the channel.Broker, then call Start to begin processing Telegram updates.
 func NewTelegramChannel(cfg ChannelConfig) (*TelegramChannel, error) {
-	api, err := tgbotapi.NewBotAPI(cfg.Token)
+	var api *tgbotapi.BotAPI
+	var err error
+	if cfg.APIEndpoint != "" {
+		api, err = tgbotapi.NewBotAPIWithAPIEndpoint(cfg.Token, cfg.APIEndpoint)
+	} else {
+		api, err = tgbotapi.NewBotAPI(cfg.Token)
+	}
 	if err != nil {
 		// Do not wrap the original error: the telegram-bot-api library
 		// includes the full request URL (which contains the bot token) in
