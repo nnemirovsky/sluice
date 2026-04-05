@@ -375,16 +375,16 @@ func TestCredential_UnboundPhantomStripped(t *testing.T) {
 	}
 }
 
-// TestCredential_ResponseRedaction verifies that content redaction patterns
-// in the policy config are applied to responses passing through the proxy.
+// TestCredential_RedactRulesLoaded verifies that the proxy correctly loads
+// redact rules from the policy config and that audit logging captures
+// connections when redact rules are active.
 //
 // HTTP response redaction is applied at the WebSocket frame level and in the
 // MCP gateway. For HTTPS MITM, the proxy modifies requests (phantom
 // replacement) but does not currently modify response bodies. This test
-// verifies the proxy correctly loads redact rules and that audit logging
-// captures the connection, which validates the content inspection pipeline
-// is wired up even though HTTP response bodies pass through unmodified.
-func TestCredential_ResponseRedaction(t *testing.T) {
+// verifies the content inspection pipeline is wired up (rules loaded, audit
+// active) even though HTTP response bodies pass through unmodified.
+func TestCredential_RedactRulesLoaded(t *testing.T) {
 	// Start an HTTPS echo server that includes a "secret" pattern in its
 	// response body. The echo server reflects the URL path, so we control
 	// what appears in the response.

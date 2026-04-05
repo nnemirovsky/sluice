@@ -203,7 +203,7 @@ default = "allow"
 	stopSluice(t, proc)
 
 	// Start a fresh sluice with the same DB that now has the upstream.
-	proc2 := startSluiceWithDB(t, proc.DBPath, proc.AuditPath, config, nil)
+	proc2 := startSluiceWithDB(t, proc.DBPath, proc.AuditPath, nil)
 	return proc2
 }
 
@@ -238,14 +238,14 @@ default = "allow"
 
 	// Restart to pick up upstreams.
 	stopSluice(t, proc)
-	proc2 := startSluiceWithDB(t, proc.DBPath, proc.AuditPath, config, nil)
+	proc2 := startSluiceWithDB(t, proc.DBPath, proc.AuditPath, nil)
 	return proc2
 }
 
 // startSluiceWithDB starts sluice using an existing DB file. This allows
 // registering upstreams in the DB before starting sluice, so the MCP gateway
 // discovers them on startup.
-func startSluiceWithDB(t *testing.T, dbPath, auditPath, configTOML string, env []string) *SluiceProcess {
+func startSluiceWithDB(t *testing.T, dbPath, auditPath string, env []string) *SluiceProcess {
 	t.Helper()
 	binary := buildSluice(t)
 
@@ -679,7 +679,7 @@ name = "allow all mock tools"
 
 	// Restart to pick up the upstream.
 	stopSluice(t, proc)
-	proc2 := startSluiceWithDB(t, proc.DBPath, proc.AuditPath, config, nil)
+	proc2 := startSluiceWithDB(t, proc.DBPath, proc.AuditPath, nil)
 
 	sessionID := initMCPSession(t, proc2.HealthURL)
 

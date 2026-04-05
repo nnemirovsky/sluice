@@ -318,10 +318,20 @@ func auditLogContains(t *testing.T, path, substr string) bool {
 }
 
 // runSluiceCLI runs a sluice subcommand and returns the combined output.
+// The --db flag is inserted after the subcommand name so it is parsed
+// correctly even when positional arguments follow.
 func runSluiceCLI(t *testing.T, proc *SluiceProcess, args ...string) string {
 	t.Helper()
 	binary := buildSluice(t)
-	fullArgs := append(args, "--db", proc.DBPath)
+	// Insert --db after the first two args (subcommand + action) so that
+	// Go's flag package sees it before any positional arguments.
+	var fullArgs []string
+	if len(args) >= 2 {
+		fullArgs = append(fullArgs, args[0], args[1], "--db", proc.DBPath)
+		fullArgs = append(fullArgs, args[2:]...)
+	} else {
+		fullArgs = append(args, "--db", proc.DBPath)
+	}
 	cmd := exec.Command(binary, fullArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

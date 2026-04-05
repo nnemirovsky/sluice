@@ -341,7 +341,7 @@ name = "allow echo"
 	stopSluice(t, proc)
 
 	// Restart sluice with the same DB and audit log.
-	proc2 := startSluiceWithDB(t, proc.DBPath, proc.AuditPath, config, nil)
+	proc2 := startSluiceWithDB(t, proc.DBPath, proc.AuditPath, nil)
 
 	// Generate more entries after restart.
 	for i := 0; i < 3; i++ {
