@@ -1,6 +1,6 @@
 # Sluice
 
-Governance and credential injection proxy for [OpenClaw](https://github.com/nnemirovsky/openclaw). Sluice sits between OpenClaw and the internet, ensuring every outbound connection and MCP tool call is governed by policy, approved by a human when needed, and never exposes real credentials to the agent.
+Governance and credential injection proxy for [OpenClaw](https://github.com/openclaw/openclaw). Sluice sits between OpenClaw and the internet, ensuring every outbound connection and MCP tool call is governed by policy, approved by a human when needed, and never exposes real credentials to the agent.
 
 ## Why Sluice
 
