@@ -86,17 +86,17 @@ The Telegram approval flow and channel implementation are almost entirely untest
 - Modify: `internal/telegram/commands.go`
 - Modify: `internal/telegram/commands_test.go`
 
-- [ ] Write tests for `NewTelegramChannel` initialization
-- [ ] Write tests for `RequestApproval` (sends message via Telegram API mock, returns on resolve)
-- [ ] Write tests for `CancelApproval` (edits Telegram message to show cancelled)
-- [ ] Write tests for `Start`/`Stop` lifecycle
-- [ ] Write tests for Telegram callback handling (allow once, always allow, deny button taps)
-- [ ] Write tests for stale approval cleanup (request times out while Telegram API call is in flight)
-- [ ] Write tests for `SetDockerManager`, `SetPhantomDir`, `SetResolverPtr` setters
-- [ ] Write tests for `/cred` Telegram commands with mock vault and docker manager
-- [ ] Write tests for `/policy` Telegram commands verifying store writes and engine recompile
-- [ ] Use mock Telegram API (httptest server returning canned BotAPI responses)
-- [ ] Run tests: `go test ./internal/telegram/ -v -timeout 30s -cover`
+- [x] Write tests for `NewTelegramChannel` initialization
+- [x] Write tests for `RequestApproval` (sends message via Telegram API mock, returns on resolve)
+- [x] Write tests for `CancelApproval` (edits Telegram message to show cancelled)
+- [x] Write tests for `Start`/`Stop` lifecycle
+- [x] Write tests for Telegram callback handling (allow once, always allow, deny button taps)
+- [x] Write tests for stale approval cleanup (request times out while Telegram API call is in flight)
+- [x] Write tests for `SetDockerManager`, `SetPhantomDir`, `SetResolverPtr` setters
+- [x] Write tests for `/cred` Telegram commands with mock vault and docker manager
+- [x] Write tests for `/policy` Telegram commands verifying store writes and engine recompile
+- [x] Use mock Telegram API (httptest server returning canned BotAPI responses)
+- [x] Run tests: `go test ./internal/telegram/ -v -timeout 30s -cover`
 
 ### Task 3: Fill internal/proxy unit test gaps (56.9% -> 80%+)
 
