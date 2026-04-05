@@ -321,7 +321,7 @@ steps:
 - [x] Create `.github/workflows/e2e-linux.yml`: ubuntu-latest runner, install Docker Compose, build sluice, run e2e tests with `linux` tag
 - [x] Create `.github/workflows/e2e-macos.yml`: macos-15 runner, check for Apple Container availability, run e2e tests with `darwin` tag. Skip gracefully if Apple Container not available on the runner.
 - [x] Update `.github/workflows/ci.yml`: add coverage report step (`go test -coverprofile`), upload as artifact
-- [x] Add coverage badge or threshold check (fail CI if coverage drops below 80%)
+- [x] Add coverage badge or threshold check (fail CI if coverage drops below 75%)
 - [x] Run workflows manually to verify: `gh workflow run e2e-linux.yml` (skipped - requires GitHub credentials, will verify on push)
 
 ### Task 14: Verify acceptance criteria

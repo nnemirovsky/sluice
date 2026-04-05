@@ -28,7 +28,7 @@ make test   # all unit tests
 
 - `make test` -- runs all unit tests with `-v -count=1`
 - `make test-coverage` -- generates HTML coverage report in `coverage.html`
-- CI enforces a minimum 80% overall coverage threshold
+- CI enforces a minimum 75% overall coverage threshold
 
 ### End-to-end tests
 

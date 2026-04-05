@@ -47,8 +47,6 @@ services:
     restart: "no"
     network_mode: "service:tun2proxy"
     environment:
-      - SLUICE_E2E_PROXY_ADDR=sluice:1080
-      - SLUICE_E2E_HEALTH_ADDR=sluice:3000
       - SSL_CERT_FILE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
     volumes:
       - sluice-ca:/usr/local/share/ca-certificates/sluice:ro

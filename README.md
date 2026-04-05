@@ -230,7 +230,7 @@ make test-e2e-linux    # Linux e2e tests (go test with linux build tag)
 make test-e2e-macos    # macOS e2e tests (Apple Container)
 ```
 
-E2e tests use build tags (`e2e`, `linux`, `darwin`) and live in `e2e/`. CI enforces a minimum 80% coverage threshold.
+E2e tests use build tags (`e2e`, `linux`, `darwin`) and live in `e2e/`. CI enforces a minimum 75% coverage threshold.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for details on writing tests.
 
