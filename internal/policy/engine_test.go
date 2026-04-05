@@ -1202,3 +1202,551 @@ name = "deny all TCP to this host"
 		t.Errorf("EvaluateUDP should not match tcp rule, got %v, want Deny", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Mutation methods (deprecated but still exercised for backward compat)
+// ---------------------------------------------------------------------------
+
+func TestAddDynamicAllow(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[deny]]
+destination = "evil.com"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Before: unknown host is denied by default.
+	if got := eng.Evaluate("new.example.com", 443); got != Deny {
+		t.Fatalf("expected Deny before AddDynamicAllow, got %v", got)
+	}
+
+	// Add dynamic allow rule.
+	if err := eng.AddDynamicAllow("new.example.com", 443); err != nil {
+		t.Fatalf("AddDynamicAllow: %v", err)
+	}
+
+	// After: the host on that port is now allowed.
+	if got := eng.Evaluate("new.example.com", 443); got != Allow {
+		t.Errorf("expected Allow after AddDynamicAllow, got %v", got)
+	}
+
+	// Deny rule still takes priority for evil.com.
+	if got := eng.Evaluate("evil.com", 443); got != Deny {
+		t.Errorf("deny rule should still apply, got %v", got)
+	}
+}
+
+func TestAddDynamicAllow_RollbackOnCompileError(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	origCount := len(eng.AllowRules)
+
+	// Empty destination triggers compile error.
+	if err := eng.AddDynamicAllow("", 443); err == nil {
+		t.Fatal("expected error for empty destination")
+	}
+
+	// Rule list should be rolled back to original length.
+	if len(eng.AllowRules) != origCount {
+		t.Errorf("AllowRules length = %d, want %d (rollback failed)", len(eng.AllowRules), origCount)
+	}
+}
+
+func TestAddAllowRule(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := eng.Evaluate("api.example.com", 443); got != Deny {
+		t.Fatalf("expected Deny before AddAllowRule, got %v", got)
+	}
+
+	if err := eng.AddAllowRule("api.example.com"); err != nil {
+		t.Fatalf("AddAllowRule: %v", err)
+	}
+
+	// Portless allow rule matches any port.
+	if got := eng.Evaluate("api.example.com", 443); got != Allow {
+		t.Errorf("expected Allow on port 443, got %v", got)
+	}
+	if got := eng.Evaluate("api.example.com", 80); got != Allow {
+		t.Errorf("expected Allow on port 80, got %v", got)
+	}
+}
+
+func TestAddAllowRule_RollbackOnCompileError(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	origCount := len(eng.AllowRules)
+
+	if err := eng.AddAllowRule(""); err == nil {
+		t.Fatal("expected error for empty destination")
+	}
+	if len(eng.AllowRules) != origCount {
+		t.Errorf("AllowRules length = %d, want %d (rollback failed)", len(eng.AllowRules), origCount)
+	}
+}
+
+func TestAddDenyRule(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+
+[[allow]]
+destination = "good.example.com"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := eng.Evaluate("bad.example.com", 443); got != Allow {
+		t.Fatalf("expected Allow before AddDenyRule, got %v", got)
+	}
+
+	if err := eng.AddDenyRule("bad.example.com"); err != nil {
+		t.Fatalf("AddDenyRule: %v", err)
+	}
+
+	// Now denied.
+	if got := eng.Evaluate("bad.example.com", 443); got != Deny {
+		t.Errorf("expected Deny after AddDenyRule, got %v", got)
+	}
+
+	// Good host still allowed.
+	if got := eng.Evaluate("good.example.com", 443); got != Allow {
+		t.Errorf("expected Allow for good.example.com, got %v", got)
+	}
+}
+
+func TestAddDenyRule_RollbackOnCompileError(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	origCount := len(eng.DenyRules)
+
+	if err := eng.AddDenyRule(""); err == nil {
+		t.Fatal("expected error for empty destination")
+	}
+	if len(eng.DenyRules) != origCount {
+		t.Errorf("DenyRules length = %d, want %d (rollback failed)", len(eng.DenyRules), origCount)
+	}
+}
+
+func TestAddAllowRule_ConcurrentSafety(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 50
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			errs <- eng.AddAllowRule(fmt.Sprintf("host%d.example.com", i))
+		}(i)
+	}
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent AddAllowRule: %v", err)
+		}
+	}
+
+	// All 50 hosts should now be allowed.
+	for i := 0; i < n; i++ {
+		dest := fmt.Sprintf("host%d.example.com", i)
+		if got := eng.Evaluate(dest, 443); got != Allow {
+			t.Errorf("Evaluate(%q) = %v, want Allow", dest, got)
+		}
+	}
+}
+
+func TestRemoveRule(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "allowed.example.com"
+
+[[deny]]
+destination = "denied.example.com"
+
+[[ask]]
+destination = "ask.example.com"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove from allow list.
+	removed, err := eng.RemoveRule("allowed.example.com")
+	if err != nil {
+		t.Fatalf("RemoveRule(allow): %v", err)
+	}
+	if !removed {
+		t.Error("expected removed=true for allow rule")
+	}
+	if got := eng.Evaluate("allowed.example.com", 443); got != Deny {
+		t.Errorf("after removing allow rule, expected Deny, got %v", got)
+	}
+
+	// Remove from deny list.
+	removed, err = eng.RemoveRule("denied.example.com")
+	if err != nil {
+		t.Fatalf("RemoveRule(deny): %v", err)
+	}
+	if !removed {
+		t.Error("expected removed=true for deny rule")
+	}
+
+	// Remove from ask list.
+	removed, err = eng.RemoveRule("ask.example.com")
+	if err != nil {
+		t.Fatalf("RemoveRule(ask): %v", err)
+	}
+	if !removed {
+		t.Error("expected removed=true for ask rule")
+	}
+}
+
+func TestRemoveRule_NonExistent(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "example.com"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := eng.RemoveRule("nonexistent.example.com")
+	if err != nil {
+		t.Fatalf("RemoveRule: %v", err)
+	}
+	if removed {
+		t.Error("expected removed=false for non-existent rule")
+	}
+}
+
+func TestRemoveRule_CaseInsensitive(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "Example.COM"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := eng.RemoveRule("example.com")
+	if err != nil {
+		t.Fatalf("RemoveRule: %v", err)
+	}
+	if !removed {
+		t.Error("expected case-insensitive removal to succeed")
+	}
+	if got := eng.Evaluate("example.com", 443); got != Deny {
+		t.Errorf("expected Deny after removal, got %v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot
+// ---------------------------------------------------------------------------
+
+func TestSnapshot(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "ask"
+
+[[allow]]
+destination = "good.example.com"
+ports = [443]
+
+[[deny]]
+destination = "bad.example.com"
+
+[[ask]]
+destination = "maybe.example.com"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snap := eng.Snapshot()
+
+	if snap.Default != Ask {
+		t.Errorf("Snapshot.Default = %v, want Ask", snap.Default)
+	}
+	if len(snap.AllowRules) != 1 {
+		t.Errorf("Snapshot.AllowRules len = %d, want 1", len(snap.AllowRules))
+	}
+	if len(snap.DenyRules) != 1 {
+		t.Errorf("Snapshot.DenyRules len = %d, want 1", len(snap.DenyRules))
+	}
+	if len(snap.AskRules) != 1 {
+		t.Errorf("Snapshot.AskRules len = %d, want 1", len(snap.AskRules))
+	}
+
+	// Verify snapshot content matches engine state.
+	if snap.AllowRules[0].Destination != "good.example.com" {
+		t.Errorf("AllowRules[0].Destination = %q, want %q", snap.AllowRules[0].Destination, "good.example.com")
+	}
+	if snap.DenyRules[0].Destination != "bad.example.com" {
+		t.Errorf("DenyRules[0].Destination = %q, want %q", snap.DenyRules[0].Destination, "bad.example.com")
+	}
+	if snap.AskRules[0].Destination != "maybe.example.com" {
+		t.Errorf("AskRules[0].Destination = %q, want %q", snap.AskRules[0].Destination, "maybe.example.com")
+	}
+}
+
+func TestSnapshot_MutationIsolation(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "example.com"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snap := eng.Snapshot()
+
+	// Mutate the engine after snapshot.
+	if err := eng.AddAllowRule("new.example.com"); err != nil {
+		t.Fatalf("AddAllowRule: %v", err)
+	}
+
+	// Snapshot should be unaffected.
+	if len(snap.AllowRules) != 1 {
+		t.Errorf("Snapshot AllowRules len changed to %d after engine mutation, want 1", len(snap.AllowRules))
+	}
+
+	// Mutate the snapshot slice directly.
+	snap.AllowRules[0].Destination = "hacked.com"
+
+	// Engine should be unaffected.
+	newSnap := eng.Snapshot()
+	if newSnap.AllowRules[0].Destination == "hacked.com" {
+		t.Error("mutating snapshot slice affected engine state")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// portToProtocol
+// ---------------------------------------------------------------------------
+
+func TestPortToProtocol(t *testing.T) {
+	tests := []struct {
+		port int
+		want string
+	}{
+		{80, "http"},
+		{8080, "http"},
+		{443, "https"},
+		{8443, "https"},
+		{22, "ssh"},
+		{143, "imap"},
+		{993, "imap"},
+		{25, "smtp"},
+		{587, "smtp"},
+		{465, "smtp"},
+		{53, "dns"},
+		{5223, "apns"},
+		{9999, ""},
+		{1, ""},
+		{0, ""},
+		{65535, ""},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("port_%d", tt.port), func(t *testing.T) {
+			got := portToProtocol(tt.port)
+			if got != tt.want {
+				t.Errorf("portToProtocol(%d) = %q, want %q", tt.port, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases
+// ---------------------------------------------------------------------------
+
+func TestEmptyEngine(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No rules at all. Default applies.
+	if got := eng.Evaluate("anything.com", 443); got != Deny {
+		t.Errorf("empty engine default=deny: got %v", got)
+	}
+	if eng.IsDenied("anything.com", 443) {
+		t.Error("IsDenied should be false with no deny rules")
+	}
+	if eng.IsRestricted("anything.com", 443) {
+		t.Error("IsRestricted should be false with no deny/ask rules")
+	}
+	if eng.IsExplicitlyAllowed("anything.com", 443) {
+		t.Error("IsExplicitlyAllowed should be false with no allow rules")
+	}
+}
+
+func TestEmptyEngineDefaultAllow(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := eng.Evaluate("anything.com", 443); got != Allow {
+		t.Errorf("empty engine default=allow: got %v", got)
+	}
+}
+
+func TestAllRulesSameVerdict(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "a.example.com"
+
+[[allow]]
+destination = "b.example.com"
+
+[[allow]]
+destination = "c.example.com"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// All three should be allowed.
+	for _, dest := range []string{"a.example.com", "b.example.com", "c.example.com"} {
+		if got := eng.Evaluate(dest, 443); got != Allow {
+			t.Errorf("Evaluate(%q) = %v, want Allow", dest, got)
+		}
+	}
+
+	// Others still denied.
+	if got := eng.Evaluate("d.example.com", 443); got != Deny {
+		t.Errorf("Evaluate(d.example.com) = %v, want Deny", got)
+	}
+}
+
+func TestOverlappingGlobPatterns(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+
+[[deny]]
+destination = "*.example.com"
+
+[[allow]]
+destination = "safe.example.com"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Deny has priority over allow in evaluation order.
+	if got := eng.Evaluate("safe.example.com", 443); got != Deny {
+		t.Errorf("overlapping deny should win: got %v, want Deny", got)
+	}
+	if got := eng.Evaluate("other.example.com", 443); got != Deny {
+		t.Errorf("wildcard deny should match: got %v, want Deny", got)
+	}
+	// Non-matching host falls to default allow.
+	if got := eng.Evaluate("totally-different.com", 443); got != Allow {
+		t.Errorf("non-matching should use default: got %v, want Allow", got)
+	}
+}
+
+func TestOverlappingGlobPatterns_AskVsDeny(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+
+[[ask]]
+destination = "**.example.com"
+
+[[deny]]
+destination = "bad.sub.example.com"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Deny always takes priority over ask.
+	if got := eng.Evaluate("bad.sub.example.com", 443); got != Deny {
+		t.Errorf("deny should beat ask: got %v, want Deny", got)
+	}
+	// Ask still applies to other subdomains.
+	if got := eng.Evaluate("good.sub.example.com", 443); got != Ask {
+		t.Errorf("ask should match: got %v, want Ask", got)
+	}
+}
+
+func TestValidate(t *testing.T) {
+	// Nil engine.
+	var nilEng *Engine
+	if err := nilEng.Validate(); err == nil {
+		t.Error("Validate on nil engine should return error")
+	}
+
+	// Engine without compilation.
+	uncompiledEng := &Engine{}
+	if err := uncompiledEng.Validate(); err == nil {
+		t.Error("Validate on uncompiled engine should return error")
+	}
+
+	// Properly loaded engine.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.Validate(); err != nil {
+		t.Errorf("Validate on valid engine: %v", err)
+	}
+}

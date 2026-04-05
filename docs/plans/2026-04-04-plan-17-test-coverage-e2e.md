@@ -126,14 +126,14 @@ Policy mutation methods and helper functions lack tests.
 - Modify: `internal/policy/engine_test.go`
 - Modify: `internal/policy/glob_test.go`
 
-- [ ] Write tests for `AddDynamicAllow` (add rule, verify evaluation changes)
-- [ ] Write tests for `AddAllowRule` / `AddDenyRule` (add, verify, check concurrent safety)
-- [ ] Write tests for `RemoveRule` (remove by ID, verify evaluation changes, remove non-existent)
-- [ ] Write tests for `Snapshot` (verify snapshot reflects current state, mutations after snapshot don't affect it)
-- [ ] Write tests for `portToProtocol` (all known ports, unknown port returns generic)
-- [ ] Write tests for `Glob.String()` representation
-- [ ] Write tests for edge cases: empty engine (no rules), all rules same verdict, overlapping glob patterns
-- [ ] Run tests: `go test ./internal/policy/ -v -timeout 30s -cover`
+- [x] Write tests for `AddDynamicAllow` (add rule, verify evaluation changes)
+- [x] Write tests for `AddAllowRule` / `AddDenyRule` (add, verify, check concurrent safety)
+- [x] Write tests for `RemoveRule` (remove by ID, verify evaluation changes, remove non-existent)
+- [x] Write tests for `Snapshot` (verify snapshot reflects current state, mutations after snapshot don't affect it)
+- [x] Write tests for `portToProtocol` (all known ports, unknown port returns generic)
+- [x] Write tests for `Glob.String()` representation
+- [x] Write tests for edge cases: empty engine (no rules), all rules same verdict, overlapping glob patterns
+- [x] Run tests: `go test ./internal/policy/ -v -timeout 30s -cover`
 
 ### Task 5: Fill remaining package gaps to 85%+
 
