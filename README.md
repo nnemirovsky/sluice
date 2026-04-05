@@ -26,22 +26,27 @@ flowchart LR
         PX[SOCKS5 Proxy<br/>network policy + MITM]
     end
 
-    TG[Telegram Bot<br/>approve / deny]
+    subgraph Approval["Approval Channels"]
+        TG[Telegram<br/>primary]
+        WH[HTTP Webhooks]
+    end
+
     HM[Human]
     UP[Upstream<br/>MCP Servers]
     IN[Internet]
 
     OC -- "MCP tool calls" --> GW
     OC -- "all TCP/UDP<br/>(via tun2proxy)" --> PX
-    GW --> UP
+    GW -- "allowed" --> UP
+    GW -. "ask verdict" .-> Approval
     PX -- "phantom -> real<br/>credential swap" --> IN
-    PX -. "ask verdict" .-> TG
-    TG -. "allow / deny" .-> HM
-    HM -. "respond" .-> TG
-    TG -. "resolve" .-> PX
+    PX -. "ask verdict" .-> Approval
+    Approval -. "allow / deny" .-> HM
+    HM -. "respond" .-> Approval
+    Approval -. "resolve" .-> Sluice
 ```
 
-**OpenClaw** uses phantom tokens for all API calls. **tun2proxy** routes all traffic to sluice's SOCKS5 proxy (runs as a container in Docker, on the host for Apple Container/macOS VM). **Sluice** evaluates every connection against policy rules (allow / deny / ask). "Ask" verdicts send a Telegram notification with inline buttons. The MITM proxy swaps phantom tokens for real credentials in-flight. Credentials are managed via Telegram or CLI, stored encrypted with age, and hot-reloaded into OpenClaw without restarts.
+**OpenClaw** uses phantom tokens for all API calls. **tun2proxy** routes all traffic to sluice's SOCKS5 proxy (runs as a container in Docker, on the host for Apple Container/macOS VM). Both the MCP gateway and SOCKS5 proxy evaluate requests against policy rules (allow / deny / ask). "Ask" verdicts are broadcast to all configured approval channels (Telegram, HTTP webhooks). The first channel to respond wins. The MITM proxy swaps phantom tokens for real credentials in-flight. Credentials are managed via approval channels or CLI, stored encrypted with age, and hot-reloaded into OpenClaw without restarts.
 
 ## Quick Start
 
@@ -200,9 +205,13 @@ Sluice supports multiple credential backends. Set `provider` in `[vault]` config
 
 Chain multiple providers with `providers = ["1password", "age"]`. First provider with the credential wins.
 
-## Telegram Bot
+## Approval Channels
 
-Manage sluice from your phone. Approve connections, add credentials, update policy.
+Sluice broadcasts "ask" verdicts to all configured approval channels. The first channel to respond wins. Other channels get a cancellation notice.
+
+### Telegram (primary)
+
+Manage sluice from your phone. Approve connections and tool calls, add credentials, update policy.
 
 | Command | Description |
 |---------|-------------|
@@ -213,6 +222,10 @@ Manage sluice from your phone. Approve connections, add credentials, update poli
 | `/cred rotate <name>` | Replace credential, hot-reload OpenClaw |
 | `/status` | Proxy stats and pending approvals |
 | `/audit recent [N]` | Last N audit entries |
+
+### HTTP Webhooks
+
+REST API on port 3000 for programmatic approval integration. `GET /api/approvals` lists pending requests, `POST /api/approvals/{id}/resolve` resolves them. Use this to build custom approval UIs or integrate with existing workflows.
 
 ## Audit Log
 

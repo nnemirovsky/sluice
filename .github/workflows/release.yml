@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 jobs:
-  goreleaser:
+  release-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,9 +19,39 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Install arm64 cross-compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release-darwin:
+    runs-on: macos-latest
+    needs: release-linux
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build darwin binaries
+        run: |
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -ldflags='-s -w' -o sluice_darwin_arm64 ./cmd/sluice/
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -ldflags='-s -w' -o sluice_darwin_amd64 ./cmd/sluice/
+
+      - name: Upload darwin binaries to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
+          mv sluice_darwin_arm64 "sluice_${version}_darwin_arm64"
+          mv sluice_darwin_amd64 "sluice_${version}_darwin_amd64"
+          gh release upload "$tag" "sluice_${version}_darwin_arm64" "sluice_${version}_darwin_amd64"

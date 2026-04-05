@@ -4,12 +4,21 @@ builds:
   - id: sluice
     main: ./cmd/sluice
     binary: sluice
+    env:
+      - CGO_ENABLED=1
     goos:
-      - darwin
       - linux
     goarch:
       - amd64
       - arm64
+    overrides:
+      - goos: linux
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+          - CC=aarch64-linux-gnu-gcc
+    ldflags:
+      - -s -w -linkmode external -extldflags "-static"
 
 archives:
   - id: sluice
