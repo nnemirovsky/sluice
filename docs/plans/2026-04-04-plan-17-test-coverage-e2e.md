@@ -201,17 +201,17 @@ Test the full SOCKS5 proxy flow with policy evaluation end-to-end.
 **Files:**
 - Create: `e2e/proxy_test.go`
 
-- [ ] Test: allow rule permits connection (connect through SOCKS5 to echo server, verify response)
-- [ ] Test: deny rule blocks connection (connect to denied destination, verify connection refused)
-- [ ] Test: ask rule without broker auto-denies
-- [ ] Test: default verdict applies when no rule matches
-- [ ] Test: glob patterns in rules (* matches single label, ** matches across dots)
-- [ ] Test: port-specific rules (allow port 443 but deny port 80 for same destination)
-- [ ] Test: protocol-specific rules (`protocols = ["https"]` only matches TLS connections)
-- [ ] Test: policy import via CLI (`sluice policy import config.toml`) then verify proxy enforces imported rules
-- [ ] Test: dynamic rule add via CLI (`sluice policy add allow example.com`) then verify proxy allows
-- [ ] Test: dynamic rule remove via CLI then verify proxy denies
-- [ ] Run: `go test -tags=e2e ./e2e/ -v -timeout 120s`
+- [x] Test: allow rule permits connection (connect through SOCKS5 to echo server, verify response)
+- [x] Test: deny rule blocks connection (connect to denied destination, verify connection refused)
+- [x] Test: ask rule without broker auto-denies
+- [x] Test: default verdict applies when no rule matches
+- [x] Test: glob patterns in rules (* matches single label, ** matches across dots)
+- [x] Test: port-specific rules (allow port 443 but deny port 80 for same destination)
+- [x] Test: protocol-specific rules (`protocols = ["https"]` only matches TLS connections)
+- [x] Test: policy import via CLI (`sluice policy import config.toml`) then verify proxy enforces imported rules
+- [x] Test: dynamic rule add via CLI (`sluice policy add allow example.com`) then verify proxy allows
+- [x] Test: dynamic rule remove via CLI then verify proxy denies
+- [x] Run: `go test -tags=e2e ./e2e/ -v -timeout 120s`
 
 ### Task 8: E2e tests -- credential injection
 

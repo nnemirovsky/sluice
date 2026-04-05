@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -192,6 +193,8 @@ func connectSOCKS5(t *testing.T, proxyAddr string) proxy.Dialer {
 }
 
 // importConfig runs `sluice policy import <path>` against a running sluice's DB.
+// Note: --db must come before the positional toml path arg because Go's flag
+// package stops parsing flags at the first non-flag argument.
 func importConfig(t *testing.T, proc *SluiceProcess, toml string) {
 	t.Helper()
 	binary := buildSluice(t)
@@ -199,7 +202,7 @@ func importConfig(t *testing.T, proc *SluiceProcess, toml string) {
 	if err := os.WriteFile(configPath, []byte(toml), 0o644); err != nil {
 		t.Fatalf("write import config: %v", err)
 	}
-	cmd := exec.Command(binary, "policy", "import", configPath, "--db", proc.DBPath)
+	cmd := exec.Command(binary, "policy", "import", "--db", proc.DBPath, configPath)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("policy import: %v\n%s", err, out)
@@ -321,4 +324,49 @@ func runSluiceCLI(t *testing.T, proc *SluiceProcess, args ...string) string {
 		t.Fatalf("sluice %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 	return string(out)
+}
+
+// tryHTTPGetViaSOCKS5 attempts an HTTP GET through the SOCKS5 proxy and
+// returns the status code, body, and any error. Unlike httpGetViaSOCKS5 it
+// does not call t.Fatalf on failure so callers can assert on the error.
+func tryHTTPGetViaSOCKS5(t *testing.T, proxyAddr, url string) (int, string, error) {
+	t.Helper()
+	dialer := connectSOCKS5(t, proxyAddr)
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialer.Dial(network, addr)
+		},
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return resp.StatusCode, "", readErr
+	}
+	return resp.StatusCode, string(body), nil
+}
+
+// sendSIGHUP sends SIGHUP to a running sluice process to trigger a policy
+// reload from the SQLite store.
+func sendSIGHUP(t *testing.T, proc *SluiceProcess) {
+	t.Helper()
+	if err := proc.Cmd.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatalf("send SIGHUP: %v", err)
+	}
+	// Give the process time to reload.
+	time.Sleep(500 * time.Millisecond)
+}
+
+// echoServerAddr returns the host:port of an httptest.Server suitable for
+// use in SOCKS5 proxy connections (strips the http:// scheme prefix).
+func echoServerAddr(t *testing.T, srv *httptest.Server) string {
+	t.Helper()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	addr = strings.TrimPrefix(addr, "https://")
+	return addr
 }
