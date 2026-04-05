@@ -23,23 +23,20 @@ import (
 // credential that shares the same destination.
 const credAddSourcePrefix = "cred-add:"
 
-func handleCredCommand(args []string) {
+func handleCredCommand(args []string) error {
 	if len(args) == 0 {
-		fmt.Println("usage: sluice cred [add|list|remove] ...")
-		os.Exit(1)
+		return fmt.Errorf("usage: sluice cred [add|list|remove] ...")
 	}
 
 	switch args[0] {
 	case "add":
-		handleCredAdd(args[1:])
+		return handleCredAdd(args[1:])
 	case "list":
-		handleCredList(args[1:])
+		return handleCredList(args[1:])
 	case "remove":
-		handleCredRemove(args[1:])
+		return handleCredRemove(args[1:])
 	default:
-		fmt.Printf("unknown cred command: %s\n", args[0])
-		fmt.Println("usage: sluice cred [add|list|remove] ...")
-		os.Exit(1)
+		return fmt.Errorf("unknown cred command: %s\nusage: sluice cred [add|list|remove] ...", args[0])
 	}
 }
 
@@ -48,23 +45,23 @@ func handleCredCommand(args []string) {
 // to ensure the CLI operates on the same backend as the running proxy.
 // If a non-age provider is configured, it returns an error so the caller
 // can report it clearly instead of silently mutating the wrong backend.
-func openVaultStore(dbPath string) *vault.Store {
+func openVaultStore(dbPath string) (*vault.Store, error) {
 	var vaultDir string
 
 	// Read vault config from the DB to ensure the CLI uses the
 	// same backend as the running proxy.
 	if dbPath != "" {
 		if _, statErr := os.Stat(dbPath); statErr != nil && !os.IsNotExist(statErr) {
-			log.Fatalf("cannot access database %s: %v", dbPath, statErr)
+			return nil, fmt.Errorf("cannot access database %s: %w", dbPath, statErr)
 		} else if statErr == nil {
 			db, dbErr := store.New(dbPath)
 			if dbErr != nil {
-				log.Fatalf("open store %s: %v", dbPath, dbErr)
+				return nil, fmt.Errorf("open store %s: %w", dbPath, dbErr)
 			}
 			cfg, cfgErr := db.GetConfig()
 			if cfgErr != nil {
 				_ = db.Close()
-				log.Fatalf("read config from store: %v", cfgErr)
+				return nil, fmt.Errorf("read config from store: %w", cfgErr)
 			}
 			_ = db.Close()
 
@@ -88,7 +85,7 @@ func openVaultStore(dbPath string) *vault.Store {
 					}
 				}
 				if !hasAge {
-					log.Fatalf("vault_providers is configured as %v without the age backend. "+
+					return nil, fmt.Errorf("vault_providers is configured as %v without the age backend. "+
 						"CLI credential management only supports the age backend. "+
 						"Manage credentials through the configured providers' native tools.", cfg.VaultProviders)
 				}
@@ -99,7 +96,7 @@ func openVaultStore(dbPath string) *vault.Store {
 				}
 			} else if cfg.VaultProvider != "" && cfg.VaultProvider != "age" {
 				// Single provider that is not age.
-				log.Fatalf("vault provider is %q; CLI credential management only supports the age backend. "+
+				return nil, fmt.Errorf("vault provider is %q; CLI credential management only supports the age backend. "+
 					"Manage credentials through the %s provider's native tools.", cfg.VaultProvider, cfg.VaultProvider)
 			}
 		}
@@ -108,30 +105,31 @@ func openVaultStore(dbPath string) *vault.Store {
 	if vaultDir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			log.Fatalf("determine home dir: %v", err)
+			return nil, fmt.Errorf("determine home dir: %w", err)
 		}
 		vaultDir = filepath.Join(home, ".sluice")
 	}
 
 	vs, err := vault.NewStore(vaultDir)
 	if err != nil {
-		log.Fatalf("open vault: %v", err)
+		return nil, fmt.Errorf("open vault: %w", err)
 	}
-	return vs
+	return vs, nil
 }
 
-func handleCredAdd(args []string) {
-	fs := flag.NewFlagSet("cred add", flag.ExitOnError)
+func handleCredAdd(args []string) error {
+	fs := flag.NewFlagSet("cred add", flag.ContinueOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
 	destination := fs.String("destination", "", "auto-create allow rule and binding for this destination")
 	portsStr := fs.String("ports", "", "comma-separated port list for the allow rule (e.g. 443,80)")
 	header := fs.String("header", "", "header for the binding (e.g. Authorization)")
 	template := fs.String("template", "", "template for credential injection (e.g. \"Bearer {value}\")")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if fs.NArg() == 0 {
-		fmt.Println("usage: sluice cred add <name> [--destination host] [--ports 443] [--header Authorization] [--template \"Bearer {value}\"]")
-		os.Exit(1)
+		return fmt.Errorf("usage: sluice cred add <name> [--destination host] [--ports 443] [--header Authorization] [--template \"Bearer {value}\"]")
 	}
 	name := fs.Arg(0)
 
@@ -142,13 +140,13 @@ func handleCredAdd(args []string) {
 		s, err := term.ReadPassword(int(os.Stdin.Fd()))
 		fmt.Println()
 		if err != nil {
-			log.Fatalf("read secret: %v", err)
+			return fmt.Errorf("read secret: %w", err)
 		}
 		secret = s
 	} else {
 		scanner := bufio.NewScanner(os.Stdin)
 		if !scanner.Scan() {
-			log.Fatalf("read secret from stdin: no input")
+			return fmt.Errorf("read secret from stdin: no input")
 		}
 		secret = []byte(strings.TrimRight(scanner.Text(), "\r\n"))
 	}
@@ -161,7 +159,7 @@ func handleCredAdd(args []string) {
 	var db *store.Store
 	if *destination != "" {
 		if _, err := policy.CompileGlob(*destination); err != nil {
-			log.Fatalf("invalid destination pattern %q: %v", *destination, err)
+			return fmt.Errorf("invalid destination pattern %q: %w", *destination, err)
 		}
 
 		if *portsStr != "" {
@@ -169,10 +167,10 @@ func handleCredAdd(args []string) {
 				ps = strings.TrimSpace(ps)
 				p, err := strconv.Atoi(ps)
 				if err != nil {
-					log.Fatalf("invalid port %q: %v", ps, err)
+					return fmt.Errorf("invalid port %q: %w", ps, err)
 				}
 				if p < 1 || p > 65535 {
-					log.Fatalf("port %d out of range (1-65535)", p)
+					return fmt.Errorf("port %d out of range (1-65535)", p)
 				}
 				ports = append(ports, p)
 			}
@@ -181,13 +179,16 @@ func handleCredAdd(args []string) {
 		var err error
 		db, err = store.New(*dbPath)
 		if err != nil {
-			log.Fatalf("open store: %v", err)
+			return fmt.Errorf("open store: %w", err)
 		}
 		defer func() { _ = db.Close() }()
 	}
 
 	// Inputs validated and DB is open. Now persist the credential.
-	vs := openVaultStore(*dbPath)
+	vs, err := openVaultStore(*dbPath)
+	if err != nil {
+		return err
+	}
 
 	// Back up existing credential ciphertext in case we need to roll back
 	// after a DB failure. This prevents losing a previously working secret
@@ -197,7 +198,7 @@ func handleCredAdd(args []string) {
 		var readErr error
 		prevCiphertext, readErr = vs.ReadRawCredential(name)
 		if readErr != nil {
-			log.Fatalf("backup existing credential %q before overwrite: %v", name, readErr)
+			return fmt.Errorf("backup existing credential %q before overwrite: %w", name, readErr)
 		}
 	}
 
@@ -206,7 +207,7 @@ func handleCredAdd(args []string) {
 		secret[i] = 0
 	}
 	if addErr != nil {
-		log.Fatalf("add credential: %v", addErr)
+		return fmt.Errorf("add credential: %w", addErr)
 	}
 
 	// Create rule and binding atomically. If the DB insert fails, roll back
@@ -247,7 +248,7 @@ func handleCredAdd(args []string) {
 					log.Printf("warning: failed to clean up vault credential %q after DB error: %v", name, rmErr)
 				}
 			}
-			log.Fatalf("add rule and binding: %v", err)
+			return fmt.Errorf("add rule and binding: %w", err)
 		}
 		fmt.Printf("credential %q added\n", name)
 		fmt.Printf("added allow rule [%d] for %s\n", ruleID, *destination)
@@ -255,21 +256,27 @@ func handleCredAdd(args []string) {
 	} else {
 		fmt.Printf("credential %q added\n", name)
 	}
+	return nil
 }
 
-func handleCredList(args []string) {
-	fs := flag.NewFlagSet("cred list", flag.ExitOnError)
+func handleCredList(args []string) error {
+	fs := flag.NewFlagSet("cred list", flag.ContinueOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
-	vs := openVaultStore(*dbPath)
+	vs, err := openVaultStore(*dbPath)
+	if err != nil {
+		return err
+	}
 	names, err := vs.List()
 	if err != nil {
-		log.Fatalf("list: %v", err)
+		return fmt.Errorf("list: %w", err)
 	}
 
 	if len(names) == 0 {
-		return
+		return nil
 	}
 
 	// Try to open the store to show binding info. Skip if DB doesn't exist
@@ -281,7 +288,7 @@ func handleCredList(args []string) {
 		for _, n := range names {
 			fmt.Println(n)
 		}
-		return
+		return nil
 	}
 	db, dbErr := store.New(*dbPath)
 	if dbErr != nil {
@@ -289,7 +296,7 @@ func handleCredList(args []string) {
 		for _, n := range names {
 			fmt.Println(n)
 		}
-		return
+		return nil
 	}
 	defer func() { _ = db.Close() }()
 
@@ -319,26 +326,31 @@ func handleCredList(args []string) {
 			fmt.Printf("%s -> %s%s%s%s\n", n, b.Destination, ports, hdr, tmpl)
 		}
 	}
+	return nil
 }
 
-func handleCredRemove(args []string) {
-	fs := flag.NewFlagSet("cred remove", flag.ExitOnError)
+func handleCredRemove(args []string) error {
+	fs := flag.NewFlagSet("cred remove", flag.ContinueOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if fs.NArg() == 0 {
-		fmt.Println("usage: sluice cred remove <name>")
-		os.Exit(1)
+		return fmt.Errorf("usage: sluice cred remove <name>")
 	}
 	name := fs.Arg(0)
 
-	vs := openVaultStore(*dbPath)
+	vs, err := openVaultStore(*dbPath)
+	if err != nil {
+		return err
+	}
 
 	// Remove from vault. If already gone (previous partial cleanup),
 	// continue to DB cleanup so stale rules/bindings can be removed.
 	if err := vs.Remove(name); err != nil {
 		if !os.IsNotExist(err) {
-			log.Fatalf("remove: %v", err)
+			return fmt.Errorf("remove: %w", err)
 		}
 		fmt.Printf("credential %q already removed from vault, cleaning up database\n", name)
 	} else {
@@ -380,4 +392,5 @@ func handleCredRemove(args []string) {
 			fmt.Printf("removed %d binding(s) for %q\n", removed, name)
 		}
 	}
+	return nil
 }

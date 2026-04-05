@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -29,6 +28,26 @@ func setupVaultDB(t *testing.T, dir string) string {
 	return dbPath
 }
 
+// captureStdout runs fn with stdout redirected to a pipe and returns the output.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	oldStdout := os.Stdout
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = outW
+	defer func() { os.Stdout = oldStdout }()
+
+	fn()
+
+	_ = outW.Close()
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, outR)
+	os.Stdout = oldStdout
+	return buf.String()
+}
+
 // TestHandleCredAdd tests adding a credential via piped stdin.
 func TestHandleCredAdd(t *testing.T) {
 	dir := t.TempDir()
@@ -47,23 +66,12 @@ func TestHandleCredAdd(t *testing.T) {
 	_ = w.Close()
 	defer func() { os.Stdin = oldStdin }()
 
-	// Capture stdout.
-	oldStdout := os.Stdout
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = outW
-	defer func() { os.Stdout = oldStdout }()
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{"add", "--db", dbPath, "test_key"}); err != nil {
+			t.Fatalf("handleCredCommand add: %v", err)
+		}
+	})
 
-	handleCredCommand([]string{"add", "--db", dbPath, "test_key"})
-
-	_ = outW.Close()
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, outR)
-	os.Stdout = oldStdout
-
-	output := buf.String()
 	if !strings.Contains(output, `credential "test_key" added`) {
 		t.Errorf("unexpected output: %s", output)
 	}
@@ -99,23 +107,12 @@ func TestHandleCredList(t *testing.T) {
 		}
 	}
 
-	// Capture stdout.
-	oldStdout := os.Stdout
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = outW
-	defer func() { os.Stdout = oldStdout }()
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{"list", "--db", dbPath}); err != nil {
+			t.Fatalf("handleCredCommand list: %v", err)
+		}
+	})
 
-	handleCredCommand([]string{"list", "--db", dbPath})
-
-	_ = outW.Close()
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, outR)
-	os.Stdout = oldStdout
-
-	output := buf.String()
 	for _, name := range []string{"alpha", "beta", "gamma"} {
 		if !strings.Contains(output, name) {
 			t.Errorf("expected %q in output, got: %s", name, output)
@@ -137,23 +134,12 @@ func TestHandleCredRemove(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Capture stdout.
-	oldStdout := os.Stdout
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = outW
-	defer func() { os.Stdout = oldStdout }()
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{"remove", "--db", dbPath, "to_remove"}); err != nil {
+			t.Fatalf("handleCredCommand remove: %v", err)
+		}
+	})
 
-	handleCredCommand([]string{"remove", "--db", dbPath, "to_remove"})
-
-	_ = outW.Close()
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, outR)
-	os.Stdout = oldStdout
-
-	output := buf.String()
 	if !strings.Contains(output, `credential "to_remove" removed`) {
 		t.Errorf("unexpected output: %s", output)
 	}
@@ -181,86 +167,48 @@ func TestHandleCredListEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Capture stdout.
-	oldStdout := os.Stdout
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = outW
-	defer func() { os.Stdout = oldStdout }()
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{"list", "--db", dbPath}); err != nil {
+			t.Fatalf("handleCredCommand list: %v", err)
+		}
+	})
 
-	handleCredCommand([]string{"list", "--db", dbPath})
-
-	_ = outW.Close()
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, outR)
-	os.Stdout = oldStdout
-
-	output := strings.TrimSpace(buf.String())
+	output = strings.TrimSpace(output)
 	if output != "" {
 		t.Errorf("expected empty output for empty vault, got: %q", output)
 	}
 }
 
-// TestHandleCredNoArgs verifies exit 1 when no subcommand is given.
+// TestHandleCredNoArgs verifies error when no subcommand is given.
 func TestHandleCredNoArgs(t *testing.T) {
-	if os.Getenv("TEST_CRED_SUBPROCESS") == "no_args" {
-		handleCredCommand([]string{})
-		return
+	err := handleCredCommand([]string{})
+	if err == nil {
+		t.Fatal("expected error for no args")
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=TestHandleCredNoArgs")
-	cmd.Env = append(os.Environ(), "TEST_CRED_SUBPROCESS=no_args")
-	err := cmd.Run()
-	if e, ok := err.(*exec.ExitError); ok && !e.Success() {
-		return // expected non-zero exit
-	}
-	t.Fatal("expected non-zero exit code")
 }
 
-// TestHandleCredAddNoName verifies exit 1 when add is called without a name.
+// TestHandleCredAddNoName verifies error when add is called without a name.
 func TestHandleCredAddNoName(t *testing.T) {
-	if os.Getenv("TEST_CRED_SUBPROCESS") == "add_no_name" {
-		handleCredCommand([]string{"add"})
-		return
+	err := handleCredCommand([]string{"add"})
+	if err == nil {
+		t.Fatal("expected error for add without name")
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=TestHandleCredAddNoName")
-	cmd.Env = append(os.Environ(), "TEST_CRED_SUBPROCESS=add_no_name")
-	err := cmd.Run()
-	if e, ok := err.(*exec.ExitError); ok && !e.Success() {
-		return
-	}
-	t.Fatal("expected non-zero exit code")
 }
 
-// TestHandleCredRemoveNoName verifies exit 1 when remove is called without a name.
+// TestHandleCredRemoveNoName verifies error when remove is called without a name.
 func TestHandleCredRemoveNoName(t *testing.T) {
-	if os.Getenv("TEST_CRED_SUBPROCESS") == "remove_no_name" {
-		handleCredCommand([]string{"remove"})
-		return
+	err := handleCredCommand([]string{"remove"})
+	if err == nil {
+		t.Fatal("expected error for remove without name")
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=TestHandleCredRemoveNoName")
-	cmd.Env = append(os.Environ(), "TEST_CRED_SUBPROCESS=remove_no_name")
-	err := cmd.Run()
-	if e, ok := err.(*exec.ExitError); ok && !e.Success() {
-		return
-	}
-	t.Fatal("expected non-zero exit code")
 }
 
-// TestHandleCredUnknownSubcommand verifies exit 1 for unknown subcommand.
+// TestHandleCredUnknownSubcommand verifies error for unknown subcommand.
 func TestHandleCredUnknownSubcommand(t *testing.T) {
-	if os.Getenv("TEST_CRED_SUBPROCESS") == "unknown" {
-		handleCredCommand([]string{"bogus"})
-		return
+	err := handleCredCommand([]string{"bogus"})
+	if err == nil {
+		t.Fatal("expected error for unknown subcommand")
 	}
-	cmd := exec.Command(os.Args[0], "-test.run=TestHandleCredUnknownSubcommand")
-	cmd.Env = append(os.Environ(), "TEST_CRED_SUBPROCESS=unknown")
-	err := cmd.Run()
-	if e, ok := err.(*exec.ExitError); ok && !e.Success() {
-		return
-	}
-	t.Fatal("expected non-zero exit code")
 }
 
 // TestHandleCredRemoveNonexistent verifies idempotent behavior when removing
@@ -275,23 +223,12 @@ func TestHandleCredRemoveNonexistent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Capture stdout.
-	oldStdout := os.Stdout
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = outW
-	defer func() { os.Stdout = oldStdout }()
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{"remove", "--db", dbPath, "does_not_exist"}); err != nil {
+			t.Fatalf("handleCredCommand remove nonexistent: %v", err)
+		}
+	})
 
-	handleCredCommand([]string{"remove", "--db", dbPath, "does_not_exist"})
-
-	_ = outW.Close()
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, outR)
-	os.Stdout = oldStdout
-
-	output := buf.String()
 	if !strings.Contains(output, "already removed from vault") {
 		t.Errorf("expected 'already removed from vault' message, got: %s", output)
 	}
@@ -316,30 +253,19 @@ func TestHandleCredAddWithDestination(t *testing.T) {
 	_ = w.Close()
 	defer func() { os.Stdin = oldStdin }()
 
-	// Capture stdout.
-	oldStdout := os.Stdout
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = outW
-	defer func() { os.Stdout = oldStdout }()
-
-	handleCredCommand([]string{
-		"add",
-		"--db", dbPath,
-		"--destination", "api.anthropic.com",
-		"--ports", "443",
-		"--header", "x-api-key",
-		"anthropic_key",
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--destination", "api.anthropic.com",
+			"--ports", "443",
+			"--header", "x-api-key",
+			"anthropic_key",
+		}); err != nil {
+			t.Fatalf("handleCredCommand add with destination: %v", err)
+		}
 	})
 
-	_ = outW.Close()
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, outR)
-	os.Stdout = oldStdout
-
-	output := buf.String()
 	if !strings.Contains(output, `credential "anthropic_key" added`) {
 		t.Errorf("expected credential added message, got: %s", output)
 	}
@@ -424,28 +350,19 @@ func TestHandleCredAddWithTemplate(t *testing.T) {
 	_ = w.Close()
 	defer func() { os.Stdin = oldStdin }()
 
-	oldStdout := os.Stdout
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = outW
-	defer func() { os.Stdout = oldStdout }()
-
-	handleCredCommand([]string{
-		"add",
-		"--db", dbPath,
-		"--destination", "api.github.com",
-		"--ports", "443",
-		"--header", "Authorization",
-		"--template", "Bearer {value}",
-		"github_token",
+	_ = captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--destination", "api.github.com",
+			"--ports", "443",
+			"--header", "Authorization",
+			"--template", "Bearer {value}",
+			"github_token",
+		}); err != nil {
+			t.Fatalf("handleCredCommand add with template: %v", err)
+		}
 	})
-
-	_ = outW.Close()
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, outR)
-	os.Stdout = oldStdout
 
 	db, err := store.New(dbPath)
 	if err != nil {
@@ -494,23 +411,12 @@ func TestHandleCredListWithBindings(t *testing.T) {
 	}
 	_ = db.Close()
 
-	// Capture stdout.
-	oldStdout := os.Stdout
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = outW
-	defer func() { os.Stdout = oldStdout }()
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{"list", "--db", dbPath}); err != nil {
+			t.Fatalf("handleCredCommand list: %v", err)
+		}
+	})
 
-	handleCredCommand([]string{"list", "--db", dbPath})
-
-	_ = outW.Close()
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, outR)
-	os.Stdout = oldStdout
-
-	output := buf.String()
 	if !strings.Contains(output, "mykey") {
 		t.Errorf("expected credential name in output, got: %s", output)
 	}
@@ -570,23 +476,12 @@ func TestHandleCredRemoveWithBindings(t *testing.T) {
 	}
 	_ = db.Close()
 
-	// Capture stdout.
-	oldStdout := os.Stdout
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = outW
-	defer func() { os.Stdout = oldStdout }()
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{"remove", "--db", dbPath, "cleanup_key"}); err != nil {
+			t.Fatalf("handleCredCommand remove: %v", err)
+		}
+	})
 
-	handleCredCommand([]string{"remove", "--db", dbPath, "cleanup_key"})
-
-	_ = outW.Close()
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, outR)
-	os.Stdout = oldStdout
-
-	output := buf.String()
 	if !strings.Contains(output, `credential "cleanup_key" removed`) {
 		t.Errorf("expected removal message, got: %s", output)
 	}
@@ -654,27 +549,19 @@ func TestHandleCredAddThenRemoveIntegrated(t *testing.T) {
 	}
 	_ = w.Close()
 
-	oldStdout := os.Stdout
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = outW
-
-	handleCredCommand([]string{
-		"add",
-		"--db", dbPath,
-		"--destination", "api.test.com",
-		"--ports", "443,8443",
-		"--header", "X-Custom",
-		"--template", "Token {value}",
-		"integrated_key",
+	_ = captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--destination", "api.test.com",
+			"--ports", "443,8443",
+			"--header", "X-Custom",
+			"--template", "Token {value}",
+			"integrated_key",
+		}); err != nil {
+			t.Fatalf("handleCredCommand add: %v", err)
+		}
 	})
-
-	_ = outW.Close()
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, outR)
-	os.Stdout = oldStdout
 	os.Stdin = oldStdin
 
 	// Verify store state after add.
@@ -704,18 +591,11 @@ func TestHandleCredAddThenRemoveIntegrated(t *testing.T) {
 	_ = db.Close()
 
 	// Step 2: Remove credential.
-	outR, outW, err = os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = outW
-
-	handleCredCommand([]string{"remove", "--db", dbPath, "integrated_key"})
-
-	_ = outW.Close()
-	buf.Reset()
-	_, _ = io.Copy(&buf, outR)
-	os.Stdout = oldStdout
+	_ = captureStdout(t, func() {
+		if err := handleCredCommand([]string{"remove", "--db", dbPath, "integrated_key"}); err != nil {
+			t.Fatalf("handleCredCommand remove: %v", err)
+		}
+	})
 
 	// Verify everything was cleaned up.
 	db, err = store.New(dbPath)

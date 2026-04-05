@@ -64,17 +64,17 @@ The CLI handlers are the biggest gap. Most are untested because they call `os.Ex
 - Modify: `cmd/sluice/main.go`
 - Modify: `cmd/sluice/main_test.go`
 
-- [ ] Refactor CLI handlers that call `os.Exit` or `log.Fatalf` to return errors. Keep a thin wrapper at the top level that calls `os.Exit` based on the returned error.
-- [ ] Write tests for `handlePolicyList` with various filter flags (--verdict allow, --verdict deny, no filter)
-- [ ] Write tests for `handlePolicyAdd` (allow, deny, ask with destination, tool, pattern variants)
-- [ ] Write tests for `handlePolicyRemove` (valid ID, invalid ID, non-existent ID)
-- [ ] Write tests for `handlePolicyImport` (valid TOML file, malformed file, non-existent file)
-- [ ] Write tests for `handlePolicyExport` (verify TOML output matches store contents)
-- [ ] Write tests for `handleCertGenerate` (verify CA cert created, idempotent on re-run)
-- [ ] Write tests for `envDefault` helper
-- [ ] Write tests for `main()` startup with various flag combinations (--db, --config, --listen, --health-addr)
-- [ ] Write tests for auto-seed behavior (empty DB + config.toml present -> import)
-- [ ] Run tests: `go test ./cmd/sluice/ -v -timeout 30s -cover`
+- [x] Refactor CLI handlers that call `os.Exit` or `log.Fatalf` to return errors. Keep a thin wrapper at the top level that calls `os.Exit` based on the returned error.
+- [x] Write tests for `handlePolicyList` with various filter flags (--verdict allow, --verdict deny, no filter)
+- [x] Write tests for `handlePolicyAdd` (allow, deny, ask with destination, tool, pattern variants)
+- [x] Write tests for `handlePolicyRemove` (valid ID, invalid ID, non-existent ID)
+- [x] Write tests for `handlePolicyImport` (valid TOML file, malformed file, non-existent file)
+- [x] Write tests for `handlePolicyExport` (verify TOML output matches store contents)
+- [x] Write tests for `handleCertGenerate` (verify CA cert created, idempotent on re-run)
+- [x] Write tests for `envDefault` helper
+- [x] Write tests for `main()` startup with various flag combinations (--db, --config, --listen, --health-addr)
+- [x] Write tests for auto-seed behavior (empty DB + config.toml present -> import)
+- [x] Run tests: `go test ./cmd/sluice/ -v -timeout 30s -cover`
 
 ### Task 2: Fill internal/telegram unit test gaps (45.2% -> 80%+)
 

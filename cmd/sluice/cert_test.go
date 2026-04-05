@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"crypto/x509"
 	"encoding/pem"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nemirovsky/sluice/internal/proxy"
@@ -118,5 +121,124 @@ func TestCertGeneratePermissions(t *testing.T) {
 	perm = info.Mode().Perm()
 	if perm != 0644 {
 		t.Errorf("ca-cert.pem permissions: %o, want 0644", perm)
+	}
+}
+
+// --- Handler-level tests ---
+
+func TestHandleCertGenerateCreatesFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	oldStdout := os.Stdout
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = outW
+	defer func() { os.Stdout = oldStdout }()
+
+	if err := handleCertGenerate([]string{"--out", dir}); err != nil {
+		t.Fatalf("handleCertGenerate: %v", err)
+	}
+
+	_ = outW.Close()
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, outR)
+	os.Stdout = oldStdout
+
+	output := buf.String()
+	if !strings.Contains(output, "CA certificate:") {
+		t.Errorf("expected 'CA certificate:' in output: %s", output)
+	}
+	if !strings.Contains(output, "CA private key:") {
+		t.Errorf("expected 'CA private key:' in output: %s", output)
+	}
+	if !strings.Contains(output, "ca-cert.pem") {
+		t.Errorf("expected cert path in output: %s", output)
+	}
+
+	// Verify files exist.
+	if _, err := os.Stat(filepath.Join(dir, "ca-cert.pem")); err != nil {
+		t.Errorf("ca-cert.pem not created: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ca-key.pem")); err != nil {
+		t.Errorf("ca-key.pem not created: %v", err)
+	}
+}
+
+func TestHandleCertGenerateIdempotentViaHandler(t *testing.T) {
+	dir := t.TempDir()
+
+	// First call.
+	oldStdout := os.Stdout
+	_, outW, _ := os.Pipe()
+	os.Stdout = outW
+	if err := handleCertGenerate([]string{"--out", dir}); err != nil {
+		os.Stdout = oldStdout
+		t.Fatalf("first handleCertGenerate: %v", err)
+	}
+	_ = outW.Close()
+	os.Stdout = oldStdout
+
+	// Get serial of first cert.
+	certData1, _ := os.ReadFile(filepath.Join(dir, "ca-cert.pem"))
+	block1, _ := pem.Decode(certData1)
+	cert1, _ := x509.ParseCertificate(block1.Bytes)
+
+	// Second call.
+	_, outW2, _ := os.Pipe()
+	os.Stdout = outW2
+	if err := handleCertGenerate([]string{"--out", dir}); err != nil {
+		os.Stdout = oldStdout
+		t.Fatalf("second handleCertGenerate: %v", err)
+	}
+	_ = outW2.Close()
+	os.Stdout = oldStdout
+
+	// Get serial of second cert.
+	certData2, _ := os.ReadFile(filepath.Join(dir, "ca-cert.pem"))
+	block2, _ := pem.Decode(certData2)
+	cert2, _ := x509.ParseCertificate(block2.Bytes)
+
+	if cert1.SerialNumber.Cmp(cert2.SerialNumber) != 0 {
+		t.Error("serial numbers should match on second call (idempotent)")
+	}
+}
+
+func TestHandleCertCommandNoArgs(t *testing.T) {
+	err := handleCertCommand([]string{})
+	if err == nil {
+		t.Fatal("expected error for no args")
+	}
+}
+
+func TestHandleCertCommandUnknown(t *testing.T) {
+	err := handleCertCommand([]string{"bogus"})
+	if err == nil {
+		t.Fatal("expected error for unknown subcommand")
+	}
+	if !strings.Contains(err.Error(), "unknown cert command") {
+		t.Errorf("expected 'unknown cert command' in error, got: %v", err)
+	}
+}
+
+func TestHandleCertGenerateWithEnvVar(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SLUICE_VAULT_DIR", dir)
+
+	oldStdout := os.Stdout
+	_, outW, _ := os.Pipe()
+	os.Stdout = outW
+	defer func() { os.Stdout = oldStdout }()
+
+	if err := handleCertGenerate([]string{}); err != nil {
+		os.Stdout = oldStdout
+		t.Fatalf("handleCertGenerate with env: %v", err)
+	}
+	_ = outW.Close()
+	os.Stdout = oldStdout
+
+	if _, err := os.Stat(filepath.Join(dir, "ca-cert.pem")); err != nil {
+		t.Errorf("ca-cert.pem not created in SLUICE_VAULT_DIR: %v", err)
 	}
 }
