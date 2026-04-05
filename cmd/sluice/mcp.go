@@ -49,13 +49,15 @@ func handleMCPCommand(args []string) error {
 }
 
 func handleMCPGateway(args []string) error {
-	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
 	configPath := fs.String("config", "", "path to config TOML file (seeds DB on first run if DB is empty)")
 	auditPath := fs.String("audit", "", "path to audit log file (optional)")
 	telegramToken := fs.String("telegram-token", os.Getenv("TELEGRAM_BOT_TOKEN"), "Telegram bot token")
 	telegramChatIDStr := fs.String("telegram-chat-id", os.Getenv("TELEGRAM_CHAT_ID"), "Telegram chat ID for approvals")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	// Open the SQLite store.
 	db, err := store.New(*dbPath)
@@ -245,18 +247,19 @@ func handleMCPGateway(args []string) error {
 }
 
 func handleMCPAdd(args []string) error {
-	fs := flag.NewFlagSet("mcp add", flag.ExitOnError)
+	fs := flag.NewFlagSet("mcp add", flag.ContinueOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
 	command := fs.String("command", "", "command to run (stdio) or URL (http/websocket)")
 	argsStr := fs.String("args", "", "comma-separated arguments for the command")
 	envStr := fs.String("env", "", "comma-separated KEY=VAL environment variables")
 	timeout := fs.Int("timeout", 120, "upstream timeout in seconds")
 	transport := fs.String("transport", "stdio", "transport type: stdio, http, or websocket")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if fs.NArg() == 0 || *command == "" {
-		fmt.Println("usage: sluice mcp add <name> --command <cmd> [--transport stdio|http|websocket] [--args \"arg1,arg2\"] [--env \"KEY=VAL,...\"] [--timeout 120]")
-		os.Exit(1)
+		return fmt.Errorf("usage: sluice mcp add <name> --command <cmd> [--transport stdio|http|websocket] [--args \"arg1,arg2\"] [--env \"KEY=VAL,...\"] [--timeout 120]")
 	}
 	name := fs.Arg(0)
 
@@ -316,9 +319,11 @@ func handleMCPAdd(args []string) error {
 }
 
 func handleMCPList(args []string) error {
-	fs := flag.NewFlagSet("mcp list", flag.ExitOnError)
+	fs := flag.NewFlagSet("mcp list", flag.ContinueOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	db, err := store.New(*dbPath)
 	if err != nil {
@@ -368,13 +373,14 @@ func handleMCPList(args []string) error {
 }
 
 func handleMCPRemove(args []string) error {
-	fs := flag.NewFlagSet("mcp remove", flag.ExitOnError)
+	fs := flag.NewFlagSet("mcp remove", flag.ContinueOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if fs.NArg() == 0 {
-		fmt.Println("usage: sluice mcp remove <name>")
-		os.Exit(1)
+		return fmt.Errorf("usage: sluice mcp remove <name>")
 	}
 	name := fs.Arg(0)
 
@@ -389,8 +395,7 @@ func handleMCPRemove(args []string) error {
 		return fmt.Errorf("remove upstream: %w", err)
 	}
 	if !deleted {
-		fmt.Printf("no upstream named %q\n", name)
-		os.Exit(1)
+		return fmt.Errorf("no upstream named %q", name)
 	}
 	fmt.Printf("removed MCP upstream %q\n", name)
 	fmt.Println("NOTE: if the MCP gateway is running, restart sluice for the removal to take effect")

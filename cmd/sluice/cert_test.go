@@ -171,7 +171,10 @@ func TestHandleCertGenerateIdempotentViaHandler(t *testing.T) {
 
 	// First call.
 	oldStdout := os.Stdout
-	_, outW, _ := os.Pipe()
+	_, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	os.Stdout = outW
 	if err := handleCertGenerate([]string{"--out", dir}); err != nil {
 		os.Stdout = oldStdout
@@ -186,7 +189,10 @@ func TestHandleCertGenerateIdempotentViaHandler(t *testing.T) {
 	cert1, _ := x509.ParseCertificate(block1.Bytes)
 
 	// Second call.
-	_, outW2, _ := os.Pipe()
+	_, outW2, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	os.Stdout = outW2
 	if err := handleCertGenerate([]string{"--out", dir}); err != nil {
 		os.Stdout = oldStdout
@@ -227,7 +233,10 @@ func TestHandleCertGenerateWithEnvVar(t *testing.T) {
 	t.Setenv("SLUICE_VAULT_DIR", dir)
 
 	oldStdout := os.Stdout
-	_, outW, _ := os.Pipe()
+	_, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	os.Stdout = outW
 	defer func() { os.Stdout = oldStdout }()
 
