@@ -31,7 +31,7 @@ services:
     cap_add: [NET_ADMIN]
     devices:
       - /dev/net/tun:/dev/net/tun
-    command: ["--proxy", "socks5://sluice:1080", "--setup"]
+    command: ["--proxy", "socks5://sluice:1080"]
     healthcheck:
       test: ["CMD-SHELL", "ip link show tun0 || exit 1"]
       interval: 10s
