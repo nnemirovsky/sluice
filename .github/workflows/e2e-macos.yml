@@ -1,0 +1,33 @@
+name: E2E Tests (macOS)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e-macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check Apple Container availability
+        id: check-apple
+        run: |
+          if command -v container &> /dev/null; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Apple Container CLI not found, tests will be skipped gracefully"
+          fi
+
+      - name: Build sluice
+        run: go build -o bin/sluice ./cmd/sluice
+
+      - name: Run e2e tests
+        run: go test -tags="e2e darwin" ./e2e/ -v -count=1 -timeout=300s

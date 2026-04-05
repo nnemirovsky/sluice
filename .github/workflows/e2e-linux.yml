@@ -1,0 +1,28 @@
+name: E2E Tests (Linux)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  e2e-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build sluice
+        run: go build -o bin/sluice ./cmd/sluice
+
+      - name: Run e2e tests
+        run: go test -tags="e2e linux" ./e2e/ -v -count=1 -timeout=300s
+
+      - name: Run Docker Compose e2e tests
+        run: |
+          docker compose -f compose.e2e.yml up --build --abort-on-container-exit --exit-code-from test-runner
+          docker compose -f compose.e2e.yml down -v
