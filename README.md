@@ -148,8 +148,8 @@ Download a pre-built binary from [Releases](https://github.com/nnemirovsky/sluic
 Available binaries: `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`.
 
 ```bash
-# Download (replace VERSION and OS/ARCH)
-curl -L -o sluice https://github.com/nnemirovsky/sluice/releases/download/vVERSION/sluice_VERSION_OS_ARCH
+# Download (replace OS_ARCH: linux_amd64, linux_arm64, darwin_amd64, darwin_arm64)
+curl -L -o sluice https://github.com/nnemirovsky/sluice/releases/latest/download/sluice_OS_ARCH
 chmod +x sluice
 
 # Run standalone
