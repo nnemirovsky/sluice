@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -110,6 +111,22 @@ func NewInjector(provider vault.Provider, resolver *atomic.Pointer[vault.Binding
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Verbose = false
 
+	// Build a root CA pool for the outbound transport. Start with system
+	// roots and add the sluice MITM CA cert. Adding the MITM CA is
+	// necessary because in containerized deployments, upstream test
+	// servers may present certificates signed by the same CA that sluice
+	// uses for interception. In production, no real server will present a
+	// cert signed by sluice's CA, so this addition is harmless.
+	rootCAs, _ := x509.SystemCertPool()
+	if rootCAs == nil {
+		rootCAs = x509.NewCertPool()
+	}
+	if len(caCert.Certificate) > 0 {
+		if parsed, err := x509.ParseCertificate(caCert.Certificate[0]); err == nil {
+			rootCAs.AddCert(parsed)
+		}
+	}
+
 	// Use a transport that dials pinned IPs (set by the SOCKS5 dial
 	// function) instead of re-resolving DNS. This prevents DNS rebinding
 	// attacks where the hostname resolves to a different IP between
@@ -138,6 +155,7 @@ func NewInjector(provider vault.Provider, resolver *atomic.Pointer[vault.Binding
 			}
 			return (&net.Dialer{Timeout: connectTimeout}).DialContext(ctx, network, addr)
 		},
+		TLSClientConfig:     &tls.Config{RootCAs: rootCAs},
 		ForceAttemptHTTP2:   true,
 		TLSHandshakeTimeout: 10 * time.Second,
 	}

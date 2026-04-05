@@ -22,7 +22,12 @@ func TestSmoke_HealthzReturns200(t *testing.T) {
 }
 
 func TestSmoke_SOCKS5Listening(t *testing.T) {
-	proc := startSluice(t, SluiceOpts{})
+	proc := startSluice(t, SluiceOpts{
+		ConfigTOML: `
+[policy]
+default = "allow"
+`,
+	})
 
 	// Verify we can actually dial through the SOCKS5 proxy to the health endpoint.
 	dialer := connectSOCKS5(t, proc.ProxyAddr)

@@ -745,6 +745,14 @@ template = "testuser"
 		t.Error("audit log should contain SSH connection entry")
 	}
 
+	// Close the SSH session and client connection before waiting for the
+	// server goroutine. The defers registered above won't run until the
+	// function returns, so we must close explicitly to unblock the test
+	// server's "for newChan := range chans" loop.
+	session.Close()
+	sshClientConn.Close()
+	conn.Close()
+
 	// Wait for SSH server goroutine to finish.
 	_ = sshListener.Close()
 
