@@ -373,12 +373,16 @@ name = "temp allow"
 	}
 }
 
-// mustSplitAddr extracts host and port from an httptest.Server URL.
+// mustSplitAddr extracts host and port from a server URL (e.g. "http://127.0.0.1:3000/healthz").
 // Returns (host, port) as strings.
 func mustSplitAddr(t *testing.T, serverURL string) (string, string) {
 	t.Helper()
 	addr := strings.TrimPrefix(serverURL, "http://")
 	addr = strings.TrimPrefix(addr, "https://")
+	// Strip any path component (e.g. "/healthz") before splitting host:port.
+	if i := strings.Index(addr, "/"); i != -1 {
+		addr = addr[:i]
+	}
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		t.Fatalf("split %q: %v", addr, err)
