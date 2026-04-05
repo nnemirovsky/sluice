@@ -175,7 +175,7 @@ destination = "api.anthropic.com"
 protocols = ["http", "https"]
 
 [[allow]]
-destination = "dns.google"
+destination = "*.github.com"   # matches the domain being queried, not the resolver
 protocols = ["dns"]
 
 [[ask]]
