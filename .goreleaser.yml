@@ -25,7 +25,7 @@ archives:
     builds:
       - sluice
     format: binary
-    name_template: "sluice_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    name_template: "sluice_{{ .Os }}_{{ .Arch }}"
 
 changelog:
   disable: true

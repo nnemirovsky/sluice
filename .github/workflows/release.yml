@@ -51,7 +51,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          version="${tag#v}"
-          mv sluice_darwin_arm64 "sluice_${version}_darwin_arm64"
-          mv sluice_darwin_amd64 "sluice_${version}_darwin_amd64"
-          gh release upload "$tag" "sluice_${version}_darwin_arm64" "sluice_${version}_darwin_amd64"
+          gh release upload "$tag" sluice_darwin_arm64 sluice_darwin_amd64
