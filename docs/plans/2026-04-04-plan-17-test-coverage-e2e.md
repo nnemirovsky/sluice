@@ -267,13 +267,13 @@ Docker-specific integration tests using docker compose.
 **Files:**
 - Create: `e2e/docker_test.go` (build tag: `//go:build e2e && linux`)
 
-- [ ] Test: `docker compose -f compose.dev.yml up --build` succeeds and all services healthy
-- [ ] Test: sluice healthcheck responds 200 from within the compose network
-- [ ] Test: traffic from openclaw container routes through sluice (make HTTP request from openclaw, verify audit log entry in sluice)
-- [ ] Test: credential hot-reload via shared volume (write phantom file, exec reload, verify openclaw picks up new value)
-- [ ] Test: MCP auto-injection (verify mcp-servers.json written, openclaw connects to sluice gateway)
-- [ ] Cleanup: `docker compose -f compose.dev.yml down -v`
-- [ ] Run: `go test -tags="e2e linux" ./e2e/ -v -timeout 300s`
+- [x] Test: `docker compose -f compose.dev.yml up --build` succeeds and all services healthy
+- [x] Test: sluice healthcheck responds 200 from within the compose network
+- [x] Test: traffic from openclaw container routes through sluice (make HTTP request from openclaw, verify audit log entry in sluice)
+- [x] Test: credential hot-reload via shared volume (write phantom file, exec reload, verify openclaw picks up new value)
+- [x] Test: MCP auto-injection (verify mcp-servers.json written, openclaw connects to sluice gateway)
+- [x] Cleanup: `docker compose -f compose.dev.yml down -v`
+- [x] Run: `go test -tags="e2e linux" ./e2e/ -v -timeout 300s`
 
 ### Task 12: E2e tests -- Apple Container-specific (macOS)
 
