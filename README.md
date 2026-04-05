@@ -61,17 +61,28 @@ Native macOS micro-VMs via Virtualization.framework. Lightweight isolation with 
 curl -L -o sluice https://github.com/nnemirovsky/sluice/releases/latest/download/sluice_darwin_arm64
 chmod +x sluice
 
-# 2. Start sluice with Apple Container runtime
-./sluice --runtime apple --container-name openclaw \
-  --phantom-dir /tmp/sluice-phantoms \
-  --config examples/config.toml
+# 2. Generate CA certificate for HTTPS interception
+./sluice cert generate
 
-# 3. Network routing (requires root for pf rules)
+# 3. Seed policy and add credentials
+./sluice policy import examples/config.toml
+./sluice cred add anthropic_api_key \
+  --destination api.anthropic.com --ports 443 --header x-api-key
+
+# 4. Start sluice with Apple Container runtime
+./sluice --runtime apple --container-name openclaw \
+  --phantom-dir ~/.sluice/phantoms
+
+# 5. Network routing (requires root for pf rules)
 sudo ./scripts/apple-container-setup.sh
 
-# 4. Start OpenClaw in Apple Container
+# 6. Start OpenClaw in Apple Container
 container run --name openclaw \
-  -v /tmp/sluice-phantoms:/phantoms \
+  -e SSL_CERT_FILE=/certs/sluice-ca.crt \
+  -e REQUESTS_CA_BUNDLE=/certs/sluice-ca.crt \
+  -e NODE_EXTRA_CA_CERTS=/certs/sluice-ca.crt \
+  -v ~/.sluice/ca:/certs:ro \
+  -v ~/.sluice/phantoms:/phantoms:ro \
   ghcr.io/openclaw/openclaw:latest
 ```
 
@@ -216,6 +227,18 @@ sluice audit verify   # check hash chain integrity
 | Apple Container | macOS, `container` CLI |
 | macOS VM | macOS, Apple Silicon, `tart` CLI |
 | All | Telegram bot token (optional, for approval flow) |
+
+## Troubleshooting
+
+**OpenClaw has no network access:** Check pf rules are loaded (`sudo pfctl -a sluice -sr`). Verify tun2proxy is running and sluice is listening on the SOCKS5 port.
+
+**HTTPS certificate errors inside the container/VM:** Verify the CA cert is mounted and `SSL_CERT_FILE` points to it. Regenerate with `sluice cert generate` if needed.
+
+**`container` CLI not found:** Install Apple Container runtime. The `container` binary must be in PATH.
+
+**`tart` CLI not found:** Install via `brew install cirruslabs/cli/tart`.
+
+**Permission denied on pfctl:** pf rules require root. Use the setup scripts with sudo.
 
 ## License
 
