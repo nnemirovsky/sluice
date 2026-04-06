@@ -1,5 +1,19 @@
 # Sluice
 
+[![CI](https://github.com/nnemirovsky/sluice/actions/workflows/ci.yml/badge.svg)](https://github.com/nnemirovsky/sluice/actions/workflows/ci.yml)
+[![E2E](https://github.com/nnemirovsky/sluice/actions/workflows/e2e-linux.yml/badge.svg)](https://github.com/nnemirovsky/sluice/actions/workflows/e2e-linux.yml)
+[![Lint](https://github.com/nnemirovsky/sluice/actions/workflows/lint.yml/badge.svg)](https://github.com/nnemirovsky/sluice/actions/workflows/lint.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Go Report Card](https://goreportcard.com/badge/github.com/nnemirovsky/sluice)](https://goreportcard.com/report/github.com/nnemirovsky/sluice)
+[![Release](https://img.shields.io/github/v/release/nnemirovsky/sluice)](https://github.com/nnemirovsky/sluice/releases/latest)
+
+```
+ ___  _    _   _ ___ ___ ___
+/ __|| |  | | | |_ _/ __| __|
+\__ \| |__| |_| || | (__| _|
+|___/|____|\___/|___\___|___|
+```
+
 Governance and credential injection proxy for [OpenClaw](https://github.com/openclaw/openclaw). Keeps real secrets out of the agent, enforces per-request policy on every connection and tool call, and puts a human in the loop when it matters.
 
 ## Why Sluice
