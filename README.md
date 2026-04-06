@@ -1,4 +1,4 @@
-# Sluice
+# :shield: Sluice — Credential Governance Proxy for OpenClaw
 
 [![CI](https://github.com/nnemirovsky/sluice/actions/workflows/ci.yml/badge.svg)](https://github.com/nnemirovsky/sluice/actions/workflows/ci.yml)
 [![E2E](https://github.com/nnemirovsky/sluice/actions/workflows/e2e-linux.yml/badge.svg)](https://github.com/nnemirovsky/sluice/actions/workflows/e2e-linux.yml)
@@ -7,14 +7,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/nnemirovsky/sluice)](https://goreportcard.com/report/github.com/nnemirovsky/sluice)
 [![Release](https://img.shields.io/github/v/release/nnemirovsky/sluice)](https://github.com/nnemirovsky/sluice/releases/latest)
 
-```
- ___  _    _   _ ___ ___ ___
-/ __|| |  | | | |_ _/ __| __|
-\__ \| |__| |_| || | (__| _|
-|___/|____|\___/|___\___|___|
-```
-
-Governance and credential injection proxy for [OpenClaw](https://github.com/openclaw/openclaw). Keeps real secrets out of the agent, enforces per-request policy on every connection and tool call, and puts a human in the loop when it matters.
+Keeps real secrets out of the agent, enforces per-request policy on every connection and tool call, and puts a human in the loop when it matters.
 
 ## Why Sluice
 
