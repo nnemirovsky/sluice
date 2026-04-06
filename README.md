@@ -1,6 +1,6 @@
 # :shield: Sluice — Credential Governance Proxy for OpenClaw
 
-[![CI](https://github.com/nnemirovsky/sluice/actions/workflows/ci.yml/badge.svg)](https://github.com/nnemirovsky/sluice/actions/workflows/ci.yml)
+[![Tests](https://github.com/nnemirovsky/sluice/actions/workflows/test.yml/badge.svg)](https://github.com/nnemirovsky/sluice/actions/workflows/test.yml)
 [![E2E](https://github.com/nnemirovsky/sluice/actions/workflows/e2e-linux.yml/badge.svg)](https://github.com/nnemirovsky/sluice/actions/workflows/e2e-linux.yml)
 [![Lint](https://github.com/nnemirovsky/sluice/actions/workflows/lint.yml/badge.svg)](https://github.com/nnemirovsky/sluice/actions/workflows/lint.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
