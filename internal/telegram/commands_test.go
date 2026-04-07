@@ -473,3 +473,163 @@ func TestPolicyRemoveThenRecompile(t *testing.T) {
 		t.Errorf("rule should be removed from engine after store delete + recompile: %v", snap.AllowRules)
 	}
 }
+
+func TestExtractFlag(t *testing.T) {
+	tests := []struct {
+		name          string
+		args          []string
+		flag          string
+		wantValue     string
+		wantRemaining []string
+	}{
+		{
+			name:          "flag present",
+			args:          []string{"value1", "--env-var", "OPENAI_API_KEY"},
+			flag:          "--env-var",
+			wantValue:     "OPENAI_API_KEY",
+			wantRemaining: []string{"value1"},
+		},
+		{
+			name:          "flag in the middle",
+			args:          []string{"part1", "--env-var", "MY_VAR", "part2"},
+			flag:          "--env-var",
+			wantValue:     "MY_VAR",
+			wantRemaining: []string{"part1", "part2"},
+		},
+		{
+			name:          "flag not present",
+			args:          []string{"value1", "value2"},
+			flag:          "--env-var",
+			wantValue:     "",
+			wantRemaining: []string{"value1", "value2"},
+		},
+		{
+			name:          "flag at end without value",
+			args:          []string{"value1", "--env-var"},
+			flag:          "--env-var",
+			wantValue:     "",
+			wantRemaining: []string{"value1", "--env-var"},
+		},
+		{
+			name:          "empty args",
+			args:          []string{},
+			flag:          "--env-var",
+			wantValue:     "",
+			wantRemaining: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotValue, gotRemaining := extractFlag(tt.args, tt.flag)
+			if gotValue != tt.wantValue {
+				t.Errorf("value = %q, want %q", gotValue, tt.wantValue)
+			}
+			if len(gotRemaining) != len(tt.wantRemaining) {
+				t.Fatalf("remaining len = %d, want %d: %v", len(gotRemaining), len(tt.wantRemaining), gotRemaining)
+			}
+			for i, r := range gotRemaining {
+				if r != tt.wantRemaining[i] {
+					t.Errorf("remaining[%d] = %q, want %q", i, r, tt.wantRemaining[i])
+				}
+			}
+		})
+	}
+}
+
+func TestCredAddWithEnvVar(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	dir := t.TempDir()
+	vaultStore, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.SetVault(vaultStore)
+
+	// Add credential with --env-var flag.
+	result := handler.Handle(&Command{
+		Name: "cred",
+		Args: []string{"add", "my_key", "secret123", "--env-var", "OPENAI_API_KEY"},
+	})
+	if !strings.Contains(result, "Added credential") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+	if !strings.Contains(result, "OPENAI_API_KEY") {
+		t.Errorf("should mention env_var, got: %s", result)
+	}
+
+	// Verify binding was created with env_var in the store.
+	bindings, err := s.ListBindingsWithEnvVar()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if bindings[0].EnvVar != "OPENAI_API_KEY" {
+		t.Errorf("expected env_var OPENAI_API_KEY, got %q", bindings[0].EnvVar)
+	}
+}
+
+func TestCredAddWithoutEnvVar(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	dir := t.TempDir()
+	vaultStore, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.SetVault(vaultStore)
+
+	// Add credential without --env-var flag.
+	result := handler.Handle(&Command{
+		Name: "cred",
+		Args: []string{"add", "my_key", "secret123"},
+	})
+	if !strings.Contains(result, "Added credential") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+
+	// No binding should be created with env_var.
+	bindings, err := s.ListBindingsWithEnvVar()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 bindings with env_var, got %d", len(bindings))
+	}
+}
+
+func TestCredAddEnvVarConsumedFromValue(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	dir := t.TempDir()
+	vaultStore, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.SetVault(vaultStore)
+
+	// Verify --env-var is extracted and not part of the credential value.
+	result := handler.Handle(&Command{
+		Name: "cred",
+		Args: []string{"add", "my_key", "--env-var", "MY_VAR", "the-secret-value"},
+	})
+	if !strings.Contains(result, "Added credential") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+
+	// The credential value should be "the-secret-value" (not include --env-var or MY_VAR).
+	sb, err := vaultStore.Get("my_key")
+	if err != nil {
+		t.Fatalf("get credential: %v", err)
+	}
+	defer sb.Release()
+	if string(sb.Bytes()) != "the-secret-value" {
+		t.Errorf("expected credential value 'the-secret-value', got %q", string(sb.Bytes()))
+	}
+}

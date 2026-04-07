@@ -298,7 +298,6 @@ func TestNewTelegramChannelWithAllConfig(t *testing.T) {
 		Store:        s,
 		Vault:        vaultStore,
 		ContainerMgr: &mockContainerMgr{},
-		PhantomDir:   "/tmp/phantoms",
 		OnEngineSwap: func(_ *policy.Engine) { swapCalled = true },
 		APIEndpoint:  mock.endpoint(),
 	})
@@ -313,9 +312,6 @@ func TestNewTelegramChannelWithAllConfig(t *testing.T) {
 	}
 	if tc.commands.containerMgr == nil {
 		t.Error("containerMgr should be set")
-	}
-	if tc.commands.phantomDir != "/tmp/phantoms" {
-		t.Errorf("phantomDir = %q, want /tmp/phantoms", tc.commands.phantomDir)
 	}
 	if tc.commands.resolverPtr == nil {
 		t.Error("resolverPtr should be set")
@@ -951,21 +947,6 @@ func TestSetDockerManager(t *testing.T) {
 	}
 }
 
-func TestSetPhantomDir(t *testing.T) {
-	s := newTestStore(t)
-	h := newTestHandlerWithStore(t, s, nil, "")
-
-	if h.phantomDir != "" {
-		t.Error("phantomDir should be empty initially")
-	}
-
-	h.SetPhantomDir("/tmp/phantoms")
-
-	if h.phantomDir != "/tmp/phantoms" {
-		t.Errorf("phantomDir = %q, want /tmp/phantoms", h.phantomDir)
-	}
-}
-
 func TestSetResolverPtr(t *testing.T) {
 	s := newTestStore(t)
 	h := newTestHandlerWithStore(t, s, nil, "")
@@ -1215,22 +1196,18 @@ func TestCredAddWithContainerManager(t *testing.T) {
 
 	mgr := &mockContainerMgr{}
 	h.SetContainerManager(mgr)
-	h.SetPhantomDir("/tmp/phantoms")
 
+	// Add credential without --env-var: no env injection happens.
 	result := h.Handle(&Command{Name: "cred", Args: []string{"add", "api_key", "sk-test123"}})
 	if !strings.Contains(result, "Added credential") {
 		t.Errorf("expected add confirmation, got: %s", result)
 	}
-	if !strings.Contains(result, "reloaded") {
-		t.Errorf("should indicate secrets reloaded, got: %s", result)
-	}
-
-	if !mgr.reloadCalled {
-		t.Error("ReloadSecrets should have been called")
+	if mgr.injectCalled {
+		t.Error("InjectEnvVars should not be called when no env_var bindings exist")
 	}
 }
 
-func TestCredAddWithContainerManagerFallbackRestart(t *testing.T) {
+func TestCredAddWithContainerManagerAndEnvVar(t *testing.T) {
 	s := newTestStore(t)
 	h := newTestHandlerWithStore(t, s, nil, "")
 
@@ -1243,18 +1220,21 @@ func TestCredAddWithContainerManagerFallbackRestart(t *testing.T) {
 
 	mgr := &mockContainerMgr{}
 	h.SetContainerManager(mgr)
-	// No phantomDir set, so it falls back to RestartWithEnv.
 
-	result := h.Handle(&Command{Name: "cred", Args: []string{"add", "api_key", "sk-test123"}})
+	// Add credential with --env-var: InjectEnvVars should be called.
+	result := h.Handle(&Command{Name: "cred", Args: []string{"add", "api_key", "sk-test123", "--env-var", "OPENAI_API_KEY"}})
 	if !strings.Contains(result, "Added credential") {
 		t.Errorf("expected add confirmation, got: %s", result)
 	}
-	if !strings.Contains(result, "restarted") {
-		t.Errorf("should indicate container restarted, got: %s", result)
+	if !strings.Contains(result, "env vars updated") {
+		t.Errorf("should indicate env vars updated, got: %s", result)
 	}
 
-	if !mgr.restartCalled {
-		t.Error("RestartWithEnv should have been called")
+	if !mgr.injectCalled {
+		t.Error("InjectEnvVars should have been called")
+	}
+	if _, ok := mgr.injectEnv["OPENAI_API_KEY"]; !ok {
+		t.Error("InjectEnvVars should include OPENAI_API_KEY")
 	}
 }
 
@@ -1271,13 +1251,22 @@ func TestCredRemoveWithContainerManager(t *testing.T) {
 
 	mgr := &mockContainerMgr{}
 	h.SetContainerManager(mgr)
-	h.SetPhantomDir("/tmp/phantoms")
 
-	// Add then remove.
+	// Add with env_var, then remove. InjectEnvVars should be called with
+	// an empty value for the removed env var.
 	_, _ = vaultStore.Add("test_cred", "value")
+	_, _ = s.AddBinding("api.example.com", "test_cred", store.BindingOpts{EnvVar: "TEST_API_KEY"})
+
 	result := h.Handle(&Command{Name: "cred", Args: []string{"remove", "test_cred"}})
 	if !strings.Contains(result, "Removed credential") {
 		t.Errorf("expected remove confirmation, got: %s", result)
+	}
+
+	if !mgr.injectCalled {
+		t.Error("InjectEnvVars should have been called after remove")
+	}
+	if v, ok := mgr.injectEnv["TEST_API_KEY"]; !ok || v != "" {
+		t.Errorf("removed env var should be empty, got: %q (exists=%v)", v, ok)
 	}
 }
 
@@ -1294,17 +1283,17 @@ func TestCredRotateWithContainerManager(t *testing.T) {
 
 	mgr := &mockContainerMgr{}
 	h.SetContainerManager(mgr)
-	h.SetPhantomDir("/tmp/phantoms")
 
-	// Add first.
+	// Add first with env_var binding.
 	_, _ = vaultStore.Add("rotate_key", "old_value")
+	_, _ = s.AddBinding("api.example.com", "rotate_key", store.BindingOpts{EnvVar: "ROTATE_KEY"})
 
 	result := h.Handle(&Command{Name: "cred", Args: []string{"rotate", "rotate_key", "new_value"}})
 	if !strings.Contains(result, "Rotated credential") {
 		t.Errorf("expected rotate confirmation, got: %s", result)
 	}
-	if !mgr.reloadCalled {
-		t.Error("ReloadSecrets should have been called after rotate")
+	if !mgr.injectCalled {
+		t.Error("InjectEnvVars should have been called after rotate")
 	}
 }
 
@@ -1720,15 +1709,17 @@ func TestRebuildResolverEmptyBindings(t *testing.T) {
 // --- mockContainerMgr ---
 
 type mockContainerMgr struct {
-	reloadCalled  bool
+	injectCalled  bool
+	injectEnv     map[string]string
+	injectErr     error
 	restartCalled bool
-	reloadErr     error
 	restartErr    error
 }
 
-func (m *mockContainerMgr) ReloadSecrets(_ context.Context, _ string, _ map[string]string) error {
-	m.reloadCalled = true
-	return m.reloadErr
+func (m *mockContainerMgr) InjectEnvVars(_ context.Context, envMap map[string]string, _ bool) error {
+	m.injectCalled = true
+	m.injectEnv = envMap
+	return m.injectErr
 }
 
 func (m *mockContainerMgr) RestartWithEnv(_ context.Context, _ map[string]string) error {

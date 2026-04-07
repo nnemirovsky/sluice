@@ -56,7 +56,6 @@ type CommandHandler struct {
 	vault               *vault.Store
 	containerMgr        container.ContainerManager
 	store               *store.Store
-	phantomDir          string                   // shared volume path for phantom token files
 	onEngineSwap        func(eng *policy.Engine) // called after engine swap to update dependent state
 	onOAuthIndexRebuild func()                   // called after credential removal to rebuild proxy OAuth index
 }
@@ -74,11 +73,6 @@ func (h *CommandHandler) SetContainerManager(mgr container.ContainerManager) {
 // SetStore enables persistent policy management via SQLite.
 func (h *CommandHandler) SetStore(s *store.Store) {
 	h.store = s
-}
-
-// SetPhantomDir sets the shared volume path for phantom token files.
-func (h *CommandHandler) SetPhantomDir(dir string) {
-	h.phantomDir = dir
 }
 
 // SetResolverPtr shares the proxy's binding resolver pointer so credential
@@ -406,7 +400,7 @@ func (h *CommandHandler) policyRemove(idStr string) string {
 
 func (h *CommandHandler) handleCred(args []string) string {
 	if len(args) == 0 {
-		return "Usage: /cred add <name> <value> | /cred list | /cred rotate <name> <value> | /cred remove <name>"
+		return "Usage: /cred add <name> <value> [--env-var VAR] | /cred list | /cred rotate <name> <value> | /cred remove <name>"
 	}
 	if h.vault == nil {
 		return "Credential management is not available (vault not configured)."
@@ -417,9 +411,14 @@ func (h *CommandHandler) handleCred(args []string) string {
 		return h.credList()
 	case "add":
 		if len(args) < 3 {
-			return "Usage: /cred add <name> <value>"
+			return "Usage: /cred add <name> <value> [--env-var VAR]"
 		}
-		return h.credAdd(args[1], strings.Join(args[2:], " "))
+		envVar, remaining := extractFlag(args[2:], "--env-var")
+		value := strings.Join(remaining, " ")
+		if value == "" {
+			return "Usage: /cred add <name> <value> [--env-var VAR]"
+		}
+		return h.credAdd(args[1], value, envVar)
 	case "rotate":
 		if len(args) < 3 {
 			return "Usage: /cred rotate <name> <value>"
@@ -433,6 +432,22 @@ func (h *CommandHandler) handleCred(args []string) string {
 	default:
 		return fmt.Sprintf("Unknown cred subcommand: %s", args[0])
 	}
+}
+
+// extractFlag scans args for a flag (e.g. "--env-var") followed by its value.
+// Returns the value and the remaining args with the flag pair removed.
+// If the flag is not found, returns empty string and the original args.
+func extractFlag(args []string, flag string) (string, []string) {
+	for i := 0; i < len(args); i++ {
+		if args[i] == flag && i+1 < len(args) {
+			value := args[i+1]
+			remaining := make([]string, 0, len(args)-2)
+			remaining = append(remaining, args[:i]...)
+			remaining = append(remaining, args[i+2:]...)
+			return value, remaining
+		}
+	}
+	return "", args
 }
 
 func (h *CommandHandler) credList() string {
@@ -453,11 +468,26 @@ func (h *CommandHandler) credList() string {
 	return b.String()
 }
 
-func (h *CommandHandler) credAdd(name, value string) string {
+func (h *CommandHandler) credAdd(name, value, envVar string) string {
 	if _, err := h.vault.Add(name, value); err != nil {
 		return fmt.Sprintf("Failed to add credential: %v", err)
 	}
-	return h.credMutationComplete(fmt.Sprintf("Added credential: %s", name))
+
+	// If env_var is specified and we have a store, create a binding with the env_var.
+	if envVar != "" && h.store != nil {
+		h.reloadMu.Lock()
+		_, err := h.store.AddBinding("*", name, store.BindingOpts{EnvVar: envVar})
+		h.reloadMu.Unlock()
+		if err != nil {
+			return fmt.Sprintf("Added credential %s but failed to create binding with env_var: %v", name, err)
+		}
+	}
+
+	msg := fmt.Sprintf("Added credential: %s", name)
+	if envVar != "" {
+		msg += fmt.Sprintf(" (env_var: %s)", envVar)
+	}
+	return h.credMutationComplete(msg)
 }
 
 func (h *CommandHandler) credRotate(name, value string) string {
@@ -484,9 +514,19 @@ func (h *CommandHandler) credRemove(name string) string {
 
 	// Clean up associated bindings and auto-created rules.
 	var warnings []string
+	var removedEnvVars []string
 	if h.store != nil {
 		h.reloadMu.Lock()
 		defer h.reloadMu.Unlock()
+		// Read env_var values from bindings before removal so we can clear
+		// them from the agent container after the bindings are deleted.
+		if credBindings, err := h.store.ListBindingsByCredential(name); err == nil {
+			for _, b := range credBindings {
+				if b.EnvVar != "" {
+					removedEnvVars = append(removedEnvVars, b.EnvVar)
+				}
+			}
+		}
 		if _, err := h.store.RemoveRulesBySource("cred-add:" + name); err != nil {
 			log.Printf("[WARN] remove rules for credential %q: %v", name, err)
 			warnings = append(warnings, fmt.Sprintf("failed to remove rules: %v", err))
@@ -523,54 +563,41 @@ func (h *CommandHandler) credRemove(name string) string {
 			msg += "- " + w + "\n"
 		}
 	}
-	return h.credMutationComplete(msg, name)
+	return h.credMutationComplete(msg, removedEnvVars...)
 }
 
-func (h *CommandHandler) credMutationComplete(msg string, removedCreds ...string) string {
-	if h.containerMgr == nil {
+func (h *CommandHandler) credMutationComplete(msg string, removedEnvVars ...string) string {
+	if h.containerMgr == nil || h.store == nil {
 		return msg
 	}
 
-	names, err := h.vault.List()
+	bindings, err := h.store.ListBindingsWithEnvVar()
 	if err != nil {
-		return msg + "\nWarning: failed to list credentials for container update: " + err.Error()
+		return msg + "\nWarning: failed to list bindings for container update: " + err.Error()
 	}
 
-	phantomEnv := vault.GeneratePhantomEnv(names, h.vault)
-	// Mark removed credentials with empty values so they are cleaned up.
-	// For OAuth credentials the removal must cover both _ACCESS and _REFRESH files.
-	for _, removed := range removedCreds {
-		envVar := vault.CredNameToEnvVar(removed)
-		if _, exists := phantomEnv[envVar]; !exists {
-			phantomEnv[envVar] = ""
+	envMap := make(map[string]string, len(bindings)+len(removedEnvVars))
+	for _, b := range bindings {
+		envMap[b.EnvVar] = vault.GeneratePhantomToken(b.Credential)
+	}
+	// Set empty values for removed env vars so they are cleared from the agent.
+	for _, ev := range removedEnvVars {
+		if _, exists := envMap[ev]; !exists {
+			envMap[ev] = ""
 		}
-		// Also clean up OAuth phantom files in case the removed credential was OAuth.
-		accessKey := envVar + "_ACCESS"
-		refreshKey := envVar + "_REFRESH"
-		if _, exists := phantomEnv[accessKey]; !exists {
-			phantomEnv[accessKey] = ""
-		}
-		if _, exists := phantomEnv[refreshKey]; !exists {
-			phantomEnv[refreshKey] = ""
-		}
+	}
+
+	if len(envMap) == 0 {
+		return msg
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Prefer hot-reload via shared volume when phantomDir is configured.
-	if h.phantomDir != "" {
-		if err := h.containerMgr.ReloadSecrets(ctx, h.phantomDir, phantomEnv); err != nil {
-			return msg + "\nWarning: failed to reload agent secrets: " + err.Error()
-		}
-		return msg + "\nAgent secrets reloaded."
+	if err := h.containerMgr.InjectEnvVars(ctx, envMap, false); err != nil {
+		return msg + "\nWarning: failed to inject env vars: " + err.Error()
 	}
-
-	// Fallback to full container restart.
-	if err := h.containerMgr.RestartWithEnv(ctx, phantomEnv); err != nil {
-		return msg + "\nWarning: failed to restart agent container: " + err.Error()
-	}
-	return msg + "\nAgent container restarted with updated credentials."
+	return msg + "\nAgent env vars updated."
 }
 
 func (h *CommandHandler) handleStatus() string {
@@ -646,7 +673,7 @@ func (h *CommandHandler) handleHelp() string {
 		help += `
 
 /cred list - List stored credentials
-/cred add <name> <value> - Add credential
+/cred add <name> <value> [--env-var VAR] - Add credential
 /cred rotate <name> <value> - Rotate credential
 /cred remove <name> - Remove credential`
 	}

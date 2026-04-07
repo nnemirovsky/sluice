@@ -33,7 +33,6 @@ type ChannelConfig struct {
 	Vault               *vault.Store
 	ContainerMgr        container.ContainerManager
 	Store               *store.Store
-	PhantomDir          string
 	OnEngineSwap        func(eng *policy.Engine) // called after policy mutations to update dependent state
 	OnOAuthIndexRebuild func()                   // called after credential removal to rebuild proxy OAuth index
 	APIEndpoint         string                   // custom Telegram API endpoint (for testing); empty uses default
@@ -87,9 +86,6 @@ func NewTelegramChannel(cfg ChannelConfig) (*TelegramChannel, error) {
 	}
 	if cfg.ContainerMgr != nil {
 		cmdHandler.SetContainerManager(cfg.ContainerMgr)
-	}
-	if cfg.PhantomDir != "" {
-		cmdHandler.SetPhantomDir(cfg.PhantomDir)
 	}
 	if cfg.ResolverPtr != nil {
 		cmdHandler.SetResolverPtr(cfg.ResolverPtr)
