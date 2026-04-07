@@ -19,6 +19,7 @@ require (
 	github.com/tobischo/gokeepasslib/v3 v3.6.2
 	golang.org/x/crypto v0.49.0
 	golang.org/x/net v0.52.0
+	golang.org/x/sync v0.20.0
 	golang.org/x/term v0.41.0
 	lukechampine.com/blake3 v1.4.1
 	modernc.org/sqlite v1.48.0

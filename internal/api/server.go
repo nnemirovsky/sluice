@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -128,6 +129,21 @@ func (s *Server) rebuildResolver() error {
 	return nil
 }
 
+// rebuildOAuthIndex reads credential_meta from the store and updates the
+// proxy server's OAuth token URL index. This is called after OAuth credential
+// mutations so the MITM response handler picks up new or removed token URLs.
+func (s *Server) rebuildOAuthIndex() {
+	if s.proxySrv == nil || s.store == nil {
+		return
+	}
+	metas, err := s.store.ListCredentialMeta()
+	if err != nil {
+		log.Printf("[WARN] list credential meta for OAuth index rebuild: %v", err)
+		return
+	}
+	s.proxySrv.UpdateOAuthIndex(metas)
+}
+
 // credMutationComplete regenerates phantom tokens and hot-reloads the agent
 // container after a credential change. removedCreds lists credentials that
 // were deleted and should be cleaned up in the agent environment.
@@ -141,11 +157,20 @@ func (s *Server) credMutationComplete(removedCreds ...string) error {
 		return fmt.Errorf("list credentials for container update: %w", err)
 	}
 
-	phantomEnv := vault.GeneratePhantomEnv(names)
+	phantomEnv := vault.GeneratePhantomEnv(names, s.vault)
 	for _, removed := range removedCreds {
 		envVar := vault.CredNameToEnvVar(removed)
 		if _, exists := phantomEnv[envVar]; !exists {
 			phantomEnv[envVar] = ""
+		}
+		// Also clean up OAuth phantom files in case the removed credential was OAuth.
+		accessKey := envVar + "_ACCESS"
+		refreshKey := envVar + "_REFRESH"
+		if _, exists := phantomEnv[accessKey]; !exists {
+			phantomEnv[accessKey] = ""
+		}
+		if _, exists := phantomEnv[refreshKey]; !exists {
+			phantomEnv[refreshKey] = ""
 		}
 	}
 
@@ -764,7 +789,7 @@ func (s *Server) PatchApiConfig(w http.ResponseWriter, r *http.Request) { //noli
 
 // --- Credential handlers ---
 
-// GetApiCredentials lists credential names from the vault.
+// GetApiCredentials lists credential names from the vault with type metadata.
 func (s *Server) GetApiCredentials(w http.ResponseWriter, r *http.Request) { //nolint:revive // generated interface name
 	if s.vault == nil {
 		writeError(w, http.StatusServiceUnavailable, "vault not configured", "")
@@ -777,9 +802,29 @@ func (s *Server) GetApiCredentials(w http.ResponseWriter, r *http.Request) { //n
 		return
 	}
 
+	// Build a lookup of credential metadata for type/token_url.
+	metas, metaErr := s.store.ListCredentialMeta()
+	metaMap := make(map[string]store.CredentialMeta, len(metas))
+	if metaErr == nil {
+		for _, m := range metas {
+			metaMap[m.Name] = m
+		}
+	}
+
 	creds := make([]Credential, len(names))
 	for i, n := range names {
 		creds[i] = Credential{Name: n}
+		if m, ok := metaMap[n]; ok {
+			ct := CredentialType(m.CredType)
+			creds[i].Type = &ct
+			if m.TokenURL != "" {
+				creds[i].TokenUrl = &m.TokenURL
+			}
+		} else {
+			// Default to static for credentials without metadata.
+			ct := CredentialTypeStatic
+			creds[i].Type = &ct
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -787,7 +832,8 @@ func (s *Server) GetApiCredentials(w http.ResponseWriter, r *http.Request) { //n
 }
 
 // PostApiCredentials adds a credential to the vault. If destination is
-// provided, also creates an allow rule and binding.
+// provided, also creates an allow rule and binding. Supports both static
+// and oauth credential types.
 func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) { //nolint:revive // generated interface name
 	if s.vault == nil {
 		writeError(w, http.StatusServiceUnavailable, "vault not configured", "")
@@ -800,9 +846,47 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) { //
 		return
 	}
 
-	if req.Name == "" || req.Value == "" {
-		writeError(w, http.StatusBadRequest, "name and value are required", "")
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required", "")
 		return
+	}
+
+	// Determine credential type (default: static).
+	credType := "static"
+	if req.Type != nil {
+		if !req.Type.Valid() {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid credential type %q: must be static or oauth", *req.Type), "")
+			return
+		}
+		if *req.Type == CreateCredentialRequestTypeOauth {
+			credType = "oauth"
+		}
+	}
+
+	// Validate type-specific required fields.
+	if credType == "static" {
+		if req.Value == nil || *req.Value == "" {
+			writeError(w, http.StatusBadRequest, "value is required for static credentials", "")
+			return
+		}
+	} else {
+		if req.TokenUrl == nil || *req.TokenUrl == "" {
+			writeError(w, http.StatusBadRequest, "token_url is required for oauth credentials", "")
+			return
+		}
+		parsed, err := url.Parse(*req.TokenUrl)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			writeError(w, http.StatusBadRequest, "invalid token_url: must include scheme and host", "")
+			return
+		}
+		if parsed.Scheme != "https" && parsed.Scheme != "http" {
+			writeError(w, http.StatusBadRequest, "invalid token_url: scheme must be http or https", "")
+			return
+		}
+		if req.AccessToken == nil || *req.AccessToken == "" {
+			writeError(w, http.StatusBadRequest, "access_token is required for oauth credentials", "")
+			return
+		}
 	}
 
 	// Check if credential already exists.
@@ -818,8 +902,42 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) { //
 		}
 	}
 
-	if _, err := s.vault.Add(req.Name, req.Value); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to store credential: "+err.Error(), "")
+	// Store the credential value in the vault.
+	if credType == "oauth" {
+		oauthCred := &vault.OAuthCredential{
+			AccessToken: *req.AccessToken,
+			TokenURL:    *req.TokenUrl,
+		}
+		if req.RefreshToken != nil {
+			oauthCred.RefreshToken = *req.RefreshToken
+		}
+		data, err := oauthCred.Marshal()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to marshal oauth credential: "+err.Error(), "")
+			return
+		}
+		if _, err := s.vault.Add(req.Name, string(data)); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to store credential: "+err.Error(), "")
+			return
+		}
+	} else {
+		if _, err := s.vault.Add(req.Name, *req.Value); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to store credential: "+err.Error(), "")
+			return
+		}
+	}
+
+	// Store credential metadata in the store.
+	tokenURL := ""
+	if req.TokenUrl != nil {
+		tokenURL = *req.TokenUrl
+	}
+	if err := s.store.AddCredentialMeta(req.Name, credType, tokenURL); err != nil {
+		// Roll back vault on meta failure.
+		if rmErr := s.vault.Remove(req.Name); rmErr != nil {
+			log.Printf("[WARN] failed to clean up credential %q after meta failure: %v", req.Name, rmErr)
+		}
+		writeError(w, http.StatusInternalServerError, "failed to store credential metadata: "+err.Error(), "")
 		return
 	}
 
@@ -828,7 +946,7 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) { //
 		ruleOpts := store.RuleOpts{
 			Destination: *req.Destination,
 			Name:        "credential: " + req.Name,
-			Source:      "api",
+			Source:      "cred-add:" + req.Name,
 		}
 		if req.Ports != nil {
 			ruleOpts.Ports = *req.Ports
@@ -848,9 +966,12 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) { //
 		}
 
 		if _, _, err := s.store.AddRuleAndBinding("allow", ruleOpts, req.Name, bindingOpts); err != nil {
-			// Roll back the vault credential to keep state consistent and allow retries.
+			// Roll back the vault credential and meta to keep state consistent.
 			if rmErr := s.vault.Remove(req.Name); rmErr != nil {
 				log.Printf("[WARN] failed to clean up credential %q after rule/binding failure: %v", req.Name, rmErr)
+			}
+			if _, rmErr := s.store.RemoveCredentialMeta(req.Name); rmErr != nil {
+				log.Printf("[WARN] failed to clean up credential meta %q after rule/binding failure: %v", req.Name, rmErr)
 			}
 			writeError(w, http.StatusBadRequest, "failed to create rule/binding: "+err.Error(), "")
 			return
@@ -866,13 +987,25 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) { //
 		}
 	}
 
+	// For OAuth credentials, update the proxy's OAuth index.
+	if credType == "oauth" {
+		s.rebuildOAuthIndex()
+	}
+
 	if err := s.credMutationComplete(); err != nil {
 		log.Printf("[WARN] phantom regen/hot-reload after cred add failed: %v", err)
 	}
 
+	respCred := Credential{Name: req.Name}
+	ct := CredentialType(credType)
+	respCred.Type = &ct
+	if tokenURL != "" {
+		respCred.TokenUrl = &tokenURL
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(Credential{Name: req.Name})
+	_ = json.NewEncoder(w).Encode(respCred)
 }
 
 // DeleteApiCredentialsName removes a credential and its associated bindings/rules.
@@ -900,25 +1033,41 @@ func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Check if this was an OAuth credential (for index rebuild later).
+	wasOAuth := false
+	if meta, err := s.store.GetCredentialMeta(name); err == nil && meta != nil {
+		wasOAuth = meta.CredType == "oauth"
+	}
+
 	if s.reloadMu != nil {
 		s.reloadMu.Lock()
 		defer s.reloadMu.Unlock()
 	}
 
-	// Remove associated bindings and auto-created rules.
+	// Remove associated bindings and auto-created rules first. If vault.Remove
+	// below fails, bindings/rules are already gone. This is a pre-existing
+	// ordering tradeoff: reversing it would orphan bindings when vault succeeds
+	// but SQLite fails. A transactional approach would require the vault to
+	// participate in the same transaction, which is not currently possible.
 	if _, err := s.store.RemoveBindingsByCredential(name); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to remove bindings: "+err.Error(), "")
 		return
 	}
-	if _, err := s.store.RemoveRulesByName("credential: " + name); err != nil {
+	if _, err := s.store.RemoveRulesBySource("cred-add:" + name); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to remove associated rules: "+err.Error(), "")
 		return
 	}
 
-	// Remove the credential from the vault.
+	// Remove the credential from the vault first. If this fails, metadata
+	// stays intact so the credential type is not lost.
 	if err := s.vault.Remove(name); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to remove credential: "+err.Error(), "")
 		return
+	}
+
+	// Remove credential metadata after vault deletion succeeded.
+	if _, err := s.store.RemoveCredentialMeta(name); err != nil {
+		log.Printf("[WARN] failed to remove credential meta %q: %v", name, err)
 	}
 
 	if err := s.recompileEngine(); err != nil {
@@ -928,6 +1077,11 @@ func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request
 
 	if err := s.rebuildResolver(); err != nil {
 		log.Printf("[WARN] rebuild resolver after cred remove failed: %v", err)
+	}
+
+	// If this was an OAuth credential, rebuild the OAuth index.
+	if wasOAuth {
+		s.rebuildOAuthIndex()
 	}
 
 	if err := s.credMutationComplete(name); err != nil {

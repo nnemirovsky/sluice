@@ -22,7 +22,7 @@ AI agents need credentials to be useful. Giving them real credentials is dangero
 | **MCP Gateway** | Tool names, arguments, responses | File writes, exec, deletions, any MCP tool call |
 | **SOCKS5 Proxy** | Every TCP and UDP connection | HTTP, HTTPS, WebSocket, gRPC, SSH, IMAP, SMTP, DNS, QUIC/HTTP3 |
 
-**Phantom token swap:** OpenClaw gets phantom tokens that look like real API keys. Sluice's MITM proxy swaps them for real credentials in-flight. If a phantom token leaks, it is useless outside the proxy.
+**Phantom token swap:** OpenClaw gets phantom tokens that look like real API keys. Sluice's MITM proxy swaps them for real credentials in-flight. If a phantom token leaks, it is useless outside the proxy. OAuth credentials are handled bidirectionally: sluice intercepts token endpoint responses, captures real tokens, and returns phantom tokens to the agent. The entire OAuth lifecycle (initial auth, token refresh, token rotation) is transparent.
 
 **Human approval:** Connections and tool calls matching "ask" policy rules trigger a notification via Telegram or HTTP webhook. OpenClaw blocks until a human responds with Allow or Deny.
 
@@ -233,6 +233,43 @@ Sluice supports multiple credential backends. Set `provider` in `[vault]` config
 
 Chain multiple providers with `providers = ["1password", "age"]`. First provider with the credential wins.
 
+## OAuth Token Management
+
+Sluice handles OAuth access and refresh tokens transparently through the phantom swap system. The agent never sees real tokens at any point in the OAuth lifecycle.
+
+**Adding OAuth credentials:**
+
+```bash
+# Tokens are read from stdin (not CLI flags) to avoid shell history exposure
+sluice cred add openai_oauth \
+  --type oauth \
+  --token-url https://auth0.openai.com/oauth/token \
+  --destination api.openai.com \
+  --ports 443
+# Prompts for: access token, refresh token (optional)
+```
+
+**Listing credentials shows the type:**
+
+```
+$ sluice cred list
+NAME             TYPE    DESTINATION
+openai_oauth     oauth   api.openai.com
+github_pat       static  api.github.com
+```
+
+**How it works:**
+
+1. Sluice stores real tokens in the vault and generates deterministic phantom tokens
+2. The agent receives phantom tokens and uses them normally with any SDK
+3. On outbound requests, sluice swaps phantom tokens for real tokens (same as static credentials)
+4. On token endpoint responses, sluice intercepts the response, captures new real tokens, and replaces them with phantoms before the response reaches the agent
+5. The vault is updated asynchronously. If the write fails, the agent still sees only phantom tokens
+
+**Token refresh and rotation:** When an access token expires and the agent (or SDK) sends a refresh request, sluice swaps the phantom refresh token for the real one, forwards the request, intercepts the response with new tokens, and returns phantoms. Concurrent refresh requests are deduplicated so only one vault update occurs per credential.
+
+**Supported response formats:** Both `application/json` and `application/x-www-form-urlencoded` token responses per RFC 6749.
+
 ## Approval Channels
 
 Sluice broadcasts "ask" verdicts to all configured approval channels. The first channel to respond wins. Other channels get a cancellation notice.
@@ -254,6 +291,18 @@ Manage sluice from your phone. Approve connections and tool calls, add credentia
 ### HTTP Webhooks
 
 REST API on port 3000 for programmatic approval integration. `GET /api/approvals` lists pending requests, `POST /api/approvals/{id}/resolve` resolves them. Use this to build custom approval UIs or integrate with existing workflows.
+
+Credential management endpoints support both static and OAuth types:
+
+```bash
+# Add static credential
+curl -X POST http://localhost:3000/api/credentials \
+  -d '{"name":"github_pat","value":"ghp_xxx","destination":"api.github.com"}'
+
+# Add OAuth credential
+curl -X POST http://localhost:3000/api/credentials \
+  -d '{"name":"openai_oauth","type":"oauth","token_url":"https://auth.example.com/token","access_token":"at-xxx","refresh_token":"rt-xxx","destination":"api.openai.com"}'
+```
 
 ## Audit Log
 

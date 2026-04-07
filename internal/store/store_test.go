@@ -21,8 +21,8 @@ func newTestStore(t *testing.T) *Store {
 
 func TestNewCreatesSchema(t *testing.T) {
 	s := newTestStore(t)
-	// Verify all 5 tables exist by querying them.
-	tables := []string{"rules", "config", "bindings", "mcp_upstreams", "channels"}
+	// Verify all 6 tables exist by querying them.
+	tables := []string{"rules", "config", "bindings", "mcp_upstreams", "channels", "credential_meta"}
 	for _, table := range tables {
 		var count int
 		err := s.db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count)
@@ -1962,5 +1962,322 @@ func TestAddRuleAndBindingValidation(t *testing.T) {
 	_, _, err = s.AddRuleAndBinding("allow", RuleOpts{Destination: "test.com"}, "", BindingOpts{})
 	if err == nil {
 		t.Error("expected error for empty credential")
+	}
+}
+
+// --- Credential Meta tests ---
+
+func TestCredentialMetaMigration(t *testing.T) {
+	s := newTestStore(t)
+
+	// Verify credential_meta table exists by querying it.
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM credential_meta").Scan(&count)
+	if err != nil {
+		t.Fatalf("credential_meta table should exist: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("credential_meta should be empty, got %d", count)
+	}
+}
+
+func TestCredentialMetaMigrationDown(t *testing.T) {
+	// Verify the down migration SQL is valid by checking the embedded file exists
+	// and the table can be dropped. We test this indirectly: create a store,
+	// verify the table exists, then manually run the down migration.
+	s := newTestStore(t)
+
+	// Table should exist after migration.
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM credential_meta").Scan(&count)
+	if err != nil {
+		t.Fatalf("credential_meta should exist: %v", err)
+	}
+
+	// Run the down migration manually.
+	_, err = s.db.Exec("DROP TABLE IF EXISTS credential_meta")
+	if err != nil {
+		t.Fatalf("drop credential_meta: %v", err)
+	}
+
+	// Table should no longer exist.
+	err = s.db.QueryRow("SELECT COUNT(*) FROM credential_meta").Scan(&count)
+	if err == nil {
+		t.Error("credential_meta should not exist after drop")
+	}
+}
+
+func TestAddCredentialMetaStatic(t *testing.T) {
+	s := newTestStore(t)
+
+	err := s.AddCredentialMeta("github_pat", "static", "")
+	if err != nil {
+		t.Fatalf("add static credential meta: %v", err)
+	}
+
+	meta, err := s.GetCredentialMeta("github_pat")
+	if err != nil {
+		t.Fatalf("get credential meta: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("expected non-nil meta")
+	}
+	if meta.Name != "github_pat" {
+		t.Errorf("name = %q, want github_pat", meta.Name)
+	}
+	if meta.CredType != "static" {
+		t.Errorf("cred_type = %q, want static", meta.CredType)
+	}
+	if meta.TokenURL != "" {
+		t.Errorf("token_url = %q, want empty", meta.TokenURL)
+	}
+	if meta.CreatedAt == "" {
+		t.Error("created_at should not be empty")
+	}
+}
+
+func TestAddCredentialMetaOAuth(t *testing.T) {
+	s := newTestStore(t)
+
+	err := s.AddCredentialMeta("openai_oauth", "oauth", "https://auth0.openai.com/oauth/token")
+	if err != nil {
+		t.Fatalf("add oauth credential meta: %v", err)
+	}
+
+	meta, err := s.GetCredentialMeta("openai_oauth")
+	if err != nil {
+		t.Fatalf("get credential meta: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("expected non-nil meta")
+	}
+	if meta.Name != "openai_oauth" {
+		t.Errorf("name = %q, want openai_oauth", meta.Name)
+	}
+	if meta.CredType != "oauth" {
+		t.Errorf("cred_type = %q, want oauth", meta.CredType)
+	}
+	if meta.TokenURL != "https://auth0.openai.com/oauth/token" {
+		t.Errorf("token_url = %q, want https://auth0.openai.com/oauth/token", meta.TokenURL)
+	}
+}
+
+func TestAddCredentialMetaDefaultType(t *testing.T) {
+	s := newTestStore(t)
+
+	// Empty cred type should default to "static".
+	err := s.AddCredentialMeta("test_cred", "", "")
+	if err != nil {
+		t.Fatalf("add credential meta with empty type: %v", err)
+	}
+
+	meta, err := s.GetCredentialMeta("test_cred")
+	if err != nil {
+		t.Fatalf("get credential meta: %v", err)
+	}
+	if meta.CredType != "static" {
+		t.Errorf("cred_type = %q, want static (default)", meta.CredType)
+	}
+}
+
+func TestAddCredentialMetaValidation(t *testing.T) {
+	s := newTestStore(t)
+
+	// Empty name.
+	err := s.AddCredentialMeta("", "static", "")
+	if err == nil {
+		t.Error("expected error for empty name")
+	}
+
+	// Invalid type.
+	err = s.AddCredentialMeta("test", "bogus", "")
+	if err == nil {
+		t.Error("expected error for invalid credential type")
+	}
+
+	// OAuth without token URL.
+	err = s.AddCredentialMeta("test", "oauth", "")
+	if err == nil {
+		t.Error("expected error for oauth without token_url")
+	}
+}
+
+func TestAddCredentialMetaDuplicate(t *testing.T) {
+	s := newTestStore(t)
+
+	err := s.AddCredentialMeta("test_cred", "static", "")
+	if err != nil {
+		t.Fatalf("first add: %v", err)
+	}
+
+	// Re-adding the same name should succeed (upsert) so credential
+	// rotation works without requiring a remove-then-add sequence.
+	err = s.AddCredentialMeta("test_cred", "static", "")
+	if err != nil {
+		t.Errorf("upsert should succeed: %v", err)
+	}
+}
+
+func TestAddCredentialMetaUpsertChangesType(t *testing.T) {
+	s := newTestStore(t)
+
+	// Start as static.
+	if err := s.AddCredentialMeta("rotating", "static", ""); err != nil {
+		t.Fatalf("first add: %v", err)
+	}
+	meta, err := s.GetCredentialMeta("rotating")
+	if err != nil {
+		t.Fatalf("get after first add: %v", err)
+	}
+	if meta.CredType != "static" {
+		t.Fatalf("expected static, got %q", meta.CredType)
+	}
+
+	// Upsert to oauth.
+	if err := s.AddCredentialMeta("rotating", "oauth", "https://auth.example.com/token"); err != nil {
+		t.Fatalf("upsert to oauth: %v", err)
+	}
+	meta, err = s.GetCredentialMeta("rotating")
+	if err != nil {
+		t.Fatalf("get after upsert: %v", err)
+	}
+	if meta.CredType != "oauth" {
+		t.Errorf("expected oauth after upsert, got %q", meta.CredType)
+	}
+	if meta.TokenURL != "https://auth.example.com/token" {
+		t.Errorf("expected token URL after upsert, got %q", meta.TokenURL)
+	}
+}
+
+func TestGetCredentialMetaNotFound(t *testing.T) {
+	s := newTestStore(t)
+
+	meta, err := s.GetCredentialMeta("nonexistent")
+	if err != nil {
+		t.Fatalf("get nonexistent: %v", err)
+	}
+	if meta != nil {
+		t.Errorf("expected nil for nonexistent, got %+v", meta)
+	}
+}
+
+func TestListCredentialMeta(t *testing.T) {
+	s := newTestStore(t)
+
+	// Empty list.
+	metas, err := s.ListCredentialMeta()
+	if err != nil {
+		t.Fatalf("list empty: %v", err)
+	}
+	if len(metas) != 0 {
+		t.Errorf("expected 0 metas, got %d", len(metas))
+	}
+
+	// Add multiple credentials.
+	_ = s.AddCredentialMeta("beta_oauth", "oauth", "https://example.com/token")
+	_ = s.AddCredentialMeta("alpha_static", "static", "")
+	_ = s.AddCredentialMeta("gamma_oauth", "oauth", "https://other.com/oauth/token")
+
+	metas, err = s.ListCredentialMeta()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(metas) != 3 {
+		t.Fatalf("expected 3 metas, got %d", len(metas))
+	}
+
+	// Should be ordered by name.
+	if metas[0].Name != "alpha_static" {
+		t.Errorf("metas[0].Name = %q, want alpha_static", metas[0].Name)
+	}
+	if metas[1].Name != "beta_oauth" {
+		t.Errorf("metas[1].Name = %q, want beta_oauth", metas[1].Name)
+	}
+	if metas[2].Name != "gamma_oauth" {
+		t.Errorf("metas[2].Name = %q, want gamma_oauth", metas[2].Name)
+	}
+
+	// Verify types.
+	if metas[0].CredType != "static" {
+		t.Errorf("metas[0].CredType = %q, want static", metas[0].CredType)
+	}
+	if metas[1].CredType != "oauth" {
+		t.Errorf("metas[1].CredType = %q, want oauth", metas[1].CredType)
+	}
+	if metas[1].TokenURL != "https://example.com/token" {
+		t.Errorf("metas[1].TokenURL = %q, want https://example.com/token", metas[1].TokenURL)
+	}
+}
+
+func TestRemoveCredentialMeta(t *testing.T) {
+	s := newTestStore(t)
+
+	_ = s.AddCredentialMeta("test_cred", "static", "")
+
+	deleted, err := s.RemoveCredentialMeta("test_cred")
+	if err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if !deleted {
+		t.Error("expected deletion to succeed")
+	}
+
+	// Verify it is gone.
+	meta, err := s.GetCredentialMeta("test_cred")
+	if err != nil {
+		t.Fatalf("get after remove: %v", err)
+	}
+	if meta != nil {
+		t.Errorf("expected nil after removal, got %+v", meta)
+	}
+}
+
+func TestRemoveCredentialMetaNonExistent(t *testing.T) {
+	s := newTestStore(t)
+
+	deleted, err := s.RemoveCredentialMeta("nonexistent")
+	if err != nil {
+		t.Fatalf("remove nonexistent: %v", err)
+	}
+	if deleted {
+		t.Error("expected no deletion for nonexistent name")
+	}
+}
+
+func TestCredentialMetaCRUDRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+
+	// Add several entries of different types.
+	_ = s.AddCredentialMeta("static_cred", "static", "")
+	_ = s.AddCredentialMeta("oauth_cred", "oauth", "https://auth.example.com/token")
+
+	// List and verify count.
+	metas, err := s.ListCredentialMeta()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(metas) != 2 {
+		t.Fatalf("expected 2, got %d", len(metas))
+	}
+
+	// Remove one.
+	deleted, err := s.RemoveCredentialMeta("static_cred")
+	if err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if !deleted {
+		t.Error("expected deletion")
+	}
+
+	// List should now have 1.
+	metas, err = s.ListCredentialMeta()
+	if err != nil {
+		t.Fatalf("list after remove: %v", err)
+	}
+	if len(metas) != 1 {
+		t.Fatalf("expected 1, got %d", len(metas))
+	}
+	if metas[0].Name != "oauth_cred" {
+		t.Errorf("remaining name = %q, want oauth_cred", metas[0].Name)
 	}
 }

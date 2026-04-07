@@ -716,16 +716,37 @@ components:
       properties:
         name:
           type: string
+        type:
+          type: string
+          enum: [static, oauth]
+          description: Credential type (static or oauth)
+        token_url:
+          type: string
+          description: Token endpoint URL (only for oauth type)
 
     CreateCredentialRequest:
       type: object
-      required: [name, value]
+      required: [name]
       properties:
         name:
           type: string
         value:
           type: string
-          description: The credential secret value (stored encrypted)
+          description: The credential secret value (stored encrypted). Required for static type.
+        type:
+          type: string
+          enum: [static, oauth]
+          default: static
+          description: Credential type. Defaults to static.
+        token_url:
+          type: string
+          description: Token endpoint URL (required when type is oauth)
+        access_token:
+          type: string
+          description: OAuth access token (required when type is oauth)
+        refresh_token:
+          type: string
+          description: OAuth refresh token (optional, for token rotation)
         destination:
           type: string
           description: If set, also creates an allow rule and binding

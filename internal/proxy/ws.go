@@ -390,6 +390,16 @@ func (wp *WSProxy) Relay(agentConn, upstreamConn net.Conn, host string, port int
 				log.Printf("[WS] credential %q lookup failed: %v", name, err)
 				continue
 			}
+			// Check if this is an OAuth credential. If so, build two phantom
+			// pairs (access + refresh) instead of one static pair.
+			if vault.IsOAuth(secret.Bytes()) {
+				oauthPairs, parseErr := buildOAuthPhantomPairs(name, secret, "WS")
+				if parseErr != nil {
+					continue
+				}
+				pairs = append(pairs, oauthPairs...)
+				continue
+			}
 			pairs = append(pairs, phantomPair{
 				phantom: []byte(PhantomToken(name)),
 				secret:  secret,
@@ -519,23 +529,9 @@ func (wp *WSProxy) relayFrames(src io.Reader, dst io.Writer, pairs []phantomPair
 }
 
 // stripUnboundPhantoms removes phantom tokens from data that are not bound
-// to the current destination. Uses exact matching via provider.List() first,
-// then falls back to regex for remaining tokens.
+// to the current destination. Delegates to the shared helper.
 func (wp *WSProxy) stripUnboundPhantoms(data []byte) []byte {
-	names, _ := wp.provider.List()
-	sort.Slice(names, func(i, j int) bool {
-		return len(names[i]) > len(names[j])
-	})
-	for _, name := range names {
-		phantom := []byte(PhantomToken(name))
-		if bytes.Contains(data, phantom) {
-			data = bytes.ReplaceAll(data, phantom, nil)
-		}
-	}
-	if bytes.Contains(data, phantomPrefix) {
-		data = phantomStripRe.ReplaceAll(data, nil)
-	}
-	return data
+	return stripUnboundPhantomsFromProvider(data, wp.provider)
 }
 
 // sendCloseFrame writes a WebSocket close frame with the given status code

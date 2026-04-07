@@ -971,6 +971,95 @@ func (s *Store) AddRuleAndBinding(
 	return ruleID, bindingID, nil
 }
 
+// --- Credential Meta ---
+
+// CredentialMeta represents a row in the credential_meta table.
+// It stores per-credential metadata (type, token URL) separately from bindings
+// since one credential can have multiple bindings.
+type CredentialMeta struct {
+	Name      string
+	CredType  string // "static" or "oauth"
+	TokenURL  string
+	CreatedAt string
+}
+
+// AddCredentialMeta inserts a credential metadata row.
+func (s *Store) AddCredentialMeta(name, credType, tokenURL string) error {
+	if name == "" {
+		return fmt.Errorf("credential name is required")
+	}
+	if credType == "" {
+		credType = "static"
+	}
+	if credType != "static" && credType != "oauth" {
+		return fmt.Errorf("invalid credential type %q: must be static or oauth", credType)
+	}
+	if credType == "oauth" && tokenURL == "" {
+		return fmt.Errorf("token_url is required for oauth credentials")
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO credential_meta (name, cred_type, token_url)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(name) DO UPDATE SET cred_type = excluded.cred_type, token_url = excluded.token_url`,
+		name, credType, nilIfEmpty(tokenURL),
+	)
+	if err != nil {
+		return fmt.Errorf("insert credential meta: %w", err)
+	}
+	return nil
+}
+
+// GetCredentialMeta returns a credential metadata row by name, or nil if not found.
+func (s *Store) GetCredentialMeta(name string) (*CredentialMeta, error) {
+	var meta CredentialMeta
+	var tokenURL sql.NullString
+	err := s.db.QueryRow(
+		"SELECT name, cred_type, token_url, created_at FROM credential_meta WHERE name = ?", name,
+	).Scan(&meta.Name, &meta.CredType, &tokenURL, &meta.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get credential meta %q: %w", name, err)
+	}
+	meta.TokenURL = tokenURL.String
+	return &meta, nil
+}
+
+// ListCredentialMeta returns all credential metadata rows ordered by name.
+func (s *Store) ListCredentialMeta() ([]CredentialMeta, error) {
+	rows, err := s.db.Query(
+		"SELECT name, cred_type, token_url, created_at FROM credential_meta ORDER BY name",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list credential meta: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var metas []CredentialMeta
+	for rows.Next() {
+		var m CredentialMeta
+		var tokenURL sql.NullString
+		if err := rows.Scan(&m.Name, &m.CredType, &tokenURL, &m.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan credential meta: %w", err)
+		}
+		m.TokenURL = tokenURL.String
+		metas = append(metas, m)
+	}
+	return metas, rows.Err()
+}
+
+// RemoveCredentialMeta deletes a credential metadata row by name. Returns true
+// if a row was deleted.
+func (s *Store) RemoveCredentialMeta(name string) (bool, error) {
+	res, err := s.db.Exec("DELETE FROM credential_meta WHERE name = ?", name)
+	if err != nil {
+		return false, fmt.Errorf("delete credential meta: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // --- Helpers ---
 
 // nilIfEmpty returns nil for empty strings, allowing SQLite to store NULL.

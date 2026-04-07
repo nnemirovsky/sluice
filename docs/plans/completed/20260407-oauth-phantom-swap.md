@@ -195,15 +195,15 @@ For phantom files on the shared volume (what the agent loads as env vars), `Gene
 - Create: `internal/vault/oauth.go`
 - Modify: `internal/vault/store.go`
 
-- [ ] Create `internal/vault/oauth.go` with `OAuthCredential` struct (AccessToken, RefreshToken, TokenURL, ExpiresAt). No phantom values in the struct (phantoms are deterministic, derived from credential name at runtime).
-- [ ] Add `ParseOAuth(data []byte) (*OAuthCredential, error)` to parse JSON blob from vault
-- [ ] Add `(*OAuthCredential) Marshal() ([]byte, error)` to serialize back to JSON
-- [ ] Add `(*OAuthCredential) UpdateTokens(access, refresh string, expiresIn int)` that updates real tokens and computes ExpiresAt. If refresh is empty, preserve existing refresh_token.
-- [ ] Add `IsOAuth(data []byte) bool` function that checks if credential content is valid OAuth JSON (has access_token + token_url fields)
-- [ ] Write tests for OAuthCredential parse/marshal round-trip
-- [ ] Write tests for UpdateTokens (both tokens, access only, refresh preserved)
-- [ ] Write tests for IsOAuth detection (positive, negative, malformed JSON)
-- [ ] Run tests: `go test ./internal/vault/ -timeout 30s`
+- [x] Create `internal/vault/oauth.go` with `OAuthCredential` struct (AccessToken, RefreshToken, TokenURL, ExpiresAt). No phantom values in the struct (phantoms are deterministic, derived from credential name at runtime).
+- [x] Add `ParseOAuth(data []byte) (*OAuthCredential, error)` to parse JSON blob from vault
+- [x] Add `(*OAuthCredential) Marshal() ([]byte, error)` to serialize back to JSON
+- [x] Add `(*OAuthCredential) UpdateTokens(access, refresh string, expiresIn int)` that updates real tokens and computes ExpiresAt. If refresh is empty, preserve existing refresh_token.
+- [x] Add `IsOAuth(data []byte) bool` function that checks if credential content is valid OAuth JSON (has access_token + token_url fields)
+- [x] Write tests for OAuthCredential parse/marshal round-trip
+- [x] Write tests for UpdateTokens (both tokens, access only, refresh preserved)
+- [x] Write tests for IsOAuth detection (positive, negative, malformed JSON)
+- [x] Run tests: `go test ./internal/vault/ -timeout 30s`
 
 ### Task 2: Add credential_meta table to store schema
 
@@ -212,31 +212,31 @@ For phantom files on the shared volume (what the agent loads as env vars), `Gene
 - Create: `internal/store/migrations/000002_credential_meta.down.sql`
 - Modify: `internal/store/store.go`
 
-- [ ] Create migration: new `credential_meta` table with `name TEXT PRIMARY KEY`, `cred_type TEXT NOT NULL DEFAULT 'static'`, `token_url TEXT`, `created_at DATETIME DEFAULT CURRENT_TIMESTAMP`
-- [ ] Add `CredentialMeta` struct to store (Name, CredType, TokenURL, CreatedAt)
-- [ ] Add `AddCredentialMeta(name, credType, tokenURL string) error`
-- [ ] Add `GetCredentialMeta(name string) (*CredentialMeta, error)`
-- [ ] Add `ListCredentialMeta() ([]CredentialMeta, error)`
-- [ ] Add `RemoveCredentialMeta(name string) error` (cascade with credential removal)
-- [ ] Write tests for migration (up and down)
-- [ ] Write tests for CRUD operations on credential_meta
-- [ ] Run tests: `go test ./internal/store/ -timeout 30s`
+- [x] Create migration: new `credential_meta` table with `name TEXT PRIMARY KEY`, `cred_type TEXT NOT NULL DEFAULT 'static'`, `token_url TEXT`, `created_at DATETIME DEFAULT CURRENT_TIMESTAMP`
+- [x] Add `CredentialMeta` struct to store (Name, CredType, TokenURL, CreatedAt)
+- [x] Add `AddCredentialMeta(name, credType, tokenURL string) error`
+- [x] Add `GetCredentialMeta(name string) (*CredentialMeta, error)`
+- [x] Add `ListCredentialMeta() ([]CredentialMeta, error)`
+- [x] Add `RemoveCredentialMeta(name string) error` (cascade with credential removal)
+- [x] Write tests for migration (up and down)
+- [x] Write tests for CRUD operations on credential_meta
+- [x] Run tests: `go test ./internal/store/ -timeout 30s`
 
 ### Task 3: Extend CLI for OAuth credentials
 
 **Files:**
 - Modify: `cmd/sluice/cred.go`
 
-- [ ] Add `--type` flag to `sluice cred add` (default: "static", options: "static", "oauth")
-- [ ] Add `--token-url` flag (required when type=oauth)
-- [ ] When type=oauth: prompt for access token and refresh token via stdin/terminal (not CLI flags, to avoid shell history exposure). Support stdin pipe for scripted use.
-- [ ] When type=oauth: create OAuthCredential JSON, store in vault, create credential_meta row, create binding with destination
-- [ ] Generate two phantom files for OAuth: `CRED_NAME_ACCESS` and `CRED_NAME_REFRESH`
-- [ ] Update `sluice cred list` to show credential type column (join with credential_meta)
-- [ ] Update `sluice cred remove` to also delete credential_meta row
-- [ ] Write tests for CLI flag parsing and validation
-- [ ] Write tests for OAuth credential creation flow
-- [ ] Run tests: `go test ./cmd/sluice/ -timeout 30s`
+- [x] Add `--type` flag to `sluice cred add` (default: "static", options: "static", "oauth")
+- [x] Add `--token-url` flag (required when type=oauth)
+- [x] When type=oauth: prompt for access token and refresh token via stdin/terminal (not CLI flags, to avoid shell history exposure). Support stdin pipe for scripted use.
+- [x] When type=oauth: create OAuthCredential JSON, store in vault, create credential_meta row, create binding with destination
+- [x] Generate two phantom files for OAuth: `CRED_NAME_ACCESS` and `CRED_NAME_REFRESH`
+- [x] Update `sluice cred list` to show credential type column (join with credential_meta)
+- [x] Update `sluice cred remove` to also delete credential_meta row
+- [x] Write tests for CLI flag parsing and validation
+- [x] Write tests for OAuth credential creation flow
+- [x] Run tests: `go test ./cmd/sluice/ -timeout 30s`
 
 ### Task 4: Build OAuth token URL index
 
@@ -244,15 +244,15 @@ For phantom files on the shared volume (what the agent loads as env vars), `Gene
 - Create: `internal/proxy/oauth_index.go`
 - Modify: `internal/proxy/inject.go`
 
-- [ ] Create `internal/proxy/oauth_index.go` with `OAuthIndex` struct: maps token URLs to credential names
-- [ ] Add `NewOAuthIndex(metas []store.CredentialMeta) *OAuthIndex` that filters oauth-type entries and parses token URLs
-- [ ] Add `Match(requestURL *url.URL) (credName string, ok bool)` for exact URL matching (scheme + host + path)
-- [ ] Add `oauthIndex *atomic.Pointer[OAuthIndex]` field to `Injector` struct
-- [ ] Build and store index during `NewInjector()` initialization
-- [ ] Add `UpdateOAuthIndex(metas []store.CredentialMeta)` for hot-reload (called from StoreResolver path)
-- [ ] Write tests for index building and matching (exact match, no match, multiple entries)
-- [ ] Write tests for hot-reload (index swap)
-- [ ] Run tests: `go test ./internal/proxy/ -timeout 30s`
+- [x] Create `internal/proxy/oauth_index.go` with `OAuthIndex` struct: maps token URLs to credential names
+- [x] Add `NewOAuthIndex(metas []store.CredentialMeta) *OAuthIndex` that filters oauth-type entries and parses token URLs
+- [x] Add `Match(requestURL *url.URL) (credName string, ok bool)` for exact URL matching (scheme + host + path)
+- [x] Add `oauthIndex *atomic.Pointer[OAuthIndex]` field to `Injector` struct
+- [x] Build and store index during `NewInjector()` initialization
+- [x] Add `UpdateOAuthIndex(metas []store.CredentialMeta)` for hot-reload (called from StoreResolver path)
+- [x] Write tests for index building and matching (exact match, no match, multiple entries)
+- [x] Write tests for hot-reload (index swap)
+- [x] Run tests: `go test ./internal/proxy/ -timeout 30s`
 
 ### Task 5: Implement response-side OAuth token interception
 
@@ -260,10 +260,10 @@ For phantom files on the shared volume (what the agent loads as env vars), `Gene
 - Create: `internal/proxy/oauth_response.go`
 - Modify: `internal/proxy/inject.go`
 
-- [ ] Add `golang.org/x/sync/singleflight` dependency: `go get golang.org/x/sync`
-- [ ] Add `refreshGroup singleflight.Group` field to `Injector` struct for concurrent refresh dedup
-- [ ] Register response handler in `NewInjector()`: `proxy.OnResponse().DoFunc(inj.interceptOAuthResponse)`
-- [ ] Implement `interceptOAuthResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Response`:
+- [x] Add `golang.org/x/sync/singleflight` dependency: `go get golang.org/x/sync`
+- [x] Add `refreshGroup singleflight.Group` field to `Injector` struct for concurrent refresh dedup
+- [x] Register response handler in `NewInjector()`: `proxy.OnResponse().DoFunc(inj.interceptOAuthResponse)`
+- [x] Implement `interceptOAuthResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Response`:
   - Check response status is 200-299
   - Match request URL against OAuth index. If no match, return unchanged.
   - Use `singleflight.Do(credName, ...)` to prevent concurrent refresh race
@@ -275,30 +275,30 @@ For phantom files on the shared volume (what the agent loads as env vars), `Gene
   - Update `resp.Body` with modified body
   - **Asynchronously** (goroutine): load OAuthCredential from vault, call `UpdateTokens()`, store back, write phantom files, signal agent reload
   - Use `SecureBytes` for real token handling in the async goroutine, `Release()` after vault write
-- [ ] Handle edge cases: missing refresh_token in response (preserve existing), non-JSON/non-form content type (pass through), read errors (pass through unchanged)
-- [ ] If vault write fails: log error. Agent already has phantom tokens. Next refresh cycle will correct.
-- [ ] Write tests with mock goproxy context and httptest response (JSON format)
-- [ ] Write tests for form-encoded token responses
-- [ ] Write tests for partial responses (only access_token, no refresh_token)
-- [ ] Write tests for concurrent refresh dedup (singleflight)
-- [ ] Write tests for error cases (non-2xx, non-JSON, oversized body, vault write failure)
-- [ ] Run tests: `go test ./internal/proxy/ -timeout 30s`
+- [x] Handle edge cases: missing refresh_token in response (preserve existing), non-JSON/non-form content type (pass through), read errors (pass through unchanged)
+- [x] If vault write fails: log error. Agent already has phantom tokens. Next refresh cycle will correct.
+- [x] Write tests with mock goproxy context and httptest response (JSON format)
+- [x] Write tests for form-encoded token responses
+- [x] Write tests for partial responses (only access_token, no refresh_token)
+- [x] Write tests for concurrent refresh dedup (singleflight)
+- [x] Write tests for error cases (non-2xx, non-JSON, oversized body, vault write failure)
+- [x] Run tests: `go test ./internal/proxy/ -timeout 30s`
 
 ### Task 6: Request-side OAuth phantom swap
 
 **Files:**
 - Modify: `internal/proxy/inject.go`
 
-- [ ] Extend `injectCredentials()` to detect OAuth credentials: check if credential name exists in OAuth index (or if vault content is OAuth JSON via `IsOAuth()`)
-- [ ] For OAuth credentials: parse vault JSON via `ParseOAuth()`, extract real access_token and refresh_token, build two phantom pairs: `[{SLUICE_PHANTOM:cred.access, realAccess}, {SLUICE_PHANTOM:cred.refresh, realRefresh}]`
-- [ ] Add OAuth phantom pairs to the scoped replacement list alongside static phantom pairs
-- [ ] Ensure OAuth phantoms (`SLUICE_PHANTOM:*.access`, `SLUICE_PHANTOM:*.refresh`) are included in the unbound strip pass (pass 3) via extended `stripUnboundPhantoms()`
-- [ ] Use `SecureBytes` for real tokens, `Release()` after replacement
-- [ ] Write tests: request with OAuth phantom access token gets swapped to real
-- [ ] Write tests: request with OAuth phantom refresh token gets swapped to real
-- [ ] Write tests: mixed static + OAuth credentials on same request
-- [ ] Write tests: unbound OAuth phantom tokens are stripped
-- [ ] Run tests: `go test ./internal/proxy/ -timeout 30s`
+- [x] Extend `injectCredentials()` to detect OAuth credentials: check if credential name exists in OAuth index (or if vault content is OAuth JSON via `IsOAuth()`)
+- [x] For OAuth credentials: parse vault JSON via `ParseOAuth()`, extract real access_token and refresh_token, build two phantom pairs: `[{SLUICE_PHANTOM:cred.access, realAccess}, {SLUICE_PHANTOM:cred.refresh, realRefresh}]`
+- [x] Add OAuth phantom pairs to the scoped replacement list alongside static phantom pairs
+- [x] Ensure OAuth phantoms (`SLUICE_PHANTOM:*.access`, `SLUICE_PHANTOM:*.refresh`) are included in the unbound strip pass (pass 3) via extended `stripUnboundPhantoms()`
+- [x] Use `SecureBytes` for real tokens, `Release()` after replacement
+- [x] Write tests: request with OAuth phantom access token gets swapped to real
+- [x] Write tests: request with OAuth phantom refresh token gets swapped to real
+- [x] Write tests: mixed static + OAuth credentials on same request
+- [x] Write tests: unbound OAuth phantom tokens are stripped
+- [x] Run tests: `go test ./internal/proxy/ -timeout 30s`
 
 ### Task 7: Hot-reload and phantom file management
 
@@ -306,13 +306,13 @@ For phantom files on the shared volume (what the agent loads as env vars), `Gene
 - Modify: `internal/proxy/server.go`
 - Modify: `internal/vault/phantom.go`
 
-- [ ] Extend `GeneratePhantomEnv()` to handle OAuth credentials: detect OAuth JSON in vault, write two files per OAuth credential (`CRED_ACCESS`, `CRED_REFRESH`) with format-matching phantom values
-- [ ] Add `WriteOAuthPhantoms(dir string, cred *OAuthCredential, name string) error` to write phantom files for a single OAuth credential (called from async goroutine in response handler)
-- [ ] Ensure async phantom file write in response handler (Task 5) does not block HTTP response delivery
-- [ ] Rebuild OAuth index on `StoreResolver()` calls (when credential_meta changes)
-- [ ] Write tests for OAuth phantom file generation (two files created, correct naming)
-- [ ] Write tests for hot-reload path (credential_meta change triggers index rebuild)
-- [ ] Run tests: `go test ./... -timeout 30s`
+- [x] Extend `GeneratePhantomEnv()` to handle OAuth credentials: detect OAuth JSON in vault, write two files per OAuth credential (`CRED_ACCESS`, `CRED_REFRESH`) with format-matching phantom values
+- [x] Add `WriteOAuthPhantoms(dir string, cred *OAuthCredential, name string) error` to write phantom files for a single OAuth credential (called from async goroutine in response handler)
+- [x] Ensure async phantom file write in response handler (Task 5) does not block HTTP response delivery
+- [x] Rebuild OAuth index on `StoreResolver()` calls (when credential_meta changes)
+- [x] Write tests for OAuth phantom file generation (two files created, correct naming)
+- [x] Write tests for hot-reload path (credential_meta change triggers index rebuild)
+- [x] Run tests: `go test ./... -timeout 30s`
 
 ### Task 8: API endpoint support for OAuth credentials
 
@@ -321,37 +321,37 @@ For phantom files on the shared volume (what the agent loads as env vars), `Gene
 - Modify: `internal/api/server.go`
 - Modify: `internal/api/api.gen.go` (regenerated)
 
-- [ ] Add `type` field (enum: static, oauth) and `token_url` field to credential create request schema in OpenAPI spec
-- [ ] Add `access_token` and `refresh_token` fields to credential create request (required when type=oauth)
-- [ ] Add `type` and `token_url` fields to credential list response schema
-- [ ] Regenerate API code: `go generate ./internal/api/`
-- [ ] Update `PostApiCredentials` handler: when type=oauth, create OAuthCredential JSON in vault, add credential_meta row, generate OAuth phantom files
-- [ ] Update `GetApiCredentials` handler: join with credential_meta to return type and token_url
-- [ ] Update `DeleteApiCredentialsName` handler: also remove credential_meta row
-- [ ] Write tests for OAuth credential creation via API (success, missing required fields)
-- [ ] Write tests for credential list with type field
-- [ ] Write tests for credential deletion cascading to credential_meta
-- [ ] Run tests: `go test ./internal/api/ -timeout 30s`
+- [x] Add `type` field (enum: static, oauth) and `token_url` field to credential create request schema in OpenAPI spec
+- [x] Add `access_token` and `refresh_token` fields to credential create request (required when type=oauth)
+- [x] Add `type` and `token_url` fields to credential list response schema
+- [x] Regenerate API code: `go generate ./internal/api/`
+- [x] Update `PostApiCredentials` handler: when type=oauth, create OAuthCredential JSON in vault, add credential_meta row, generate OAuth phantom files
+- [x] Update `GetApiCredentials` handler: join with credential_meta to return type and token_url
+- [x] Update `DeleteApiCredentialsName` handler: also remove credential_meta row
+- [x] Write tests for OAuth credential creation via API (success, missing required fields)
+- [x] Write tests for credential list with type field
+- [x] Write tests for credential deletion cascading to credential_meta
+- [x] Run tests: `go test ./internal/api/ -timeout 30s`
 
 ### Task 9: Verify acceptance criteria
 
-- [ ] Verify static credentials still work unchanged (backward compatibility)
-- [ ] Verify OAuth credential can be added via CLI with --type oauth
-- [ ] Verify phantom files are generated for OAuth (access + refresh)
-- [ ] Verify request-side swap works for OAuth access token
-- [ ] Verify request-side swap works for OAuth refresh token
-- [ ] Verify response interception captures new tokens from token endpoint
-- [ ] Verify vault is updated with rotated tokens
-- [ ] Verify new phantoms are written and agent reload signaled
-- [ ] Verify unbound OAuth phantoms are stripped from requests
-- [ ] Run full test suite: `go test ./... -v -timeout 30s`
-- [ ] Run e2e tests: `go test -tags=e2e ./e2e/ -v -count=1 -timeout=300s`
+- [x] Verify static credentials still work unchanged (backward compatibility)
+- [x] Verify OAuth credential can be added via CLI with --type oauth
+- [x] Verify phantom files are generated for OAuth (access + refresh)
+- [x] Verify request-side swap works for OAuth access token
+- [x] Verify request-side swap works for OAuth refresh token
+- [x] Verify response interception captures new tokens from token endpoint
+- [x] Verify vault is updated with rotated tokens
+- [x] Verify new phantoms are written and agent reload signaled
+- [x] Verify unbound OAuth phantoms are stripped from requests
+- [x] Run full test suite: `go test ./... -v -timeout 30s`
+- [x] Run e2e tests: `go test -tags=e2e ./e2e/ -v -count=1 -timeout=300s`
 
 ### Task 10: [Final] Update documentation
 
-- [ ] Update CLAUDE.md with OAuth credential type documentation
-- [ ] Update README.md: add section on dynamic OAuth/JWT token management (transparent access/refresh token rotation through phantom swap, subscription-based auth support)
-- [ ] Move this plan to `docs/plans/completed/`
+- [x] Update CLAUDE.md with OAuth credential type documentation
+- [x] Update README.md: add section on dynamic OAuth/JWT token management (transparent access/refresh token rotation through phantom swap, subscription-based auth support)
+- [x] Move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

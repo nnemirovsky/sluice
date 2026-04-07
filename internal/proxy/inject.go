@@ -20,12 +20,11 @@ import (
 	"time"
 
 	"github.com/elazarl/goproxy"
+	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
+	"golang.org/x/sync/singleflight"
 )
 
-// maxMITMBody limits the request body size the HTTPS MITM proxy reads for
-// phantom token replacement. Matches the QUIC proxy limit (16 MiB).
-const maxMITMBody = 16 << 20
 
 // phantomPrefix is the byte prefix for all phantom tokens, used for quick
 // detection before applying the more expensive regex strip.
@@ -77,6 +76,24 @@ type Injector struct {
 	// wsFrameInterceptor that performs phantom token replacement and
 	// content inspection on individual WebSocket frames.
 	wsProxy *WSProxy
+	// oauthIndex maps OAuth token endpoint URLs to credential names.
+	// Used by the response handler to detect token responses and perform
+	// phantom token replacement. Updated atomically during hot-reload.
+	oauthIndex atomic.Pointer[OAuthIndex]
+	// refreshGroup deduplicates concurrent OAuth token refresh responses
+	// for the same credential. Keyed by credential name so only one
+	// vault update occurs when multiple requests trigger simultaneous
+	// refreshes.
+	refreshGroup singleflight.Group
+	// phantomDir is the shared volume path for phantom token files.
+	// When non-empty, the async OAuth token persist goroutine writes
+	// updated phantom files after vault persistence so the agent
+	// container picks up refreshed phantom values.
+	phantomDir string
+	// persistDone is an optional channel signaled when an async OAuth
+	// token persist goroutine completes. Used by tests to avoid
+	// time.Sleep-based synchronization. Nil in production.
+	persistDone chan struct{}
 }
 
 // PinIPs stores resolved IPs keyed by a unique per-connection pin ID so
@@ -94,6 +111,23 @@ func (inj *Injector) UnpinIPs(pinID string) {
 	inj.pinnedIPs.Delete(pinID)
 }
 
+// UpdateOAuthIndex rebuilds the OAuth token URL index from current credential
+// metadata and atomically swaps it into the injector. Call this from the
+// StoreResolver path when credential_meta changes (e.g. SIGHUP, Telegram
+// credential mutations).
+func (inj *Injector) UpdateOAuthIndex(metas []store.CredentialMeta) {
+	idx := NewOAuthIndex(metas)
+	inj.oauthIndex.Store(idx)
+	log.Printf("[INJECT-OAUTH] updated token URL index (%d entries)", idx.Len())
+}
+
+// SetPhantomDir configures the shared volume path for phantom token files.
+// When set, the async OAuth token persist goroutine writes updated phantom
+// files after vault persistence.
+func (inj *Injector) SetPhantomDir(dir string) {
+	inj.phantomDir = dir
+}
+
 // NewInjector creates an MITM proxy that injects credentials into matching
 // requests. The caCert is used to generate per-host TLS certificates for
 // HTTPS interception. The authToken must be included in CONNECT requests
@@ -107,6 +141,9 @@ func NewInjector(provider vault.Provider, resolver *atomic.Pointer[vault.Binding
 		authToken: authToken,
 		wsProxy:   wsProxy,
 	}
+	// Initialize with an empty OAuth index. The caller should call
+	// UpdateOAuthIndex with credential metadata to populate it.
+	inj.oauthIndex.Store(NewOAuthIndex(nil))
 
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Verbose = false
@@ -194,6 +231,10 @@ func NewInjector(provider vault.Provider, resolver *atomic.Pointer[vault.Binding
 	if inj.wsProxy != nil {
 		proxy.OnResponse().DoFunc(inj.handleWSUpgrade)
 	}
+
+	// Register OAuth response handler to intercept token endpoint responses
+	// and replace real tokens with phantom tokens before they reach the agent.
+	proxy.OnResponse().DoFunc(inj.interceptOAuthResponse)
 
 	inj.Proxy = proxy
 	return inj
@@ -292,6 +333,16 @@ func newWSFrameInterceptor(upstream io.ReadWriter, wp *WSProxy, host string, por
 			secret, err := wp.provider.Get(name)
 			if err != nil {
 				log.Printf("[WS-MITM] credential %q lookup failed: %v", name, err)
+				continue
+			}
+			// Check if this is an OAuth credential. If so, build two phantom
+			// pairs (access + refresh) instead of one static pair.
+			if vault.IsOAuth(secret.Bytes()) {
+				oauthPairs, parseErr := buildOAuthPhantomPairs(name, secret, "WS-MITM")
+				if parseErr != nil {
+					continue
+				}
+				fi.pairs = append(fi.pairs, oauthPairs...)
 				continue
 			}
 			fi.pairs = append(fi.pairs, phantomPair{
@@ -544,6 +595,19 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 			log.Printf("[INJECT] credential %q lookup failed: %v", name, err)
 			continue
 		}
+
+		// Check if this is an OAuth credential. If so, build two phantom
+		// pairs (access + refresh) instead of one static pair.
+		if vault.IsOAuth(secret.Bytes()) {
+			oauthPairs, parseErr := buildOAuthPhantomPairs(name, secret, "INJECT")
+			if parseErr != nil {
+				continue
+			}
+			pairs = append(pairs, oauthPairs...)
+			log.Printf("[INJECT] built OAuth phantom pairs for credential %q", name)
+			continue
+		}
+
 		pairs = append(pairs, phantomPair{
 			phantom: []byte(PhantomToken(name)),
 			secret:  secret,
@@ -589,16 +653,16 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 	// Replace bound phantom tokens in the request body, then strip
 	// any remaining unbound phantom tokens.
 	// Limit body size to prevent memory exhaustion from oversized
-	// requests (matches the QUIC proxy's maxQUICBody limit).
+	// requests (uses the shared maxProxyBody limit).
 	if r.Body != nil && r.Body != http.NoBody {
-		body, readErr := io.ReadAll(io.LimitReader(r.Body, maxMITMBody+1))
+		body, readErr := io.ReadAll(io.LimitReader(r.Body, maxProxyBody+1))
 		_ = r.Body.Close()
 		if readErr != nil {
 			log.Printf("[INJECT] body read error for %s:%d: %v", host, port, readErr)
 			return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusBadGateway, "request body read error")
 		}
-		if int64(len(body)) > maxMITMBody {
-			log.Printf("[INJECT] request body exceeds %d bytes for %s:%d, rejecting", maxMITMBody, host, port)
+		if int64(len(body)) > maxProxyBody {
+			log.Printf("[INJECT] request body exceeds %d bytes for %s:%d, rejecting", maxProxyBody, host, port)
 			return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusRequestEntityTooLarge, "request body exceeds proxy limit")
 		}
 		changed := false
@@ -655,29 +719,10 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 	return r, nil
 }
 
-// stripUnboundPhantoms removes phantom tokens from data using exact matching
-// via provider.List() first, then falls back to regex for any remaining tokens
-// from providers that don't support listing. Exact matching handles credential
-// names with hyphens and other characters that the regex can't safely match.
+// stripUnboundPhantoms removes phantom tokens from data that are not bound
+// to the current destination. Delegates to the shared helper.
 func (inj *Injector) stripUnboundPhantoms(data []byte) []byte {
-	names, _ := inj.provider.List()
-	// Sort by name length descending so longer phantom tokens are stripped
-	// before shorter prefixes that could corrupt them via substring match.
-	sort.Slice(names, func(i, j int) bool {
-		return len(names[i]) > len(names[j])
-	})
-	for _, name := range names {
-		phantom := []byte(PhantomToken(name))
-		if bytes.Contains(data, phantom) {
-			data = bytes.ReplaceAll(data, phantom, nil)
-		}
-	}
-	// Last-resort regex strip for phantom tokens from providers that
-	// don't support List() (e.g. env provider).
-	if bytes.Contains(data, phantomPrefix) {
-		data = phantomStripRe.ReplaceAll(data, nil)
-	}
-	return data
+	return stripUnboundPhantomsFromProvider(data, inj.provider)
 }
 
 func portFromRequest(r *http.Request) int {

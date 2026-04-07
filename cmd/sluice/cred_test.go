@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -736,5 +737,561 @@ func TestHandleCredAddThenRemoveIntegrated(t *testing.T) {
 	}
 	if len(bindings) != 0 {
 		t.Errorf("expected 0 bindings after remove, got %d", len(bindings))
+	}
+}
+
+// --- OAuth credential CLI tests ---
+
+// pipeStdin replaces os.Stdin with a pipe containing the given data and returns
+// a cleanup function that restores the original stdin.
+func pipeStdin(t *testing.T, data string) func() {
+	t.Helper()
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	if _, err := w.Write([]byte(data)); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	return func() { os.Stdin = oldStdin }
+}
+
+// TestHandleCredAddOAuthTypeFlag tests that --type oauth requires --token-url.
+func TestHandleCredAddOAuthTypeFlag(t *testing.T) {
+	err := handleCredCommand([]string{"add", "--type", "oauth", "test_oauth"})
+	if err == nil {
+		t.Fatal("expected error when --type=oauth without --token-url")
+	}
+	if !strings.Contains(err.Error(), "--token-url is required") {
+		t.Errorf("expected token-url required error, got: %v", err)
+	}
+}
+
+// TestHandleCredAddTokenURLWithoutOAuth tests that --token-url is rejected
+// for static credentials.
+func TestHandleCredAddTokenURLWithoutOAuth(t *testing.T) {
+	err := handleCredCommand([]string{
+		"add", "--type", "static",
+		"--token-url", "https://example.com/token",
+		"test_static",
+	})
+	if err == nil {
+		t.Fatal("expected error when --token-url used with --type=static")
+	}
+	if !strings.Contains(err.Error(), "--token-url is only valid with --type=oauth") {
+		t.Errorf("expected token-url-only-oauth error, got: %v", err)
+	}
+}
+
+// TestHandleCredAddInvalidType tests that an invalid --type is rejected.
+func TestHandleCredAddInvalidType(t *testing.T) {
+	err := handleCredCommand([]string{"add", "--type", "bogus", "test_cred"})
+	if err == nil {
+		t.Fatal("expected error for invalid type")
+	}
+	if !strings.Contains(err.Error(), "invalid credential type") {
+		t.Errorf("expected invalid-type error, got: %v", err)
+	}
+}
+
+// TestHandleCredAddOAuth tests adding an OAuth credential via piped stdin.
+func TestHandleCredAddOAuth(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	// Pipe access token and refresh token via stdin (two lines).
+	cleanup := pipeStdin(t, "my-access-token\nmy-refresh-token\n")
+	defer cleanup()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--type", "oauth",
+			"--token-url", "https://auth.example.com/oauth/token",
+			"--destination", "api.example.com",
+			"--ports", "443",
+			"openai_oauth",
+		}); err != nil {
+			t.Fatalf("handleCredCommand add oauth: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, `credential "openai_oauth" added (type: oauth)`) {
+		t.Errorf("expected oauth added message, got: %s", output)
+	}
+	if !strings.Contains(output, "added allow rule") {
+		t.Errorf("expected allow rule message, got: %s", output)
+	}
+	if !strings.Contains(output, "added binding") {
+		t.Errorf("expected binding message, got: %s", output)
+	}
+	if !strings.Contains(output, "oauth phantom env vars") {
+		t.Errorf("expected phantom env vars message, got: %s", output)
+	}
+	if !strings.Contains(output, "OPENAI_OAUTH_ACCESS") {
+		t.Errorf("expected OPENAI_OAUTH_ACCESS in output, got: %s", output)
+	}
+	if !strings.Contains(output, "OPENAI_OAUTH_REFRESH") {
+		t.Errorf("expected OPENAI_OAUTH_REFRESH in output, got: %s", output)
+	}
+
+	// Verify the credential is in the vault as OAuth JSON.
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("open vault: %v", err)
+	}
+	sb, err := vs.Get("openai_oauth")
+	if err != nil {
+		t.Fatalf("get credential: %v", err)
+	}
+	defer sb.Release()
+
+	if !vault.IsOAuth(sb.Bytes()) {
+		t.Fatal("expected vault content to be OAuth JSON")
+	}
+	oauthCred, err := vault.ParseOAuth(sb.Bytes())
+	if err != nil {
+		t.Fatalf("parse oauth: %v", err)
+	}
+	if oauthCred.AccessToken != "my-access-token" {
+		t.Errorf("access token = %q, want %q", oauthCred.AccessToken, "my-access-token")
+	}
+	if oauthCred.RefreshToken != "my-refresh-token" {
+		t.Errorf("refresh token = %q, want %q", oauthCred.RefreshToken, "my-refresh-token")
+	}
+	if oauthCred.TokenURL != "https://auth.example.com/oauth/token" {
+		t.Errorf("token url = %q, want %q", oauthCred.TokenURL, "https://auth.example.com/oauth/token")
+	}
+
+	// Verify credential_meta was created.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	meta, err := db.GetCredentialMeta("openai_oauth")
+	if err != nil {
+		t.Fatalf("get credential meta: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("expected credential_meta row")
+	}
+	if meta.CredType != "oauth" {
+		t.Errorf("meta cred_type = %q, want %q", meta.CredType, "oauth")
+	}
+	if meta.TokenURL != "https://auth.example.com/oauth/token" {
+		t.Errorf("meta token_url = %q, want %q", meta.TokenURL, "https://auth.example.com/oauth/token")
+	}
+}
+
+// TestHandleCredAddOAuthAccessOnly tests adding an OAuth credential with
+// only an access token (no refresh token).
+func TestHandleCredAddOAuthAccessOnly(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	// Only one line: access token.
+	cleanup := pipeStdin(t, "only-access\n")
+	defer cleanup()
+
+	_ = captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--type", "oauth",
+			"--token-url", "https://auth.example.com/token",
+			"access_only_oauth",
+		}); err != nil {
+			t.Fatalf("handleCredCommand add oauth access-only: %v", err)
+		}
+	})
+
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("open vault: %v", err)
+	}
+	sb, err := vs.Get("access_only_oauth")
+	if err != nil {
+		t.Fatalf("get credential: %v", err)
+	}
+	defer sb.Release()
+
+	oauthCred, err := vault.ParseOAuth(sb.Bytes())
+	if err != nil {
+		t.Fatalf("parse oauth: %v", err)
+	}
+	if oauthCred.AccessToken != "only-access" {
+		t.Errorf("access token = %q, want %q", oauthCred.AccessToken, "only-access")
+	}
+	if oauthCred.RefreshToken != "" {
+		t.Errorf("refresh token = %q, want empty", oauthCred.RefreshToken)
+	}
+}
+
+// TestHandleCredAddOAuthEmptyAccess tests that an empty access token is rejected.
+func TestHandleCredAddOAuthEmptyAccess(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	// Empty access token line.
+	cleanup := pipeStdin(t, "\n")
+	defer cleanup()
+
+	err := handleCredCommand([]string{
+		"add",
+		"--db", dbPath,
+		"--type", "oauth",
+		"--token-url", "https://auth.example.com/token",
+		"empty_access",
+	})
+	if err == nil {
+		t.Fatal("expected error for empty access token")
+	}
+	if !strings.Contains(err.Error(), "access token is required") {
+		t.Errorf("expected access-token-required error, got: %v", err)
+	}
+}
+
+// TestHandleCredAddOAuthWithoutDestination tests adding an OAuth credential
+// without --destination (only credential_meta is stored, no rule/binding).
+func TestHandleCredAddOAuthWithoutDestination(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	cleanup := pipeStdin(t, "access-tok\nrefresh-tok\n")
+	defer cleanup()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--type", "oauth",
+			"--token-url", "https://auth.example.com/token",
+			"nodest_oauth",
+		}); err != nil {
+			t.Fatalf("handleCredCommand add oauth without destination: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, `credential "nodest_oauth" added (type: oauth)`) {
+		t.Errorf("expected added message, got: %s", output)
+	}
+	// Should not mention rule or binding.
+	if strings.Contains(output, "allow rule") {
+		t.Errorf("unexpected allow rule message for no-destination add: %s", output)
+	}
+
+	// Verify credential_meta was still created.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	meta, err := db.GetCredentialMeta("nodest_oauth")
+	if err != nil {
+		t.Fatalf("get credential meta: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("expected credential_meta even without --destination")
+	}
+	if meta.CredType != "oauth" {
+		t.Errorf("cred_type = %q, want oauth", meta.CredType)
+	}
+}
+
+// TestHandleCredListShowsType tests that cred list includes the credential type.
+func TestHandleCredListShowsType(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add a static credential.
+	if _, err := vs.Add("github_pat", "ghp_secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add an OAuth credential (store the JSON blob in vault).
+	oauthCred := &vault.OAuthCredential{
+		AccessToken:  "real-access",
+		RefreshToken: "real-refresh",
+		TokenURL:     "https://auth.example.com/token",
+	}
+	oauthJSON, _ := oauthCred.Marshal()
+	if _, err := vs.Add("openai_oauth", string(oauthJSON)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create credential_meta for the OAuth credential.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddCredentialMeta("openai_oauth", "oauth", "https://auth.example.com/token"); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{"list", "--db", dbPath}); err != nil {
+			t.Fatalf("handleCredCommand list: %v", err)
+		}
+	})
+
+	// Static credential should show [static].
+	if !strings.Contains(output, "github_pat [static]") {
+		t.Errorf("expected 'github_pat [static]' in output, got: %s", output)
+	}
+	// OAuth credential should show [oauth].
+	if !strings.Contains(output, "openai_oauth [oauth]") {
+		t.Errorf("expected 'openai_oauth [oauth]' in output, got: %s", output)
+	}
+}
+
+// TestHandleCredRemoveOAuth tests that removing an OAuth credential also
+// removes the credential_meta row.
+func TestHandleCredRemoveOAuth(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	// Create an OAuth credential in vault.
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oauthJSON, _ := json.Marshal(map[string]string{
+		"access_token": "real-access",
+		"token_url":    "https://auth.example.com/token",
+	})
+	if _, err := vs.Add("oauth_to_remove", string(oauthJSON)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create credential_meta row.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddCredentialMeta("oauth_to_remove", "oauth", "https://auth.example.com/token"); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{"remove", "--db", dbPath, "oauth_to_remove"}); err != nil {
+			t.Fatalf("handleCredCommand remove oauth: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, `credential "oauth_to_remove" removed`) {
+		t.Errorf("expected removal message, got: %s", output)
+	}
+	if !strings.Contains(output, "removed credential metadata") {
+		t.Errorf("expected credential metadata removed message, got: %s", output)
+	}
+
+	// Verify credential_meta was deleted.
+	db, err = store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	meta, err := db.GetCredentialMeta("oauth_to_remove")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta != nil {
+		t.Error("expected credential_meta to be deleted")
+	}
+}
+
+// TestHandleCredAddOAuthCreationFlow tests the full OAuth credential creation
+// flow: vault storage, credential_meta, rule, and binding.
+func TestHandleCredAddOAuthCreationFlow(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	cleanup := pipeStdin(t, "access-123\nrefresh-456\n")
+	defer cleanup()
+
+	_ = captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--type", "oauth",
+			"--token-url", "https://auth0.openai.com/oauth/token",
+			"--destination", "api.openai.com",
+			"--ports", "443",
+			"openai_cred",
+		}); err != nil {
+			t.Fatalf("handleCredCommand add oauth full: %v", err)
+		}
+	})
+
+	// Open the DB and verify all artifacts.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// 1. Credential_meta exists with correct type and token_url.
+	meta, err := db.GetCredentialMeta("openai_cred")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta == nil {
+		t.Fatal("expected credential_meta row")
+	}
+	if meta.CredType != "oauth" {
+		t.Errorf("meta cred_type = %q, want oauth", meta.CredType)
+	}
+	if meta.TokenURL != "https://auth0.openai.com/oauth/token" {
+		t.Errorf("meta token_url = %q, want https://auth0.openai.com/oauth/token", meta.TokenURL)
+	}
+
+	// 2. Allow rule exists for the destination.
+	rules, err := db.ListRules(store.RuleFilter{Verdict: "allow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 allow rule, got %d", len(rules))
+	}
+	if rules[0].Destination != "api.openai.com" {
+		t.Errorf("rule destination = %q, want api.openai.com", rules[0].Destination)
+	}
+
+	// 3. Binding exists.
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if bindings[0].Credential != "openai_cred" {
+		t.Errorf("binding credential = %q, want openai_cred", bindings[0].Credential)
+	}
+
+	// 4. Vault content is valid OAuth JSON.
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb, err := vs.Get("openai_cred")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sb.Release()
+
+	oauthCred, err := vault.ParseOAuth(sb.Bytes())
+	if err != nil {
+		t.Fatalf("parse oauth: %v", err)
+	}
+	if oauthCred.AccessToken != "access-123" {
+		t.Errorf("access_token = %q, want access-123", oauthCred.AccessToken)
+	}
+	if oauthCred.RefreshToken != "refresh-456" {
+		t.Errorf("refresh_token = %q, want refresh-456", oauthCred.RefreshToken)
+	}
+}
+
+// TestHandleCredAddOAuthThenRemoveIntegrated tests the full add-then-remove
+// lifecycle for OAuth credentials including credential_meta cleanup.
+func TestHandleCredAddOAuthThenRemoveIntegrated(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	// Step 1: Add OAuth credential.
+	cleanup := pipeStdin(t, "acc-tok\nref-tok\n")
+	defer cleanup()
+
+	_ = captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--type", "oauth",
+			"--token-url", "https://example.com/token",
+			"--destination", "api.test.com",
+			"--ports", "443",
+			"lifecycle_oauth",
+		}); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+	})
+
+	// Verify credential_meta exists after add.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, _ := db.GetCredentialMeta("lifecycle_oauth")
+	if meta == nil {
+		t.Fatal("expected credential_meta after add")
+	}
+	_ = db.Close()
+
+	// Step 2: Remove.
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{"remove", "--db", dbPath, "lifecycle_oauth"}); err != nil {
+			t.Fatalf("remove: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, "removed credential metadata") {
+		t.Errorf("expected credential metadata removal message, got: %s", output)
+	}
+
+	// Verify everything cleaned up.
+	db, err = store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	meta, _ = db.GetCredentialMeta("lifecycle_oauth")
+	if meta != nil {
+		t.Error("credential_meta should be removed")
+	}
+
+	rules, _ := db.ListRules(store.RuleFilter{})
+	if len(rules) != 0 {
+		t.Errorf("expected 0 rules after remove, got %d", len(rules))
+	}
+
+	bindings, _ := db.ListBindings()
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 bindings after remove, got %d", len(bindings))
+	}
+}
+
+// TestHandleCredAddStaticDefaultType verifies that omitting --type defaults
+// to static and output shows (type: static).
+func TestHandleCredAddStaticDefaultType(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	cleanup := pipeStdin(t, "plain-secret\n")
+	defer cleanup()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{"add", "--db", dbPath, "plain_cred"}); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, "(type: static)") {
+		t.Errorf("expected '(type: static)' in output, got: %s", output)
 	}
 }

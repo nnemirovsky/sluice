@@ -22,10 +22,6 @@ import (
 	"github.com/quic-go/quic-go/http3"
 )
 
-// maxQUICBody limits the request/response body size the QUIC proxy is willing
-// to buffer. 16 MiB is sufficient for typical API traffic while preventing
-// memory exhaustion from concurrent large requests.
-const maxQUICBody = 16 << 20
 
 // QUICBlockRuleConfig defines a content deny rule for QUICProxy construction.
 type QUICBlockRuleConfig struct {
@@ -394,14 +390,14 @@ func (q *QUICProxy) buildHandler(upstreamHost string, destPort int) http.Handler
 		var reqBody []byte
 		if r.Body != nil && r.Body != http.NoBody {
 			var readErr error
-			reqBody, readErr = io.ReadAll(io.LimitReader(r.Body, maxQUICBody+1))
+			reqBody, readErr = io.ReadAll(io.LimitReader(r.Body, maxProxyBody+1))
 			_ = r.Body.Close()
 			if readErr != nil {
 				http.Error(w, "request body read error", http.StatusBadGateway)
 				return
 			}
-			if int64(len(reqBody)) > maxQUICBody {
-				log.Printf("[QUIC] request body exceeds %d bytes for %s:%d, rejecting", maxQUICBody, host, port)
+			if int64(len(reqBody)) > maxProxyBody {
+				log.Printf("[QUIC] request body exceeds %d bytes for %s:%d, rejecting", maxProxyBody, host, port)
 				http.Error(w, "request body exceeds proxy limit", http.StatusRequestEntityTooLarge)
 				return
 			}
@@ -462,13 +458,13 @@ func (q *QUICProxy) buildHandler(upstreamHost string, destPort int) http.Handler
 		defer func() { _ = resp.Body.Close() }()
 
 		// Read upstream response body for redaction.
-		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxQUICBody+1))
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxProxyBody+1))
 		if err != nil {
 			http.Error(w, "upstream response read error", http.StatusBadGateway)
 			return
 		}
-		if int64(len(respBody)) > maxQUICBody {
-			log.Printf("[QUIC] response body exceeds %d bytes from %s:%d, rejecting", maxQUICBody, host, port)
+		if int64(len(respBody)) > maxProxyBody {
+			log.Printf("[QUIC] response body exceeds %d bytes from %s:%d, rejecting", maxProxyBody, host, port)
 			http.Error(w, "upstream response exceeds proxy limit", http.StatusBadGateway)
 			return
 		}
@@ -506,6 +502,16 @@ func (q *QUICProxy) buildPhantomPairs(host string, port int) []phantomPair {
 			secret, err := q.provider.Get(name)
 			if err != nil {
 				log.Printf("[QUIC-MITM] credential %q lookup failed: %v", name, err)
+				continue
+			}
+			// Check if this is an OAuth credential. If so, build two phantom
+			// pairs (access + refresh) instead of one static pair.
+			if vault.IsOAuth(secret.Bytes()) {
+				oauthPairs, parseErr := buildOAuthPhantomPairs(name, secret, "QUIC-MITM")
+				if parseErr != nil {
+					continue
+				}
+				pairs = append(pairs, oauthPairs...)
 				continue
 			}
 			pairs = append(pairs, phantomPair{
@@ -561,21 +567,9 @@ func (q *QUICProxy) replacePhantomInBody(body []byte, pairs []phantomPair, host 
 }
 
 // stripUnboundPhantoms removes phantom tokens not bound to the destination.
+// Delegates to the shared helper.
 func (q *QUICProxy) stripUnboundPhantoms(data []byte) []byte {
-	names, _ := q.provider.List()
-	sort.Slice(names, func(i, j int) bool {
-		return len(names[i]) > len(names[j])
-	})
-	for _, name := range names {
-		phantom := []byte(PhantomToken(name))
-		if bytes.Contains(data, phantom) {
-			data = bytes.ReplaceAll(data, phantom, nil)
-		}
-	}
-	if bytes.Contains(data, phantomPrefix) {
-		data = phantomStripRe.ReplaceAll(data, nil)
-	}
-	return data
+	return stripUnboundPhantomsFromProvider(data, q.provider)
 }
 
 // logAudit writes an audit event for an HTTP/3 request if the audit logger

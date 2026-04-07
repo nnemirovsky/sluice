@@ -476,6 +476,17 @@ func (s *Server) setupInjection(cfg Config, _ net.Listener) error {
 	}
 
 	s.injector = NewInjector(cfg.Provider, &s.resolver, caCert, authToken, wsProxy)
+
+	// Populate the OAuth token URL index from credential metadata so
+	// the response handler can detect OAuth token endpoints from startup.
+	if cfg.Store != nil {
+		if metas, metaErr := cfg.Store.ListCredentialMeta(); metaErr == nil {
+			s.injector.UpdateOAuthIndex(metas)
+		} else {
+			log.Printf("[INJECT-OAUTH] failed to load credential meta for index: %v", metaErr)
+		}
+	}
+
 	injLn, injErr := net.Listen("tcp", "127.0.0.1:0")
 	if injErr != nil {
 		return fmt.Errorf("injector listener: %w", injErr)
@@ -1479,6 +1490,25 @@ func (s *Server) UpdateInspectRules(eng *policy.Engine) {
 // see the updated bindings.
 func (s *Server) StoreResolver(r *vault.BindingResolver) {
 	s.resolver.Store(r)
+}
+
+// UpdateOAuthIndex rebuilds the OAuth token URL index from credential
+// metadata. Call this after StoreResolver in the SIGHUP reload path or
+// after Telegram credential mutations so the response handler detects
+// new or removed OAuth token endpoints.
+func (s *Server) UpdateOAuthIndex(metas []store.CredentialMeta) {
+	if s.injector != nil {
+		s.injector.UpdateOAuthIndex(metas)
+	}
+}
+
+// SetPhantomDir configures the shared volume path for phantom token files
+// on the injector. When set, the async OAuth token persist goroutine writes
+// updated phantom files after vault persistence.
+func (s *Server) SetPhantomDir(dir string) {
+	if s.injector != nil {
+		s.injector.SetPhantomDir(dir)
+	}
 }
 
 // EnginePtr returns the shared atomic engine pointer. The Telegram command

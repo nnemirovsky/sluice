@@ -56,8 +56,9 @@ type CommandHandler struct {
 	vault        *vault.Store
 	containerMgr container.ContainerManager
 	store        *store.Store
-	phantomDir   string                   // shared volume path for phantom token files
-	onEngineSwap func(eng *policy.Engine) // called after engine swap to update dependent state
+	phantomDir           string                   // shared volume path for phantom token files
+	onEngineSwap         func(eng *policy.Engine) // called after engine swap to update dependent state
+	onOAuthIndexRebuild  func()                   // called after credential removal to rebuild proxy OAuth index
 }
 
 // SetVault enables credential management commands.
@@ -90,6 +91,12 @@ func (h *CommandHandler) SetResolverPtr(ptr *atomic.Pointer[vault.BindingResolve
 // dependent state (e.g. content inspection rules) can be updated.
 func (h *CommandHandler) SetOnEngineSwap(fn func(eng *policy.Engine)) {
 	h.onEngineSwap = fn
+}
+
+// SetOnOAuthIndexRebuild sets a callback invoked after credential removal
+// to rebuild the proxy's OAuth token URL index.
+func (h *CommandHandler) SetOnOAuthIndexRebuild(fn func()) {
+	h.onOAuthIndexRebuild = fn
 }
 
 // SetBroker sets the channel broker for status reporting.
@@ -488,6 +495,10 @@ func (h *CommandHandler) credRemove(name string) string {
 			log.Printf("[WARN] remove bindings for credential %q: %v", name, err)
 			warnings = append(warnings, fmt.Sprintf("failed to remove bindings: %v", err))
 		}
+		if _, err := h.store.RemoveCredentialMeta(name); err != nil {
+			log.Printf("[WARN] remove credential meta for %q: %v", name, err)
+			warnings = append(warnings, fmt.Sprintf("failed to remove credential meta: %v", err))
+		}
 		// Recompile engine so removed allow rules take effect immediately.
 		if err := h.recompileAndSwap(); err != nil {
 			log.Printf("[WARN] recompile after cred remove failed: %v", err)
@@ -497,6 +508,11 @@ func (h *CommandHandler) credRemove(name string) string {
 		if err := h.rebuildResolver(); err != nil {
 			log.Printf("[WARN] rebuild resolver after cred remove failed: %v", err)
 			warnings = append(warnings, fmt.Sprintf("resolver rebuild failed: %v", err))
+		}
+		// Rebuild OAuth index so the proxy stops intercepting responses for
+		// the deleted credential's token URL.
+		if h.onOAuthIndexRebuild != nil {
+			h.onOAuthIndexRebuild()
 		}
 	}
 
@@ -520,12 +536,22 @@ func (h *CommandHandler) credMutationComplete(msg string, removedCreds ...string
 		return msg + "\nWarning: failed to list credentials for container update: " + err.Error()
 	}
 
-	phantomEnv := vault.GeneratePhantomEnv(names)
+	phantomEnv := vault.GeneratePhantomEnv(names, h.vault)
 	// Mark removed credentials with empty values so they are cleaned up.
+	// For OAuth credentials the removal must cover both _ACCESS and _REFRESH files.
 	for _, removed := range removedCreds {
 		envVar := vault.CredNameToEnvVar(removed)
 		if _, exists := phantomEnv[envVar]; !exists {
 			phantomEnv[envVar] = ""
+		}
+		// Also clean up OAuth phantom files in case the removed credential was OAuth.
+		accessKey := envVar + "_ACCESS"
+		refreshKey := envVar + "_REFRESH"
+		if _, exists := phantomEnv[accessKey]; !exists {
+			phantomEnv[accessKey] = ""
+		}
+		if _, exists := phantomEnv[refreshKey]; !exists {
+			phantomEnv[refreshKey] = ""
 		}
 	}
 

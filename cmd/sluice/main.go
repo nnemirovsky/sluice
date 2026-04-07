@@ -329,6 +329,21 @@ func main() {
 		log.Fatalf("start proxy: %v", err)
 	}
 
+	// Configure phantom dir on the proxy's injector so the async OAuth
+	// token persist goroutine writes updated phantom files.
+	if *phantomDir != "" {
+		srv.SetPhantomDir(*phantomDir)
+	}
+
+	// Populate the initial OAuth token URL index at startup so response
+	// interception works for credentials added before the first SIGHUP.
+	if db != nil {
+		if metas, metaErr := db.ListCredentialMeta(); metaErr == nil && len(metas) > 0 {
+			srv.UpdateOAuthIndex(metas)
+			log.Printf("oauth index initialized: %d entries", len(metas))
+		}
+	}
+
 	// Inject the MITM CA certificate into the agent container/VM so TLS
 	// interception is trusted. The CA cert is created by proxy.New above.
 	// Docker handles this via compose volumes so InjectCACert is a no-op.
@@ -364,6 +379,17 @@ func main() {
 			Store:        db,
 			PhantomDir:   *phantomDir,
 			OnEngineSwap: srv.UpdateInspectRules,
+			OnOAuthIndexRebuild: func() {
+				if db == nil {
+					return
+				}
+				metas, err := db.ListCredentialMeta()
+				if err != nil {
+					log.Printf("[WARN] list credential meta for OAuth index rebuild: %v", err)
+					return
+				}
+				srv.UpdateOAuthIndex(metas)
+			},
 		})
 		if channelErr != nil {
 			log.Fatalf("telegram channel: %v", channelErr)
@@ -570,6 +596,14 @@ func main() {
 				}
 			} else if len(newBindings) == 0 {
 				srv.StoreResolver(nil)
+			}
+
+			// Rebuild OAuth token URL index so response interception picks
+			// up credentials added via CLI or Telegram since last reload.
+			if metas, metaErr := db.ListCredentialMeta(); metaErr == nil {
+				srv.UpdateOAuthIndex(metas)
+			} else {
+				log.Printf("reload oauth index failed: %v", metaErr)
 			}
 
 			// Warn if the reloaded policy has ask rules but no approval

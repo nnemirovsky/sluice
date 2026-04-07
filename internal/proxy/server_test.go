@@ -3706,3 +3706,86 @@ func TestHandleServerFirstDetectionNoData(t *testing.T) {
 		t.Fatal("handleServerFirstDetection did not return")
 	}
 }
+
+func TestServerSetPhantomDir(t *testing.T) {
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	vs, vsErr := vault.NewStore(dir)
+	if vsErr != nil {
+		t.Fatal(vsErr)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Provider:   vs,
+		VaultDir:   dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	// SetPhantomDir should not panic even if injector is nil (no bindings).
+	srv.SetPhantomDir("/tmp/phantoms")
+
+	// When injector is present, it should set the phantomDir.
+	if srv.injector != nil {
+		if srv.injector.phantomDir != "/tmp/phantoms" {
+			t.Errorf("phantomDir = %q, want /tmp/phantoms", srv.injector.phantomDir)
+		}
+	}
+}
+
+func TestServerUpdateOAuthIndexNoInjector(t *testing.T) {
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	// Should not panic when injector is nil.
+	srv.UpdateOAuthIndex([]store.CredentialMeta{
+		{Name: "test", CredType: "oauth", TokenURL: "https://example.com/token"},
+	})
+}
+
+func TestServerSetPhantomDirNoInjector(t *testing.T) {
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	// Should not panic when injector is nil.
+	srv.SetPhantomDir("/tmp/phantoms")
+}

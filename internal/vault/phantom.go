@@ -3,6 +3,9 @@ package vault
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -41,13 +44,52 @@ func CredNameToEnvVar(name string) string {
 
 // GeneratePhantomEnv generates phantom token environment variables for all
 // given credential names. Returns a map of ENV_VAR_NAME to phantom value.
-func GeneratePhantomEnv(credNames []string) map[string]string {
-	result := make(map[string]string, len(credNames))
+// If a provider is given, OAuth credentials produce two entries
+// (CRED_ACCESS and CRED_REFRESH) instead of one.
+func GeneratePhantomEnv(credNames []string, providers ...Provider) map[string]string {
+	result := make(map[string]string, len(credNames)*2)
+	var prov Provider
+	if len(providers) > 0 {
+		prov = providers[0]
+	}
 	for _, name := range credNames {
+		if prov != nil {
+			secret, err := prov.Get(name)
+			if err == nil {
+				if IsOAuth(secret.Bytes()) {
+					secret.Release()
+					envBase := CredNameToEnvVar(name)
+					result[envBase+"_ACCESS"] = GeneratePhantomToken(name)
+					result[envBase+"_REFRESH"] = GeneratePhantomToken(name)
+					continue
+				}
+				secret.Release()
+			}
+		}
 		envVar := CredNameToEnvVar(name)
 		result[envVar] = GeneratePhantomToken(name)
 	}
 	return result
+}
+
+// WriteOAuthPhantoms writes two phantom token files for an OAuth credential
+// to the given directory: CRED_ACCESS and CRED_REFRESH. The file content is
+// a format-matching phantom token generated via GeneratePhantomToken.
+// This is called from the async goroutine in the response handler after
+// vault persistence so the agent container picks up refreshed phantom values.
+func WriteOAuthPhantoms(dir string, name string) error {
+	envBase := CredNameToEnvVar(name)
+	files := map[string]string{
+		envBase + "_ACCESS":  GeneratePhantomToken(name),
+		envBase + "_REFRESH": GeneratePhantomToken(name),
+	}
+	for fname, value := range files {
+		path := filepath.Join(dir, fname)
+		if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+			return fmt.Errorf("write oauth phantom file %s: %w", fname, err)
+		}
+	}
+	return nil
 }
 
 func randomHex(n int) string {

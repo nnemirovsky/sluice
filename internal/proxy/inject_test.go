@@ -1145,3 +1145,380 @@ func TestWSMITM_ContentRedaction(t *testing.T) {
 
 	sendCloseFrame(wsConn, 1000, "done")
 }
+
+func TestOAuthPhantomSwapAccessTokenInBody(t *testing.T) {
+	// OAuth phantom access token in request body should be swapped
+	// to the real access token from the vault.
+	var mu sync.Mutex
+	var receivedBody string
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		receivedBody = string(body)
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	bindings := []vault.Binding{{
+		Destination: backendURL.Hostname(),
+		Credential:  "openai_oauth",
+	}}
+
+	inj, vaultStore := setupTestInjector(t, bindings)
+
+	// Store OAuth credential in vault.
+	oauthCred := &vault.OAuthCredential{
+		AccessToken:  "real-access-token-xyz",
+		RefreshToken: "real-refresh-token-abc",
+		TokenURL:     "https://auth.example.com/oauth/token",
+	}
+	data, err := oauthCred.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vaultStore.Add("openai_oauth", string(data)); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyServer := httptest.NewServer(inj.Proxy)
+	defer proxyServer.Close()
+
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+
+	accessPhantom := oauthPhantomAccess("openai_oauth")
+	bodyStr := `{"token": "` + accessPhantom + `"}`
+	req, _ := http.NewRequest("POST", backend.URL+"/api/chat", strings.NewReader(bodyStr))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if strings.Contains(receivedBody, accessPhantom) {
+		t.Error("OAuth access phantom token was not replaced in body")
+	}
+	expectedBody := `{"token": "real-access-token-xyz"}`
+	if receivedBody != expectedBody {
+		t.Errorf("expected %q, got %q", expectedBody, receivedBody)
+	}
+}
+
+func TestOAuthPhantomSwapRefreshTokenInBody(t *testing.T) {
+	// OAuth phantom refresh token in request body should be swapped
+	// to the real refresh token from the vault.
+	var mu sync.Mutex
+	var receivedBody string
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		receivedBody = string(body)
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	bindings := []vault.Binding{{
+		Destination: backendURL.Hostname(),
+		Credential:  "openai_oauth",
+	}}
+
+	inj, vaultStore := setupTestInjector(t, bindings)
+
+	oauthCred := &vault.OAuthCredential{
+		AccessToken:  "real-access-token-xyz",
+		RefreshToken: "real-refresh-token-abc",
+		TokenURL:     "https://auth.example.com/oauth/token",
+	}
+	data, err := oauthCred.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vaultStore.Add("openai_oauth", string(data)); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyServer := httptest.NewServer(inj.Proxy)
+	defer proxyServer.Close()
+
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+
+	refreshPhantom := oauthPhantomRefresh("openai_oauth")
+	bodyStr := `grant_type=refresh_token&refresh_token=` + refreshPhantom
+	req, _ := http.NewRequest("POST", backend.URL+"/oauth/token", strings.NewReader(bodyStr))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if strings.Contains(receivedBody, refreshPhantom) {
+		t.Error("OAuth refresh phantom token was not replaced in body")
+	}
+	expectedBody := `grant_type=refresh_token&refresh_token=real-refresh-token-abc`
+	if receivedBody != expectedBody {
+		t.Errorf("expected %q, got %q", expectedBody, receivedBody)
+	}
+}
+
+func TestOAuthPhantomSwapInHeaders(t *testing.T) {
+	// OAuth phantom access token in Authorization header should be swapped.
+	var mu sync.Mutex
+	var received http.Header
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		received = r.Header.Clone()
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	bindings := []vault.Binding{{
+		Destination: backendURL.Hostname(),
+		Credential:  "my_oauth",
+	}}
+
+	inj, vaultStore := setupTestInjector(t, bindings)
+
+	oauthCred := &vault.OAuthCredential{
+		AccessToken:  "real-access-hdr",
+		RefreshToken: "real-refresh-hdr",
+		TokenURL:     "https://auth.example.com/token",
+	}
+	data, err := oauthCred.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vaultStore.Add("my_oauth", string(data)); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyServer := httptest.NewServer(inj.Proxy)
+	defer proxyServer.Close()
+
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+
+	accessPhantom := oauthPhantomAccess("my_oauth")
+	req, _ := http.NewRequest("GET", backend.URL+"/api/data", nil)
+	req.Header.Set("Authorization", "Bearer "+accessPhantom)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	auth := received.Get("Authorization")
+	if strings.Contains(auth, accessPhantom) {
+		t.Error("OAuth access phantom was not replaced in Authorization header")
+	}
+	if auth != "Bearer real-access-hdr" {
+		t.Errorf("expected 'Bearer real-access-hdr', got %q", auth)
+	}
+}
+
+func TestMixedStaticAndOAuthCredentials(t *testing.T) {
+	// Request with both static and OAuth phantom tokens. Both types should
+	// be replaced when bound to the same destination.
+	var mu sync.Mutex
+	var receivedBody string
+	var receivedHeaders http.Header
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		receivedBody = string(body)
+		receivedHeaders = r.Header.Clone()
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+	bindings := []vault.Binding{
+		{Destination: backendURL.Hostname(), Credential: "static_key"},
+		{Destination: backendURL.Hostname(), Credential: "oauth_cred"},
+	}
+
+	inj, vaultStore := setupTestInjector(t, bindings)
+
+	// Add static credential.
+	if _, err := vaultStore.Add("static_key", "sk-static-real-value"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add OAuth credential.
+	oauthCred := &vault.OAuthCredential{
+		AccessToken:  "real-oauth-access",
+		RefreshToken: "real-oauth-refresh",
+		TokenURL:     "https://auth.example.com/token",
+	}
+	data, err := oauthCred.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vaultStore.Add("oauth_cred", string(data)); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyServer := httptest.NewServer(inj.Proxy)
+	defer proxyServer.Close()
+
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+
+	staticPhantom := PhantomToken("static_key")
+	oauthAccessPhantom := oauthPhantomAccess("oauth_cred")
+	oauthRefreshPhantom := oauthPhantomRefresh("oauth_cred")
+
+	bodyStr := `{"api_key": "` + staticPhantom + `", "access": "` + oauthAccessPhantom + `", "refresh": "` + oauthRefreshPhantom + `"}`
+	req, _ := http.NewRequest("POST", backend.URL+"/mixed", strings.NewReader(bodyStr))
+	req.Header.Set("X-Access", oauthAccessPhantom)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Static phantom replaced.
+	if strings.Contains(receivedBody, staticPhantom) {
+		t.Error("static phantom token leaked in body")
+	}
+	// OAuth access phantom replaced.
+	if strings.Contains(receivedBody, oauthAccessPhantom) {
+		t.Error("OAuth access phantom leaked in body")
+	}
+	// OAuth refresh phantom replaced.
+	if strings.Contains(receivedBody, oauthRefreshPhantom) {
+		t.Error("OAuth refresh phantom leaked in body")
+	}
+
+	expectedBody := `{"api_key": "sk-static-real-value", "access": "real-oauth-access", "refresh": "real-oauth-refresh"}`
+	if receivedBody != expectedBody {
+		t.Errorf("body: expected %q, got %q", expectedBody, receivedBody)
+	}
+
+	// Header should also be swapped.
+	xAccess := receivedHeaders.Get("X-Access")
+	if xAccess != "real-oauth-access" {
+		t.Errorf("X-Access header: expected 'real-oauth-access', got %q", xAccess)
+	}
+}
+
+func TestUnboundOAuthPhantomTokensAreStripped(t *testing.T) {
+	// OAuth phantom tokens for unbound credentials should be stripped
+	// (not replaced with real values) to prevent exfiltration.
+	var mu sync.Mutex
+	var receivedBody string
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		receivedBody = string(body)
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer backend.Close()
+
+	// No bindings for the backend host.
+	inj, vaultStore := setupTestInjector(t, nil)
+
+	// Add OAuth credential (not bound to this destination).
+	oauthCred := &vault.OAuthCredential{
+		AccessToken:  "real-oauth-secret",
+		RefreshToken: "real-oauth-refresh-secret",
+		TokenURL:     "https://auth.example.com/token",
+	}
+	data, err := oauthCred.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vaultStore.Add("unbound_oauth", string(data)); err != nil {
+		t.Fatal(err)
+	}
+
+	proxyServer := httptest.NewServer(inj.Proxy)
+	defer proxyServer.Close()
+
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+
+	accessPhantom := oauthPhantomAccess("unbound_oauth")
+	refreshPhantom := oauthPhantomRefresh("unbound_oauth")
+
+	bodyStr := `{"access": "` + accessPhantom + `", "refresh": "` + refreshPhantom + `"}`
+	req, _ := http.NewRequest("POST", backend.URL+"/test", strings.NewReader(bodyStr))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Phantom tokens must be stripped.
+	if strings.Contains(receivedBody, accessPhantom) {
+		t.Error("unbound OAuth access phantom leaked in body")
+	}
+	if strings.Contains(receivedBody, refreshPhantom) {
+		t.Error("unbound OAuth refresh phantom leaked in body")
+	}
+	// Real tokens must NOT appear.
+	if strings.Contains(receivedBody, "real-oauth-secret") {
+		t.Error("real OAuth access token leaked to unbound host")
+	}
+	if strings.Contains(receivedBody, "real-oauth-refresh-secret") {
+		t.Error("real OAuth refresh token leaked to unbound host")
+	}
+	// Stripped tokens should leave empty strings.
+	expectedBody := `{"access": "", "refresh": ""}`
+	if receivedBody != expectedBody {
+		t.Errorf("expected %q, got %q", expectedBody, receivedBody)
+	}
+}

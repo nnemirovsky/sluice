@@ -73,7 +73,8 @@ sluice mcp list
 sluice mcp remove <name>
 sluice mcp                          # start MCP gateway
 
-sluice cred add <name> [--destination host] [--ports 443] [--header Authorization] [--template "Bearer {value}"]
+sluice cred add <name> [--type static|oauth] [--destination host] [--ports 443] [--header Authorization] [--template "Bearer {value}"]
+sluice cred add <name> --type oauth --token-url <url> --destination <host> --ports 443
 sluice cred list
 sluice cred remove <name>
 
@@ -83,13 +84,15 @@ sluice audit verify                 # verify audit log hash chain integrity
 
 When `--destination` is provided, `sluice cred add` also creates an allow rule and binding in the store. For HTTP/WebSocket upstreams, `--command` holds the URL. Env values prefixed with `vault:` are resolved from the credential vault at upstream spawn time.
 
+Two credential types: `static` (default) for API keys and `oauth` for OAuth access/refresh token pairs. OAuth credentials prompt for tokens via stdin (not CLI flags) to avoid shell history exposure.
+
 ## Policy Store
 
 All runtime policy state in SQLite (default: `sluice.db`). TOML files for initial seeding only via `sluice policy import`. See `examples/config.toml` for the full seed format.
 
 Rules use `[[allow]]`/`[[deny]]`/`[[ask]]`/`[[redact]]` sections. Each entry carries exactly one of: `destination` (network), `tool` (MCP), or `pattern` (content inspection). The `rules` table uses a CHECK constraint enforcing mutual exclusivity of these columns. Import uses merge semantics (skip duplicates).
 
-Store uses `modernc.org/sqlite` (pure Go, no CGO), WAL mode, `golang-migrate` for schema. 5 tables: `rules`, `config`, `bindings`, `mcp_upstreams`, `channels`.
+Store uses `modernc.org/sqlite` (pure Go, no CGO), WAL mode, `golang-migrate` for schema. 6 tables: `rules`, `config`, `bindings`, `mcp_upstreams`, `channels`, `credential_meta`.
 
 ## Credential Injection: Phantom Token Swap
 
@@ -103,6 +106,27 @@ Store uses `modernc.org/sqlite` (pure Go, no CGO), WAL mode, `golang-migrate` fo
 Three-pass injection in MITM: (1) binding-specific header injection, (2) scoped phantom replacement for bound credentials only (prevents cross-credential exfiltration), (3) strip unbound phantom tokens as safety net.
 
 All HTTPS connections are MITMed (not just those with bindings) so phantom tokens can never leak upstream. `SecureBytes.Release()` zeroes credentials immediately after injection.
+
+### OAuth dynamic phantom swap
+
+Extends phantom swap to handle OAuth credentials bidirectionally. Static credentials are request-only (phantom -> real). OAuth credentials add response-side interception for transparent token lifecycle management.
+
+**Request side:** OAuth credentials produce two phantom pairs. `SLUICE_PHANTOM:cred.access` and `SLUICE_PHANTOM:cred.refresh` are swapped to real tokens in outbound requests. Works alongside static phantom pairs in the same three-pass injection.
+
+**Response side:** When an OAuth token endpoint returns new tokens, sluice intercepts the response. Real tokens are replaced with deterministic phantoms before the response reaches the agent. Vault is updated asynchronously. If the vault write fails, the agent still receives phantom tokens (not real ones). The next refresh cycle corrects the state.
+
+**Concurrent refresh protection:** `singleflight` keyed on credential name deduplicates async vault writes when multiple requests trigger simultaneous token refreshes. Each response is independently processed (phantom swap happens per-response), but vault persistence is deduplicated.
+
+**Data model:** `credential_meta` table stores credential type and token_url. `OAuthIndex` maps token URLs to credential names for fast response matching. Both are hot-reloaded via `StoreResolver()`.
+
+**Phantom file generation:** `GeneratePhantomEnv(credNames []string, providers ...Provider)` accepts an optional `Provider` to detect OAuth credentials. When a provider is given, OAuth credentials produce two files (`CRED_ACCESS`, `CRED_REFRESH`) instead of one. Callers without a provider get static phantom files only.
+
+**Key files:**
+- `internal/vault/oauth.go` -- OAuthCredential struct, parse/marshal, token update
+- `internal/vault/phantom.go` -- `GeneratePhantomEnv`, `WriteOAuthPhantoms`
+- `internal/proxy/oauth_index.go` -- Token URL index for response matching
+- `internal/proxy/oauth_response.go` -- Response interception, phantom swap, async vault persistence
+- `internal/store/migrations/000002_credential_meta.up.sql` -- Schema for credential metadata
 
 ### Protocol-specific handling
 

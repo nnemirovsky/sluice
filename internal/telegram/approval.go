@@ -34,8 +34,9 @@ type ChannelConfig struct {
 	ContainerMgr container.ContainerManager
 	Store        *store.Store
 	PhantomDir   string
-	OnEngineSwap func(eng *policy.Engine) // called after policy mutations to update dependent state
-	APIEndpoint  string                   // custom Telegram API endpoint (for testing); empty uses default
+	OnEngineSwap        func(eng *policy.Engine) // called after policy mutations to update dependent state
+	OnOAuthIndexRebuild func()                   // called after credential removal to rebuild proxy OAuth index
+	APIEndpoint         string                   // custom Telegram API endpoint (for testing); empty uses default
 }
 
 // TelegramChannel implements channel.Channel for Telegram bot interaction.
@@ -95,6 +96,9 @@ func NewTelegramChannel(cfg ChannelConfig) (*TelegramChannel, error) {
 	}
 	if cfg.OnEngineSwap != nil {
 		cmdHandler.SetOnEngineSwap(cfg.OnEngineSwap)
+	}
+	if cfg.OnOAuthIndexRebuild != nil {
+		cmdHandler.SetOnOAuthIndexRebuild(cfg.OnOAuthIndexRebuild)
 	}
 
 	tc.commands = cmdHandler

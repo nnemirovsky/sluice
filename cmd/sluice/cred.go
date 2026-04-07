@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -124,31 +125,59 @@ func handleCredAdd(args []string) error {
 	portsStr := fs.String("ports", "", "comma-separated port list for the allow rule (e.g. 443,80)")
 	header := fs.String("header", "", "header for the binding (e.g. Authorization)")
 	template := fs.String("template", "", "template for credential injection (e.g. \"Bearer {value}\")")
+	credType := fs.String("type", "static", "credential type: static or oauth")
+	tokenURL := fs.String("token-url", "", "OAuth token endpoint URL (required when type=oauth)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	if fs.NArg() == 0 {
-		return fmt.Errorf("usage: sluice cred add <name> [--destination host] [--ports 443] [--header Authorization] [--template \"Bearer {value}\"]")
+		return fmt.Errorf("usage: sluice cred add <name> [--type static|oauth] [--token-url URL] [--destination host] [--ports 443] [--header Authorization] [--template \"Bearer {value}\"]")
 	}
 	name := fs.Arg(0)
 
-	// Read secret from terminal or stdin.
-	var secret []byte
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		fmt.Print("Enter secret: ")
-		s, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Println()
+	// Validate --type flag.
+	if *credType != "static" && *credType != "oauth" {
+		return fmt.Errorf("invalid credential type %q: must be static or oauth", *credType)
+	}
+
+	// Validate --token-url: required for oauth, forbidden for static.
+	if *credType == "oauth" {
+		if *tokenURL == "" {
+			return fmt.Errorf("--token-url is required when --type=oauth")
+		}
+		parsed, err := url.Parse(*tokenURL)
 		if err != nil {
-			return fmt.Errorf("read secret: %w", err)
+			return fmt.Errorf("invalid token URL %q: %w", *tokenURL, err)
+		}
+		if parsed.Scheme == "" || parsed.Host == "" {
+			return fmt.Errorf("invalid token URL %q: must include scheme and host (e.g. https://auth.example.com/token)", *tokenURL)
+		}
+		if parsed.Scheme != "https" && parsed.Scheme != "http" {
+			return fmt.Errorf("invalid token URL %q: scheme must be http or https", *tokenURL)
+		}
+	} else if *tokenURL != "" {
+		return fmt.Errorf("--token-url is only valid with --type=oauth")
+	}
+
+	// Read credential input from terminal or stdin.
+	var secret []byte
+	if *credType == "oauth" {
+		oauthCred, err := readOAuthCredentialInput(*tokenURL)
+		if err != nil {
+			return err
+		}
+		data, marshalErr := oauthCred.Marshal()
+		if marshalErr != nil {
+			return fmt.Errorf("marshal oauth credential: %w", marshalErr)
+		}
+		secret = data
+	} else {
+		s, err := readStaticSecretInput()
+		if err != nil {
+			return err
 		}
 		secret = s
-	} else {
-		scanner := bufio.NewScanner(os.Stdin)
-		if !scanner.Scan() {
-			return fmt.Errorf("read secret from stdin: no input")
-		}
-		secret = []byte(strings.TrimRight(scanner.Text(), "\r\n"))
 	}
 
 	// Validate --destination inputs and open the DB before persisting
@@ -156,7 +185,7 @@ func handleCredAdd(args []string) error {
 	// when the glob pattern is invalid, a port is out of range, or the
 	// DB path is unreachable.
 	var ports []int
-	var db *store.Store
+
 	if *destination != "" {
 		if _, err := policy.CompileGlob(*destination); err != nil {
 			return fmt.Errorf("invalid destination pattern %q: %w", *destination, err)
@@ -175,14 +204,13 @@ func handleCredAdd(args []string) error {
 				ports = append(ports, p)
 			}
 		}
-
-		var err error
-		db, err = store.New(*dbPath)
-		if err != nil {
-			return fmt.Errorf("open store: %w", err)
-		}
-		defer func() { _ = db.Close() }()
 	}
+
+	db, err := store.New(*dbPath)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer func() { _ = db.Close() }()
 
 	// Inputs validated and DB is open. Now persist the credential.
 	vs, err := openVaultStore(*dbPath)
@@ -194,12 +222,10 @@ func handleCredAdd(args []string) error {
 	// after a DB failure. This prevents losing a previously working secret
 	// when overwriting it and then hitting a transient DB error.
 	var prevCiphertext []byte
-	if db != nil {
-		var readErr error
-		prevCiphertext, readErr = vs.ReadRawCredential(name)
-		if readErr != nil {
-			return fmt.Errorf("backup existing credential %q before overwrite: %w", name, readErr)
-		}
+	var readErr error
+	prevCiphertext, readErr = vs.ReadRawCredential(name)
+	if readErr != nil {
+		return fmt.Errorf("backup existing credential %q before overwrite: %w", name, readErr)
 	}
 
 	ourCiphertext, addErr := vs.Add(name, string(secret))
@@ -210,12 +236,35 @@ func handleCredAdd(args []string) error {
 		return fmt.Errorf("add credential: %w", addErr)
 	}
 
+	// rollbackVault restores or removes the vault credential on DB failure.
+	rollbackVault := func() {
+		currentCiphertext, casErr := vs.ReadRawCredential(name)
+		concurrentWrite := casErr != nil || !bytes.Equal(currentCiphertext, ourCiphertext)
+		if concurrentWrite {
+			log.Printf("warning: credential %q was modified concurrently; skipping vault rollback", name)
+		} else if prevCiphertext != nil {
+			if restoreErr := vs.WriteRawCredential(name, prevCiphertext); restoreErr != nil {
+				log.Printf("warning: failed to restore previous credential %q after DB error: %v", name, restoreErr)
+			}
+		} else {
+			if rmErr := vs.Remove(name); rmErr != nil {
+				log.Printf("warning: failed to clean up vault credential %q after DB error: %v", name, rmErr)
+			}
+		}
+	}
+
+	// Store credential_meta for all credential types.
+	if err := db.AddCredentialMeta(name, *credType, *tokenURL); err != nil {
+		rollbackVault()
+		return fmt.Errorf("add credential meta: %w", err)
+	}
+
 	// Create rule and binding atomically. If the DB insert fails, roll back
 	// the vault change: restore the previous ciphertext if overwriting, or
 	// remove the new file if the credential was brand new. Rollback uses
 	// compare-and-swap: only restore/delete if the credential still matches
 	// what we wrote, avoiding clobber of concurrent writes.
-	if db != nil {
+	if *destination != "" {
 		ruleID, bindingID, err := db.AddRuleAndBinding(
 			"allow",
 			store.RuleOpts{
@@ -232,31 +281,93 @@ func handleCredAdd(args []string) error {
 			},
 		)
 		if err != nil {
-			// Compare-and-swap: only rollback if the credential file still
-			// contains what we wrote. If a concurrent writer changed it,
-			// leave their value in place.
-			currentCiphertext, casErr := vs.ReadRawCredential(name)
-			concurrentWrite := casErr != nil || !bytes.Equal(currentCiphertext, ourCiphertext)
-			if concurrentWrite {
-				log.Printf("warning: credential %q was modified concurrently; skipping vault rollback", name)
-			} else if prevCiphertext != nil {
-				if restoreErr := vs.WriteRawCredential(name, prevCiphertext); restoreErr != nil {
-					log.Printf("warning: failed to restore previous credential %q after DB error: %v", name, restoreErr)
-				}
-			} else {
-				if rmErr := vs.Remove(name); rmErr != nil {
-					log.Printf("warning: failed to clean up vault credential %q after DB error: %v", name, rmErr)
-				}
+			// Also clean up credential_meta if it was just created.
+			if _, rmErr := db.RemoveCredentialMeta(name); rmErr != nil {
+				log.Printf("warning: failed to remove credential meta for %q after rule/binding error: %v", name, rmErr)
 			}
+			rollbackVault()
 			return fmt.Errorf("add rule and binding: %w", err)
 		}
-		fmt.Printf("credential %q added\n", name)
+		fmt.Printf("credential %q added (type: %s)\n", name, *credType)
 		fmt.Printf("added allow rule [%d] for %s\n", ruleID, *destination)
 		fmt.Printf("added binding [%d] %s -> %s\n", bindingID, *destination, name)
 	} else {
-		fmt.Printf("credential %q added\n", name)
+		fmt.Printf("credential %q added (type: %s)\n", name, *credType)
 	}
+
+	// Report OAuth phantom env var names so the operator knows what the
+	// agent container will see after secrets are reloaded.
+	if *credType == "oauth" {
+		envAccess := vault.CredNameToEnvVar(name) + "_ACCESS"
+		envRefresh := vault.CredNameToEnvVar(name) + "_REFRESH"
+		fmt.Printf("oauth phantom env vars: %s, %s\n", envAccess, envRefresh)
+	}
+
 	return nil
+}
+
+// readStaticSecretInput reads a single secret value from terminal or stdin.
+func readStaticSecretInput() ([]byte, error) {
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Print("Enter secret: ")
+		s, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println()
+		if err != nil {
+			return nil, fmt.Errorf("read secret: %w", err)
+		}
+		return s, nil
+	}
+	scanner := bufio.NewScanner(os.Stdin)
+	if !scanner.Scan() {
+		return nil, fmt.Errorf("read secret from stdin: no input")
+	}
+	return []byte(strings.TrimRight(scanner.Text(), "\r\n")), nil
+}
+
+// readOAuthCredentialInput reads access token and optional refresh token from
+// terminal or stdin and builds an OAuthCredential. When reading from stdin
+// (piped input), it expects one or two lines: access token, then optional
+// refresh token.
+func readOAuthCredentialInput(tokenURL string) (*vault.OAuthCredential, error) {
+	var accessToken, refreshToken string
+
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Print("Enter access token: ")
+		at, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println()
+		if err != nil {
+			return nil, fmt.Errorf("read access token: %w", err)
+		}
+		accessToken = string(at)
+
+		fmt.Print("Enter refresh token (press Enter to skip): ")
+		rt, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println()
+		if err != nil {
+			return nil, fmt.Errorf("read refresh token: %w", err)
+		}
+		refreshToken = string(rt)
+	} else {
+		scanner := bufio.NewScanner(os.Stdin)
+		if !scanner.Scan() {
+			return nil, fmt.Errorf("read access token from stdin: no input")
+		}
+		accessToken = strings.TrimRight(scanner.Text(), "\r\n")
+		if scanner.Scan() {
+			refreshToken = strings.TrimRight(scanner.Text(), "\r\n")
+		}
+	}
+
+	if accessToken == "" {
+		return nil, fmt.Errorf("access token is required for oauth credentials")
+	}
+
+	cred := &vault.OAuthCredential{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		TokenURL:     tokenURL,
+	}
+	return cred, nil
 }
 
 func handleCredList(args []string) error {
@@ -279,8 +390,9 @@ func handleCredList(args []string) error {
 		return nil
 	}
 
-	// Try to open the store to show binding info. Skip if DB doesn't exist
-	// to avoid creating files as a side effect of a read-only operation.
+	// Try to open the store to show binding info and credential type.
+	// Skip if DB doesn't exist to avoid creating files as a side effect
+	// of a read-only operation.
 	if _, statErr := os.Stat(*dbPath); statErr != nil {
 		if !os.IsNotExist(statErr) {
 			fmt.Fprintf(os.Stderr, "warning: cannot access database %s: %v\n", *dbPath, statErr)
@@ -300,10 +412,25 @@ func handleCredList(args []string) error {
 	}
 	defer func() { _ = db.Close() }()
 
+	// Build a lookup map from credential_meta for type information.
+	metaMap := make(map[string]*store.CredentialMeta)
+	metas, metaErr := db.ListCredentialMeta()
+	if metaErr == nil {
+		for i := range metas {
+			metaMap[metas[i].Name] = &metas[i]
+		}
+	}
+
 	for _, n := range names {
+		// Determine credential type from metadata.
+		ct := "static"
+		if meta, ok := metaMap[n]; ok {
+			ct = meta.CredType
+		}
+
 		bindings, bErr := db.ListBindingsByCredential(n)
 		if bErr != nil || len(bindings) == 0 {
-			fmt.Println(n)
+			fmt.Printf("%s [%s]\n", n, ct)
 			continue
 		}
 		for _, b := range bindings {
@@ -323,7 +450,7 @@ func handleCredList(args []string) error {
 			if b.Template != "" {
 				tmpl = " template=" + b.Template
 			}
-			fmt.Printf("%s -> %s%s%s%s\n", n, b.Destination, ports, hdr, tmpl)
+			fmt.Printf("%s [%s] -> %s%s%s%s\n", n, ct, b.Destination, ports, hdr, tmpl)
 		}
 	}
 	return nil
@@ -390,6 +517,14 @@ func handleCredRemove(args []string) error {
 			log.Printf("warning: failed to remove bindings for %q: %v", name, rmBindErr)
 		} else if removed > 0 {
 			fmt.Printf("removed %d binding(s) for %q\n", removed, name)
+		}
+
+		// Remove credential metadata (type, token_url).
+		metaDeleted, rmMetaErr := db.RemoveCredentialMeta(name)
+		if rmMetaErr != nil {
+			log.Printf("warning: failed to remove credential meta for %q: %v", name, rmMetaErr)
+		} else if metaDeleted {
+			fmt.Printf("removed credential metadata for %q\n", name)
 		}
 	}
 	return nil

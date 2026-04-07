@@ -1378,6 +1378,463 @@ func TestDeleteApiCredentials_NotFound(t *testing.T) {
 	}
 }
 
+// --- OAuth credential tests ---
+
+func TestPostApiCredentials_OAuthSuccess(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{
+		"name": "openai_oauth",
+		"type": "oauth",
+		"token_url": "https://auth0.openai.com/oauth/token",
+		"access_token": "real-access-token-123",
+		"refresh_token": "real-refresh-token-456",
+		"destination": "api.openai.com",
+		"ports": [443]
+	}`
+	req := httptest.NewRequest("POST", "/api/credentials", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var cred api.Credential
+	if err := json.NewDecoder(rec.Body).Decode(&cred); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if cred.Name != "openai_oauth" {
+		t.Errorf("expected name openai_oauth, got %q", cred.Name)
+	}
+	if cred.Type == nil || string(*cred.Type) != "oauth" {
+		t.Errorf("expected type oauth, got %v", cred.Type)
+	}
+	if cred.TokenUrl == nil || *cred.TokenUrl != "https://auth0.openai.com/oauth/token" {
+		t.Errorf("expected token_url, got %v", cred.TokenUrl)
+	}
+
+	// Verify credential is in vault.
+	names, err := v.List()
+	if err != nil {
+		t.Fatalf("list vault: %v", err)
+	}
+	if len(names) != 1 || names[0] != "openai_oauth" {
+		t.Errorf("expected vault to contain openai_oauth, got %v", names)
+	}
+
+	// Verify vault content is OAuth JSON.
+	sec, err := v.Get("openai_oauth")
+	if err != nil {
+		t.Fatalf("get from vault: %v", err)
+	}
+	oauthCred, err := vault.ParseOAuth(sec.Bytes())
+	sec.Release()
+	if err != nil {
+		t.Fatalf("parse oauth: %v", err)
+	}
+	if oauthCred.AccessToken != "real-access-token-123" {
+		t.Errorf("expected access token, got %q", oauthCred.AccessToken)
+	}
+	if oauthCred.RefreshToken != "real-refresh-token-456" {
+		t.Errorf("expected refresh token, got %q", oauthCred.RefreshToken)
+	}
+	if oauthCred.TokenURL != "https://auth0.openai.com/oauth/token" {
+		t.Errorf("expected token url, got %q", oauthCred.TokenURL)
+	}
+
+	// Verify credential_meta was created.
+	meta, err := st.GetCredentialMeta("openai_oauth")
+	if err != nil {
+		t.Fatalf("get meta: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("expected credential meta to exist")
+	}
+	if meta.CredType != "oauth" {
+		t.Errorf("expected cred_type oauth, got %q", meta.CredType)
+	}
+	if meta.TokenURL != "https://auth0.openai.com/oauth/token" {
+		t.Errorf("expected token_url, got %q", meta.TokenURL)
+	}
+
+	// Verify binding was created.
+	bindings, err := st.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if bindings[0].Credential != "openai_oauth" {
+		t.Errorf("expected credential openai_oauth, got %q", bindings[0].Credential)
+	}
+}
+
+func TestPostApiCredentials_OAuthMissingAccessToken(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{
+		"name": "bad_oauth",
+		"type": "oauth",
+		"token_url": "https://auth.example.com/token"
+	}`
+	req := httptest.NewRequest("POST", "/api/credentials", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPostApiCredentials_OAuthMissingTokenURL(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{
+		"name": "bad_oauth",
+		"type": "oauth",
+		"access_token": "some-token"
+	}`
+	req := httptest.NewRequest("POST", "/api/credentials", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPostApiCredentials_OAuthNoRefreshToken(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{
+		"name": "oauth_no_refresh",
+		"type": "oauth",
+		"token_url": "https://auth.example.com/token",
+		"access_token": "access-only"
+	}`
+	req := httptest.NewRequest("POST", "/api/credentials", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify vault content has no refresh token.
+	sec, err := v.Get("oauth_no_refresh")
+	if err != nil {
+		t.Fatalf("get from vault: %v", err)
+	}
+	oauthCred, err := vault.ParseOAuth(sec.Bytes())
+	sec.Release()
+	if err != nil {
+		t.Fatalf("parse oauth: %v", err)
+	}
+	if oauthCred.RefreshToken != "" {
+		t.Errorf("expected empty refresh token, got %q", oauthCred.RefreshToken)
+	}
+}
+
+func TestGetApiCredentials_WithType(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	// Add a static credential.
+	if _, err := v.Add("github_pat", "ghp_xxx"); err != nil {
+		t.Fatalf("add static: %v", err)
+	}
+	if err := st.AddCredentialMeta("github_pat", "static", ""); err != nil {
+		t.Fatalf("add meta static: %v", err)
+	}
+
+	// Add an OAuth credential.
+	oauthJSON := `{"access_token":"at","refresh_token":"rt","token_url":"https://auth.example.com/token"}`
+	if _, err := v.Add("openai_oauth", oauthJSON); err != nil {
+		t.Fatalf("add oauth: %v", err)
+	}
+	if err := st.AddCredentialMeta("openai_oauth", "oauth", "https://auth.example.com/token"); err != nil {
+		t.Fatalf("add meta oauth: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("GET", "/api/credentials", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var creds []api.Credential
+	if err := json.NewDecoder(rec.Body).Decode(&creds); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(creds) != 2 {
+		t.Fatalf("expected 2 credentials, got %d", len(creds))
+	}
+
+	// Build lookup by name.
+	credMap := make(map[string]api.Credential)
+	for _, c := range creds {
+		credMap[c.Name] = c
+	}
+
+	// Check static credential.
+	pat, ok := credMap["github_pat"]
+	if !ok {
+		t.Fatal("github_pat not found")
+	}
+	if pat.Type == nil || string(*pat.Type) != "static" {
+		t.Errorf("expected type static for github_pat, got %v", pat.Type)
+	}
+	if pat.TokenUrl != nil {
+		t.Errorf("expected no token_url for static credential, got %v", pat.TokenUrl)
+	}
+
+	// Check OAuth credential.
+	oauth, ok := credMap["openai_oauth"]
+	if !ok {
+		t.Fatal("openai_oauth not found")
+	}
+	if oauth.Type == nil || string(*oauth.Type) != "oauth" {
+		t.Errorf("expected type oauth for openai_oauth, got %v", oauth.Type)
+	}
+	if oauth.TokenUrl == nil || *oauth.TokenUrl != "https://auth.example.com/token" {
+		t.Errorf("expected token_url for oauth credential, got %v", oauth.TokenUrl)
+	}
+}
+
+func TestGetApiCredentials_NoMetaDefaultsStatic(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	// Add a credential without metadata (legacy credential).
+	if _, err := v.Add("legacy_key", "secret"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("GET", "/api/credentials", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var creds []api.Credential
+	if err := json.NewDecoder(rec.Body).Decode(&creds); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(creds) != 1 {
+		t.Fatalf("expected 1 credential, got %d", len(creds))
+	}
+	if creds[0].Type == nil || string(*creds[0].Type) != "static" {
+		t.Errorf("expected type static for legacy credential, got %v", creds[0].Type)
+	}
+}
+
+func TestDeleteApiCredentials_CascadesToMeta(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	// Add an OAuth credential with binding and meta.
+	oauthJSON := `{"access_token":"at","refresh_token":"rt","token_url":"https://auth.example.com/token"}`
+	if _, err := v.Add("oauth_cred", oauthJSON); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := st.AddCredentialMeta("oauth_cred", "oauth", "https://auth.example.com/token"); err != nil {
+		t.Fatalf("add meta: %v", err)
+	}
+	if _, err := st.AddBinding("api.example.com", "oauth_cred", store.BindingOpts{}); err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("DELETE", "/api/credentials/oauth_cred", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify credential is gone.
+	names, err := v.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("expected 0 credentials, got %v", names)
+	}
+
+	// Verify credential_meta is gone.
+	meta, err := st.GetCredentialMeta("oauth_cred")
+	if err != nil {
+		t.Fatalf("get meta: %v", err)
+	}
+	if meta != nil {
+		t.Errorf("expected credential meta to be deleted, got %+v", meta)
+	}
+
+	// Verify binding is gone.
+	bindings, err := st.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 bindings, got %d", len(bindings))
+	}
+}
+
+func TestPostApiCredentials_StaticWithMetaCreated(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	// Create a static credential (no type field means default static).
+	body := `{"name": "my_key", "value": "secret-value-123"}`
+	req := httptest.NewRequest("POST", "/api/credentials", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify credential_meta was created with static type.
+	meta, err := st.GetCredentialMeta("my_key")
+	if err != nil {
+		t.Fatalf("get meta: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("expected credential meta to exist")
+	}
+	if meta.CredType != "static" {
+		t.Errorf("expected cred_type static, got %q", meta.CredType)
+	}
+	if meta.TokenURL != "" {
+		t.Errorf("expected empty token_url for static, got %q", meta.TokenURL)
+	}
+
+	// Check response includes type.
+	var cred api.Credential
+	if err := json.NewDecoder(rec.Body).Decode(&cred); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if cred.Type == nil || string(*cred.Type) != "static" {
+		t.Errorf("expected type static in response, got %v", cred.Type)
+	}
+}
+
+func TestPostApiCredentials_StaticMissingValue(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	// Static credential without value should fail.
+	body := `{"name": "no_value"}`
+	req := httptest.NewRequest("POST", "/api/credentials", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPostApiCredentials_InvalidType(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"name": "bad_type", "type": "bogus", "value": "secret"}`
+	req := httptest.NewRequest("POST", "/api/credentials", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for unknown type, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // --- Binding handler tests ---
 
 func TestGetApiBindings_Empty(t *testing.T) {
