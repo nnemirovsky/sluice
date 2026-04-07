@@ -552,70 +552,70 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
+	// reloadAll reloads policy, bindings, and OAuth index from the database.
+	// Called by both SIGHUP handler and the SQLite data_version watcher.
+	reloadAll := func() {
+		srv.ReloadMu().Lock()
+		defer srv.ReloadMu().Unlock()
+
+		newEng, loadErr := policy.LoadFromStore(db)
+		if loadErr != nil {
+			log.Printf("reload policy failed: %v", loadErr)
+			return
+		}
+
+		if valErr := newEng.Validate(); valErr != nil {
+			log.Printf("reload policy validation failed: %v", valErr)
+			return
+		}
+
+		log.Printf("reloaded policy: %d allow, %d deny, %d ask rules (default: %s)",
+			len(newEng.AllowRules), len(newEng.DenyRules), len(newEng.AskRules), newEng.Default)
+		srv.StoreEngine(newEng)
+		srv.UpdateInspectRules(newEng)
+
+		newBindings, bindErr := readBindings(db)
+		if bindErr != nil {
+			log.Printf("reload bindings failed: %v", bindErr)
+		} else if len(newBindings) > 0 {
+			newResolver, resolveErr := vault.NewBindingResolver(newBindings)
+			if resolveErr != nil {
+				log.Printf("rebuild binding resolver failed: %v", resolveErr)
+			} else {
+				srv.StoreResolver(newResolver)
+				log.Printf("reloaded bindings: %d", len(newBindings))
+			}
+		} else if len(newBindings) == 0 {
+			srv.StoreResolver(nil)
+		}
+
+		if metas, metaErr := db.ListCredentialMeta(); metaErr == nil {
+			srv.UpdateOAuthIndex(metas)
+		} else {
+			log.Printf("reload oauth index failed: %v", metaErr)
+		}
+
+		if broker == nil && (len(newEng.AskRules) > 0 || newEng.Default == policy.Ask) {
+			log.Printf("WARNING: policy has ask rules but no approval broker is running; ask verdicts will auto-deny")
+		}
+
+	}
+
 	sighupCh := make(chan os.Signal, 1)
 	signal.Notify(sighupCh, syscall.SIGHUP)
 
 	go func() {
 		for range sighupCh {
-			srv.ReloadMu().Lock()
-
-			newEng, loadErr := policy.LoadFromStore(db)
-			if loadErr != nil {
-				log.Printf("reload policy failed: %v", loadErr)
-				drainSignals(sighupCh)
-				srv.ReloadMu().Unlock()
-				continue
-			}
-
-			// Validate the new engine before swapping to catch
-			// corrupted or incomplete compilation results.
-			if valErr := newEng.Validate(); valErr != nil {
-				log.Printf("reload policy validation failed: %v", valErr)
-				drainSignals(sighupCh)
-				srv.ReloadMu().Unlock()
-				continue
-			}
-
-			log.Printf("reloaded policy: %d allow, %d deny, %d ask rules (default: %s)",
-				len(newEng.AllowRules), len(newEng.DenyRules), len(newEng.AskRules), newEng.Default)
-			srv.StoreEngine(newEng)
-			srv.UpdateInspectRules(newEng)
-
-			// Rebuild binding resolver so credential injection picks up
-			// bindings added via CLI or Telegram since last reload.
-			newBindings, bindErr := readBindings(db)
-			if bindErr != nil {
-				log.Printf("reload bindings failed: %v", bindErr)
-			} else if len(newBindings) > 0 {
-				newResolver, resolveErr := vault.NewBindingResolver(newBindings)
-				if resolveErr != nil {
-					log.Printf("rebuild binding resolver failed: %v", resolveErr)
-				} else {
-					srv.StoreResolver(newResolver)
-					log.Printf("reloaded bindings: %d", len(newBindings))
-				}
-			} else if len(newBindings) == 0 {
-				srv.StoreResolver(nil)
-			}
-
-			// Rebuild OAuth token URL index so response interception picks
-			// up credentials added via CLI or Telegram since last reload.
-			if metas, metaErr := db.ListCredentialMeta(); metaErr == nil {
-				srv.UpdateOAuthIndex(metas)
-			} else {
-				log.Printf("reload oauth index failed: %v", metaErr)
-			}
-
-			// Warn if the reloaded policy has ask rules but no approval
-			// broker is running.
-			if broker == nil && (len(newEng.AskRules) > 0 || newEng.Default == policy.Ask) {
-				log.Printf("WARNING: policy has ask rules but no approval broker is running; ask verdicts will auto-deny")
-			}
-
+			reloadAll()
 			drainSignals(sighupCh)
-			srv.ReloadMu().Unlock()
 		}
 	}()
+
+	// Watch for database changes from external connections (CLI commands).
+	// Triggers the same reload as SIGHUP without requiring manual signals.
+	dbWatcher := store.NewWatcher(db.DB(), reloadAll)
+	dbWatcher.Start()
+	defer dbWatcher.Stop()
 
 	errCh := make(chan error, 1)
 	go func() {
