@@ -848,9 +848,9 @@ func isTartCLIAvailable() bool {
 }
 
 // startAPIServer starts the HTTP server with the generated chi router.
-// It serves /healthz (no auth), /api/* (bearer auth + channel gate), and
-// optionally /mcp (MCP Streamable HTTP, no auth) when mcpHandler is non-nil.
-func startAPIServer(addr string, apiSrv *api.Server, st *store.Store, mcpHandler http.Handler) (net.Listener, *http.Server) {
+// It serves /healthz (no auth), /api/* (bearer auth), and optionally
+// /mcp (MCP Streamable HTTP, no auth) when mcpHandler is non-nil.
+func startAPIServer(addr string, apiSrv *api.Server, _ *store.Store, mcpHandler http.Handler) (net.Listener, *http.Server) {
 	if addr == "" {
 		return nil, nil
 	}
