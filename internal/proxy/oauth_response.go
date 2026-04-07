@@ -2,6 +2,9 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,16 +18,59 @@ import (
 	"github.com/nemirovsky/sluice/internal/vault"
 )
 
-// oauthPhantomAccess returns the deterministic phantom token for an OAuth
-// credential's access token. The agent sees this value in token responses.
-func oauthPhantomAccess(credName string) string {
+// phantomSigningKey is used to re-sign JWT tokens so phantom JWTs have a
+// valid structure but cannot be used against the real API. This is a
+// fixed key because phantom JWTs only need structural validity for
+// client-side claim parsing, not cryptographic security.
+var phantomSigningKey = []byte("sluice-phantom-jwt-signing-key")
+
+// oauthPhantomAccess returns a phantom token for an OAuth access token.
+// When called without a real token (request-side, stripping), returns the
+// deterministic SLUICE_PHANTOM string. When called with a real JWT token
+// (response-side), preserves the header and payload but re-signs so the
+// token is structurally valid but useless against the real API.
+func oauthPhantomAccess(credName string, realToken ...string) string {
+	if len(realToken) > 0 && realToken[0] != "" {
+		if phantom := resignJWT(realToken[0]); phantom != "" {
+			return phantom
+		}
+	}
 	return "SLUICE_PHANTOM:" + credName + ".access"
 }
 
-// oauthPhantomRefresh returns the deterministic phantom token for an OAuth
-// credential's refresh token.
-func oauthPhantomRefresh(credName string) string {
+// oauthPhantomRefresh returns a phantom for an OAuth refresh token.
+func oauthPhantomRefresh(credName string, realToken ...string) string {
+	if len(realToken) > 0 && realToken[0] != "" {
+		if phantom := resignJWT(realToken[0]); phantom != "" {
+			return phantom
+		}
+	}
 	return "SLUICE_PHANTOM:" + credName + ".refresh"
+}
+
+// resignJWT takes a JWT string, preserves the header and payload, and
+// replaces the signature with an HMAC-SHA256 using sluice's phantom key.
+// Returns empty string if the input is not a valid 3-part JWT.
+func resignJWT(token string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	// Verify parts 0 and 1 are valid base64url.
+	if _, err := base64.RawURLEncoding.DecodeString(parts[0]); err != nil {
+		return ""
+	}
+	if _, err := base64.RawURLEncoding.DecodeString(parts[1]); err != nil {
+		return ""
+	}
+
+	// Re-sign: HMAC-SHA256(header.payload, phantomSigningKey)
+	signingInput := parts[0] + "." + parts[1]
+	mac := hmac.New(sha256.New, phantomSigningKey)
+	mac.Write([]byte(signingInput))
+	newSig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+
+	return signingInput + "." + newSig
 }
 
 // tokenResponse is the parsed result from an OAuth token endpoint. Fields
@@ -149,8 +195,8 @@ func (inj *Injector) processOAuthResponse(resp *http.Response, credName string) 
 		return resp, nil
 	}
 
-	accessPhantom := oauthPhantomAccess(credName)
-	refreshPhantom := oauthPhantomRefresh(credName)
+	accessPhantom := oauthPhantomAccess(credName, tr.AccessToken)
+	refreshPhantom := oauthPhantomRefresh(credName, tr.RefreshToken)
 
 	// Replace real tokens with phantoms in the response body.
 	// Do this as byte-level replacement so it works for both JSON and form

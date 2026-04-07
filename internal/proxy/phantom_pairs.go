@@ -25,13 +25,13 @@ func buildOAuthPhantomPairs(name string, secret vault.SecureBytes, logPrefix str
 	}
 	accessSecret := vault.NewSecureBytes(cred.AccessToken)
 	pairs := []phantomPair{{
-		phantom: []byte(oauthPhantomAccess(name)),
+		phantom: []byte(oauthPhantomAccess(name, cred.AccessToken)),
 		secret:  accessSecret,
 	}}
 	if cred.RefreshToken != "" {
 		refreshSecret := vault.NewSecureBytes(cred.RefreshToken)
 		pairs = append(pairs, phantomPair{
-			phantom: []byte(oauthPhantomRefresh(name)),
+			phantom: []byte(oauthPhantomRefresh(name, cred.RefreshToken)),
 			secret:  refreshSecret,
 		})
 	}

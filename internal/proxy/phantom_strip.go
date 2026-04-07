@@ -19,6 +19,26 @@ func stripUnboundPhantomsFromProvider(data []byte, provider vault.Provider) []by
 	// must be stripped before the base token to prevent partial matches.
 	var phantoms [][]byte
 	for _, name := range names {
+		// For OAuth credentials, load real tokens to generate the correct
+		// re-signed JWT phantoms. Fall back to deterministic phantoms if
+		// vault read fails.
+		secret, getErr := provider.Get(name)
+		if getErr == nil {
+			if vault.IsOAuth(secret.Bytes()) {
+				cred, parseErr := vault.ParseOAuth(secret.Bytes())
+				secret.Release()
+				if parseErr == nil {
+					phantoms = append(phantoms,
+						[]byte(oauthPhantomAccess(name, cred.AccessToken)),
+						[]byte(oauthPhantomRefresh(name, cred.RefreshToken)),
+						[]byte(PhantomToken(name)),
+					)
+					continue
+				}
+			} else {
+				secret.Release()
+			}
+		}
 		phantoms = append(phantoms,
 			[]byte(oauthPhantomAccess(name)),
 			[]byte(oauthPhantomRefresh(name)),
