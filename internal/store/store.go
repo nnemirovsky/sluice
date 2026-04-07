@@ -20,6 +20,11 @@ type Store struct {
 	db *sql.DB
 }
 
+// DB returns the underlying *sql.DB for use by the data_version watcher.
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
 // New opens or creates a SQLite database at the given path and runs
 // schema migrations. Use ":memory:" for an in-memory database (tests).
 func New(path string) (*Store, error) {
