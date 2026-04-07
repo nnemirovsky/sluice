@@ -21,6 +21,7 @@ type DNSInterceptor struct {
 	engine   *atomic.Pointer[policy.Engine]
 	audit    *audit.FileLogger
 	resolver string // upstream DNS resolver address (host:port)
+	reverse  *ReverseDNSCache
 }
 
 // NewDNSInterceptor creates a DNS interceptor that forwards allowed queries
@@ -37,7 +38,14 @@ func NewDNSInterceptor(engine *atomic.Pointer[policy.Engine], audit *audit.FileL
 		engine:   engine,
 		audit:    audit,
 		resolver: resolver,
+		reverse:  NewReverseDNSCache(),
 	}
+}
+
+// ReverseLookup returns the hostname for an IP if it was recently resolved
+// through this interceptor. Returns empty string if not found.
+func (d *DNSInterceptor) ReverseLookup(ip string) string {
+	return d.reverse.Lookup(ip)
 }
 
 // dnsTimeout bounds how long a single upstream DNS query can block.
@@ -253,7 +261,18 @@ func (d *DNSInterceptor) HandleQuery(query []byte) ([]byte, error) {
 		return BuildNXDOMAIN(query)
 	}
 
-	return d.forwardToResolver(query)
+	resp, fwdErr := d.forwardToResolver(query)
+	if fwdErr != nil {
+		return nil, fwdErr
+	}
+
+	// Populate reverse DNS cache from A/AAAA responses so the SOCKS5
+	// handler can recover hostnames from IP-only CONNECT requests.
+	if questions[0].Type == dnsTypeA || questions[0].Type == dnsTypeAAAA {
+		d.reverse.PopulateFromResponse(domain, resp)
+	}
+
+	return resp, nil
 }
 
 // evaluate checks the DNS domain against the policy engine. Uses

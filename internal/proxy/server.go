@@ -190,12 +190,13 @@ func (r *policyResolver) Resolve(ctx context.Context, name string) (context.Cont
 }
 
 type policyRuleSet struct {
-	engine     *atomic.Pointer[policy.Engine]
-	reloadMu   *sync.Mutex // serializes engine swaps and dynamic rule mutations
-	audit      *audit.FileLogger
-	broker     *channel.Broker
-	store      *store.Store
-	selfBypass map[string]bool // host:port addresses that bypass policy (sluice's own listeners)
+	engine         *atomic.Pointer[policy.Engine]
+	reloadMu       *sync.Mutex // serializes engine swaps and dynamic rule mutations
+	audit          *audit.FileLogger
+	broker         *channel.Broker
+	store          *store.Store
+	selfBypass     map[string]bool // host:port addresses that bypass policy (sluice's own listeners)
+	dnsInterceptor *DNSInterceptor // reverse DNS cache for IP -> hostname recovery
 }
 
 func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context.Context, bool) {
@@ -210,7 +211,21 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 	dest := req.DestAddr.FQDN
 	if dest == "" {
 		if req.DestAddr.IP != nil {
-			dest = req.DestAddr.IP.String()
+			ipStr := req.DestAddr.IP.String()
+			// Recover hostname from DNS reverse cache. tun2proxy operates
+			// at the network level and sends IP-only CONNECT requests.
+			// The DNS interceptor caches IP -> hostname mappings from
+			// responses, so we can show hostnames in approval messages
+			// and evaluate hostname-based policy rules.
+			if r.dnsInterceptor != nil {
+				if hostname := r.dnsInterceptor.ReverseLookup(ipStr); hostname != "" {
+					dest = hostname
+				} else {
+					dest = ipStr
+				}
+			} else {
+				dest = ipStr
+			}
 		} else {
 			return ctx, false
 		}
@@ -412,14 +427,14 @@ func New(cfg Config) (*Server, error) {
 		}
 	}
 
-	rules := &policyRuleSet{engine: enginePtr, reloadMu: reloadMu, audit: cfg.Audit, broker: cfg.Broker, store: cfg.Store, selfBypass: bypassSet}
-	dnsRes := &policyResolver{engine: enginePtr, audit: cfg.Audit, broker: cfg.Broker}
-	srv.rules = rules
-	srv.dnsResolver = dnsRes
-
 	// Create UDP relay and DNS interceptor for UDP ASSOCIATE sessions.
 	srv.udpRelay = NewUDPRelay(enginePtr, cfg.Audit)
 	srv.dnsInterceptor = NewDNSInterceptor(enginePtr, cfg.Audit, cfg.DNSResolver)
+
+	rules := &policyRuleSet{engine: enginePtr, reloadMu: reloadMu, audit: cfg.Audit, broker: cfg.Broker, store: cfg.Store, selfBypass: bypassSet, dnsInterceptor: srv.dnsInterceptor}
+	dnsRes := &policyResolver{engine: enginePtr, audit: cfg.Audit, broker: cfg.Broker}
+	srv.rules = rules
+	srv.dnsResolver = dnsRes
 
 	srv.socks = socks5.NewServer(
 		socks5.WithRule(rules),
