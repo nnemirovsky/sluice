@@ -57,7 +57,7 @@ services:
         condition: service_healthy
 
   openclaw:
-    image: openclaw/openclaw:latest
+    image: ghcr.io/openclaw/openclaw:latest
     restart: unless-stopped
     container_name: openclaw
     network_mode: "service:tun2proxy"
