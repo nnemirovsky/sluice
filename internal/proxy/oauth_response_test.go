@@ -61,7 +61,7 @@ func waitPersist(t *testing.T, inj *Injector, n int) {
 
 func TestInterceptOAuthResponseJSON(t *testing.T) {
 	// Token endpoint returns a JSON token response.
-	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		resp := map[string]interface{}{
 			"access_token":  "new-real-access-token-12345",
@@ -69,7 +69,7 @@ func TestInterceptOAuthResponseJSON(t *testing.T) {
 			"expires_in":    3600,
 			"token_type":    "Bearer",
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer tokenEndpoint.Close()
 
@@ -96,7 +96,7 @@ func TestInterceptOAuthResponseJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	bodyStr := string(body)
@@ -130,9 +130,9 @@ func TestInterceptOAuthResponseJSON(t *testing.T) {
 
 func TestInterceptOAuthResponseFormEncoded(t *testing.T) {
 	// Token endpoint returns a form-encoded response (per RFC 6749).
-	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/x-www-form-urlencoded")
-		fmt.Fprint(w, "access_token=form-real-access&refresh_token=form-real-refresh&expires_in=7200&token_type=bearer")
+		_, _ = fmt.Fprint(w, "access_token=form-real-access&refresh_token=form-real-refresh&expires_in=7200&token_type=bearer")
 	}))
 	defer tokenEndpoint.Close()
 
@@ -158,7 +158,7 @@ func TestInterceptOAuthResponseFormEncoded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	bodyStr := string(body)
@@ -186,14 +186,14 @@ func TestInterceptOAuthResponseFormEncoded(t *testing.T) {
 
 func TestInterceptOAuthResponseOnlyAccessToken(t *testing.T) {
 	// Token endpoint returns only access_token, no refresh_token.
-	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		resp := map[string]interface{}{
 			"access_token": "access-only-real-token",
 			"expires_in":   1800,
 			"token_type":   "Bearer",
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer tokenEndpoint.Close()
 
@@ -220,7 +220,7 @@ func TestInterceptOAuthResponseOnlyAccessToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	bodyStr := string(body)
@@ -255,10 +255,10 @@ func TestInterceptOAuthResponseOnlyAccessToken(t *testing.T) {
 
 func TestInterceptOAuthResponseNon2xx(t *testing.T) {
 	// Non-2xx responses should pass through unchanged.
-	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprint(w, `{"error":"invalid_grant","error_description":"token expired"}`)
+		_, _ = fmt.Fprint(w, `{"error":"invalid_grant","error_description":"token expired"}`)
 	}))
 	defer tokenEndpoint.Close()
 
@@ -284,7 +284,7 @@ func TestInterceptOAuthResponseNon2xx(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", resp.StatusCode)
@@ -298,13 +298,13 @@ func TestInterceptOAuthResponseNon2xx(t *testing.T) {
 
 func TestInterceptOAuthResponseNonMatchingURL(t *testing.T) {
 	// A response from a non-token-URL should pass through unchanged.
-	apiEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	apiEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		resp := map[string]interface{}{
 			"access_token": "this-looks-like-a-token-but-is-not",
 			"data":         "some api response",
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer apiEndpoint.Close()
 
@@ -330,7 +330,7 @@ func TestInterceptOAuthResponseNonMatchingURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	// The response should contain the original token since this URL does not
@@ -342,7 +342,7 @@ func TestInterceptOAuthResponseNonMatchingURL(t *testing.T) {
 
 func TestInterceptOAuthResponseVaultPersistence(t *testing.T) {
 	// Verify that the vault is updated with new tokens after interception.
-	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		resp := map[string]interface{}{
 			"access_token":  "updated-access-token",
@@ -350,7 +350,7 @@ func TestInterceptOAuthResponseVaultPersistence(t *testing.T) {
 			"expires_in":    7200,
 			"token_type":    "Bearer",
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer tokenEndpoint.Close()
 
@@ -411,7 +411,7 @@ func TestInterceptOAuthResponseConcurrentRefreshDedup(t *testing.T) {
 	var mu sync.Mutex
 	requestCount := 0
 
-	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		mu.Lock()
 		requestCount++
 		count := requestCount
@@ -423,7 +423,7 @@ func TestInterceptOAuthResponseConcurrentRefreshDedup(t *testing.T) {
 			"refresh_token": fmt.Sprintf("concurrent-refresh-%d", count),
 			"expires_in":    3600,
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer tokenEndpoint.Close()
 
@@ -494,9 +494,9 @@ func TestInterceptOAuthResponseConcurrentRefreshDedup(t *testing.T) {
 func TestInterceptOAuthResponseNonJSONContentType(t *testing.T) {
 	// Non-JSON/non-form content type that happens to contain token-like fields
 	// should fail parsing and pass through unchanged.
-	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprint(w, "this is not a token response")
+		_, _ = fmt.Fprint(w, "this is not a token response")
 	}))
 	defer tokenEndpoint.Close()
 
@@ -522,7 +522,7 @@ func TestInterceptOAuthResponseNonJSONContentType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != "this is not a token response" {
@@ -532,14 +532,14 @@ func TestInterceptOAuthResponseNonJSONContentType(t *testing.T) {
 
 func TestInterceptOAuthResponseTransferEncodingCleared(t *testing.T) {
 	// Verify that Transfer-Encoding is cleared and Content-Length is set.
-	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Transfer-Encoding", "chunked")
 		resp := map[string]interface{}{
 			"access_token": "real-token-for-te-test",
 			"expires_in":   3600,
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer tokenEndpoint.Close()
 
@@ -565,7 +565,7 @@ func TestInterceptOAuthResponseTransferEncodingCleared(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 
@@ -660,13 +660,13 @@ func TestOAuthPhantomTokenFormat(t *testing.T) {
 
 func TestInterceptOAuthResponseEmptyIndex(t *testing.T) {
 	// With an empty OAuth index, all responses should pass through unchanged.
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		resp := map[string]interface{}{
 			"access_token": "some-token-value",
 			"token_type":   "Bearer",
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer backend.Close()
 
@@ -688,7 +688,7 @@ func TestInterceptOAuthResponseEmptyIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "some-token-value") {
@@ -698,9 +698,9 @@ func TestInterceptOAuthResponseEmptyIndex(t *testing.T) {
 
 func TestInterceptOAuthResponseMultipleCredentials(t *testing.T) {
 	// Test with multiple OAuth credentials and verify correct one is matched.
-	tokenEndpoint1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tokenEndpoint1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token":  "real-token-for-cred1",
 			"refresh_token": "real-refresh-for-cred1",
 			"expires_in":    3600,
@@ -708,9 +708,9 @@ func TestInterceptOAuthResponseMultipleCredentials(t *testing.T) {
 	}))
 	defer tokenEndpoint1.Close()
 
-	tokenEndpoint2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tokenEndpoint2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token":  "real-token-for-cred2",
 			"refresh_token": "real-refresh-for-cred2",
 			"expires_in":    1800,
@@ -727,14 +727,14 @@ func TestInterceptOAuthResponseMultipleCredentials(t *testing.T) {
 		TokenURL:    tokenEndpoint1.URL,
 	}
 	data1, _ := cred1.Marshal()
-	vaultStore.Add("cred1", string(data1))
+	_, _ = vaultStore.Add("cred1", string(data1))
 
 	cred2 := &vault.OAuthCredential{
 		AccessToken: "old-access-2",
 		TokenURL:    tokenEndpoint2.URL,
 	}
 	data2, _ := cred2.Marshal()
-	vaultStore.Add("cred2", string(data2))
+	_, _ = vaultStore.Add("cred2", string(data2))
 
 	metas := []store.CredentialMeta{
 		{Name: "cred1", CredType: "oauth", TokenURL: tokenEndpoint1.URL},
@@ -788,9 +788,9 @@ func TestInterceptOAuthResponseVaultWriteFailure(t *testing.T) {
 	// Even if the vault write would fail (e.g., provider doesn't support Add),
 	// the response should still contain phantom tokens. We test this by using
 	// a provider wrapper that does not implement Add.
-	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token":  "real-token-vault-fail",
 			"refresh_token": "real-refresh-vault-fail",
 			"expires_in":    3600,
@@ -855,7 +855,7 @@ func TestInterceptOAuthResponseVaultWriteFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	bodyStr := string(body)
@@ -874,9 +874,9 @@ func TestInterceptOAuthResponseVaultWriteFailure(t *testing.T) {
 func TestInterceptOAuthResponsePhantomFileWrite(t *testing.T) {
 	// Verify that phantom files are written after vault persistence when
 	// phantomDir is configured.
-	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token":  "new-real-access-for-phantom",
 			"refresh_token": "new-real-refresh-for-phantom",
 			"expires_in":    3600,
@@ -919,19 +919,19 @@ func TestInterceptOAuthResponsePhantomFileWrite(t *testing.T) {
 	accessPath := phantomDir + "/PHANTOM_WRITE_OAUTH_ACCESS"
 	refreshPath := phantomDir + "/PHANTOM_WRITE_OAUTH_REFRESH"
 
-	if _, err := readFileContent(accessPath); err != nil {
+	if err := checkFileExists(accessPath); err != nil {
 		t.Errorf("access phantom file not found: %v", err)
 	}
-	if _, err := readFileContent(refreshPath); err != nil {
+	if err := checkFileExists(refreshPath); err != nil {
 		t.Errorf("refresh phantom file not found: %v", err)
 	}
 }
 
 func TestInterceptOAuthResponseNoPhantomFileWithoutDir(t *testing.T) {
 	// When phantomDir is not set, no phantom files should be written.
-	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token":  "access-no-dir",
 			"refresh_token": "refresh-no-dir",
 			"expires_in":    3600,
@@ -991,9 +991,9 @@ func TestInterceptOAuthResponseOversizedBody(t *testing.T) {
 	// Response body exceeding maxProxyBody (16 MiB) should pass through
 	// unchanged without phantom replacement.
 	bigBody := strings.Repeat("x", maxProxyBody+1)
-	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(bigBody))
+		_, _ = w.Write([]byte(bigBody))
 	}))
 	defer tokenEndpoint.Close()
 
@@ -1028,12 +1028,9 @@ func TestInterceptOAuthResponseOversizedBody(t *testing.T) {
 	}
 }
 
-func readFileContent(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
+func checkFileExists(path string) error {
+	_, err := os.Stat(path)
+	return err
 }
 
 // readOnlyProvider wraps a vault.Provider but does not implement the Add interface,
@@ -1057,9 +1054,9 @@ func (p *readOnlyProvider) Name() string {
 func TestInterceptOAuthResponseChainProviderPersistence(t *testing.T) {
 	// Verify that OAuth token persistence works when the injector uses a
 	// ChainProvider wrapping a vault.Store (which implements Add).
-	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token":  "chain-updated-access",
 			"refresh_token": "chain-updated-refresh",
 			"expires_in":    3600,

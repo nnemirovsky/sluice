@@ -25,7 +25,6 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-
 // phantomPrefix is the byte prefix for all phantom tokens, used for quick
 // detection before applying the more expensive regex strip.
 var phantomPrefix = []byte("SLUICE_PHANTOM:")

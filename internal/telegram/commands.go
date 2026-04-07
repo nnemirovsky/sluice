@@ -48,17 +48,17 @@ func ParseCommand(text string) *Command {
 
 // CommandHandler holds the dependencies needed by command handlers.
 type CommandHandler struct {
-	engine       *atomic.Pointer[policy.Engine]
-	resolverPtr  *atomic.Pointer[vault.BindingResolver] // shared with proxy; nil if not wired
-	reloadMu     *sync.Mutex                            // shared with proxy; serializes engine swaps and policy mutations
-	broker       *channel.Broker
-	auditPath    string
-	vault        *vault.Store
-	containerMgr container.ContainerManager
-	store        *store.Store
-	phantomDir           string                   // shared volume path for phantom token files
-	onEngineSwap         func(eng *policy.Engine) // called after engine swap to update dependent state
-	onOAuthIndexRebuild  func()                   // called after credential removal to rebuild proxy OAuth index
+	engine              *atomic.Pointer[policy.Engine]
+	resolverPtr         *atomic.Pointer[vault.BindingResolver] // shared with proxy; nil if not wired
+	reloadMu            *sync.Mutex                            // shared with proxy; serializes engine swaps and policy mutations
+	broker              *channel.Broker
+	auditPath           string
+	vault               *vault.Store
+	containerMgr        container.ContainerManager
+	store               *store.Store
+	phantomDir          string                   // shared volume path for phantom token files
+	onEngineSwap        func(eng *policy.Engine) // called after engine swap to update dependent state
+	onOAuthIndexRebuild func()                   // called after credential removal to rebuild proxy OAuth index
 }
 
 // SetVault enables credential management commands.

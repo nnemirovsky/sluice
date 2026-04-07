@@ -24,16 +24,16 @@ import (
 
 // ChannelConfig holds configuration for creating a TelegramChannel.
 type ChannelConfig struct {
-	Token        string
-	ChatID       int64
-	EnginePtr    *atomic.Pointer[policy.Engine]
-	ResolverPtr  *atomic.Pointer[vault.BindingResolver]
-	ReloadMu     *sync.Mutex
-	AuditPath    string
-	Vault        *vault.Store
-	ContainerMgr container.ContainerManager
-	Store        *store.Store
-	PhantomDir   string
+	Token               string
+	ChatID              int64
+	EnginePtr           *atomic.Pointer[policy.Engine]
+	ResolverPtr         *atomic.Pointer[vault.BindingResolver]
+	ReloadMu            *sync.Mutex
+	AuditPath           string
+	Vault               *vault.Store
+	ContainerMgr        container.ContainerManager
+	Store               *store.Store
+	PhantomDir          string
 	OnEngineSwap        func(eng *policy.Engine) // called after policy mutations to update dependent state
 	OnOAuthIndexRebuild func()                   // called after credential removal to rebuild proxy OAuth index
 	APIEndpoint         string                   // custom Telegram API endpoint (for testing); empty uses default

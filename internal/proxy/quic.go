@@ -22,7 +22,6 @@ import (
 	"github.com/quic-go/quic-go/http3"
 )
 
-
 // QUICBlockRuleConfig defines a content deny rule for QUICProxy construction.
 type QUICBlockRuleConfig struct {
 	Pattern string

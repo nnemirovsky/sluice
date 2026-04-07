@@ -85,6 +85,7 @@ func (m *mockOAuthProvider) Get(name string) (SecureBytes, error) {
 	}
 	return NewSecureBytes(val), nil
 }
+
 func (m *mockOAuthProvider) List() ([]string, error) {
 	var names []string
 	for k := range m.creds {
@@ -97,7 +98,7 @@ func (m *mockOAuthProvider) Name() string { return "mock" }
 func TestGeneratePhantomEnvWithOAuth(t *testing.T) {
 	prov := &mockOAuthProvider{
 		creds: map[string]string{
-			"static_key": "sk-real-value",
+			"static_key":   "sk-real-value",
 			"openai_oauth": `{"access_token":"real-access","refresh_token":"real-refresh","token_url":"https://auth0.openai.com/oauth/token"}`,
 		},
 	}
