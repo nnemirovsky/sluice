@@ -32,6 +32,8 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     command: ["--proxy", "socks5://sluice:1080"]
+    ports:
+      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
     healthcheck:
       test: ["CMD-SHELL", "ip link show tun0 || exit 1"]
       interval: 10s
@@ -50,11 +52,13 @@ services:
     network_mode: "service:tun2proxy"
     env_file: .env.phantom
     environment:
+      - HOME=/home/node
+      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-}
       - SSL_CERT_FILE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
       - REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
       - NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
     volumes:
-      - openclaw-data:/root/.openclaw
+      - openclaw-data:/home/node/.openclaw
       - sluice-ca:/usr/local/share/ca-certificates/sluice:ro
       - sluice-phantoms:/phantoms:ro
     depends_on:
