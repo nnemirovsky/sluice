@@ -3735,7 +3735,7 @@ default = "allow"
 
 	// SetOnOAuthRefresh should not panic even if injector is nil (no bindings).
 	called := false
-	srv.SetOnOAuthRefresh(func(credName string) {
+	srv.SetOnOAuthRefresh(func(_ string) {
 		called = true
 	})
 
@@ -3798,5 +3798,5 @@ default = "allow"
 	defer func() { _ = srv.Close() }()
 
 	// Should not panic when injector is nil.
-	srv.SetOnOAuthRefresh(func(credName string) {})
+	srv.SetOnOAuthRefresh(func(_ string) {})
 }

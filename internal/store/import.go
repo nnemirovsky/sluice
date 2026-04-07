@@ -7,7 +7,6 @@ import (
 	"regexp"
 
 	"github.com/BurntSushi/toml"
-
 	"github.com/nemirovsky/sluice/internal/container"
 )
 
