@@ -314,7 +314,26 @@ For phantom files on the shared volume (what the agent loads as env vars), `Gene
 - [ ] Write tests for hot-reload path (credential_meta change triggers index rebuild)
 - [ ] Run tests: `go test ./... -timeout 30s`
 
-### Task 8: Verify acceptance criteria
+### Task 8: API endpoint support for OAuth credentials
+
+**Files:**
+- Modify: `api/openapi.yaml`
+- Modify: `internal/api/server.go`
+- Modify: `internal/api/api.gen.go` (regenerated)
+
+- [ ] Add `type` field (enum: static, oauth) and `token_url` field to credential create request schema in OpenAPI spec
+- [ ] Add `access_token` and `refresh_token` fields to credential create request (required when type=oauth)
+- [ ] Add `type` and `token_url` fields to credential list response schema
+- [ ] Regenerate API code: `go generate ./internal/api/`
+- [ ] Update `PostApiCredentials` handler: when type=oauth, create OAuthCredential JSON in vault, add credential_meta row, generate OAuth phantom files
+- [ ] Update `GetApiCredentials` handler: join with credential_meta to return type and token_url
+- [ ] Update `DeleteApiCredentialsName` handler: also remove credential_meta row
+- [ ] Write tests for OAuth credential creation via API (success, missing required fields)
+- [ ] Write tests for credential list with type field
+- [ ] Write tests for credential deletion cascading to credential_meta
+- [ ] Run tests: `go test ./internal/api/ -timeout 30s`
+
+### Task 9: Verify acceptance criteria
 
 - [ ] Verify static credentials still work unchanged (backward compatibility)
 - [ ] Verify OAuth credential can be added via CLI with --type oauth
@@ -328,7 +347,7 @@ For phantom files on the shared volume (what the agent loads as env vars), `Gene
 - [ ] Run full test suite: `go test ./... -v -timeout 30s`
 - [ ] Run e2e tests: `go test -tags=e2e ./e2e/ -v -count=1 -timeout=300s`
 
-### Task 9: [Final] Update documentation
+### Task 10: [Final] Update documentation
 
 - [ ] Update CLAUDE.md with OAuth credential type documentation
 - [ ] Update README.md: add section on dynamic OAuth/JWT token management (transparent access/refresh token rotation through phantom swap, subscription-based auth support)
@@ -343,7 +362,6 @@ For phantom files on the shared volume (what the agent loads as env vars), `Gene
 - Verify phantom tokens never appear in audit log
 
 **Future work:**
-- REST API support for OAuth credential CRUD (OpenAPI spec + handlers)
 - Sluice-driven proactive token refresh (refresh before expiry, not on 401)
 - OAuth discovery (auto-detect token_url from .well-known/openid-configuration)
 - Multiple OAuth providers per agent (OpenAI + Google + Anthropic simultaneously)
