@@ -30,7 +30,7 @@ func handleChannelCommand(args []string) error {
 
 func handleChannelList(args []string) error {
 	fs := flag.NewFlagSet("channel list", flag.ContinueOnError)
-	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -71,7 +71,7 @@ func handleChannelList(args []string) error {
 
 func handleChannelAdd(args []string) error {
 	fs := flag.NewFlagSet("channel add", flag.ContinueOnError)
-	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	chType := fs.String("type", "", "channel type (telegram or http)")
 	url := fs.String("url", "", "webhook URL (required for http type)")
 	secret := fs.String("secret", "", "webhook HMAC secret (optional, for http type)")
@@ -117,7 +117,7 @@ func handleChannelAdd(args []string) error {
 
 func handleChannelUpdate(args []string) error {
 	fs := flag.NewFlagSet("channel update", flag.ContinueOnError)
-	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	enabled := fs.String("enabled", "", "set enabled state (true or false)")
 	url := fs.String("url", "", "update webhook URL")
 	secret := fs.String("secret", "", "update webhook HMAC secret")
@@ -173,7 +173,7 @@ func handleChannelUpdate(args []string) error {
 
 func handleChannelRemove(args []string) error {
 	fs := flag.NewFlagSet("channel remove", flag.ContinueOnError)
-	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

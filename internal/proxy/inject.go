@@ -48,6 +48,36 @@ type pinIDKeyType struct{}
 
 var pinIDCtxKey = pinIDKeyType{}
 
+// sniAwareTLSConfig returns a TLS config function for goproxy that generates
+// MITM certificates using the SNI hostname from the TLS ClientHello instead
+// of the CONNECT target. This is needed because tun2proxy operates at the
+// network level and sends CONNECT with the resolved IP, losing the original
+// hostname. The SNI contains the real hostname the client intended to connect
+// to, producing correctly-named certificates that pass SAN validation.
+func sniAwareTLSConfig(ca *tls.Certificate) func(host string, ctx *goproxy.ProxyCtx) (*tls.Config, error) {
+	return func(host string, ctx *goproxy.ProxyCtx) (*tls.Config, error) {
+		// Generate a base config using the CONNECT host (may be an IP).
+		// The GetConfigForClient callback below overrides the cert if
+		// the SNI provides a hostname.
+		baseCfg, err := goproxy.TLSConfigFromCA(ca)(host, ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		baseCfg.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			sni := hello.ServerName
+			if sni == "" || net.ParseIP(sni) != nil {
+				return nil, nil // use base config
+			}
+
+			// SNI has a hostname. Regenerate the cert with it.
+			return goproxy.TLSConfigFromCA(ca)(sni, ctx)
+		}
+
+		return baseCfg, nil
+	}
+}
+
 // Injector is an HTTP/HTTPS MITM proxy that intercepts requests and injects
 // credentials from the vault. It resolves bindings by destination, decrypts
 // credentials, and performs byte-level replacement of phantom tokens in
@@ -204,7 +234,7 @@ func NewInjector(provider vault.Provider, resolver *atomic.Pointer[vault.Binding
 	// (generated in server.New).
 	mitmAction := &goproxy.ConnectAction{
 		Action:    goproxy.ConnectMitm,
-		TLSConfig: goproxy.TLSConfigFromCA(&inj.caCert),
+		TLSConfig: sniAwareTLSConfig(&inj.caCert),
 	}
 	proxy.OnRequest().HandleConnect(goproxy.FuncHttpsHandler(
 		func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {

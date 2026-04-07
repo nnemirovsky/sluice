@@ -12,6 +12,7 @@ services:
       - "${DOCKER_GID:-0}"
     volumes:
       - ./examples/config.toml:/etc/sluice/config.toml:ro
+      - sluice-data:/home/sluice/data
       - sluice-vault:/home/sluice/.sluice
       - sluice-audit:/var/log/sluice
       - sluice-ca:/home/sluice/ca
@@ -71,6 +72,7 @@ networks:
   external: {}
 
 volumes:
+  sluice-data:
   sluice-vault:
   sluice-audit:
   sluice-ca:

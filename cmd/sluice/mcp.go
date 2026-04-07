@@ -50,7 +50,7 @@ func handleMCPCommand(args []string) error {
 
 func handleMCPGateway(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
-	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	configPath := fs.String("config", "", "path to config TOML file (seeds DB on first run if DB is empty)")
 	auditPath := fs.String("audit", "", "path to audit log file (optional)")
 	telegramToken := fs.String("telegram-token", os.Getenv("TELEGRAM_BOT_TOKEN"), "Telegram bot token")
@@ -248,7 +248,7 @@ func handleMCPGateway(args []string) error {
 
 func handleMCPAdd(args []string) error {
 	fs := flag.NewFlagSet("mcp add", flag.ContinueOnError)
-	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	command := fs.String("command", "", "command to run (stdio) or URL (http/websocket)")
 	argsStr := fs.String("args", "", "comma-separated arguments for the command")
 	envStr := fs.String("env", "", "comma-separated KEY=VAL environment variables")
@@ -320,7 +320,7 @@ func handleMCPAdd(args []string) error {
 
 func handleMCPList(args []string) error {
 	fs := flag.NewFlagSet("mcp list", flag.ContinueOnError)
-	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -374,7 +374,7 @@ func handleMCPList(args []string) error {
 
 func handleMCPRemove(args []string) error {
 	fs := flag.NewFlagSet("mcp remove", flag.ContinueOnError)
-	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

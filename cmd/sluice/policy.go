@@ -36,7 +36,7 @@ func handlePolicyCommand(args []string) error {
 
 func handlePolicyList(args []string) error {
 	fs := flag.NewFlagSet("policy list", flag.ContinueOnError)
-	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	verdict := fs.String("verdict", "", "filter by verdict (allow, deny, ask)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -98,7 +98,7 @@ func handlePolicyAdd(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("policy add", flag.ContinueOnError)
-	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	portsStr := fs.String("ports", "", "comma-separated port list (e.g. 443,80)")
 	note := fs.String("name", "", "human-readable name")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -145,7 +145,7 @@ func handlePolicyAdd(args []string) error {
 
 func handlePolicyRemove(args []string) error {
 	fs := flag.NewFlagSet("policy remove", flag.ContinueOnError)
-	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -178,7 +178,7 @@ func handlePolicyRemove(args []string) error {
 
 func handlePolicyImport(args []string) error {
 	fs := flag.NewFlagSet("policy import", flag.ContinueOnError)
-	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -215,7 +215,7 @@ func handlePolicyImport(args []string) error {
 
 func handlePolicyExport(args []string) error {
 	fs := flag.NewFlagSet("policy export", flag.ContinueOnError)
-	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
