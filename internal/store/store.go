@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/nemirovsky/sluice/internal/container"
-
 	_ "modernc.org/sqlite" // SQLite driver registration
 )
 
