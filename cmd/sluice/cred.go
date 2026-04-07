@@ -119,6 +119,12 @@ func openVaultStore(dbPath string) (*vault.Store, error) {
 }
 
 func handleCredAdd(args []string) error {
+	// Reorder args so the positional name is always at the end.
+	// Go's flag package stops at the first non-flag argument, so
+	// "cred add myname --type oauth" silently ignores --type.
+	// We move the name to the end: "cred add --type oauth myname".
+	args = reorderPositionalLast(args)
+
 	fs := flag.NewFlagSet("cred add", flag.ContinueOnError)
 	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
 	destination := fs.String("destination", "", "auto-create allow rule and binding for this destination")
@@ -528,4 +534,49 @@ func handleCredRemove(args []string) error {
 		}
 	}
 	return nil
+}
+
+// reorderPositionalLast moves the first positional (non-flag) argument to the
+// end of the slice so Go's flag package sees all flags before stopping at the
+// positional. Flags and their values (e.g. "--db path") are kept in order.
+// This lets users write "cred add myname --type oauth" or
+// "cred add --type oauth myname" interchangeably.
+func reorderPositionalLast(args []string) []string {
+	// Known flags that consume the next argument as a value.
+	valueFlags := map[string]bool{
+		"-db": true, "--db": true,
+		"-destination": true, "--destination": true,
+		"-ports": true, "--ports": true,
+		"-header": true, "--header": true,
+		"-template": true, "--template": true,
+		"-type": true, "--type": true,
+		"-token-url": true, "--token-url": true,
+	}
+
+	var positional string
+	var reordered []string
+	skip := false
+	for i, a := range args {
+		if skip {
+			skip = false
+			reordered = append(reordered, a)
+			continue
+		}
+		if strings.HasPrefix(a, "-") {
+			reordered = append(reordered, a)
+			if !strings.Contains(a, "=") && valueFlags[a] && i+1 < len(args) {
+				skip = true
+			}
+			continue
+		}
+		if positional == "" {
+			positional = a
+		} else {
+			reordered = append(reordered, a)
+		}
+	}
+	if positional != "" {
+		reordered = append(reordered, positional)
+	}
+	return reordered
 }
