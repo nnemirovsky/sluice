@@ -73,8 +73,8 @@ sluice mcp list
 sluice mcp remove <name>
 sluice mcp                          # start MCP gateway
 
-sluice cred add <name> [--type static|oauth] [--destination host] [--ports 443] [--header Authorization] [--template "Bearer {value}"]
-sluice cred add <name> --type oauth --token-url <url> --destination <host> --ports 443
+sluice cred add <name> [--type static|oauth] [--destination host] [--ports 443] [--header Authorization] [--template "Bearer {value}"] [--env-var OPENAI_API_KEY]
+sluice cred add <name> --type oauth --token-url <url> --destination <host> --ports 443 [--env-var OPENAI_API_KEY]
 sluice cred list
 sluice cred remove <name>
 
@@ -82,23 +82,25 @@ sluice cert generate                # generate CA certificate for HTTPS MITM
 sluice audit verify                 # verify audit log hash chain integrity
 ```
 
-When `--destination` is provided, `sluice cred add` also creates an allow rule and binding in the store. For HTTP/WebSocket upstreams, `--command` holds the URL. Env values prefixed with `vault:` are resolved from the credential vault at upstream spawn time.
+When `--destination` is provided, `sluice cred add` also creates an allow rule and binding in the store. When `--env-var` is provided, the phantom token is injected into the agent container as that environment variable via `docker exec` (no shared volume needed). For HTTP/WebSocket upstreams, `--command` holds the URL. Env values prefixed with `vault:` are resolved from the credential vault at upstream spawn time.
 
 Two credential types: `static` (default) for API keys and `oauth` for OAuth access/refresh token pairs. OAuth credentials prompt for tokens via stdin (not CLI flags) to avoid shell history exposure.
+
+Runtime flags: `--mcp-dir` (or `SLUICE_MCP_DIR` env var) sets the shared volume path for `mcp-servers.json` auto-injection. Defaults to the MCP volume path in compose files (`/home/sluice/mcp`).
 
 ## Policy Store
 
 All runtime policy state in SQLite (default: `sluice.db`). TOML files for initial seeding only via `sluice policy import`. See `examples/config.toml` for the full seed format.
 
-Rules use `[[allow]]`/`[[deny]]`/`[[ask]]`/`[[redact]]` sections. Each entry carries exactly one of: `destination` (network), `tool` (MCP), or `pattern` (content inspection). The `rules` table uses a CHECK constraint enforcing mutual exclusivity of these columns. Import uses merge semantics (skip duplicates).
+Rules use `[[allow]]`/`[[deny]]`/`[[ask]]`/`[[redact]]` sections. Each entry carries exactly one of: `destination` (network), `tool` (MCP), or `pattern` (content inspection). The `rules` table uses a CHECK constraint enforcing mutual exclusivity of these columns. Import uses merge semantics (skip duplicates). Binding entries (`[[binding]]`) support an optional `env_var` field for env var injection.
 
 Store uses `modernc.org/sqlite` (pure Go, no CGO), WAL mode, `golang-migrate` for schema. 6 tables: `rules`, `config`, `bindings`, `mcp_upstreams`, `channels`, `credential_meta`.
 
 ## Credential Injection: Phantom Token Swap
 
-1. User adds credential via CLI or Telegram
+1. User adds credential via CLI or Telegram (with `--env-var` to specify the target environment variable)
 2. Sluice encrypts real credential in vault, generates phantom token (same format/length)
-3. Phantom tokens written to shared volume (`/phantoms/CRED_NAME`), agent signaled to reload
+3. Phantom tokens injected into the agent container as environment variables via `docker exec` (written to `~/.openclaw/.env`), agent signaled to reload
 4. Agent uses phantom tokens normally via SDKs
 5. Sluice MITM intercepts requests, does byte-level find-and-replace: phantom -> real
 6. Sluice never needs to know the API's auth format
@@ -119,14 +121,17 @@ Extends phantom swap to handle OAuth credentials bidirectionally. Static credent
 
 **Data model:** `credential_meta` table stores credential type and token_url. `OAuthIndex` maps token URLs to credential names for fast response matching. Both are hot-reloaded via `StoreResolver()`.
 
-**Phantom file generation:** `GeneratePhantomEnv(credNames []string, providers ...Provider)` accepts an optional `Provider` to detect OAuth credentials. When a provider is given, OAuth credentials produce two files (`CRED_ACCESS`, `CRED_REFRESH`) instead of one. Callers without a provider get static phantom files only.
+**Env var injection:** Credentials with an `env_var` field are injected into the agent container via `docker exec`. On startup and after credential changes, sluice reads all bindings with `env_var` set, generates phantom values, and calls `ContainerManager.InjectEnvVars()` which writes to `~/.openclaw/.env` inside the container and signals `openclaw secrets reload`.
 
 **Key files:**
 - `internal/vault/oauth.go` -- OAuthCredential struct, parse/marshal, token update
-- `internal/vault/phantom.go` -- `GeneratePhantomEnv`, `WriteOAuthPhantoms`
+- `internal/vault/phantom.go` -- `GeneratePhantomToken` for MITM phantom strings
 - `internal/proxy/oauth_index.go` -- Token URL index for response matching
 - `internal/proxy/oauth_response.go` -- Response interception, phantom swap, async vault persistence
+- `internal/container/docker.go` -- `InjectEnvVars` implementation for Docker backend
+- `internal/container/types.go` -- `ContainerManager` interface with `InjectEnvVars`
 - `internal/store/migrations/000002_credential_meta.up.sql` -- Schema for credential metadata
+- `internal/store/migrations/000003_binding_env_var.up.sql` -- `env_var` column on bindings
 
 ### Protocol-specific handling
 
@@ -167,7 +172,7 @@ Three upstream transports: stdio (child processes), Streamable HTTP, WebSocket. 
 
 `MCPHTTPHandler` serves `POST /mcp` and `DELETE /mcp` on port 3000 (alongside `/healthz`). Session tracking via `Mcp-Session-Id` header. SSE response support.
 
-Auto-injection: when container runtime active, writes `mcp-servers.json` to phantoms volume, signals agent to reload. SOCKS5 auto-bypasses connections to sluice's own listeners (`SelfBypass`).
+Auto-injection: when container runtime active, writes `mcp-servers.json` to shared MCP volume (`sluice-mcp`), signals agent to reload. SOCKS5 auto-bypasses connections to sluice's own listeners (`SelfBypass`).
 
 ### Vault providers
 
@@ -189,7 +194,7 @@ Chain provider: `providers = ["1password", "age"]` tries in order, first hit win
 
 All backends implement `ContainerManager` interface (`internal/container/types.go`).
 
-**Docker**: Three-container compose (sluice + tun2proxy + openclaw). Hot-reload via shared `sluice-phantoms` volume + `docker exec openclaw openclaw secrets reload`. Fallback: container restart.
+**Docker**: Three-container compose (sluice + tun2proxy + openclaw). Hot-reload via `docker exec` env var injection into `~/.openclaw/.env` + `docker exec openclaw openclaw secrets reload`. MCP config shared via `sluice-mcp` volume. Fallback: container restart.
 
 **Apple Container**: Linux micro-VMs via Virtualization.framework. tun2proxy runs on host. `NetworkRouter` manages pf anchor rules to redirect VM bridge traffic. VirtioFS for shared volumes.
 

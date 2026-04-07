@@ -22,7 +22,7 @@ AI agents need credentials to be useful. Giving them real credentials is dangero
 | **MCP Gateway** | Tool names, arguments, responses | File writes, exec, deletions, any MCP tool call |
 | **SOCKS5 Proxy** | Every TCP and UDP connection | HTTP, HTTPS, WebSocket, gRPC, SSH, IMAP, SMTP, DNS, QUIC/HTTP3 |
 
-**Phantom token swap:** OpenClaw gets phantom tokens that look like real API keys. Sluice's MITM proxy swaps them for real credentials in-flight. If a phantom token leaks, it is useless outside the proxy. OAuth credentials are handled bidirectionally: sluice intercepts token endpoint responses, captures real tokens, and returns phantom tokens to the agent. The entire OAuth lifecycle (initial auth, token refresh, token rotation) is transparent.
+**Phantom token swap:** OpenClaw gets phantom tokens that look like real API keys, injected as environment variables via `docker exec` (no shared volume needed). Sluice's MITM proxy swaps them for real credentials in-flight. If a phantom token leaks, it is useless outside the proxy. OAuth credentials are handled bidirectionally: sluice intercepts token endpoint responses, captures real tokens, and returns phantom tokens to the agent. The entire OAuth lifecycle (initial auth, token refresh, token rotation) is transparent.
 
 **Human approval:** Connections and tool calls matching "ask" policy rules trigger a notification via Telegram or HTTP webhook. OpenClaw blocks until a human responds with Allow or Deny.
 
@@ -63,7 +63,7 @@ flowchart LR
 
 **Traffic flow:** OpenClaw runs in an isolated container (Docker, Apple Container, or macOS VM). All network traffic is routed through tun2proxy to sluice's SOCKS5 proxy. MCP tool calls go through the MCP gateway. Both layers evaluate every request against policy rules.
 
-**Policy verdicts:** Each rule resolves to allow, deny, or ask. "Ask" verdicts are broadcast to all configured approval channels. The first channel to respond wins. Credentials are managed via Telegram commands or CLI, stored encrypted, and hot-reloaded into OpenClaw without restarts.
+**Policy verdicts:** Each rule resolves to allow, deny, or ask. "Ask" verdicts are broadcast to all configured approval channels. The first channel to respond wins. Credentials are managed via Telegram commands or CLI, stored encrypted, and hot-reloaded into OpenClaw via env var injection without restarts.
 
 **Audit trail:** Every connection, tool call, approval, and denial is logged with blake3 hash chaining for tamper detection.
 
@@ -85,10 +85,11 @@ cp examples/config.toml config.toml  # edit policy rules
 # 3. Start (sluice + tun2proxy + openclaw)
 docker compose up -d
 
-# 4. Add API credentials (phantom tokens auto-generated, hot-reloaded to OpenClaw)
+# 4. Add API credentials (phantom tokens auto-generated, injected as env vars to OpenClaw)
 docker exec sluice sluice cred add anthropic_api_key \
   --destination api.anthropic.com --ports 443 \
-  --header x-api-key
+  --header x-api-key \
+  --env-var ANTHROPIC_API_KEY
 ```
 
 ### Apple Container (macOS)
@@ -106,11 +107,11 @@ chmod +x sluice
 # 3. Seed policy and add credentials
 ./sluice policy import examples/config.toml
 ./sluice cred add anthropic_api_key \
-  --destination api.anthropic.com --ports 443 --header x-api-key
+  --destination api.anthropic.com --ports 443 --header x-api-key \
+  --env-var ANTHROPIC_API_KEY
 
 # 4. Start sluice with Apple Container runtime
-./sluice --runtime apple --container-name openclaw \
-  --phantom-dir ~/.sluice/phantoms
+./sluice --runtime apple --container-name openclaw
 
 # 5. Network routing (requires root for pf rules)
 sudo ./scripts/apple-container-setup.sh
@@ -121,7 +122,6 @@ container run --name openclaw \
   -e REQUESTS_CA_BUNDLE=/certs/sluice-ca.crt \
   -e NODE_EXTRA_CA_CERTS=/certs/sluice-ca.crt \
   -v ~/.sluice/ca:/certs:ro \
-  -v ~/.sluice/phantoms:/phantoms:ro \
   ghcr.io/openclaw/openclaw:latest
 ```
 
@@ -139,7 +139,6 @@ chmod +x sluice
 ./sluice --runtime macos \
   --vm-image ghcr.io/cirruslabs/macos-sequoia-base:latest \
   --container-name openclaw \
-  --phantom-dir /tmp/sluice-phantoms \
   --config examples/config.toml
 
 # 3. Host network routing (requires root for pf rules)
@@ -245,7 +244,8 @@ sluice cred add openai_oauth \
   --type oauth \
   --token-url https://auth0.openai.com/oauth/token \
   --destination api.openai.com \
-  --ports 443
+  --ports 443 \
+  --env-var OPENAI_API_KEY
 # Prompts for: access token, refresh token (optional)
 ```
 
@@ -283,7 +283,7 @@ Manage sluice from your phone. Approve connections and tool calls, add credentia
 | `/policy show` | List current rules |
 | `/policy allow <dest>` | Add allow rule |
 | `/policy deny <dest>` | Add deny rule |
-| `/cred add <name>` | Add credential (value sent as next message, auto-deleted) |
+| `/cred add <name> [--env-var VAR]` | Add credential (value sent as next message, auto-deleted) |
 | `/cred rotate <name>` | Replace credential, hot-reload OpenClaw |
 | `/status` | Proxy stats and pending approvals |
 | `/audit recent [N]` | Last N audit entries |
@@ -295,13 +295,13 @@ REST API on port 3000 for programmatic approval integration. `GET /api/approvals
 Credential management endpoints support both static and OAuth types:
 
 ```bash
-# Add static credential
+# Add static credential with env var injection
 curl -X POST http://localhost:3000/api/credentials \
-  -d '{"name":"github_pat","value":"ghp_xxx","destination":"api.github.com"}'
+  -d '{"name":"github_pat","value":"ghp_xxx","destination":"api.github.com","env_var":"GITHUB_TOKEN"}'
 
-# Add OAuth credential
+# Add OAuth credential with env var injection
 curl -X POST http://localhost:3000/api/credentials \
-  -d '{"name":"openai_oauth","type":"oauth","token_url":"https://auth.example.com/token","access_token":"at-xxx","refresh_token":"rt-xxx","destination":"api.openai.com"}'
+  -d '{"name":"openai_oauth","type":"oauth","token_url":"https://auth.example.com/token","access_token":"at-xxx","refresh_token":"rt-xxx","destination":"api.openai.com","env_var":"OPENAI_API_KEY"}'
 ```
 
 ## Audit Log
@@ -332,6 +332,10 @@ sluice audit verify   # check hash chain integrity
 | Apple Container | macOS, `container` CLI |
 | macOS VM | macOS, Apple Silicon, `tart` CLI |
 | All | Telegram bot token (optional, for approval flow) |
+
+## Upgrading
+
+**From phantom volume to env var injection:** Sluice no longer uses a shared `sluice-phantoms` volume. Credentials are injected as environment variables via `docker exec` instead. After upgrading: remove the orphaned `sluice-phantoms` volume (`docker volume rm sluice-phantoms`), recreate containers so env vars are injected fresh on startup. No credential data is lost. Vault and database contents are unchanged.
 
 ## Troubleshooting
 
