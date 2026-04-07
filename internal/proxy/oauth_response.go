@@ -298,14 +298,10 @@ func (inj *Injector) persistOAuthTokens(credName string, realAccess, realRefresh
 		log.Printf("[INJECT-OAUTH] persisted updated tokens for credential %q", credName)
 	}
 
-	// Write updated phantom files to the shared volume so the agent
-	// container picks up the refreshed phantom values.
-	if inj.phantomDir != "" {
-		if err := vault.WriteOAuthPhantoms(inj.phantomDir, credName); err != nil {
-			log.Printf("[INJECT-OAUTH] phantom file write failed for credential %q: %v", credName, err)
-		} else {
-			log.Printf("[INJECT-OAUTH] wrote phantom files for credential %q", credName)
-		}
+	// Notify the caller so updated phantom env vars can be re-injected
+	// into the agent container (e.g. via docker exec).
+	if inj.onOAuthRefresh != nil {
+		inj.onOAuthRefresh(credName)
 	}
 }
 

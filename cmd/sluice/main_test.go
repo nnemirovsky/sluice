@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +17,7 @@ import (
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
 	"github.com/nemirovsky/sluice/internal/store"
+	"github.com/nemirovsky/sluice/internal/vault"
 )
 
 // TestReloadPolicyConcurrent verifies that rapid concurrent policy reloads
@@ -1249,7 +1253,7 @@ func TestBuildTartRunConfig(t *testing.T) {
 	tests := []struct {
 		name       string
 		vmName     string
-		phantomDir string
+		mcpDir     string
 		certDir    string
 		wantMounts int
 		wantName   string
@@ -1257,15 +1261,15 @@ func TestBuildTartRunConfig(t *testing.T) {
 		{
 			name:       "both dirs set",
 			vmName:     "openclaw",
-			phantomDir: "/tmp/phantoms",
+			mcpDir:     "/tmp/mcp",
 			certDir:    "/tmp/ca",
 			wantMounts: 2,
 			wantName:   "openclaw",
 		},
 		{
-			name:       "phantom only",
+			name:       "mcp only",
 			vmName:     "testvm",
-			phantomDir: "/tmp/phantoms",
+			mcpDir:     "/tmp/mcp",
 			certDir:    "",
 			wantMounts: 1,
 			wantName:   "testvm",
@@ -1273,7 +1277,7 @@ func TestBuildTartRunConfig(t *testing.T) {
 		{
 			name:       "cert only",
 			vmName:     "testvm",
-			phantomDir: "",
+			mcpDir:     "",
 			certDir:    "/tmp/ca",
 			wantMounts: 1,
 			wantName:   "testvm",
@@ -1281,7 +1285,7 @@ func TestBuildTartRunConfig(t *testing.T) {
 		{
 			name:       "no dirs",
 			vmName:     "testvm",
-			phantomDir: "",
+			mcpDir:     "",
 			certDir:    "",
 			wantMounts: 0,
 			wantName:   "testvm",
@@ -1290,7 +1294,7 @@ func TestBuildTartRunConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := buildTartRunConfig(tt.vmName, tt.phantomDir, tt.certDir)
+			cfg := buildTartRunConfig(tt.vmName, tt.mcpDir, tt.certDir)
 			if cfg.Name != tt.wantName {
 				t.Errorf("Name = %q, want %q", cfg.Name, tt.wantName)
 			}
@@ -1302,15 +1306,15 @@ func TestBuildTartRunConfig(t *testing.T) {
 			}
 
 			// When both dirs are set, verify mount names, paths, and readonly flags.
-			if tt.phantomDir != "" && tt.certDir != "" && len(cfg.DirMounts) == 2 {
-				if cfg.DirMounts[0].Name != "phantoms" {
-					t.Errorf("mount[0].Name = %q, want phantoms", cfg.DirMounts[0].Name)
+			if tt.mcpDir != "" && tt.certDir != "" && len(cfg.DirMounts) == 2 {
+				if cfg.DirMounts[0].Name != "mcp" {
+					t.Errorf("mount[0].Name = %q, want mcp", cfg.DirMounts[0].Name)
 				}
-				if cfg.DirMounts[0].HostPath != tt.phantomDir {
-					t.Errorf("mount[0].HostPath = %q, want %q", cfg.DirMounts[0].HostPath, tt.phantomDir)
+				if cfg.DirMounts[0].HostPath != tt.mcpDir {
+					t.Errorf("mount[0].HostPath = %q, want %q", cfg.DirMounts[0].HostPath, tt.mcpDir)
 				}
 				if cfg.DirMounts[0].ReadOnly {
-					t.Error("phantom mount should be writable")
+					t.Error("mcp mount should be writable")
 				}
 				if cfg.DirMounts[1].Name != "ca" {
 					t.Errorf("mount[1].Name = %q, want ca", cfg.DirMounts[1].Name)
@@ -1431,5 +1435,244 @@ func TestStandaloneModeCredentialInjection(t *testing.T) {
 	v := srv.EnginePtr().Load().Evaluate("api.example.com", 443)
 	if v != policy.Allow {
 		t.Errorf("expected Allow, got %s", v)
+	}
+}
+
+// mockContainerMgr implements container.ContainerManager for testing.
+type mockContainerMgr struct {
+	injectedEnv map[string]string
+	injectErr   error
+}
+
+func (m *mockContainerMgr) InjectEnvVars(_ context.Context, envMap map[string]string, _ bool) error {
+	m.injectedEnv = envMap
+	return m.injectErr
+}
+
+func (m *mockContainerMgr) RestartWithEnv(_ context.Context, _ map[string]string) error {
+	return nil
+}
+
+func (m *mockContainerMgr) InjectMCPConfig(_, _ string) error {
+	return nil
+}
+
+func (m *mockContainerMgr) InjectCACert(_ context.Context, _, _ string) error {
+	return nil
+}
+
+func (m *mockContainerMgr) Status(_ context.Context) (container.ContainerStatus, error) {
+	return container.ContainerStatus{Running: true}, nil
+}
+
+func (m *mockContainerMgr) Stop(_ context.Context) error {
+	return nil
+}
+
+func (m *mockContainerMgr) Runtime() container.Runtime {
+	return container.RuntimeDocker
+}
+
+func TestInjectEnvVarsFromStore(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Add a credential and a binding with env_var.
+	dir := t.TempDir()
+	vs, vsErr := vault.NewStore(dir)
+	if vsErr != nil {
+		t.Fatal(vsErr)
+	}
+	if _, addErr := vs.Add("openai_key", "sk-real-secret"); addErr != nil {
+		t.Fatal(addErr)
+	}
+
+	_, bindErr := db.AddBinding("api.openai.com", "openai_key", store.BindingOpts{
+		Ports:    []int{443},
+		Header:   "Authorization",
+		Template: "Bearer {value}",
+		EnvVar:   "OPENAI_API_KEY",
+	})
+	if bindErr != nil {
+		t.Fatal(bindErr)
+	}
+
+	mgr := &mockContainerMgr{}
+
+	if err := injectEnvVarsFromStore(db, mgr); err != nil {
+		t.Fatalf("injectEnvVarsFromStore failed: %v", err)
+	}
+
+	// Verify env var was injected.
+	if len(mgr.injectedEnv) != 1 {
+		t.Fatalf("expected 1 env var, got %d", len(mgr.injectedEnv))
+	}
+	val, ok := mgr.injectedEnv["OPENAI_API_KEY"]
+	if !ok {
+		t.Fatal("OPENAI_API_KEY not found in injected env")
+	}
+	// Phantom token should be a format-matching token for "openai_key".
+	if val == "" || val == "sk-real-secret" {
+		t.Errorf("expected phantom token, got %q", val)
+	}
+}
+
+func TestInjectEnvVarsFromStoreNoBindings(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	mgr := &mockContainerMgr{}
+
+	// Should call InjectEnvVars with empty map to truncate stale entries.
+	if err := injectEnvVarsFromStore(db, mgr); err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
+	}
+
+	if mgr.injectedEnv == nil {
+		t.Error("expected InjectEnvVars to be called with empty map for truncation")
+	}
+	if len(mgr.injectedEnv) != 0 {
+		t.Errorf("expected empty env map, got %d entries", len(mgr.injectedEnv))
+	}
+}
+
+func TestInjectEnvVarsFromStoreMultipleBindings(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Add two bindings with env_var.
+	_, _ = db.AddBinding("api.openai.com", "openai_key", store.BindingOpts{
+		Ports:    []int{443},
+		Header:   "Authorization",
+		Template: "Bearer {value}",
+		EnvVar:   "OPENAI_API_KEY",
+	})
+	_, _ = db.AddBinding("api.telegram.org", "tg_bot", store.BindingOpts{
+		Ports:    []int{443},
+		Header:   "Authorization",
+		Template: "Bearer {value}",
+		EnvVar:   "TELEGRAM_BOT_TOKEN",
+	})
+	// Add a binding without env_var (should not be injected).
+	_, _ = db.AddBinding("api.github.com", "gh_token", store.BindingOpts{
+		Ports:    []int{443},
+		Header:   "Authorization",
+		Template: "Bearer {value}",
+	})
+
+	mgr := &mockContainerMgr{}
+
+	if err := injectEnvVarsFromStore(db, mgr); err != nil {
+		t.Fatalf("injectEnvVarsFromStore failed: %v", err)
+	}
+
+	if len(mgr.injectedEnv) != 2 {
+		t.Fatalf("expected 2 env vars, got %d", len(mgr.injectedEnv))
+	}
+	if _, ok := mgr.injectedEnv["OPENAI_API_KEY"]; !ok {
+		t.Error("OPENAI_API_KEY not found in injected env")
+	}
+	if _, ok := mgr.injectedEnv["TELEGRAM_BOT_TOKEN"]; !ok {
+		t.Error("TELEGRAM_BOT_TOKEN not found in injected env")
+	}
+}
+
+func TestInjectEnvVarsFromStoreError(t *testing.T) {
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	_, _ = db.AddBinding("api.openai.com", "openai_key", store.BindingOpts{
+		Ports:  []int{443},
+		EnvVar: "OPENAI_API_KEY",
+	})
+
+	mgr := &mockContainerMgr{injectErr: fmt.Errorf("container exec failed")}
+
+	injectErr := injectEnvVarsFromStore(db, mgr)
+	if injectErr == nil {
+		t.Fatal("expected error from injectEnvVarsFromStore")
+	}
+	if !strings.Contains(injectErr.Error(), "container exec failed") {
+		t.Errorf("error should contain cause, got: %v", injectErr)
+	}
+}
+
+// TestDeriveMCPBaseURL verifies MCP base URL derivation from flags.
+func TestDeriveMCPBaseURL(t *testing.T) {
+	tests := []struct {
+		name       string
+		mcpBase    string
+		healthAddr string
+		want       string
+	}{
+		{
+			name:       "explicit base URL without path",
+			mcpBase:    "http://sluice:3000",
+			healthAddr: "0.0.0.0:3000",
+			want:       "http://sluice:3000/mcp",
+		},
+		{
+			name:       "explicit base URL with trailing slash",
+			mcpBase:    "http://sluice:3000/",
+			healthAddr: "0.0.0.0:3000",
+			want:       "http://sluice:3000/mcp",
+		},
+		{
+			name:       "explicit base URL already has /mcp",
+			mcpBase:    "http://sluice:3000/mcp",
+			healthAddr: "0.0.0.0:3000",
+			want:       "http://sluice:3000/mcp",
+		},
+		{
+			name:       "derive from health addr with 0.0.0.0",
+			mcpBase:    "",
+			healthAddr: "0.0.0.0:3000",
+			want:       "http://127.0.0.1:3000/mcp",
+		},
+		{
+			name:       "derive from health addr with localhost",
+			mcpBase:    "",
+			healthAddr: "127.0.0.1:3000",
+			want:       "http://127.0.0.1:3000/mcp",
+		},
+		{
+			name:       "derive from health addr with custom port",
+			mcpBase:    "",
+			healthAddr: "127.0.0.1:8080",
+			want:       "http://127.0.0.1:8080/mcp",
+		},
+		{
+			name:       "derive from health addr with empty host",
+			mcpBase:    "",
+			healthAddr: ":3000",
+			want:       "http://127.0.0.1:3000/mcp",
+		},
+		{
+			name:       "derive from invalid health addr",
+			mcpBase:    "",
+			healthAddr: "invalid",
+			want:       "http://127.0.0.1:3000/mcp",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := deriveMCPBaseURL(tt.mcpBase, tt.healthAddr)
+			if got != tt.want {
+				t.Errorf("deriveMCPBaseURL(%q, %q) = %q, want %q", tt.mcpBase, tt.healthAddr, got, tt.want)
+			}
+		})
 	}
 }

@@ -114,11 +114,11 @@ type Injector struct {
 	// vault update occurs when multiple requests trigger simultaneous
 	// refreshes.
 	refreshGroup singleflight.Group
-	// phantomDir is the shared volume path for phantom token files.
-	// When non-empty, the async OAuth token persist goroutine writes
-	// updated phantom files after vault persistence so the agent
-	// container picks up refreshed phantom values.
-	phantomDir string
+	// onOAuthRefresh is called after an OAuth token refresh persist
+	// completes successfully. It receives the credential name so the
+	// caller can re-inject updated phantom env vars into the agent
+	// container. Nil means no post-refresh action.
+	onOAuthRefresh func(credName string)
 	// persistDone is an optional channel signaled when an async OAuth
 	// token persist goroutine completes. Used by tests to avoid
 	// time.Sleep-based synchronization. Nil in production.
@@ -150,11 +150,12 @@ func (inj *Injector) UpdateOAuthIndex(metas []store.CredentialMeta) {
 	log.Printf("[INJECT-OAUTH] updated token URL index (%d entries)", idx.Len())
 }
 
-// SetPhantomDir configures the shared volume path for phantom token files.
-// When set, the async OAuth token persist goroutine writes updated phantom
-// files after vault persistence.
-func (inj *Injector) SetPhantomDir(dir string) {
-	inj.phantomDir = dir
+// SetOnOAuthRefresh configures a callback invoked after an OAuth token
+// refresh is persisted to the vault. The callback receives the credential
+// name so the caller can re-inject updated phantom env vars into the agent
+// container via docker exec (or equivalent).
+func (inj *Injector) SetOnOAuthRefresh(fn func(credName string)) {
+	inj.onOAuthRefresh = fn
 }
 
 // NewInjector creates an MITM proxy that injects credentials into matching

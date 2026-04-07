@@ -80,11 +80,11 @@ func main() {
 	vmImage := flag.String("vm-image", "", "OCI image for tart macOS VM (e.g. ghcr.io/cirruslabs/macos-sequoia-base:latest)")
 	dockerSocket := flag.String("docker-socket", "", "Docker socket path (auto-detects from DOCKER_HOST or /var/run/docker.sock)")
 	containerName := flag.String("container-name", envDefault("SLUICE_AGENT_CONTAINER", "openclaw"), "agent container/VM name")
-	phantomDir := flag.String("phantom-dir", "", "shared volume path for phantom token files (enables hot-reload)")
 	certDir := flag.String("cert-dir", "", "shared volume path for CA certificate (enables MITM trust injection into guest)")
 	dnsResolver := flag.String("dns-resolver", "", "upstream DNS resolver address for DNS interception (default: 8.8.8.8:53)")
 	autoInjectMCP := flag.Bool("auto-inject-mcp", false, "auto-inject MCP config into agent container (default true for docker/apple runtimes)")
 	mcpBaseURL := flag.String("mcp-base-url", "", "base URL for auto-injected MCP config (e.g. http://sluice:3000); derived from --health-addr when empty")
+	mcpDir := flag.String("mcp-dir", "", "shared volume path for MCP config (mcp-servers.json); enables MCP auto-injection into agent container")
 	autoInjectMCPSet := false
 	flag.Parse()
 
@@ -278,7 +278,7 @@ func main() {
 			log.Printf("apple container manager enabled: container=%s", *containerName)
 		}
 	case "macos":
-		tartMgr, tartRouter, containerMgr, tartVMOwned = startMacOSVM(*vmImage, *containerName, *phantomDir, *certDir)
+		tartMgr, tartRouter, containerMgr, tartVMOwned = startMacOSVM(*vmImage, *containerName, *mcpDir, *certDir)
 	case "none":
 		log.Printf("standalone mode: no container runtime (configure ALL_PROXY=socks5://%s manually)", *listenAddr)
 	case "":
@@ -329,12 +329,6 @@ func main() {
 		log.Fatalf("start proxy: %v", err)
 	}
 
-	// Configure phantom dir on the proxy's injector so the async OAuth
-	// token persist goroutine writes updated phantom files.
-	if *phantomDir != "" {
-		srv.SetPhantomDir(*phantomDir)
-	}
-
 	// Populate the initial OAuth token URL index at startup so response
 	// interception works for credentials added before the first SIGHUP.
 	if db != nil {
@@ -342,6 +336,28 @@ func main() {
 			srv.UpdateOAuthIndex(metas)
 			log.Printf("oauth index initialized: %d entries", len(metas))
 		}
+	}
+
+	// Inject phantom env vars into the agent container at startup.
+	// Bindings with env_var set produce env var entries (e.g. OPENAI_API_KEY=phantom-xxx)
+	// that are written into the agent's .env file via docker exec.
+	if containerMgr != nil && db != nil {
+		if err := injectEnvVarsFromStore(db, containerMgr); err != nil {
+			log.Printf("WARNING: startup env injection failed: %v", err)
+		}
+	}
+
+	// Configure the OAuth refresh callback so that after a token refresh
+	// is persisted, the updated phantom env vars are re-injected into the
+	// agent container.
+	if containerMgr != nil && db != nil {
+		srv.SetOnOAuthRefresh(func(credName string) {
+			if injectErr := injectEnvVarsFromStore(db, containerMgr); injectErr != nil {
+				log.Printf("[INJECT-OAUTH] env injection after refresh for %q failed: %v", credName, injectErr)
+			} else {
+				log.Printf("[INJECT-OAUTH] env vars re-injected after refresh for %q", credName)
+			}
+		})
 	}
 
 	// Inject the MITM CA certificate into the agent container/VM so TLS
@@ -377,7 +393,6 @@ func main() {
 			Vault:        vaultStore,
 			ContainerMgr: containerMgr,
 			Store:        db,
-			PhantomDir:   *phantomDir,
 			OnEngineSwap: srv.UpdateInspectRules,
 			OnOAuthIndexRebuild: func() {
 				if db == nil {
@@ -518,16 +533,15 @@ func main() {
 
 		// Auto-inject MCP config into the agent container so it connects
 		// to sluice's gateway via Streamable HTTP.
-		if *autoInjectMCP && containerMgr != nil && *phantomDir != "" {
-			sluiceURL := fmt.Sprintf("http://%s/mcp", *healthAddr)
-			if *mcpBaseURL != "" {
-				sluiceURL = strings.TrimRight(*mcpBaseURL, "/") + "/mcp"
-			}
-			if injectErr := containerMgr.InjectMCPConfig(*phantomDir, sluiceURL); injectErr != nil {
+		if *autoInjectMCP && containerMgr != nil && *mcpDir != "" {
+			mcpURL := deriveMCPBaseURL(*mcpBaseURL, *healthAddr)
+			if injectErr := containerMgr.InjectMCPConfig(*mcpDir, mcpURL); injectErr != nil {
 				log.Printf("WARNING: MCP auto-inject failed: %v", injectErr)
 			} else {
-				log.Printf("MCP config injected into agent container (url=%s)", sluiceURL)
+				log.Printf("MCP config auto-injected to %s (url=%s)", *mcpDir, mcpURL)
 			}
+		} else if *autoInjectMCP && containerMgr != nil && *mcpDir == "" {
+			log.Printf("MCP auto-inject skipped: no shared volume path configured (use -mcp-dir)")
 		}
 	}
 
@@ -539,7 +553,7 @@ func main() {
 		apiServer.SetVault(vaultStore)
 	}
 	if containerMgr != nil {
-		apiServer.SetContainerManager(containerMgr, *phantomDir)
+		apiServer.SetContainerManager(containerMgr)
 	}
 	healthLn, healthSrv := startAPIServer(*healthAddr, apiServer, db, mcpHandler)
 	if healthLn != nil {
@@ -595,10 +609,16 @@ func main() {
 			log.Printf("reload oauth index failed: %v", metaErr)
 		}
 
+		// Re-inject env vars into the agent container after binding changes.
+		if containerMgr != nil {
+			if injectErr := injectEnvVarsFromStore(db, containerMgr); injectErr != nil {
+				log.Printf("reload env injection failed: %v", injectErr)
+			}
+		}
+
 		if broker == nil && (len(newEng.AskRules) > 0 || newEng.Default == policy.Ask) {
 			log.Printf("WARNING: policy has ask rules but no approval broker is running; ask verdicts will auto-deny")
 		}
-
 	}
 
 	sighupCh := make(chan os.Signal, 1)
@@ -713,6 +733,32 @@ func readBindings(db *store.Store) ([]vault.Binding, error) {
 		}
 	}
 	return bindings, nil
+}
+
+// injectEnvVarsFromStore reads bindings with env_var set from the store,
+// generates phantom tokens for each, and injects them into the agent
+// container via the container manager. This is called at startup and after
+// credential/binding changes (reload).
+func injectEnvVarsFromStore(db *store.Store, mgr container.ContainerManager) error {
+	envBindings, err := db.ListBindingsWithEnvVar()
+	if err != nil {
+		return fmt.Errorf("list bindings with env_var: %w", err)
+	}
+	envMap := make(map[string]string, len(envBindings))
+	for _, b := range envBindings {
+		// For OAuth credentials, the env_var maps to the access token phantom.
+		// The credential name is used to generate a format-matching phantom.
+		envMap[b.EnvVar] = vault.GeneratePhantomToken(b.Credential)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := mgr.InjectEnvVars(ctx, envMap, true); err != nil {
+		return fmt.Errorf("inject env vars: %w", err)
+	}
+	log.Printf("injected %d env vars into agent container", len(envMap))
+	return nil
 }
 
 // envDefault returns the environment variable value if set, otherwise the fallback.
@@ -890,6 +936,28 @@ func selfBypassFromURL(baseURL, healthAddr string) string {
 	return hostport
 }
 
+// deriveMCPBaseURL returns the full MCP endpoint URL for auto-injection.
+// If mcpBaseURL is set, it appends /mcp (if not already present).
+// Otherwise it derives the URL from the health-addr listen address.
+func deriveMCPBaseURL(mcpBaseURL, healthAddr string) string {
+	if mcpBaseURL != "" {
+		u := strings.TrimRight(mcpBaseURL, "/")
+		if !strings.HasSuffix(u, "/mcp") {
+			u += "/mcp"
+		}
+		return u
+	}
+	// Derive from health-addr. Replace 0.0.0.0 with 127.0.0.1 for local access.
+	host, port, err := net.SplitHostPort(healthAddr)
+	if err != nil {
+		return "http://127.0.0.1:3000/mcp"
+	}
+	if host == "0.0.0.0" || host == "" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return fmt.Sprintf("http://%s/mcp", net.JoinHostPort(host, port))
+}
+
 // seedStoreFromConfig imports a TOML config file into the store if the store
 // is empty. Returns nil if the store is not empty or if the config file does
 // not exist (logged as a warning). Returns an error for other failures.
@@ -927,13 +995,13 @@ func seedStoreFromConfig(db *store.Store, configPath string) error {
 // routing. Returns the TartManager, NetworkRouter (for shutdown cleanup),
 // the ContainerManager interface, and a boolean indicating whether sluice
 // started the VM. Calls log.Fatalf on unrecoverable errors.
-func startMacOSVM(vmImage, vmName, phantomDir, certDir string) (*container.TartManager, *container.NetworkRouter, container.ContainerManager, bool) {
+func startMacOSVM(vmImage, vmName, mcpDir, certDir string) (*container.TartManager, *container.NetworkRouter, container.ContainerManager, bool) {
 	cli, cliErr := container.NewTartCLI(nil)
 	if cliErr != nil {
 		log.Fatalf("--runtime macos: tart CLI not available: %v", cliErr)
 	}
 
-	mgr, router, owned, err := setupMacOSVM(cli, vmImage, vmName, phantomDir, certDir)
+	mgr, router, owned, err := setupMacOSVM(cli, vmImage, vmName, mcpDir, certDir)
 	if err != nil {
 		log.Fatalf("--runtime macos: %v", err)
 	}
@@ -941,11 +1009,11 @@ func startMacOSVM(vmImage, vmName, phantomDir, certDir string) (*container.TartM
 }
 
 // buildTartRunConfig creates the TartRunConfig with VirtioFS mounts.
-func buildTartRunConfig(vmName, phantomDir, certDir string) container.TartRunConfig {
+func buildTartRunConfig(vmName, mcpDir, certDir string) container.TartRunConfig {
 	var dirMounts []container.TartDirMount
-	if phantomDir != "" {
+	if mcpDir != "" {
 		dirMounts = append(dirMounts, container.TartDirMount{
-			Name: "phantoms", HostPath: phantomDir,
+			Name: "mcp", HostPath: mcpDir,
 		})
 	}
 	if certDir != "" {
@@ -987,7 +1055,7 @@ func waitForVMIP(ctx context.Context, cli *container.TartCLI, vmName string) (st
 // indicates whether sluice started the VM (true) or attached to an
 // already-running VM (false). Only VMs started by sluice should be
 // stopped on shutdown.
-func setupMacOSVM(cli *container.TartCLI, vmImage, vmName, phantomDir, certDir string) (*container.TartManager, *container.NetworkRouter, bool, error) {
+func setupMacOSVM(cli *container.TartCLI, vmImage, vmName, mcpDir, certDir string) (*container.TartManager, *container.NetworkRouter, bool, error) {
 	ctx := context.Background()
 
 	// Check if VM already exists.
@@ -1010,7 +1078,7 @@ func setupMacOSVM(cli *container.TartCLI, vmImage, vmName, phantomDir, certDir s
 		return nil, nil, false, fmt.Errorf("check VM state: %w", stateErr)
 	}
 
-	runCfg := buildTartRunConfig(vmName, phantomDir, certDir)
+	runCfg := buildTartRunConfig(vmName, mcpDir, certDir)
 
 	// Track whether sluice started the VM so we only stop it on shutdown
 	// if we own it. Attaching to a pre-existing VM and then killing it on
