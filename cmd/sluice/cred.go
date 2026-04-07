@@ -126,7 +126,7 @@ func handleCredAdd(args []string) error {
 	args = reorderPositionalLast(args)
 
 	fs := flag.NewFlagSet("cred add", flag.ContinueOnError)
-	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	destination := fs.String("destination", "", "auto-create allow rule and binding for this destination")
 	portsStr := fs.String("ports", "", "comma-separated port list for the allow rule (e.g. 443,80)")
 	header := fs.String("header", "", "header for the binding (e.g. Authorization)")
@@ -378,7 +378,7 @@ func readOAuthCredentialInput(tokenURL string) (*vault.OAuthCredential, error) {
 
 func handleCredList(args []string) error {
 	fs := flag.NewFlagSet("cred list", flag.ContinueOnError)
-	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -464,7 +464,7 @@ func handleCredList(args []string) error {
 
 func handleCredRemove(args []string) error {
 	fs := flag.NewFlagSet("cred remove", flag.ContinueOnError)
-	dbPath := fs.String("db", "sluice.db", "path to SQLite database")
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

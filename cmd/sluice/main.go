@@ -69,7 +69,7 @@ func main() {
 	}
 
 	listenAddr := flag.String("listen", "127.0.0.1:1080", "SOCKS5 listen address")
-	dbPath := flag.String("db", "sluice.db", "path to SQLite database")
+	dbPath := flag.String("db", "data/sluice.db", "path to SQLite database")
 	configPath := flag.String("config", "", "path to config TOML file (seeds DB on first run if DB is empty)")
 	auditPath := flag.String("audit", "audit.jsonl", "path to audit log file")
 	telegramToken := flag.String("telegram-token", os.Getenv("TELEGRAM_BOT_TOKEN"), "Telegram bot token")
