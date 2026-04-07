@@ -71,23 +71,32 @@ func NewDockerManager(client ContainerClient, containerName string) *DockerManag
 	}
 }
 
-// ReloadSecrets writes phantom token files to a shared volume directory and
-// signals the agent container to reload them via docker exec. Each entry in
-// phantomEnv is written as a separate file (key = filename, value = contents).
-// If the exec command fails (e.g. the agent image does not support "secrets
-// reload"), it falls back to RestartWithEnv for backward compatibility.
-func (m *DockerManager) ReloadSecrets(ctx context.Context, phantomDir string, phantomEnv map[string]string) error {
-	if err := WritePhantomFiles(phantomDir, phantomEnv); err != nil {
-		return err
+// InjectEnvVars writes environment variables into the agent container's env
+// file (~/.openclaw/.env) via docker exec and then signals the agent to reload.
+// Each key in envMap is an env var name and the value is the phantom token.
+// When fullReplace is true the file is truncated before writing so stale
+// entries are removed. When false, entries are merged in-place.
+func (m *DockerManager) InjectEnvVars(ctx context.Context, envMap map[string]string, fullReplace bool) error {
+	if len(envMap) == 0 && !fullReplace {
+		return nil
 	}
 
-	// Signal the agent container to reload secrets.
-	err := m.client.ExecInContainer(ctx, m.containerName,
-		[]string{"openclaw", "secrets", "reload"})
+	script, err := BuildEnvInjectionScript(envMap, false, fullReplace)
 	if err != nil {
-		// Fallback to full container restart if exec fails.
-		return m.RestartWithEnv(ctx, phantomEnv)
+		return fmt.Errorf("build env injection script: %w", err)
 	}
+
+	if execErr := m.client.ExecInContainer(ctx, m.containerName,
+		[]string{"sh", "-c", script}); execErr != nil {
+		return fmt.Errorf("inject env vars: %w", execErr)
+	}
+
+	// Signal the agent to reload secrets from the updated env file.
+	if reloadErr := m.client.ExecInContainer(ctx, m.containerName,
+		[]string{"openclaw", "secrets", "reload"}); reloadErr != nil {
+		log.Printf("env vars injected but secrets reload failed: %v", reloadErr)
+	}
+
 	return nil
 }
 
@@ -144,11 +153,11 @@ func (m *DockerManager) Status(ctx context.Context) (ContainerStatus, error) {
 	}, nil
 }
 
-// InjectMCPConfig writes an mcp-servers.json file to the shared phantoms
-// volume and signals the agent container to reload MCP configuration via
-// docker exec. If exec fails, the agent picks up the config on next restart.
-func (m *DockerManager) InjectMCPConfig(phantomDir, sluiceURL string) error {
-	if err := WriteMCPConfig(phantomDir, sluiceURL); err != nil {
+// InjectMCPConfig writes an mcp-servers.json file to the shared MCP volume
+// and signals the agent container to reload MCP configuration via docker exec.
+// If exec fails, the agent picks up the config on next restart.
+func (m *DockerManager) InjectMCPConfig(mcpDir, sluiceURL string) error {
+	if err := WriteMCPConfig(mcpDir, sluiceURL); err != nil {
 		return err
 	}
 
@@ -156,7 +165,7 @@ func (m *DockerManager) InjectMCPConfig(phantomDir, sluiceURL string) error {
 	defer cancel()
 	if execErr := m.client.ExecInContainer(ctx, m.containerName,
 		[]string{"openclaw", "mcp", "reload"}); execErr != nil {
-		path := filepath.Join(phantomDir, "mcp-servers.json")
+		path := filepath.Join(mcpDir, "mcp-servers.json")
 		log.Printf("MCP config written to %s but exec reload failed: %v", path, execErr)
 	}
 	return nil
