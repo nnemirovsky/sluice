@@ -7,6 +7,8 @@ import (
 	"regexp"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/nemirovsky/sluice/internal/container"
 )
 
 // ImportResult reports what happened during a TOML import.
@@ -51,6 +53,7 @@ type importBinding struct {
 	Header      string   `toml:"header"`
 	Template    string   `toml:"template"`
 	Protocols   []string `toml:"protocols"`
+	EnvVar      string   `toml:"env_var"`
 }
 
 // importMCPUpstream is the TOML representation of an MCP upstream server.
@@ -497,12 +500,22 @@ func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
 	if err := validateProtocols(b.Protocols, fmt.Sprintf("binding %q->%q", b.Destination, b.Credential)); err != nil {
 		return false, err
 	}
+	// Validate env_var format and uniqueness when set.
+	if b.EnvVar != "" {
+		if err := container.ValidateEnvVarKey(b.EnvVar); err != nil {
+			return false, fmt.Errorf("binding %q->%q: %w", b.Destination, b.Credential, err)
+		}
+		if err := checkEnvVarUniqueWith(tx, b.EnvVar); err != nil {
+			return false, fmt.Errorf("binding %q->%q: %w", b.Destination, b.Credential, err)
+		}
+	}
+
 	portsJSON := portsToJSONPtr(b.Ports)
 	protocolsJSON := protocolsToJSONPtr(b.Protocols)
 	var count int
 	err := tx.QueryRow(
-		"SELECT COUNT(*) FROM bindings WHERE destination = ? AND credential = ? AND ports IS ? AND header IS ? AND template IS ? AND protocols IS ?",
-		b.Destination, b.Credential, portsJSON, nilIfEmpty(b.Header), nilIfEmpty(b.Template), protocolsJSON,
+		"SELECT COUNT(*) FROM bindings WHERE destination = ? AND credential = ? AND ports IS ? AND header IS ? AND template IS ? AND protocols IS ? AND env_var IS ?",
+		b.Destination, b.Credential, portsJSON, nilIfEmpty(b.Header), nilIfEmpty(b.Template), protocolsJSON, nilIfEmpty(b.EnvVar),
 	).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("check binding exists: %w", err)
@@ -512,9 +525,10 @@ func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
 	}
 
 	if _, err := tx.Exec(
-		`INSERT INTO bindings (destination, ports, credential, header, template, protocols) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO bindings (destination, ports, credential, header, template, protocols, env_var) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		b.Destination, portsJSON, b.Credential,
 		nilIfEmpty(b.Header), nilIfEmpty(b.Template), protocolsJSON,
+		nilIfEmpty(b.EnvVar),
 	); err != nil {
 		return false, fmt.Errorf("insert binding %q->%q: %w", b.Destination, b.Credential, err)
 	}
