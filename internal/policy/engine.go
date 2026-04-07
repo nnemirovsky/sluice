@@ -381,6 +381,25 @@ func (e *Engine) IsDenied(dest string, port int) bool {
 	return matchRules(e.compiled.denyRules, dest, port)
 }
 
+// IsDeniedDomain checks if a domain matches any deny rule regardless of port
+// or protocol. Used by the DNS interceptor to block resolution for explicitly
+// denied domains while allowing all others through (policy enforcement happens
+// at the SOCKS5 CONNECT level).
+func (e *Engine) IsDeniedDomain(dest string) bool {
+	dest = normalizeDestination(dest)
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.compiled == nil {
+		return false
+	}
+	for _, r := range e.compiled.denyRules {
+		if r.glob.Match(dest) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsRestricted checks whether a destination and port match any explicit deny
 // or ask rule. Unlike Evaluate, this does not fall back to the default verdict.
 // Used for DNS rebinding checks where the original FQDN was already allowed

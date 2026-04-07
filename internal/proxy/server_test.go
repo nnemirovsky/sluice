@@ -1203,8 +1203,8 @@ protocols = ["dns"]
 }
 
 func TestUDPAssociateDNSInterceptionNXDOMAIN(t *testing.T) {
-	// DNS interceptor should return NXDOMAIN for denied domains without
-	// contacting the upstream resolver.
+	// DNS interceptor should return NXDOMAIN for explicitly denied domains
+	// without contacting the upstream resolver.
 	eng, err := policy.LoadFromBytes([]byte(`
 [policy]
 default = "deny"
@@ -1213,6 +1213,9 @@ default = "deny"
 destination = "allowed.example.com"
 ports = [53]
 protocols = ["dns"]
+
+[[deny]]
+destination = "denied.example.com"
 `))
 	if err != nil {
 		t.Fatal(err)

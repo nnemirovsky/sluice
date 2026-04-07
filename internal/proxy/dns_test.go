@@ -447,6 +447,9 @@ func TestDNSInterceptor_DeniedDomain(t *testing.T) {
 	eng, err := policy.LoadFromBytes([]byte(`
 [policy]
 default = "deny"
+
+[[deny]]
+destination = "denied.example.com"
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -464,7 +467,7 @@ default = "deny"
 		t.Fatalf("HandleQuery: %v", err)
 	}
 
-	// Response should be NXDOMAIN.
+	// Response should be NXDOMAIN (explicit deny rule).
 	respID := binary.BigEndian.Uint16(resp[0:2])
 	if respID != 0x2222 {
 		t.Errorf("response ID = 0x%04x, want 0x2222", respID)
@@ -543,7 +546,9 @@ protocols = ["dns"]
 		t.Errorf("evil.google.com RCODE = %d, want %d (NXDOMAIN)", rcode, dnsRcodeNXDomain)
 	}
 
-	// Unmatched domain (default deny).
+	// Unmatched domain (default deny). DNS should still resolve so the
+	// connection reaches the SOCKS5 layer where the ask/deny flow runs.
+	// Only explicitly denied domains get NXDOMAIN at the DNS level.
 	query = buildDNSQuery(0x5555, "other.com", dnsTypeA)
 	resp, err = interceptor.HandleQuery(query)
 	if err != nil {
@@ -551,8 +556,8 @@ protocols = ["dns"]
 	}
 	flags = binary.BigEndian.Uint16(resp[2:4])
 	rcode = flags & 0x000F
-	if rcode != dnsRcodeNXDomain {
-		t.Errorf("other.com RCODE = %d, want %d (NXDOMAIN)", rcode, dnsRcodeNXDomain)
+	if rcode == dnsRcodeNXDomain {
+		t.Errorf("other.com RCODE = %d (NXDOMAIN), want forwarded (non-denied domains resolve via DNS)", rcode)
 	}
 }
 
@@ -877,10 +882,13 @@ func TestParseDNSNameEdgeCases(t *testing.T) {
 	})
 }
 
-// TestHandleQueryDenyRule tests that a deny rule causes NXDOMAIN.
+// TestHandleQueryDenyRule tests that an explicit deny rule causes NXDOMAIN.
 func TestHandleQueryDenyRule(t *testing.T) {
 	eng, _ := policy.LoadFromBytes([]byte(`[policy]
 default = "deny"
+
+[[deny]]
+destination = "blocked.example.com"
 `))
 
 	var enginePtr atomic.Pointer[policy.Engine]

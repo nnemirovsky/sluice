@@ -239,11 +239,18 @@ func (d *DNSInterceptor) HandleQuery(query []byte) ([]byte, error) {
 	}
 
 	domain := questions[0].Name
-	verdict := d.evaluate(domain)
+
+	// Only block DNS for explicitly denied domains. All other verdicts
+	// (allow, ask, default) are forwarded. Policy enforcement for the
+	// actual connection happens at the SOCKS5 CONNECT level, not DNS.
+	// Blocking DNS for "ask" or default-deny domains would prevent the
+	// connection from ever reaching the approval flow.
+	eng := d.engine.Load()
+	denied := eng.IsDeniedDomain(domain)
 
 	if d.audit != nil {
 		verdictStr := "allow"
-		if verdict != policy.Allow {
+		if denied {
 			verdictStr = "deny"
 		}
 		if logErr := d.audit.Log(audit.Event{
@@ -257,7 +264,7 @@ func (d *DNSInterceptor) HandleQuery(query []byte) ([]byte, error) {
 		}
 	}
 
-	if verdict != policy.Allow {
+	if denied {
 		return BuildNXDOMAIN(query)
 	}
 
@@ -275,17 +282,10 @@ func (d *DNSInterceptor) HandleQuery(query []byte) ([]byte, error) {
 	return resp, nil
 }
 
-// evaluate checks the DNS domain against the policy engine. Uses
-// EvaluateWithProtocol with protocol "dns" so dns-specific rules match.
-func (d *DNSInterceptor) evaluate(domain string) policy.Verdict {
-	eng := d.engine.Load()
-	// Use EvaluateWithProtocol with "dns" so protocol-scoped rules match.
-	// DNS follows the same deny-then-allow-then-default semantics as
-	// regular evaluation, not the UDP default-deny semantics, because
-	// DNS queries are a known protocol with meaningful domain-level policy.
-	v := eng.EvaluateWithProtocol(domain, 53, ProtoDNS.String())
-	return v
-}
+// NOTE: the old evaluate() method has been removed. DNS resolution is now
+// allowed for all domains except those with explicit deny rules. Policy
+// enforcement (allow/ask/deny) happens at the SOCKS5 CONNECT level where
+// the approval broker can send Telegram notifications for "ask" verdicts.
 
 // forwardToResolver sends the query to the upstream DNS resolver and returns
 // the response.

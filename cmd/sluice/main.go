@@ -861,11 +861,10 @@ func startAPIServer(addr string, apiSrv *api.Server, st *store.Store, mcpHandler
 	}
 	// oapi-codegen wraps handlers bottom-up: last middleware in the slice
 	// becomes the outermost layer. List channel gate first, then auth, so
-	// the request hits auth before the channel gate. This ensures bad tokens
-	// get 401 before the channel gate reveals whether HTTP channel is enabled.
+	// Bearer token auth protects all /api/* routes. The API is accessible
+	// whenever SLUICE_API_TOKEN is set, regardless of which channels are enabled.
 	apiHandler := api.HandlerWithOptions(apiSrv, api.ChiServerOptions{
 		Middlewares: []api.MiddlewareFunc{
-			api.ChannelGateMiddleware(st),
 			api.BearerAuthMiddleware,
 		},
 	})
