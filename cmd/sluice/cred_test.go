@@ -829,14 +829,10 @@ func TestHandleCredAddOAuth(t *testing.T) {
 	if !strings.Contains(output, "added binding") {
 		t.Errorf("expected binding message, got: %s", output)
 	}
-	if !strings.Contains(output, "oauth phantom env vars") {
-		t.Errorf("expected phantom env vars message, got: %s", output)
-	}
-	if !strings.Contains(output, "OPENAI_OAUTH_ACCESS") {
-		t.Errorf("expected OPENAI_OAUTH_ACCESS in output, got: %s", output)
-	}
-	if !strings.Contains(output, "OPENAI_OAUTH_REFRESH") {
-		t.Errorf("expected OPENAI_OAUTH_REFRESH in output, got: %s", output)
+	// Phantom env var auto-naming was removed. OAuth credentials no longer
+	// print auto-generated env var names (explicit --env-var is used instead).
+	if strings.Contains(output, "phantom env vars") {
+		t.Errorf("unexpected phantom env vars message in output: %s", output)
 	}
 
 	// Verify the credential is in the vault as OAuth JSON.
@@ -1293,5 +1289,265 @@ func TestHandleCredAddStaticDefaultType(t *testing.T) {
 
 	if !strings.Contains(output, "(type: static)") {
 		t.Errorf("expected '(type: static)' in output, got: %s", output)
+	}
+}
+
+// TestHandleCredAddWithEnvVar tests adding a credential with --env-var flag.
+func TestHandleCredAddWithEnvVar(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	cleanup := pipeStdin(t, "sk-test-secret\n")
+	defer cleanup()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--destination", "api.openai.com",
+			"--ports", "443",
+			"--header", "Authorization",
+			"--template", "Bearer {value}",
+			"--env-var", "OPENAI_API_KEY",
+			"openai_key",
+		}); err != nil {
+			t.Fatalf("handleCredCommand add with env-var: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, `credential "openai_key" added`) {
+		t.Errorf("expected credential added message, got: %s", output)
+	}
+	if !strings.Contains(output, "env var: OPENAI_API_KEY") {
+		t.Errorf("expected env var message, got: %s", output)
+	}
+
+	// Verify the binding has the env_var set.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if bindings[0].EnvVar != "OPENAI_API_KEY" {
+		t.Errorf("binding env_var = %q, want %q", bindings[0].EnvVar, "OPENAI_API_KEY")
+	}
+}
+
+// TestHandleCredAddWithoutEnvVar tests that env_var is empty when --env-var is omitted.
+func TestHandleCredAddWithoutEnvVar(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	cleanup := pipeStdin(t, "my-secret\n")
+	defer cleanup()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--destination", "api.example.com",
+			"--ports", "443",
+			"no_env_key",
+		}); err != nil {
+			t.Fatalf("handleCredCommand add without env-var: %v", err)
+		}
+	})
+
+	// Should not print env var line when --env-var is not provided.
+	if strings.Contains(output, "env var:") {
+		t.Errorf("unexpected env var message when --env-var not provided: %s", output)
+	}
+
+	// Verify the binding has empty env_var.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if bindings[0].EnvVar != "" {
+		t.Errorf("binding env_var = %q, want empty", bindings[0].EnvVar)
+	}
+}
+
+// TestHandleCredAddEnvVarRequiresDestination verifies that --env-var without
+// --destination returns an error since the env var is stored on the binding.
+func TestHandleCredAddEnvVarRequiresDestination(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	cleanup := pipeStdin(t, "my-secret\n")
+	defer cleanup()
+
+	err := handleCredCommand([]string{
+		"add",
+		"--db", dbPath,
+		"--env-var", "MY_KEY",
+		"test_cred",
+	})
+	if err == nil {
+		t.Fatal("expected error when --env-var is used without --destination")
+	}
+	if !strings.Contains(err.Error(), "--env-var requires --destination") {
+		t.Errorf("error should mention --env-var requires --destination, got: %v", err)
+	}
+}
+
+// TestHandleCredAddEnvVarFlagParsing tests that --env-var works in different
+// argument positions (before name, after name, with =).
+func TestHandleCredAddEnvVarFlagParsing(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "env-var before name",
+			args: []string{"add", "--env-var", "MY_KEY", "--destination", "api.test.com"},
+		},
+		{
+			name: "env-var after name",
+			args: []string{"add", "test_cred", "--env-var", "MY_KEY", "--destination", "api.test.com"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			dbPath := setupVaultDB(t, dir)
+
+			cleanup := pipeStdin(t, "secret-val\n")
+			defer cleanup()
+
+			fullArgs := append([]string{}, tt.args...)
+			// Ensure --db is added and a credential name is present.
+			fullArgs = append(fullArgs, "--db", dbPath)
+			// If args don't end with a non-flag, the positional is already in
+			// the args via reorderPositionalLast.
+			hasName := false
+			for _, a := range tt.args {
+				if a == "test_cred" {
+					hasName = true
+					break
+				}
+			}
+			if !hasName {
+				fullArgs = append(fullArgs, "test_cred")
+			}
+
+			_ = captureStdout(t, func() {
+				if err := handleCredCommand(fullArgs); err != nil {
+					t.Fatalf("handleCredCommand: %v", err)
+				}
+			})
+
+			db, err := store.New(dbPath)
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			defer func() { _ = db.Close() }()
+
+			bindings, err := db.ListBindings()
+			if err != nil {
+				t.Fatalf("list bindings: %v", err)
+			}
+			if len(bindings) != 1 {
+				t.Fatalf("expected 1 binding, got %d", len(bindings))
+			}
+			if bindings[0].EnvVar != "MY_KEY" {
+				t.Errorf("binding env_var = %q, want %q", bindings[0].EnvVar, "MY_KEY")
+			}
+		})
+	}
+}
+
+// TestHandleCredListShowsEnvVar tests that cred list displays env_var when set.
+func TestHandleCredListShowsEnvVar(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	// Create a credential in the vault.
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vs.Add("my_api_key", "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a binding with env_var set.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.AddBinding("api.example.com", "my_api_key", store.BindingOpts{
+		Ports:  []int{443},
+		Header: "Authorization",
+		EnvVar: "OPENAI_API_KEY",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{"list", "--db", dbPath}); err != nil {
+			t.Fatalf("handleCredCommand list: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, "env=OPENAI_API_KEY") {
+		t.Errorf("expected 'env=OPENAI_API_KEY' in list output, got: %s", output)
+	}
+}
+
+// TestHandleCredListHidesEnvVarWhenEmpty tests that cred list does not show
+// env= when env_var is not set.
+func TestHandleCredListHidesEnvVarWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vs.Add("no_env_cred", "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.AddBinding("api.example.com", "no_env_cred", store.BindingOpts{
+		Ports: []int{443},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{"list", "--db", dbPath}); err != nil {
+			t.Fatalf("handleCredCommand list: %v", err)
+		}
+	})
+
+	if strings.Contains(output, "env=") {
+		t.Errorf("unexpected 'env=' in list output when env_var is empty: %s", output)
 	}
 }

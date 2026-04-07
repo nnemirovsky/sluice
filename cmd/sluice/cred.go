@@ -133,12 +133,13 @@ func handleCredAdd(args []string) error {
 	template := fs.String("template", "", "template for credential injection (e.g. \"Bearer {value}\")")
 	credType := fs.String("type", "static", "credential type: static or oauth")
 	tokenURL := fs.String("token-url", "", "OAuth token endpoint URL (required when type=oauth)")
+	envVar := fs.String("env-var", "", "environment variable name for phantom injection (e.g. OPENAI_API_KEY)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	if fs.NArg() == 0 {
-		return fmt.Errorf("usage: sluice cred add <name> [--type static|oauth] [--token-url URL] [--destination host] [--ports 443] [--header Authorization] [--template \"Bearer {value}\"]")
+		return fmt.Errorf("usage: sluice cred add <name> [--type static|oauth] [--token-url URL] [--destination host] [--ports 443] [--header Authorization] [--template \"Bearer {value}\"] [--env-var OPENAI_API_KEY]")
 	}
 	name := fs.Arg(0)
 
@@ -164,6 +165,12 @@ func handleCredAdd(args []string) error {
 		}
 	} else if *tokenURL != "" {
 		return fmt.Errorf("--token-url is only valid with --type=oauth")
+	}
+
+	// --env-var requires --destination because the env var is stored on the
+	// binding, which only exists when a destination is provided.
+	if *envVar != "" && *destination == "" {
+		return fmt.Errorf("--env-var requires --destination (env var is stored on the binding)")
 	}
 
 	// Read credential input from terminal or stdin.
@@ -284,6 +291,7 @@ func handleCredAdd(args []string) error {
 				Ports:    ports,
 				Header:   *header,
 				Template: *template,
+				EnvVar:   *envVar,
 			},
 		)
 		if err != nil {
@@ -301,12 +309,10 @@ func handleCredAdd(args []string) error {
 		fmt.Printf("credential %q added (type: %s)\n", name, *credType)
 	}
 
-	// Report OAuth phantom env var names so the operator knows what the
-	// agent container will see after secrets are reloaded.
-	if *credType == "oauth" {
-		envAccess := vault.CredNameToEnvVar(name) + "_ACCESS"
-		envRefresh := vault.CredNameToEnvVar(name) + "_REFRESH"
-		fmt.Printf("oauth phantom env vars: %s, %s\n", envAccess, envRefresh)
+	// Report env var name if set, so the operator knows what variable name
+	// will be injected into the agent container.
+	if *envVar != "" {
+		fmt.Printf("env var: %s\n", *envVar)
 	}
 
 	return nil
@@ -456,7 +462,11 @@ func handleCredList(args []string) error {
 			if b.Template != "" {
 				tmpl = " template=" + b.Template
 			}
-			fmt.Printf("%s [%s] -> %s%s%s%s\n", n, ct, b.Destination, ports, hdr, tmpl)
+			env := ""
+			if b.EnvVar != "" {
+				env = " env=" + b.EnvVar
+			}
+			fmt.Printf("%s [%s] -> %s%s%s%s%s\n", n, ct, b.Destination, ports, hdr, tmpl, env)
 		}
 	}
 	return nil
@@ -551,6 +561,7 @@ func reorderPositionalLast(args []string) []string {
 		"-template": true, "--template": true,
 		"-type": true, "--type": true,
 		"-token-url": true, "--token-url": true,
+		"-env-var": true, "--env-var": true,
 	}
 
 	var positional string
