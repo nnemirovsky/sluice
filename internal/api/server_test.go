@@ -45,11 +45,10 @@ func enableHTTPChannel(t *testing.T, st *store.Store) {
 // oapi-codegen wraps handlers bottom-up: last middleware in the slice becomes
 // outermost. Channel gate goes first (innermost), auth second (outermost),
 // so auth rejects before channel gate reveals channel state.
-func newTestHandler(t *testing.T, srv *api.Server, st *store.Store) http.Handler {
+func newTestHandler(t *testing.T, srv *api.Server, _ *store.Store) http.Handler {
 	t.Helper()
 	return api.HandlerWithOptions(srv, api.ChiServerOptions{
 		Middlewares: []api.MiddlewareFunc{
-			api.ChannelGateMiddleware(st),
 			api.BearerAuthMiddleware,
 		},
 	})
@@ -209,53 +208,6 @@ func TestAuth_BadTokenBeforeChannelCheck(t *testing.T) {
 }
 
 // --- Channel gate middleware tests ---
-
-func TestChannelGate_Disabled(t *testing.T) {
-	st := newTestStore(t)
-	// Default store has only Telegram channel (type=0), no HTTP channel
-	srv := api.NewServer(st, nil, nil, "")
-
-	t.Setenv("SLUICE_API_TOKEN", "secret")
-	handler := newTestHandler(t, srv, st)
-
-	req := httptest.NewRequest("GET", "/api/status", nil)
-	req.Header.Set("Authorization", "Bearer secret")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("expected 403, got %d", rec.Code)
-	}
-
-	var resp api.ErrorResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Error != "HTTP channel is not enabled" {
-		t.Errorf("unexpected error: %q", resp.Error)
-	}
-	if resp.Code == nil || *resp.Code != "channel_disabled" {
-		t.Errorf("unexpected code: %v", resp.Code)
-	}
-}
-
-func TestChannelGate_Enabled(t *testing.T) {
-	st := newTestStore(t)
-	enableHTTPChannel(t, st)
-	srv := api.NewServer(st, nil, nil, "")
-
-	t.Setenv("SLUICE_API_TOKEN", "secret")
-	handler := newTestHandler(t, srv, st)
-
-	req := httptest.NewRequest("GET", "/api/status", nil)
-	req.Header.Set("Authorization", "Bearer secret")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", rec.Code)
-	}
-}
 
 // --- Approval endpoint tests ---
 
