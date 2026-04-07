@@ -157,6 +157,7 @@ destination = "api.anthropic.com"
 ports = [443]
 credential = "anthropic_api_key"
 header = "x-api-key"
+env_var = "ANTHROPIC_API_KEY"
 
 [[binding]]
 destination = "api.openai.com"
@@ -164,6 +165,7 @@ ports = [443]
 credential = "openai_api_key"
 header = "Authorization"
 template = "Bearer {value}"
+env_var = "OPENAI_API_KEY"
 
 # --- Channels ---
 # Channels deliver approval requests and receive responses. Multiple channels

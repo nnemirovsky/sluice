@@ -64,7 +64,7 @@ type appleEnv struct {
 	t            *testing.T
 	sluice       *SluiceProcess
 	vmName       string
-	phantomDir   string
+	mcpDir       string
 	certDir      string
 	tun2proxyCmd *exec.Cmd
 	tunIface     string
@@ -81,10 +81,10 @@ func setupAppleEnv(t *testing.T) *appleEnv {
 	requireRoot(t)
 
 	tmpDir := t.TempDir()
-	phantomDir := filepath.Join(tmpDir, "phantoms")
+	mcpDir := filepath.Join(tmpDir, "mcp")
 	certDir := filepath.Join(tmpDir, "certs")
-	if err := os.MkdirAll(phantomDir, 0o755); err != nil {
-		t.Fatalf("create phantom dir: %v", err)
+	if err := os.MkdirAll(mcpDir, 0o755); err != nil {
+		t.Fatalf("create mcp dir: %v", err)
 	}
 	if err := os.MkdirAll(certDir, 0o755); err != nil {
 		t.Fatalf("create cert dir: %v", err)
@@ -98,7 +98,7 @@ func setupAppleEnv(t *testing.T) *appleEnv {
 	proc := startSluice(t, SluiceOpts{
 		ConfigTOML: appleE2EConfigTOML,
 		ExtraArgs: []string{
-			"--phantom-dir", phantomDir,
+			"--mcp-dir", mcpDir,
 		},
 	})
 
@@ -106,7 +106,7 @@ func setupAppleEnv(t *testing.T) *appleEnv {
 		t:           t,
 		sluice:      proc,
 		vmName:      vmName,
-		phantomDir:  phantomDir,
+		mcpDir:      mcpDir,
 		certDir:     certDir,
 		tunIface:    tunIface,
 		anchorName:  anchorName,
@@ -348,7 +348,7 @@ func TestAppleContainer(t *testing.T) {
 
 	env := setupAppleEnv(t)
 
-	// Start the VM with env vars pointing to phantom and cert volumes.
+	// Start the VM with env vars pointing to MCP and cert volumes.
 	envVars := map[string]string{
 		"SSL_CERT_FILE":       "/certs/sluice-ca.crt",
 		"REQUESTS_CA_BUNDLE":  "/certs/sluice-ca.crt",
@@ -356,7 +356,7 @@ func TestAppleContainer(t *testing.T) {
 		"ALL_PROXY":           "socks5://" + env.sluice.ProxyAddr,
 	}
 	volumes := [][2]string{
-		{env.phantomDir, "/phantoms"},
+		{env.mcpDir, "/mcp"},
 		{env.certDir, "/certs"},
 	}
 
@@ -502,25 +502,30 @@ func testAppleTrafficRoutedThroughSluice(t *testing.T, env *appleEnv) {
 	}
 }
 
-// testAppleCredentialInjection verifies that phantom token files written to
-// the shared volume by sluice are visible inside the Apple Container VM.
+// testAppleCredentialInjection verifies that env vars injected via container
+// exec are visible inside the Apple Container VM.
 func testAppleCredentialInjection(t *testing.T, env *appleEnv) {
 	t.Helper()
 
 	phantomValue := fmt.Sprintf("sk-phantom-apple-%d", time.Now().UnixNano()%100000)
-	phantomFile := "TEST_API_KEY"
+	envVarName := "TEST_API_KEY"
 
-	// Write a phantom token file to the shared phantom directory.
-	path := filepath.Join(env.phantomDir, phantomFile)
-	if err := os.WriteFile(path, []byte(phantomValue), 0o644); err != nil {
-		t.Fatalf("write phantom file: %v", err)
+	// Write an env var into the VM's env file (simulating InjectEnvVars).
+	writeCmd := fmt.Sprintf(
+		"mkdir -p $HOME/.openclaw && echo '%s=%s' >> $HOME/.openclaw/.env",
+		envVarName, phantomValue,
+	)
+	_, writeErr := env.execInVM("sh", "-c", writeCmd)
+	if writeErr != nil {
+		t.Fatalf("write env var in VM: %v", writeErr)
 	}
 
-	// Verify the file is visible inside the VM via the shared volume.
+	// Verify the env var is readable from the VM's env file.
 	var vmOut string
 	var readErr error
 	for attempt := 0; attempt < 10; attempt++ {
-		vmOut, readErr = env.execInVM("cat", "/phantoms/"+phantomFile)
+		vmOut, readErr = env.execInVM("sh", "-c",
+			"grep '^"+envVarName+"=' $HOME/.openclaw/.env")
 		if readErr == nil && strings.Contains(vmOut, phantomValue) {
 			break
 		}
@@ -528,28 +533,10 @@ func testAppleCredentialInjection(t *testing.T, env *appleEnv) {
 	}
 
 	if readErr != nil {
-		t.Fatalf("read phantom file from VM: %v\n%s", readErr, vmOut)
+		t.Fatalf("read env var from VM: %v\n%s", readErr, vmOut)
 	}
 	if !strings.Contains(vmOut, phantomValue) {
-		t.Errorf("phantom file content mismatch: want %q, got %q", phantomValue, vmOut)
-	}
-
-	// Verify credential rotation: overwrite the phantom file with a new value.
-	rotatedValue := fmt.Sprintf("sk-phantom-rotated-%d", time.Now().UnixNano()%100000)
-	if err := os.WriteFile(path, []byte(rotatedValue), 0o644); err != nil {
-		t.Fatalf("overwrite phantom file: %v", err)
-	}
-
-	for attempt := 0; attempt < 10; attempt++ {
-		vmOut, readErr = env.execInVM("cat", "/phantoms/"+phantomFile)
-		if readErr == nil && strings.Contains(vmOut, rotatedValue) {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	if !strings.Contains(vmOut, rotatedValue) {
-		t.Errorf("rotated phantom file mismatch: want %q, got %q", rotatedValue, vmOut)
+		t.Errorf("env var content mismatch: want %q in %q", phantomValue, vmOut)
 	}
 }
 
@@ -692,7 +679,7 @@ func TestAppleContainerSluiceStartsWithRuntimeFlag(t *testing.T) {
 }
 
 // TestAppleContainerMCPAutoInjection verifies that writing mcp-servers.json to
-// the shared phantom volume makes it discoverable from inside the VM.
+// the shared MCP volume makes it discoverable from inside the VM.
 func TestAppleContainerMCPAutoInjection(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping in short mode")
@@ -704,7 +691,7 @@ func TestAppleContainerMCPAutoInjection(t *testing.T) {
 		"SSL_CERT_FILE": "/certs/sluice-ca.crt",
 	}
 	volumes := [][2]string{
-		{env.phantomDir, "/phantoms"},
+		{env.mcpDir, "/mcp"},
 		{env.certDir, "/certs"},
 	}
 
@@ -715,10 +702,10 @@ func TestAppleContainerMCPAutoInjection(t *testing.T) {
 		env.stopTun2proxy()
 	})
 
-	// Write mcp-servers.json to the phantom directory (simulating what sluice
+	// Write mcp-servers.json to the MCP directory (simulating what sluice
 	// does with --auto-inject-mcp).
 	mcpConfig := `{"sluice":{"url":"http://127.0.0.1:3000/mcp","transport":"streamable-http"}}`
-	mcpPath := filepath.Join(env.phantomDir, "mcp-servers.json")
+	mcpPath := filepath.Join(env.mcpDir, "mcp-servers.json")
 	if err := os.WriteFile(mcpPath, []byte(mcpConfig), 0o644); err != nil {
 		t.Fatalf("write mcp-servers.json: %v", err)
 	}
@@ -727,7 +714,7 @@ func TestAppleContainerMCPAutoInjection(t *testing.T) {
 	var vmOut string
 	var readErr error
 	for attempt := 0; attempt < 10; attempt++ {
-		vmOut, readErr = env.execInVM("cat", "/phantoms/mcp-servers.json")
+		vmOut, readErr = env.execInVM("cat", "/mcp/mcp-servers.json")
 		if readErr == nil && strings.Contains(vmOut, "sluice") {
 			break
 		}
