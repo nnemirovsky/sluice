@@ -3707,7 +3707,7 @@ func TestHandleServerFirstDetectionNoData(t *testing.T) {
 	}
 }
 
-func TestServerSetPhantomDir(t *testing.T) {
+func TestServerSetOnOAuthRefresh(t *testing.T) {
 	eng, err := policy.LoadFromBytes([]byte(`
 [policy]
 default = "allow"
@@ -3733,14 +3733,25 @@ default = "allow"
 	}
 	defer func() { _ = srv.Close() }()
 
-	// SetPhantomDir should not panic even if injector is nil (no bindings).
-	srv.SetPhantomDir("/tmp/phantoms")
+	// SetOnOAuthRefresh should not panic even if injector is nil (no bindings).
+	called := false
+	srv.SetOnOAuthRefresh(func(credName string) {
+		called = true
+	})
 
-	// When injector is present, it should set the phantomDir.
-	if srv.injector != nil {
-		if srv.injector.phantomDir != "/tmp/phantoms" {
-			t.Errorf("phantomDir = %q, want /tmp/phantoms", srv.injector.phantomDir)
-		}
+	// The injector may or may not be present depending on server config.
+	// If it is present, verify the callback was stored and works.
+	if srv.injector == nil {
+		t.Log("injector is nil (no TLS config), skipping callback verification")
+		return
+	}
+	if srv.injector.onOAuthRefresh == nil {
+		t.Error("onOAuthRefresh callback not set on injector")
+	}
+
+	srv.injector.onOAuthRefresh("test-cred")
+	if !called {
+		t.Error("onOAuthRefresh callback was not called")
 	}
 }
 
@@ -3768,7 +3779,7 @@ default = "allow"
 	})
 }
 
-func TestServerSetPhantomDirNoInjector(t *testing.T) {
+func TestServerSetOnOAuthRefreshNoInjector(t *testing.T) {
 	eng, err := policy.LoadFromBytes([]byte(`
 [policy]
 default = "allow"
@@ -3787,5 +3798,5 @@ default = "allow"
 	defer func() { _ = srv.Close() }()
 
 	// Should not panic when injector is nil.
-	srv.SetPhantomDir("/tmp/phantoms")
+	srv.SetOnOAuthRefresh(func(credName string) {})
 }

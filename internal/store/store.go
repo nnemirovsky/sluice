@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/nemirovsky/sluice/internal/container"
+
 	_ "modernc.org/sqlite" // SQLite driver registration
 )
 
@@ -528,6 +530,7 @@ type BindingRow struct {
 	Header      string
 	Template    string
 	Protocols   []string
+	EnvVar      string
 	CreatedAt   string
 }
 
@@ -537,6 +540,7 @@ type BindingOpts struct {
 	Header    string
 	Template  string
 	Protocols []string
+	EnvVar    string
 }
 
 // AddBinding inserts a binding and returns its ID.
@@ -544,12 +548,21 @@ func (s *Store) AddBinding(destination, credential string, opts BindingOpts) (in
 	if destination == "" || credential == "" {
 		return 0, fmt.Errorf("destination and credential are required")
 	}
+	if opts.EnvVar != "" {
+		if err := container.ValidateEnvVarKey(opts.EnvVar); err != nil {
+			return 0, err
+		}
+		if err := checkEnvVarUniqueWith(s.db, opts.EnvVar); err != nil {
+			return 0, err
+		}
+	}
 	portsJSON := portsToJSONPtr(opts.Ports)
 	protocolsJSON := protocolsToJSONPtr(opts.Protocols)
 	res, err := s.db.Exec(
-		`INSERT INTO bindings (destination, ports, credential, header, template, protocols) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO bindings (destination, ports, credential, header, template, protocols, env_var) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		destination, portsJSON, credential,
 		nilIfEmpty(opts.Header), nilIfEmpty(opts.Template), protocolsJSON,
+		nilIfEmpty(opts.EnvVar),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("insert binding: %w", err)
@@ -570,7 +583,7 @@ func (s *Store) RemoveBinding(id int64) (bool, error) {
 // ListBindings returns all bindings.
 func (s *Store) ListBindings() ([]BindingRow, error) {
 	rows, err := s.db.Query(
-		"SELECT id, destination, ports, credential, header, template, protocols, created_at FROM bindings ORDER BY id",
+		"SELECT id, destination, ports, credential, header, template, protocols, env_var, created_at FROM bindings ORDER BY id",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list bindings: %w", err)
@@ -856,7 +869,7 @@ func (s *Store) MCPUpstreamExists(name string) (bool, error) {
 // ListBindingsByCredential returns all bindings for a given credential name.
 func (s *Store) ListBindingsByCredential(credential string) ([]BindingRow, error) {
 	rows, err := s.db.Query(
-		"SELECT id, destination, ports, credential, header, template, protocols, created_at FROM bindings WHERE credential = ? ORDER BY id",
+		"SELECT id, destination, ports, credential, header, template, protocols, env_var, created_at FROM bindings WHERE credential = ? ORDER BY id",
 		credential,
 	)
 	if err != nil {
@@ -864,6 +877,40 @@ func (s *Store) ListBindingsByCredential(credential string) ([]BindingRow, error
 	}
 	defer func() { _ = rows.Close() }()
 	return scanBindings(rows)
+}
+
+// ListBindingsWithEnvVar returns all bindings where env_var is set (not empty).
+func (s *Store) ListBindingsWithEnvVar() ([]BindingRow, error) {
+	rows, err := s.db.Query(
+		"SELECT id, destination, ports, credential, header, template, protocols, env_var, created_at FROM bindings WHERE env_var IS NOT NULL AND env_var != '' ORDER BY id",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list bindings with env_var: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanBindings(rows)
+}
+
+// queryRower abstracts *sql.DB and *sql.Tx for shared query logic.
+type queryRower interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// checkEnvVarUniqueWith verifies that no other binding uses the same env_var.
+// The qr parameter allows this to work both inside and outside transactions.
+func checkEnvVarUniqueWith(qr queryRower, envVar string) error {
+	var count int
+	err := qr.QueryRow(
+		"SELECT COUNT(*) FROM bindings WHERE env_var = ?",
+		envVar,
+	).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("check env_var uniqueness: %w", err)
+	}
+	if count > 0 {
+		return fmt.Errorf("env_var %q is already used by another binding", envVar)
+	}
+	return nil
 }
 
 // RemoveBindingsByCredential deletes all bindings for a credential. Returns the number deleted.
@@ -957,13 +1004,25 @@ func (s *Store) AddRuleAndBinding(
 	}
 	ruleID, _ = res.LastInsertId()
 
+	// Validate and check env_var uniqueness before inserting (uses tx to
+	// avoid deadlock with the single-connection pool).
+	if bindingOpts.EnvVar != "" {
+		if valErr := container.ValidateEnvVarKey(bindingOpts.EnvVar); valErr != nil {
+			return 0, 0, valErr
+		}
+		if uniqueErr := checkEnvVarUniqueWith(tx, bindingOpts.EnvVar); uniqueErr != nil {
+			return 0, 0, uniqueErr
+		}
+	}
+
 	// Insert binding.
 	bPortsJSON := portsToJSONPtr(bindingOpts.Ports)
 	bProtocolsJSON := protocolsToJSONPtr(bindingOpts.Protocols)
 	res, err = tx.Exec(
-		`INSERT INTO bindings (destination, ports, credential, header, template, protocols) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO bindings (destination, ports, credential, header, template, protocols, env_var) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		ruleOpts.Destination, bPortsJSON, credential,
 		nilIfEmpty(bindingOpts.Header), nilIfEmpty(bindingOpts.Template), bProtocolsJSON,
+		nilIfEmpty(bindingOpts.EnvVar),
 	)
 	if err != nil {
 		return 0, 0, fmt.Errorf("insert binding: %w", err)
@@ -1129,8 +1188,8 @@ func scanBindings(rows *sql.Rows) ([]BindingRow, error) {
 	var bindings []BindingRow
 	for rows.Next() {
 		var b BindingRow
-		var portsJSON, header, tmpl, protocolsJSON sql.NullString
-		if err := rows.Scan(&b.ID, &b.Destination, &portsJSON, &b.Credential, &header, &tmpl, &protocolsJSON, &b.CreatedAt); err != nil {
+		var portsJSON, header, tmpl, protocolsJSON, envVar sql.NullString
+		if err := rows.Scan(&b.ID, &b.Destination, &portsJSON, &b.Credential, &header, &tmpl, &protocolsJSON, &envVar, &b.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan binding: %w", err)
 		}
 		if portsJSON.Valid {
@@ -1140,6 +1199,7 @@ func scanBindings(rows *sql.Rows) ([]BindingRow, error) {
 		}
 		b.Header = header.String
 		b.Template = tmpl.String
+		b.EnvVar = envVar.String
 		if protocolsJSON.Valid {
 			if err := json.Unmarshal([]byte(protocolsJSON.String), &b.Protocols); err != nil {
 				return nil, fmt.Errorf("unmarshal protocols for binding %d: %w", b.ID, err)

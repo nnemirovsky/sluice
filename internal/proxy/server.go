@@ -1517,12 +1517,13 @@ func (s *Server) UpdateOAuthIndex(metas []store.CredentialMeta) {
 	}
 }
 
-// SetPhantomDir configures the shared volume path for phantom token files
-// on the injector. When set, the async OAuth token persist goroutine writes
-// updated phantom files after vault persistence.
-func (s *Server) SetPhantomDir(dir string) {
+// SetOnOAuthRefresh configures a callback on the injector that is invoked
+// after an OAuth token refresh is persisted to the vault. The callback
+// receives the credential name so the caller can re-inject updated phantom
+// env vars into the agent container.
+func (s *Server) SetOnOAuthRefresh(fn func(credName string)) {
 	if s.injector != nil {
-		s.injector.SetPhantomDir(dir)
+		s.injector.SetOnOAuthRefresh(fn)
 	}
 }
 

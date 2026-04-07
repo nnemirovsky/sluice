@@ -17,6 +17,7 @@ import (
 	"github.com/nemirovsky/sluice/internal/api"
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/channel"
+	"github.com/nemirovsky/sluice/internal/container"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
 )
@@ -1023,6 +1024,60 @@ func TestGetApiRulesExport_Roundtrip(t *testing.T) {
 	}
 	if result.RulesInserted != 2 {
 		t.Errorf("expected 2 rules re-imported, got %d (skipped=%d)", result.RulesInserted, result.RulesSkipped)
+	}
+}
+
+func TestGetApiRulesExport_BindingEnvVar(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	// Add a binding with env_var set.
+	if _, err := st.AddBinding("api.openai.com", "openai_key", store.BindingOpts{
+		Ports:  []int{443},
+		EnvVar: "OPENAI_API_KEY",
+	}); err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("GET", "/api/rules/export", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `env_var = "OPENAI_API_KEY"`) {
+		t.Errorf("export missing env_var field, got:\n%s", body)
+	}
+
+	// Verify round-trip: import the exported TOML into a fresh store.
+	tmpDB := filepath.Join(t.TempDir(), "envvar-roundtrip.db")
+	st2, err := store.New(tmpDB)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	defer func() { _ = st2.Close() }()
+
+	result, err := st2.ImportTOML(rec.Body.Bytes())
+	if err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	if result.BindingsInserted != 1 {
+		t.Errorf("expected 1 binding re-imported, got %d", result.BindingsInserted)
+	}
+	bindings, err := st2.ListBindingsWithEnvVar()
+	if err != nil {
+		t.Fatalf("list bindings with env_var: %v", err)
+	}
+	if len(bindings) != 1 || bindings[0].EnvVar != "OPENAI_API_KEY" {
+		t.Errorf("expected binding with env_var=OPENAI_API_KEY, got %+v", bindings)
 	}
 }
 
@@ -2448,5 +2503,279 @@ func TestPatchApiChannels_NotFound(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", rec.Code)
+	}
+}
+
+// --- env_var tests ---
+
+func TestPostApiCredentials_WithEnvVar(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"name": "openai_key", "value": "sk-secret", "destination": "api.openai.com", "ports": [443], "env_var": "OPENAI_API_KEY"}`
+	req := httptest.NewRequest("POST", "/api/credentials", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify binding was created with env_var.
+	bindings, err := st.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if bindings[0].EnvVar != "OPENAI_API_KEY" {
+		t.Errorf("expected env_var OPENAI_API_KEY, got %q", bindings[0].EnvVar)
+	}
+}
+
+func TestPostApiBindings_WithEnvVar(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"destination": "api.example.com", "credential": "my_key", "ports": [443], "env_var": "MY_API_KEY"}`
+	req := httptest.NewRequest("POST", "/api/bindings", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var binding api.Binding
+	if err := json.NewDecoder(rec.Body).Decode(&binding); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if binding.Destination != "api.example.com" {
+		t.Errorf("expected api.example.com, got %q", binding.Destination)
+	}
+	if binding.EnvVar == nil || *binding.EnvVar != "MY_API_KEY" {
+		t.Errorf("expected env_var MY_API_KEY, got %v", binding.EnvVar)
+	}
+}
+
+func TestGetApiBindings_ReturnsEnvVar(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	// Create a binding with env_var directly in the store.
+	_, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{
+		Ports:  []int{443},
+		EnvVar: "EXAMPLE_KEY",
+	})
+	if err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("GET", "/api/bindings", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var bindings []api.Binding
+	if err := json.NewDecoder(rec.Body).Decode(&bindings); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if bindings[0].EnvVar == nil || *bindings[0].EnvVar != "EXAMPLE_KEY" {
+		t.Errorf("expected env_var EXAMPLE_KEY, got %v", bindings[0].EnvVar)
+	}
+}
+
+func TestGetApiBindings_OmitsEmptyEnvVar(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	// Create a binding without env_var.
+	_, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{})
+	if err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("GET", "/api/bindings", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify env_var is omitted from JSON when empty.
+	var rawBindings []map[string]interface{}
+	if err := json.NewDecoder(rec.Body).Decode(&rawBindings); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(rawBindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(rawBindings))
+	}
+	if _, exists := rawBindings[0]["env_var"]; exists {
+		t.Errorf("expected env_var to be omitted from JSON, but it was present")
+	}
+}
+
+// --- mockContainerMgr for testing credential mutation with container injection ---
+
+type mockContainerMgr struct {
+	injectedEnv map[string]string
+	injectErr   error
+}
+
+func (m *mockContainerMgr) InjectEnvVars(_ context.Context, envMap map[string]string, _ bool) error {
+	m.injectedEnv = envMap
+	return m.injectErr
+}
+
+func (m *mockContainerMgr) RestartWithEnv(_ context.Context, _ map[string]string) error {
+	return nil
+}
+
+func (m *mockContainerMgr) InjectMCPConfig(_, _ string) error {
+	return nil
+}
+
+func (m *mockContainerMgr) InjectCACert(_ context.Context, _, _ string) error {
+	return nil
+}
+
+func (m *mockContainerMgr) Status(_ context.Context) (container.ContainerStatus, error) {
+	return container.ContainerStatus{Running: true}, nil
+}
+
+func (m *mockContainerMgr) Stop(_ context.Context) error {
+	return nil
+}
+
+func (m *mockContainerMgr) Runtime() container.Runtime {
+	return container.RuntimeDocker
+}
+
+func TestPostApiCredentials_WithContainerManager(t *testing.T) {
+	st := newTestStore(t)
+	defer func() { _ = st.Close() }()
+
+	dir := t.TempDir()
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(vs)
+	mgr := &mockContainerMgr{}
+	srv.SetContainerManager(mgr)
+
+	body := `{"name":"openai_key","value":"sk-test-123","destination":"api.openai.com","ports":[443],"env_var":"OPENAI_API_KEY"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/credentials", strings.NewReader(body))
+	srv.PostApiCredentials(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Container manager should have been called with the env var.
+	if mgr.injectedEnv == nil {
+		t.Fatal("expected InjectEnvVars to be called")
+	}
+	if _, ok := mgr.injectedEnv["OPENAI_API_KEY"]; !ok {
+		t.Error("OPENAI_API_KEY not found in injected env")
+	}
+}
+
+func TestPostApiBindings_WithContainerManager(t *testing.T) {
+	st := newTestStore(t)
+	defer func() { _ = st.Close() }()
+
+	srv := api.NewServer(st, nil, nil, "")
+	mgr := &mockContainerMgr{}
+	srv.SetContainerManager(mgr)
+
+	body := `{"destination":"api.openai.com","credential":"openai_key","ports":[443],"env_var":"OPENAI_API_KEY"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/bindings", strings.NewReader(body))
+	srv.PostApiBindings(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Container manager should have been called.
+	if mgr.injectedEnv == nil {
+		t.Fatal("expected InjectEnvVars to be called after binding creation")
+	}
+	if _, ok := mgr.injectedEnv["OPENAI_API_KEY"]; !ok {
+		t.Error("OPENAI_API_KEY not found in injected env")
+	}
+}
+
+func TestDeleteApiBindingsId_ClearsEnvVar(t *testing.T) {
+	st := newTestStore(t)
+	defer func() { _ = st.Close() }()
+
+	// Create a binding with env_var.
+	id, err := st.AddBinding("api.openai.com", "openai_key", store.BindingOpts{
+		Ports:  []int{443},
+		EnvVar: "OPENAI_API_KEY",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := api.NewServer(st, nil, nil, "")
+	mgr := &mockContainerMgr{}
+	srv.SetContainerManager(mgr)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("DELETE", fmt.Sprintf("/api/bindings/%d", id), nil)
+	srv.DeleteApiBindingsId(rec, req, id)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Container manager should have been called with the removed env var set to empty.
+	if mgr.injectedEnv == nil {
+		t.Fatal("expected InjectEnvVars to be called after binding deletion")
+	}
+	val, ok := mgr.injectedEnv["OPENAI_API_KEY"]
+	if !ok {
+		t.Error("OPENAI_API_KEY not found in injected env (should be cleared)")
+	}
+	if val != "" {
+		t.Errorf("expected empty value for removed env var, got %q", val)
 	}
 }

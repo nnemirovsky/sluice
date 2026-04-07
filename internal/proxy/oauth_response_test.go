@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -871,14 +870,14 @@ func TestInterceptOAuthResponseVaultWriteFailure(t *testing.T) {
 	waitPersist(t, inj, 1)
 }
 
-func TestInterceptOAuthResponsePhantomFileWrite(t *testing.T) {
-	// Verify that phantom files are written after vault persistence when
-	// phantomDir is configured.
+func TestInterceptOAuthResponseOnRefreshCallback(t *testing.T) {
+	// Verify that the onOAuthRefresh callback is invoked after vault
+	// persistence when configured.
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"access_token":  "new-real-access-for-phantom",
-			"refresh_token": "new-real-refresh-for-phantom",
+			"access_token":  "new-real-access-for-callback",
+			"refresh_token": "new-real-refresh-for-callback",
 			"expires_in":    3600,
 		})
 	}))
@@ -890,11 +889,13 @@ func TestInterceptOAuthResponsePhantomFileWrite(t *testing.T) {
 		TokenURL:     tokenEndpoint.URL,
 	}
 
-	inj, _ := setupOAuthTestInjector(t, "phantom_write_oauth", tokenEndpoint.URL, oauthCred)
+	inj, _ := setupOAuthTestInjector(t, "callback_oauth", tokenEndpoint.URL, oauthCred)
 
-	// Configure phantomDir to a temp directory.
-	phantomDir := t.TempDir()
-	inj.SetPhantomDir(phantomDir)
+	// Configure onOAuthRefresh callback.
+	var callbackCredName string
+	inj.SetOnOAuthRefresh(func(credName string) {
+		callbackCredName = credName
+	})
 
 	proxyServer := httptest.NewServer(inj.Proxy)
 	defer proxyServer.Close()
@@ -915,25 +916,20 @@ func TestInterceptOAuthResponsePhantomFileWrite(t *testing.T) {
 
 	waitPersist(t, inj, 1)
 
-	// Verify phantom files were created.
-	accessPath := phantomDir + "/PHANTOM_WRITE_OAUTH_ACCESS"
-	refreshPath := phantomDir + "/PHANTOM_WRITE_OAUTH_REFRESH"
-
-	if err := checkFileExists(accessPath); err != nil {
-		t.Errorf("access phantom file not found: %v", err)
-	}
-	if err := checkFileExists(refreshPath); err != nil {
-		t.Errorf("refresh phantom file not found: %v", err)
+	// Verify the callback was invoked with the correct credential name.
+	if callbackCredName != "callback_oauth" {
+		t.Errorf("onOAuthRefresh callback credName = %q, want %q", callbackCredName, "callback_oauth")
 	}
 }
 
-func TestInterceptOAuthResponseNoPhantomFileWithoutDir(t *testing.T) {
-	// When phantomDir is not set, no phantom files should be written.
+func TestInterceptOAuthResponseNoCallbackWithoutConfig(t *testing.T) {
+	// When onOAuthRefresh is not set, phantom swap still works but no
+	// callback is invoked.
 	tokenEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"access_token":  "access-no-dir",
-			"refresh_token": "refresh-no-dir",
+			"access_token":  "access-no-cb",
+			"refresh_token": "refresh-no-cb",
 			"expires_in":    3600,
 		})
 	}))
@@ -945,8 +941,8 @@ func TestInterceptOAuthResponseNoPhantomFileWithoutDir(t *testing.T) {
 		TokenURL:     tokenEndpoint.URL,
 	}
 
-	inj, _ := setupOAuthTestInjector(t, "no_dir_oauth", tokenEndpoint.URL, oauthCred)
-	// Do NOT set phantomDir.
+	inj, _ := setupOAuthTestInjector(t, "no_cb_oauth", tokenEndpoint.URL, oauthCred)
+	// Do NOT set onOAuthRefresh.
 
 	proxyServer := httptest.NewServer(inj.Proxy)
 	defer proxyServer.Close()
@@ -969,18 +965,18 @@ func TestInterceptOAuthResponseNoPhantomFileWithoutDir(t *testing.T) {
 	bodyStr := string(body)
 
 	// Real tokens must not appear in the response.
-	if strings.Contains(bodyStr, "access-no-dir") {
+	if strings.Contains(bodyStr, "access-no-cb") {
 		t.Error("real access token leaked in response")
 	}
-	if strings.Contains(bodyStr, "refresh-no-dir") {
+	if strings.Contains(bodyStr, "refresh-no-cb") {
 		t.Error("real refresh token leaked in response")
 	}
 
 	// Phantom tokens must be present.
-	if !strings.Contains(bodyStr, oauthPhantomAccess("no_dir_oauth")) {
+	if !strings.Contains(bodyStr, oauthPhantomAccess("no_cb_oauth")) {
 		t.Errorf("expected access phantom in response, got %q", bodyStr)
 	}
-	if !strings.Contains(bodyStr, oauthPhantomRefresh("no_dir_oauth")) {
+	if !strings.Contains(bodyStr, oauthPhantomRefresh("no_cb_oauth")) {
 		t.Errorf("expected refresh phantom in response, got %q", bodyStr)
 	}
 
@@ -1026,11 +1022,6 @@ func TestInterceptOAuthResponseOversizedBody(t *testing.T) {
 	if len(body) < maxProxyBody {
 		t.Errorf("expected body length >= %d, got %d", maxProxyBody, len(body))
 	}
-}
-
-func checkFileExists(path string) error {
-	_, err := os.Stat(path)
-	return err
 }
 
 // readOnlyProvider wraps a vault.Provider but does not implement the Add interface,

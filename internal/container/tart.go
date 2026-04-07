@@ -250,18 +250,30 @@ func NewTartManager(cfg TartManagerConfig) *TartManager {
 	return m
 }
 
-// ReloadSecrets writes phantom token files to the VirtioFS shared directory
-// and signals the macOS VM to reload them via tart exec. Falls back to
-// RestartWithEnv if the exec command fails.
-func (m *TartManager) ReloadSecrets(ctx context.Context, phantomDir string, phantomEnv map[string]string) error {
-	if err := WritePhantomFiles(phantomDir, phantomEnv); err != nil {
-		return err
+// InjectEnvVars writes environment variables into the macOS VM's env file
+// (~/.openclaw/.env) via tart exec and signals the agent to reload.
+// Each key in envMap is an env var name and the value is the phantom token.
+// When fullReplace is true the file is truncated before writing so stale
+// entries are removed. When false, entries are merged in-place.
+func (m *TartManager) InjectEnvVars(ctx context.Context, envMap map[string]string, fullReplace bool) error {
+	if len(envMap) == 0 && !fullReplace {
+		return nil
 	}
 
-	_, err := m.cli.Exec(ctx, m.vmName, []string{"openclaw", "secrets", "reload"})
+	// Tart VMs run macOS which uses BSD sed (requires -i '').
+	script, err := BuildEnvInjectionScript(envMap, true, fullReplace)
 	if err != nil {
-		return m.RestartWithEnv(ctx, phantomEnv)
+		return fmt.Errorf("build env injection script: %w", err)
 	}
+
+	if _, execErr := m.cli.Exec(ctx, m.vmName, []string{"sh", "-c", script}); execErr != nil {
+		return fmt.Errorf("inject env vars: %w", execErr)
+	}
+
+	if _, reloadErr := m.cli.Exec(ctx, m.vmName, []string{"openclaw", "secrets", "reload"}); reloadErr != nil {
+		log.Printf("env vars injected but secrets reload failed: %v", reloadErr)
+	}
+
 	return nil
 }
 
@@ -298,17 +310,17 @@ func (m *TartManager) RestartWithEnv(ctx context.Context, _ map[string]string) e
 	return nil
 }
 
-// InjectMCPConfig writes an mcp-servers.json file to the VirtioFS shared
+// InjectMCPConfig writes an mcp-servers.json file to the VirtioFS shared MCP
 // volume and signals the macOS VM to reload MCP configuration via tart exec.
-func (m *TartManager) InjectMCPConfig(phantomDir, sluiceURL string) error {
-	if err := WriteMCPConfig(phantomDir, sluiceURL); err != nil {
+func (m *TartManager) InjectMCPConfig(mcpDir, sluiceURL string) error {
+	if err := WriteMCPConfig(mcpDir, sluiceURL); err != nil {
 		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if _, execErr := m.cli.Exec(ctx, m.vmName, []string{"openclaw", "mcp", "reload"}); execErr != nil {
-		path := filepath.Join(phantomDir, "mcp-servers.json")
+		path := filepath.Join(mcpDir, "mcp-servers.json")
 		log.Printf("MCP config written to %s but exec reload failed: %v", path, execErr)
 	}
 	return nil

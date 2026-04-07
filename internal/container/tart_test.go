@@ -575,91 +575,6 @@ func newTestTartManager(t *testing.T) (*TartManager, *mockRunner, string) {
 	return mgr, runner, tmpDir
 }
 
-func TestTartManagerReloadSecrets(t *testing.T) {
-	mgr, runner, tmpDir := newTestTartManager(t)
-	runner.onCommand("tart exec openclaw -- openclaw secrets reload", []byte("ok\n"), nil)
-
-	env := map[string]string{
-		"ANTHROPIC_API_KEY": "sk-ant-phantom-abc123",
-		"OPENAI_API_KEY":    "sk-phantom-xyz789",
-	}
-
-	err := mgr.ReloadSecrets(context.Background(), tmpDir, env)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Verify phantom files were written.
-	for name, value := range env {
-		data, err := os.ReadFile(filepath.Join(tmpDir, name))
-		if err != nil {
-			t.Errorf("phantom file %s not found: %v", name, err)
-			continue
-		}
-		if string(data) != value {
-			t.Errorf("phantom file %s = %q, want %q", name, string(data), value)
-		}
-	}
-
-	// Verify exec was called.
-	if !runner.called("tart exec openclaw -- openclaw secrets reload") {
-		t.Error("expected exec call for secrets reload")
-	}
-}
-
-func TestTartManagerReloadSecretsRemoveEmpty(t *testing.T) {
-	mgr, runner, tmpDir := newTestTartManager(t)
-	runner.onCommand("tart exec", []byte("ok\n"), nil)
-
-	// Write a file first, then remove via empty value.
-	path := filepath.Join(tmpDir, "OLD_KEY")
-	if err := os.WriteFile(path, []byte("old-value"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	err := mgr.ReloadSecrets(context.Background(), tmpDir, map[string]string{
-		"OLD_KEY": "",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Error("expected phantom file to be removed")
-	}
-}
-
-func TestTartManagerReloadSecretsFallback(t *testing.T) {
-	mgr, runner, tmpDir := newTestTartManager(t)
-
-	// Exec fails, triggering RestartWithEnv fallback.
-	runner.onCommand("tart exec", nil, errors.New("tart agent not running"))
-	runner.onCommand("tart stop", nil, nil)
-	runner.onCommand("tart run", nil, nil)
-
-	err := mgr.ReloadSecrets(context.Background(), tmpDir, map[string]string{
-		"NEW_KEY": "new-value",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Verify fallback called stop and run (NOT delete+clone).
-	if !runner.called("tart stop openclaw") {
-		t.Error("expected stop call in fallback")
-	}
-	if !runner.called("tart run") {
-		t.Error("expected run call in fallback")
-	}
-	// tart VMs persist, so delete should NOT be called.
-	if runner.called("tart delete") {
-		t.Error("RestartWithEnv should not delete the VM")
-	}
-	if runner.called("tart clone") {
-		t.Error("RestartWithEnv should not clone the VM")
-	}
-}
-
 func TestTartManagerRestartWithEnv(t *testing.T) {
 	mgr, runner, _ := newTestTartManager(t)
 
@@ -702,6 +617,47 @@ func TestTartManagerRestartWithEnv(t *testing.T) {
 	}
 	if runner.called("tart clone") {
 		t.Error("RestartWithEnv should not clone")
+	}
+}
+
+func TestTartManagerInjectEnvVars(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+	runner.onCommand("tart exec openclaw -- sh", []byte(""), nil)
+	runner.onCommand("tart exec openclaw -- openclaw secrets reload", []byte("ok\n"), nil)
+
+	err := mgr.InjectEnvVars(context.Background(), map[string]string{
+		"OPENAI_API_KEY": "sk-phantom-xyz789",
+	}, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify exec was called with sh -c and the env var name.
+	found := false
+	for _, call := range runner.calls {
+		if strings.Contains(call, "sh") && strings.Contains(call, "OPENAI_API_KEY") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected exec call with sh script containing env var name")
+	}
+}
+
+func TestTartManagerInjectEnvVarsEmpty(t *testing.T) {
+	mgr, runner, _ := newTestTartManager(t)
+
+	err := mgr.InjectEnvVars(context.Background(), map[string]string{}, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Only the --version call from setup should exist.
+	for _, call := range runner.calls {
+		if strings.Contains(call, "exec") {
+			t.Errorf("no exec calls expected for empty envMap, got: %s", call)
+		}
 	}
 }
 

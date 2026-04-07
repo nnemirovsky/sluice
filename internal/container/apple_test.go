@@ -528,94 +528,37 @@ func newTestAppleManager(t *testing.T) (*AppleManager, *mockRunner, string) {
 	return mgr, runner, tmpDir
 }
 
-func TestAppleManagerReloadSecrets(t *testing.T) {
-	mgr, runner, tmpDir := newTestAppleManager(t)
+func TestAppleManagerInjectEnvVars(t *testing.T) {
+	mgr, runner, _ := newTestAppleManager(t)
+	runner.onCommand("container exec openclaw sh", []byte(""), nil)
 	runner.onCommand("container exec openclaw openclaw secrets reload", []byte("ok\n"), nil)
 
-	env := map[string]string{
-		"ANTHROPIC_API_KEY": "sk-ant-phantom-abc123",
-		"OPENAI_API_KEY":    "sk-phantom-xyz789",
-	}
-
-	err := mgr.ReloadSecrets(context.Background(), tmpDir, env)
+	err := mgr.InjectEnvVars(context.Background(), map[string]string{
+		"OPENAI_API_KEY": "sk-phantom-xyz789",
+	}, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify phantom files were written.
-	for name, value := range env {
-		data, err := os.ReadFile(filepath.Join(tmpDir, name))
-		if err != nil {
-			t.Errorf("phantom file %s not found: %v", name, err)
-			continue
-		}
-		if string(data) != value {
-			t.Errorf("phantom file %s = %q, want %q", name, string(data), value)
+	// Verify exec was called with sh -c and the env var name.
+	found := false
+	for _, call := range runner.calls {
+		if strings.Contains(call, "sh") && strings.Contains(call, "OPENAI_API_KEY") {
+			found = true
+			break
 		}
 	}
-
-	// Verify exec was called.
-	if !runner.called("container exec openclaw openclaw secrets reload") {
-		t.Error("expected exec call for secrets reload")
+	if !found {
+		t.Error("expected exec call with sh script containing env var name")
 	}
 }
 
-func TestAppleManagerReloadSecretsRemoveEmpty(t *testing.T) {
-	mgr, runner, tmpDir := newTestAppleManager(t)
-	runner.onCommand("container exec", []byte("ok\n"), nil)
+func TestAppleManagerInjectEnvVarsEmpty(t *testing.T) {
+	mgr, _, _ := newTestAppleManager(t)
 
-	// Write a file first, then remove via empty value.
-	path := filepath.Join(tmpDir, "OLD_KEY")
-	if err := os.WriteFile(path, []byte("old-value"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	err := mgr.ReloadSecrets(context.Background(), tmpDir, map[string]string{
-		"OLD_KEY": "",
-	})
+	err := mgr.InjectEnvVars(context.Background(), map[string]string{}, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Error("expected phantom file to be removed")
-	}
-}
-
-func TestAppleManagerReloadSecretsFallback(t *testing.T) {
-	mgr, runner, tmpDir := newTestAppleManager(t)
-
-	// Exec fails, triggering RestartWithEnv fallback.
-	runner.onCommand("container exec", nil, errors.New("exec not supported"))
-
-	inspectJSON, _ := json.Marshal([]VMInfo{{
-		Name:  "openclaw",
-		ID:    "abc123",
-		Image: "openclaw/openclaw:latest",
-		State: VMState{Status: "running", Running: true},
-		Env:   []string{"EXISTING=value"},
-	}})
-	runner.onCommand("container inspect", inspectJSON, nil)
-	runner.onCommand("container stop", nil, nil)
-	runner.onCommand("container rm", nil, nil)
-	runner.onCommand("container run", nil, nil)
-
-	err := mgr.ReloadSecrets(context.Background(), tmpDir, map[string]string{
-		"NEW_KEY": "new-value",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Verify fallback called stop, rm, run.
-	if !runner.called("container stop openclaw") {
-		t.Error("expected stop call in fallback")
-	}
-	if !runner.called("container rm openclaw") {
-		t.Error("expected rm call in fallback")
-	}
-	if !runner.called("container run") {
-		t.Error("expected run call in fallback")
 	}
 }
 

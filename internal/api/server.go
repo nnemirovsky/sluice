@@ -39,7 +39,6 @@ type Server struct {
 	reloadMu     *sync.Mutex
 	resolverPtr  *atomic.Pointer[vault.BindingResolver]
 	containerMgr container.ContainerManager
-	phantomDir   string
 }
 
 // NewServer creates a new API server. enginePtr and reloadMu are optional
@@ -72,11 +71,10 @@ func (s *Server) SetResolverPtr(ptr *atomic.Pointer[vault.BindingResolver]) {
 	s.resolverPtr = ptr
 }
 
-// SetContainerManager enables phantom token regen and container hot-reload
+// SetContainerManager enables env injection and container hot-reload
 // on credential changes.
-func (s *Server) SetContainerManager(mgr container.ContainerManager, phantomDir string) {
+func (s *Server) SetContainerManager(mgr container.ContainerManager) {
 	s.containerMgr = mgr
-	s.phantomDir = phantomDir
 }
 
 // recompileEngine rebuilds the policy engine from the store and atomically
@@ -144,43 +142,39 @@ func (s *Server) rebuildOAuthIndex() {
 	s.proxySrv.UpdateOAuthIndex(metas)
 }
 
-// credMutationComplete regenerates phantom tokens and hot-reloads the agent
-// container after a credential change. removedCreds lists credentials that
-// were deleted and should be cleaned up in the agent environment.
-func (s *Server) credMutationComplete(removedCreds ...string) error {
-	if s.containerMgr == nil {
+// credMutationComplete reads bindings with env_var set from the store,
+// generates phantom tokens, and injects them into the agent container.
+// removedEnvVars lists env var names whose bindings were already deleted
+// and should be cleared from the agent environment.
+func (s *Server) credMutationComplete(removedEnvVars ...string) error {
+	if s.containerMgr == nil || s.store == nil {
 		return nil
 	}
 
-	names, err := s.vault.List()
+	bindings, err := s.store.ListBindingsWithEnvVar()
 	if err != nil {
-		return fmt.Errorf("list credentials for container update: %w", err)
+		return fmt.Errorf("list bindings with env_var: %w", err)
 	}
 
-	phantomEnv := vault.GeneratePhantomEnv(names, s.vault)
-	for _, removed := range removedCreds {
-		envVar := vault.CredNameToEnvVar(removed)
-		if _, exists := phantomEnv[envVar]; !exists {
-			phantomEnv[envVar] = ""
+	envMap := make(map[string]string, len(bindings)+len(removedEnvVars))
+	for _, b := range bindings {
+		envMap[b.EnvVar] = vault.GeneratePhantomToken(b.Credential)
+	}
+	// Set empty values for removed env vars so they are cleared from the agent.
+	for _, ev := range removedEnvVars {
+		if _, exists := envMap[ev]; !exists {
+			envMap[ev] = ""
 		}
-		// Also clean up OAuth phantom files in case the removed credential was OAuth.
-		accessKey := envVar + "_ACCESS"
-		refreshKey := envVar + "_REFRESH"
-		if _, exists := phantomEnv[accessKey]; !exists {
-			phantomEnv[accessKey] = ""
-		}
-		if _, exists := phantomEnv[refreshKey]; !exists {
-			phantomEnv[refreshKey] = ""
-		}
+	}
+
+	if len(envMap) == 0 {
+		return nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	if s.phantomDir != "" {
-		return s.containerMgr.ReloadSecrets(ctx, s.phantomDir, phantomEnv)
-	}
-	return s.containerMgr.RestartWithEnv(ctx, phantomEnv)
+	return s.containerMgr.InjectEnvVars(ctx, envMap, false)
 }
 
 // GetHealthz returns 200 when the proxy is listening.
@@ -680,6 +674,9 @@ func (s *Server) GetApiRulesExport(w http.ResponseWriter, r *http.Request) { //n
 			protocolsJSON, _ := json.Marshal(b.Protocols)
 			fmt.Fprintf(&buf, "protocols = %s\n", string(protocolsJSON))
 		}
+		if b.EnvVar != "" {
+			fmt.Fprintf(&buf, "env_var = %q\n", b.EnvVar)
+		}
 		buf.WriteString("\n")
 	}
 
@@ -889,6 +886,12 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) { //
 		}
 	}
 
+	// env_var requires a destination (it is stored on the binding).
+	if req.EnvVar != nil && *req.EnvVar != "" && (req.Destination == nil || *req.Destination == "") {
+		writeError(w, http.StatusBadRequest, "--env-var requires --destination", "")
+		return
+	}
+
 	// Check if credential already exists.
 	existing, err := s.vault.List()
 	if err != nil {
@@ -955,6 +958,7 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) { //
 		bindingOpts := store.BindingOpts{
 			Header:   ptrStr(req.Header),
 			Template: ptrStr(req.Template),
+			EnvVar:   ptrStr(req.EnvVar),
 		}
 		if req.Ports != nil {
 			bindingOpts.Ports = *req.Ports
@@ -1044,6 +1048,17 @@ func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request
 		defer s.reloadMu.Unlock()
 	}
 
+	// Read env_var values from bindings before removal so we can clear
+	// them from the agent container after the bindings are deleted.
+	var removedEnvVars []string
+	if credBindings, err := s.store.ListBindingsByCredential(name); err == nil {
+		for _, b := range credBindings {
+			if b.EnvVar != "" {
+				removedEnvVars = append(removedEnvVars, b.EnvVar)
+			}
+		}
+	}
+
 	// Remove associated bindings and auto-created rules first. If vault.Remove
 	// below fails, bindings/rules are already gone. This is a pre-existing
 	// ordering tradeoff: reversing it would orphan bindings when vault succeeds
@@ -1084,8 +1099,8 @@ func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request
 		s.rebuildOAuthIndex()
 	}
 
-	if err := s.credMutationComplete(name); err != nil {
-		log.Printf("[WARN] phantom regen/hot-reload after cred remove failed: %v", err)
+	if err := s.credMutationComplete(removedEnvVars...); err != nil {
+		log.Printf("[WARN] env injection after cred remove failed: %v", err)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -1126,6 +1141,7 @@ func (s *Server) PostApiBindings(w http.ResponseWriter, r *http.Request) { //nol
 	opts := store.BindingOpts{
 		Header:   ptrStr(req.Header),
 		Template: ptrStr(req.Template),
+		EnvVar:   ptrStr(req.EnvVar),
 	}
 	if req.Ports != nil {
 		opts.Ports = *req.Ports
@@ -1147,6 +1163,10 @@ func (s *Server) PostApiBindings(w http.ResponseWriter, r *http.Request) { //nol
 
 	if err := s.rebuildResolver(); err != nil {
 		log.Printf("[WARN] rebuild resolver after binding add failed: %v", err)
+	}
+
+	if err := s.credMutationComplete(); err != nil {
+		log.Printf("[WARN] credential mutation complete after binding add failed: %v", err)
 	}
 
 	// Read back the binding.
@@ -1177,6 +1197,19 @@ func (s *Server) DeleteApiBindingsId(w http.ResponseWriter, r *http.Request, id 
 		defer s.reloadMu.Unlock()
 	}
 
+	// Read env_var before deletion so we can clear it from the agent.
+	var removedEnvVars []string
+	if s.store != nil {
+		rows, listErr := s.store.ListBindings()
+		if listErr == nil {
+			for _, b := range rows {
+				if b.ID == id && b.EnvVar != "" {
+					removedEnvVars = append(removedEnvVars, b.EnvVar)
+				}
+			}
+		}
+	}
+
 	deleted, err := s.store.RemoveBinding(id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to remove binding", "")
@@ -1189,6 +1222,10 @@ func (s *Server) DeleteApiBindingsId(w http.ResponseWriter, r *http.Request, id 
 
 	if err := s.rebuildResolver(); err != nil {
 		log.Printf("[WARN] rebuild resolver after binding remove failed: %v", err)
+	}
+
+	if err := s.credMutationComplete(removedEnvVars...); err != nil {
+		log.Printf("[WARN] credential mutation complete after binding remove failed: %v", err)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -1532,6 +1569,9 @@ func storeBindingToAPI(b store.BindingRow) Binding {
 	}
 	if len(b.Protocols) > 0 {
 		binding.Protocols = &b.Protocols
+	}
+	if b.EnvVar != "" {
+		binding.EnvVar = &b.EnvVar
 	}
 	if b.CreatedAt != "" {
 		if t, err := time.Parse("2006-01-02 15:04:05", b.CreatedAt); err == nil {

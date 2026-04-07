@@ -3,6 +3,7 @@ package store
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -2279,5 +2280,342 @@ func TestCredentialMetaCRUDRoundTrip(t *testing.T) {
 	}
 	if metas[0].Name != "oauth_cred" {
 		t.Errorf("remaining name = %q, want oauth_cred", metas[0].Name)
+	}
+}
+
+// --- Binding env_var tests ---
+
+func TestBindingEnvVarMigration(t *testing.T) {
+	s := newTestStore(t)
+
+	// Verify the env_var column exists by inserting and reading back.
+	_, err := s.AddBinding("api.example.com", "key", BindingOpts{
+		Ports:  []int{443},
+		EnvVar: "OPENAI_API_KEY",
+	})
+	if err != nil {
+		t.Fatalf("add binding with env_var: %v", err)
+	}
+
+	bindings, err := s.ListBindings()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if bindings[0].EnvVar != "OPENAI_API_KEY" {
+		t.Errorf("env_var = %q, want OPENAI_API_KEY", bindings[0].EnvVar)
+	}
+}
+
+func TestBindingEnvVarEmpty(t *testing.T) {
+	s := newTestStore(t)
+
+	// Binding without env_var should have empty string.
+	_, err := s.AddBinding("api.example.com", "key", BindingOpts{
+		Ports: []int{443},
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	bindings, _ := s.ListBindings()
+	if bindings[0].EnvVar != "" {
+		t.Errorf("env_var should be empty, got %q", bindings[0].EnvVar)
+	}
+}
+
+func TestAddBindingWithEnvVar(t *testing.T) {
+	s := newTestStore(t)
+
+	id, err := s.AddBinding("api.openai.com", "openai_key", BindingOpts{
+		Ports:  []int{443},
+		Header: "Authorization",
+		EnvVar: "OPENAI_API_KEY",
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if id < 1 {
+		t.Fatal("expected positive id")
+	}
+
+	bindings, _ := s.ListBindings()
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1, got %d", len(bindings))
+	}
+	b := bindings[0]
+	if b.EnvVar != "OPENAI_API_KEY" {
+		t.Errorf("env_var = %q, want OPENAI_API_KEY", b.EnvVar)
+	}
+	if b.Credential != "openai_key" {
+		t.Errorf("credential = %q", b.Credential)
+	}
+	if b.Header != "Authorization" {
+		t.Errorf("header = %q", b.Header)
+	}
+}
+
+func TestAddBindingEnvVarUniqueness(t *testing.T) {
+	s := newTestStore(t)
+
+	// First binding with env_var should succeed.
+	_, err := s.AddBinding("api.openai.com", "openai_key", BindingOpts{
+		Ports:  []int{443},
+		EnvVar: "OPENAI_API_KEY",
+	})
+	if err != nil {
+		t.Fatalf("first add: %v", err)
+	}
+
+	// Second binding with same env_var should fail.
+	_, err = s.AddBinding("api.other.com", "other_key", BindingOpts{
+		Ports:  []int{443},
+		EnvVar: "OPENAI_API_KEY",
+	})
+	if err == nil {
+		t.Fatal("expected error for duplicate env_var")
+	}
+	if !strings.Contains(err.Error(), "already used") {
+		t.Errorf("error should mention 'already used', got: %v", err)
+	}
+
+	// Binding without env_var should still succeed.
+	_, err = s.AddBinding("api.other.com", "other_key", BindingOpts{
+		Ports: []int{443},
+	})
+	if err != nil {
+		t.Fatalf("add without env_var should succeed: %v", err)
+	}
+
+	// Another binding with a different env_var should succeed.
+	_, err = s.AddBinding("api.telegram.org", "telegram_bot", BindingOpts{
+		Ports:  []int{443},
+		EnvVar: "TELEGRAM_BOT_TOKEN",
+	})
+	if err != nil {
+		t.Fatalf("add with different env_var should succeed: %v", err)
+	}
+}
+
+func TestListBindingsWithEnvVar(t *testing.T) {
+	s := newTestStore(t)
+
+	// Add bindings with and without env_var.
+	_, _ = s.AddBinding("api.openai.com", "openai_key", BindingOpts{
+		Ports:  []int{443},
+		EnvVar: "OPENAI_API_KEY",
+	})
+	_, _ = s.AddBinding("api.github.com", "github_key", BindingOpts{
+		Ports: []int{443},
+		// No env_var.
+	})
+	_, _ = s.AddBinding("api.telegram.org", "telegram_bot", BindingOpts{
+		Ports:  []int{443},
+		EnvVar: "TELEGRAM_BOT_TOKEN",
+	})
+
+	// ListBindingsWithEnvVar should return only the two with env_var set.
+	bindings, err := s.ListBindingsWithEnvVar()
+	if err != nil {
+		t.Fatalf("ListBindingsWithEnvVar: %v", err)
+	}
+	if len(bindings) != 2 {
+		t.Fatalf("expected 2 bindings with env_var, got %d", len(bindings))
+	}
+	if bindings[0].EnvVar != "OPENAI_API_KEY" {
+		t.Errorf("bindings[0].EnvVar = %q, want OPENAI_API_KEY", bindings[0].EnvVar)
+	}
+	if bindings[1].EnvVar != "TELEGRAM_BOT_TOKEN" {
+		t.Errorf("bindings[1].EnvVar = %q, want TELEGRAM_BOT_TOKEN", bindings[1].EnvVar)
+	}
+}
+
+func TestListBindingsWithEnvVarEmpty(t *testing.T) {
+	s := newTestStore(t)
+
+	// No bindings at all.
+	bindings, err := s.ListBindingsWithEnvVar()
+	if err != nil {
+		t.Fatalf("ListBindingsWithEnvVar on empty: %v", err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("expected 0, got %d", len(bindings))
+	}
+
+	// Add binding without env_var.
+	_, _ = s.AddBinding("api.example.com", "key", BindingOpts{Ports: []int{443}})
+
+	bindings, err = s.ListBindingsWithEnvVar()
+	if err != nil {
+		t.Fatalf("ListBindingsWithEnvVar: %v", err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 (no env_var set), got %d", len(bindings))
+	}
+}
+
+func TestAddRuleAndBindingWithEnvVar(t *testing.T) {
+	s := newTestStore(t)
+	_, bindingID, err := s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{Destination: "api.openai.com", Ports: []int{443}},
+		"openai_key",
+		BindingOpts{Ports: []int{443}, EnvVar: "OPENAI_API_KEY"},
+	)
+	if err != nil {
+		t.Fatalf("AddRuleAndBinding with env_var: %v", err)
+	}
+	if bindingID < 1 {
+		t.Errorf("expected positive binding ID, got %d", bindingID)
+	}
+
+	bindings, _ := s.ListBindings()
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if bindings[0].EnvVar != "OPENAI_API_KEY" {
+		t.Errorf("env_var = %q, want OPENAI_API_KEY", bindings[0].EnvVar)
+	}
+}
+
+func TestAddRuleAndBindingEnvVarUniqueness(t *testing.T) {
+	s := newTestStore(t)
+
+	// First should succeed.
+	_, _, err := s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{Destination: "api.openai.com", Ports: []int{443}},
+		"openai_key",
+		BindingOpts{Ports: []int{443}, EnvVar: "OPENAI_API_KEY"},
+	)
+	if err != nil {
+		t.Fatalf("first AddRuleAndBinding: %v", err)
+	}
+
+	// Second with same env_var should fail.
+	_, _, err = s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{Destination: "api.other.com", Ports: []int{443}},
+		"other_key",
+		BindingOpts{Ports: []int{443}, EnvVar: "OPENAI_API_KEY"},
+	)
+	if err == nil {
+		t.Fatal("expected error for duplicate env_var in AddRuleAndBinding")
+	}
+}
+
+func TestListBindingsByCredentialWithEnvVar(t *testing.T) {
+	s := newTestStore(t)
+	_, _ = s.AddBinding("api.openai.com", "openai_key", BindingOpts{
+		Ports:  []int{443},
+		EnvVar: "OPENAI_API_KEY",
+	})
+	_, _ = s.AddBinding("api.other.com", "other_key", BindingOpts{
+		Ports: []int{443},
+	})
+
+	bindings, err := s.ListBindingsByCredential("openai_key")
+	if err != nil {
+		t.Fatalf("ListBindingsByCredential: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1, got %d", len(bindings))
+	}
+	if bindings[0].EnvVar != "OPENAI_API_KEY" {
+		t.Errorf("env_var = %q, want OPENAI_API_KEY", bindings[0].EnvVar)
+	}
+}
+
+func TestBindingEnvVarMigrationDown(t *testing.T) {
+	s := newTestStore(t)
+
+	// Add a binding with env_var to verify data exists.
+	_, err := s.AddBinding("api.example.com", "key", BindingOpts{
+		Ports:  []int{443},
+		EnvVar: "TEST_KEY",
+	})
+	if err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+
+	// Run the down migration manually (recreates bindings without env_var).
+	downSQL := `
+		CREATE TABLE bindings_backup (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			destination TEXT NOT NULL,
+			ports TEXT,
+			credential TEXT NOT NULL,
+			header TEXT,
+			template TEXT,
+			protocols TEXT,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		INSERT INTO bindings_backup (id, destination, ports, credential, header, template, protocols, created_at)
+			SELECT id, destination, ports, credential, header, template, protocols, created_at FROM bindings;
+		DROP TABLE bindings;
+		ALTER TABLE bindings_backup RENAME TO bindings;
+	`
+	if _, execErr := s.db.Exec(downSQL); execErr != nil {
+		t.Fatalf("down migration: %v", execErr)
+	}
+
+	// The env_var column should no longer exist.
+	var envVar string
+	scanErr := s.db.QueryRow("SELECT env_var FROM bindings WHERE id = 1").Scan(&envVar)
+	if scanErr == nil {
+		t.Error("expected error querying env_var after down migration")
+	}
+
+	// Data should still be accessible without env_var.
+	var dest string
+	if destErr := s.db.QueryRow("SELECT destination FROM bindings WHERE id = 1").Scan(&dest); destErr != nil {
+		t.Fatalf("binding data lost after down migration: %v", destErr)
+	}
+	if dest != "api.example.com" {
+		t.Errorf("destination = %q, want api.example.com", dest)
+	}
+}
+
+func TestAddBindingEnvVarFormatValidation(t *testing.T) {
+	s := newTestStore(t)
+
+	tests := []struct {
+		name   string
+		envVar string
+		valid  bool
+	}{
+		{"valid uppercase", "OPENAI_API_KEY", true},
+		{"valid lowercase", "my_key", true},
+		{"valid underscore start", "_HIDDEN", true},
+		{"invalid starts with digit", "1KEY", false},
+		{"invalid has spaces", "MY KEY", false},
+		{"invalid shell injection", "FOO'; rm -rf / #", false},
+		{"invalid has dash", "MY-KEY", false},
+		{"invalid has dot", "MY.KEY", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := s.AddBinding("api.example.com", tc.envVar, BindingOpts{
+				Ports:  []int{443},
+				EnvVar: tc.envVar,
+			})
+			if tc.valid && err != nil {
+				t.Errorf("expected valid, got error: %v", err)
+			}
+			if !tc.valid && err == nil {
+				t.Errorf("expected error for invalid env_var %q", tc.envVar)
+			}
+			// Clean up for next iteration.
+			if err == nil {
+				bindings, _ := s.ListBindings()
+				for _, b := range bindings {
+					if b.EnvVar == tc.envVar {
+						_, _ = s.RemoveBinding(b.ID)
+					}
+				}
+			}
+		})
 	}
 }

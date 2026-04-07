@@ -18,6 +18,7 @@ type mockClient struct {
 	createErr   error
 	startErr    error
 	execErr     error
+	execErrs    []error // per-call exec errors; takes priority over execErr when non-empty
 	createdID   string
 	createdSpec ContainerSpec
 	stopped     bool
@@ -25,6 +26,7 @@ type mockClient struct {
 	started     bool
 	execCalled  bool
 	execCmd     []string
+	execCalls   [][]string // all exec calls recorded
 	// Track container names passed to each method.
 	inspectedName string
 	stoppedName   string
@@ -65,6 +67,16 @@ func (m *mockClient) ExecInContainer(_ context.Context, name string, cmd []strin
 	m.execCalled = true
 	m.execName = name
 	m.execCmd = cmd
+	m.execCalls = append(m.execCalls, cmd)
+
+	// Use per-call error if available.
+	if len(m.execErrs) > 0 {
+		idx := len(m.execCalls) - 1
+		if idx < len(m.execErrs) {
+			return m.execErrs[idx]
+		}
+		return nil
+	}
 	return m.execErr
 }
 
@@ -469,141 +481,239 @@ func TestMergeEnvRemoval(t *testing.T) {
 	}
 }
 
-func TestReloadSecretsWritesFiles(t *testing.T) {
-	dir := t.TempDir()
+func TestInjectEnvVarsWritesEnvFile(t *testing.T) {
 	mc := &mockClient{}
 	mgr := NewDockerManager(mc, "openclaw")
 
-	phantomEnv := map[string]string{
+	envMap := map[string]string{
 		"ANTHROPIC_API_KEY": "sk-ant-phantom-abc123",
-		"GITHUB_TOKEN":      "ghp_phantom0000000000",
 	}
 
-	err := mgr.ReloadSecrets(context.Background(), dir, phantomEnv)
+	err := mgr.InjectEnvVars(context.Background(), envMap, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify files were written.
-	for name, expected := range phantomEnv {
-		data, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			t.Errorf("failed to read phantom file %s: %v", name, err)
-			continue
-		}
-		if string(data) != expected {
-			t.Errorf("phantom file %s = %q, want %q", name, string(data), expected)
-		}
+	// Should have made 2 exec calls: env file write + secrets reload.
+	if len(mc.execCalls) != 2 {
+		t.Fatalf("expected 2 exec calls, got %d", len(mc.execCalls))
 	}
 
-	// Verify file permissions are restricted.
-	for name := range phantomEnv {
-		info, err := os.Stat(filepath.Join(dir, name))
-		if err != nil {
-			t.Errorf("stat phantom file %s: %v", name, err)
-			continue
-		}
-		if info.Mode().Perm() != 0o600 {
-			t.Errorf("phantom file %s has mode %o, want 0600", name, info.Mode().Perm())
+	// First call: shell script that writes to .env file.
+	if mc.execCalls[0][0] != "sh" || mc.execCalls[0][1] != "-c" {
+		t.Errorf("first exec should be sh -c, got %v", mc.execCalls[0])
+	}
+	script := mc.execCalls[0][2]
+	if !strings.Contains(script, "ANTHROPIC_API_KEY") {
+		t.Errorf("script should contain env var name, got %s", script)
+	}
+	if !strings.Contains(script, "sk-ant-phantom-abc123") {
+		t.Errorf("script should contain env var value, got %s", script)
+	}
+	if !strings.Contains(script, ".openclaw/.env") {
+		t.Errorf("script should reference .openclaw/.env, got %s", script)
+	}
+
+	// Second call: secrets reload.
+	wantReload := []string{"openclaw", "secrets", "reload"}
+	if len(mc.execCalls[1]) != 3 {
+		t.Errorf("reload cmd = %v, want %v", mc.execCalls[1], wantReload)
+	} else {
+		for i, w := range wantReload {
+			if mc.execCalls[1][i] != w {
+				t.Errorf("reload cmd[%d] = %q, want %q", i, mc.execCalls[1][i], w)
+			}
 		}
 	}
 }
 
-func TestReloadSecretsRemovesFiles(t *testing.T) {
-	dir := t.TempDir()
-
-	// Pre-create a file that should be removed.
-	path := filepath.Join(dir, "OLD_TOKEN")
-	if err := os.WriteFile(path, []byte("old-value"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
+func TestInjectEnvVarsEmptyMap(t *testing.T) {
 	mc := &mockClient{}
 	mgr := NewDockerManager(mc, "openclaw")
 
-	err := mgr.ReloadSecrets(context.Background(), dir, map[string]string{
-		"OLD_TOKEN": "", // empty = remove
-	})
+	err := mgr.InjectEnvVars(context.Background(), map[string]string{}, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Error("phantom file should have been removed")
+	// Empty map should be a no-op.
+	if mc.execCalled {
+		t.Error("exec should not be called for empty envMap")
 	}
 }
 
-func TestReloadSecretsCallsExec(t *testing.T) {
-	dir := t.TempDir()
-	mc := &mockClient{}
-	mgr := NewDockerManager(mc, "openclaw")
-
-	err := mgr.ReloadSecrets(context.Background(), dir, map[string]string{
-		"API_KEY": "phantom-value",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if !mc.execCalled {
-		t.Error("ExecInContainer should have been called")
-	}
-	if mc.execName != "openclaw" {
-		t.Errorf("exec container name = %q, want openclaw", mc.execName)
-	}
-	if len(mc.execCmd) != 3 || mc.execCmd[0] != "openclaw" || mc.execCmd[1] != "secrets" || mc.execCmd[2] != "reload" {
-		t.Errorf("exec cmd = %v, want [openclaw secrets reload]", mc.execCmd)
-	}
-}
-
-func TestReloadSecretsFallbackToRestart(t *testing.T) {
-	dir := t.TempDir()
+func TestInjectEnvVarsExecError(t *testing.T) {
 	mc := &mockClient{
-		execErr:   fmt.Errorf("exec failed: command not found"),
-		state:     ContainerState{ID: "abc", Image: "openclaw:latest"},
-		createdID: "new123",
+		execErr: fmt.Errorf("container not running"),
 	}
 	mgr := NewDockerManager(mc, "openclaw")
 
-	err := mgr.ReloadSecrets(context.Background(), dir, map[string]string{
+	err := mgr.InjectEnvVars(context.Background(), map[string]string{
 		"API_KEY": "phantom-value",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Exec was attempted.
-	if !mc.execCalled {
-		t.Error("ExecInContainer should have been called")
-	}
-	// Fallback to restart should have happened.
-	if !mc.stopped {
-		t.Error("container should have been stopped (fallback restart)")
-	}
-	if !mc.removed {
-		t.Error("container should have been removed (fallback restart)")
-	}
-	if !mc.started {
-		t.Error("new container should have been started (fallback restart)")
-	}
-}
-
-func TestReloadSecretsFallbackRestartFails(t *testing.T) {
-	dir := t.TempDir()
-	mc := &mockClient{
-		execErr:    fmt.Errorf("exec failed"),
-		inspectErr: fmt.Errorf("container not found"),
-	}
-	mgr := NewDockerManager(mc, "openclaw")
-
-	err := mgr.ReloadSecrets(context.Background(), dir, map[string]string{
-		"API_KEY": "phantom-value",
-	})
+	}, false)
 	if err == nil {
-		t.Fatal("expected error when both exec and restart fail")
+		t.Fatal("expected error when exec fails")
 	}
-	if !strings.Contains(err.Error(), "inspect container") {
-		t.Errorf("error should propagate restart failure: %v", err)
+	if !strings.Contains(err.Error(), "inject env vars") {
+		t.Errorf("error should mention inject env vars: %v", err)
+	}
+}
+
+func TestInjectEnvVarsReloadFails(t *testing.T) {
+	// First exec (env file write) succeeds, second (reload) fails.
+	mc := &mockClient{
+		execErrs: []error{nil, fmt.Errorf("reload failed")},
+	}
+	mgr := NewDockerManager(mc, "openclaw")
+
+	// Reload failure should not cause InjectEnvVars to return an error.
+	// The env vars were successfully written; reload failure is logged.
+	err := mgr.InjectEnvVars(context.Background(), map[string]string{
+		"API_KEY": "phantom-value",
+	}, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v (reload failure should be best-effort)", err)
+	}
+}
+
+func TestInjectEnvVarsContainerName(t *testing.T) {
+	mc := &mockClient{}
+	mgr := NewDockerManager(mc, "my-agent")
+
+	err := mgr.InjectEnvVars(context.Background(), map[string]string{
+		"TOKEN": "phantom-123",
+	}, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if mc.execName != "my-agent" {
+		t.Errorf("exec container = %q, want %q", mc.execName, "my-agent")
+	}
+}
+
+func TestInjectEnvVarsSpecialCharacters(t *testing.T) {
+	t.Run("single_quote_in_value", func(t *testing.T) {
+		mc := &mockClient{}
+		mgr := NewDockerManager(mc, "openclaw")
+
+		err := mgr.InjectEnvVars(context.Background(), map[string]string{
+			"KEY": "it's a test",
+		}, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		script := mc.execCalls[0][2]
+		if !strings.Contains(script, "'\"'\"'") {
+			t.Errorf("script should contain escaped single quote, got %s", script)
+		}
+	})
+
+	t.Run("pipe_in_value", func(t *testing.T) {
+		mc := &mockClient{}
+		mgr := NewDockerManager(mc, "openclaw")
+
+		// Values containing | should not break the sed command. The
+		// implementation uses SOH (0x01) as sed delimiter.
+		err := mgr.InjectEnvVars(context.Background(), map[string]string{
+			"KEY": "value|with|pipes",
+		}, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		script := mc.execCalls[0][2]
+		if !strings.Contains(script, "value|with|pipes") {
+			t.Errorf("script should contain literal pipes in value, got %s", script)
+		}
+		// Must NOT use | as sed delimiter.
+		if strings.Contains(script, "s|") {
+			t.Errorf("script should not use | as sed delimiter, got %s", script)
+		}
+	})
+
+	t.Run("invalid_key_rejected", func(t *testing.T) {
+		mc := &mockClient{}
+		mgr := NewDockerManager(mc, "openclaw")
+
+		err := mgr.InjectEnvVars(context.Background(), map[string]string{
+			"FOO'; rm -rf / #": "harmless",
+		}, false)
+		if err == nil {
+			t.Fatal("expected error for invalid env var key")
+		}
+		if !strings.Contains(err.Error(), "invalid env var key") {
+			t.Errorf("error should mention invalid key, got: %v", err)
+		}
+	})
+}
+
+func TestInjectEnvVarsEmptyValueDeletesLine(t *testing.T) {
+	mc := &mockClient{}
+	mgr := NewDockerManager(mc, "openclaw")
+
+	// An empty value should generate a sed delete command instead of writing KEY=.
+	err := mgr.InjectEnvVars(context.Background(), map[string]string{
+		"OLD_KEY": "",
+	}, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	script := mc.execCalls[0][2]
+	// Should use sed deletion (d command), not substitution.
+	if !strings.Contains(script, "/^OLD_KEY=/d") {
+		t.Errorf("script should contain sed deletion for empty value, got %s", script)
+	}
+	// Should NOT write OLD_KEY= to the file.
+	if strings.Contains(script, "echo 'OLD_KEY=") {
+		t.Errorf("script should not write empty env var, got %s", script)
+	}
+}
+
+func TestInjectEnvVarsFullReplaceTruncatesFile(t *testing.T) {
+	mc := &mockClient{}
+	mgr := NewDockerManager(mc, "openclaw")
+
+	err := mgr.InjectEnvVars(context.Background(), map[string]string{
+		"NEW_KEY": "phantom-value",
+	}, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	script := mc.execCalls[0][2]
+	// Full replace should truncate the file before writing.
+	if !strings.Contains(script, ": > ") {
+		t.Errorf("fullReplace script should truncate the file, got %s", script)
+	}
+	if strings.Contains(script, "touch") {
+		t.Errorf("fullReplace script should not use touch, got %s", script)
+	}
+	if !strings.Contains(script, "NEW_KEY") {
+		t.Errorf("script should contain env var name, got %s", script)
+	}
+}
+
+func TestInjectEnvVarsMergeModeDoesNotTruncate(t *testing.T) {
+	mc := &mockClient{}
+	mgr := NewDockerManager(mc, "openclaw")
+
+	err := mgr.InjectEnvVars(context.Background(), map[string]string{
+		"KEY": "value",
+	}, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	script := mc.execCalls[0][2]
+	// Merge mode should use touch, not truncate.
+	if strings.Contains(script, ": > ") {
+		t.Errorf("merge mode should not truncate the file, got %s", script)
+	}
+	if !strings.Contains(script, "touch") {
+		t.Errorf("merge mode should use touch, got %s", script)
 	}
 }
 

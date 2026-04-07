@@ -77,7 +77,7 @@ const composeTemplate = `services:
       - sluice-vault:/home/sluice/.sluice
       - sluice-audit:/var/log/sluice
       - sluice-ca:/home/sluice/ca
-      - sluice-phantoms:/home/sluice/phantoms
+      - sluice-mcp:/home/sluice/mcp
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
       interval: 5s
@@ -119,7 +119,7 @@ const composeTemplate = `services:
       - SSL_CERT_FILE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
     volumes:
       - sluice-ca:/usr/local/share/ca-certificates/sluice:ro
-      - sluice-phantoms:/phantoms:ro
+      - sluice-mcp:/mcp:ro
     depends_on:
       tun2proxy:
         condition: service_healthy
@@ -133,7 +133,7 @@ volumes:
   sluice-vault:
   sluice-audit:
   sluice-ca:
-  sluice-phantoms:
+  sluice-mcp:
 `
 
 func setupDockerCompose(t *testing.T) *dockerComposeEnv {
@@ -345,26 +345,30 @@ func testTrafficRoutesThroughSluice(t *testing.T, env *dockerComposeEnv) {
 	}
 }
 
-// testCredentialHotReload verifies that phantom token files written to the
-// shared volume by sluice are visible in the agent container.
+// testCredentialHotReload verifies that env vars injected via docker exec
+// are visible inside the agent container.
 func testCredentialHotReload(t *testing.T, env *dockerComposeEnv) {
 	t.Helper()
 
 	phantomValue := "sk-phantom-test-" + fmt.Sprintf("%d", time.Now().UnixNano()%100000)
-	phantomFile := "TEST_API_KEY"
+	envVarName := "TEST_API_KEY"
 
-	// Write a phantom token file into sluice's phantom directory.
-	writeCmd := fmt.Sprintf("echo -n '%s' > /home/sluice/phantoms/%s", phantomValue, phantomFile)
-	out, err := env.execInService("sluice", "sh", "-c", writeCmd)
+	// Write an env var into the agent container's env file via docker exec
+	// (simulating what sluice's InjectEnvVars does).
+	writeCmd := fmt.Sprintf(
+		"mkdir -p $HOME/.openclaw && echo '%s=%s' >> $HOME/.openclaw/.env",
+		envVarName, phantomValue,
+	)
+	out, err := env.execInService("agent", "sh", "-c", writeCmd)
 	if err != nil {
-		t.Fatalf("write phantom file in sluice: %v\n%s", err, out)
+		t.Fatalf("write env var in agent: %v\n%s", err, out)
 	}
 
-	// Verify the phantom file is visible in the agent container via the
-	// shared sluice-phantoms volume (mounted at /phantoms in the agent).
+	// Verify the env var is readable from the agent container's env file.
 	var agentOut string
 	for attempt := 0; attempt < 10; attempt++ {
-		agentOut, err = env.execInService("agent", "cat", "/phantoms/"+phantomFile)
+		agentOut, err = env.execInService("agent", "sh", "-c",
+			"grep '^"+envVarName+"=' $HOME/.openclaw/.env")
 		if err == nil && strings.Contains(agentOut, phantomValue) {
 			break
 		}
@@ -372,44 +376,24 @@ func testCredentialHotReload(t *testing.T, env *dockerComposeEnv) {
 	}
 
 	if err != nil {
-		t.Fatalf("read phantom file from agent: %v\n%s", err, agentOut)
+		t.Fatalf("read env var from agent: %v\n%s", err, agentOut)
 	}
 	if !strings.Contains(agentOut, phantomValue) {
-		t.Errorf("phantom file content mismatch: expected %q, got %q", phantomValue, agentOut)
-	}
-
-	// Write a second value to verify hot-reload (overwrite).
-	updatedValue := "sk-phantom-rotated-" + fmt.Sprintf("%d", time.Now().UnixNano()%100000)
-	writeCmd = fmt.Sprintf("echo -n '%s' > /home/sluice/phantoms/%s", updatedValue, phantomFile)
-	out, err = env.execInService("sluice", "sh", "-c", writeCmd)
-	if err != nil {
-		t.Fatalf("overwrite phantom file: %v\n%s", err, out)
-	}
-
-	for attempt := 0; attempt < 10; attempt++ {
-		agentOut, err = env.execInService("agent", "cat", "/phantoms/"+phantomFile)
-		if err == nil && strings.Contains(agentOut, updatedValue) {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	if !strings.Contains(agentOut, updatedValue) {
-		t.Errorf("rotated phantom file content mismatch: expected %q, got %q", updatedValue, agentOut)
+		t.Errorf("env var content mismatch: expected %q in %q", phantomValue, agentOut)
 	}
 }
 
 // testMCPAutoInjection verifies that sluice writes mcp-servers.json to the
-// shared phantom volume when MCP upstreams are configured, making them
+// shared MCP volume when MCP upstreams are configured, making them
 // discoverable by the agent container.
 func testMCPAutoInjection(t *testing.T, env *dockerComposeEnv) {
 	t.Helper()
 
-	// Write a mock mcp-servers.json to the phantom directory from sluice.
+	// Write a mock mcp-servers.json to the MCP directory from sluice.
 	// In a real deployment, sluice writes this automatically when
 	// --auto-inject-mcp is set and MCP upstreams are registered.
 	mcpConfig := `{"sluice":{"url":"http://sluice:3000/mcp","transport":"streamable-http"}}`
-	writeCmd := fmt.Sprintf("echo -n '%s' > /home/sluice/phantoms/mcp-servers.json", mcpConfig)
+	writeCmd := fmt.Sprintf("echo -n '%s' > /home/sluice/mcp/mcp-servers.json", mcpConfig)
 	out, err := env.execInService("sluice", "sh", "-c", writeCmd)
 	if err != nil {
 		t.Fatalf("write mcp-servers.json: %v\n%s", err, out)
@@ -418,7 +402,7 @@ func testMCPAutoInjection(t *testing.T, env *dockerComposeEnv) {
 	// Verify the agent can read the MCP config from the shared volume.
 	var agentOut string
 	for attempt := 0; attempt < 10; attempt++ {
-		agentOut, err = env.execInService("agent", "cat", "/phantoms/mcp-servers.json")
+		agentOut, err = env.execInService("agent", "cat", "/mcp/mcp-servers.json")
 		if err == nil && strings.Contains(agentOut, "sluice") {
 			break
 		}

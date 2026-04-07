@@ -758,6 +758,9 @@ components:
           type: string
         template:
           type: string
+        env_var:
+          type: string
+          description: Environment variable name for phantom token injection into the agent container
 
     Binding:
       type: object
@@ -782,6 +785,9 @@ components:
           type: array
           items:
             type: string
+        env_var:
+          type: string
+          description: Environment variable name for phantom token injection
         created_at:
           type: string
           format: date-time
@@ -806,6 +812,9 @@ components:
           type: array
           items:
             type: string
+        env_var:
+          type: string
+          description: Environment variable name for phantom token injection
 
     MCPUpstream:
       type: object

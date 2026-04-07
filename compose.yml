@@ -4,11 +4,12 @@
 # Startup order is enforced via healthcheck + condition: service_healthy:
 #   sluice starts first -> tun2proxy waits for sluice /healthz -> openclaw waits for tun2proxy TUN device.
 #
-# MCP auto-injection: sluice writes /phantoms/mcp-servers.json to the shared
-# phantoms volume on startup and after upstream changes. OpenClaw reads it to
-# discover sluice as an MCP server via Streamable HTTP (http://sluice:3000/mcp).
-# The SOCKS5 proxy auto-bypasses OpenClaw's connection to sluice:3000 so MCP
-# traffic is not double-checked by policy. Set --auto-inject-mcp=false to disable.
+# MCP auto-injection: sluice writes /home/sluice/mcp/mcp-servers.json to the
+# shared sluice-mcp volume on startup and after upstream changes. OpenClaw reads
+# it from /mcp/mcp-servers.json to discover sluice as an MCP server via
+# Streamable HTTP (http://sluice:3000/mcp). The SOCKS5 proxy auto-bypasses
+# OpenClaw's connection to sluice:3000 so MCP traffic is not double-checked by
+# policy. Set --auto-inject-mcp=false to disable.
 services:
   sluice:
     image: ghcr.io/nnemirovsky/sluice:latest
@@ -29,7 +30,7 @@ services:
       - sluice-vault:/home/sluice/.sluice
       - sluice-audit:/var/log/sluice
       - sluice-ca:/home/sluice/ca
-      - sluice-phantoms:/home/sluice/phantoms
+      - sluice-mcp:/home/sluice/mcp
       - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
@@ -66,7 +67,6 @@ services:
     restart: unless-stopped
     container_name: openclaw
     network_mode: "service:tun2proxy"
-    env_file: .env.phantom
     environment:
       - HOME=/home/node
       - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-}
@@ -76,7 +76,7 @@ services:
     volumes:
       - openclaw-home:/home/node
       - sluice-ca:/usr/local/share/ca-certificates/sluice:ro
-      - sluice-phantoms:/phantoms:ro
+      - sluice-mcp:/mcp:ro
     depends_on:
       tun2proxy:
         condition: service_healthy
@@ -91,5 +91,5 @@ volumes:
   sluice-vault:
   sluice-audit:
   sluice-ca:
-  sluice-phantoms:
+  sluice-mcp:
   openclaw-home:
