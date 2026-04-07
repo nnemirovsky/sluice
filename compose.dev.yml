@@ -58,7 +58,7 @@ services:
       - REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
       - NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
     volumes:
-      - openclaw-data:/home/node/.openclaw
+      - openclaw-home:/home/node
       - sluice-ca:/usr/local/share/ca-certificates/sluice:ro
       - sluice-phantoms:/phantoms:ro
     depends_on:
@@ -75,4 +75,4 @@ volumes:
   sluice-audit:
   sluice-ca:
   sluice-phantoms:
-  openclaw-data:
+  openclaw-home:
