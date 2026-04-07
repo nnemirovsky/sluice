@@ -306,8 +306,8 @@ func handleMCPAdd(args []string) error {
 	fmt.Println("NOTE: if the MCP gateway is running, restart sluice for the new upstream to take effect")
 
 	// Best-effort: write mcp-servers.json so the agent picks up the MCP
-	// gateway on next reload/restart. Only if phantom-dir is detectable.
-	if dir := os.Getenv("SLUICE_PHANTOM_DIR"); dir != "" {
+	// gateway on next reload/restart. Only if mcp-dir is detectable.
+	if dir := os.Getenv("SLUICE_MCP_DIR"); dir != "" {
 		url := os.Getenv("SLUICE_URL")
 		if url == "" {
 			url = "http://127.0.0.1:3000/mcp"
@@ -401,7 +401,7 @@ func handleMCPRemove(args []string) error {
 	fmt.Println("NOTE: if the MCP gateway is running, restart sluice for the removal to take effect")
 
 	// Best-effort: update mcp-servers.json.
-	if dir := os.Getenv("SLUICE_PHANTOM_DIR"); dir != "" {
+	if dir := os.Getenv("SLUICE_MCP_DIR"); dir != "" {
 		url := os.Getenv("SLUICE_URL")
 		if url == "" {
 			url = "http://127.0.0.1:3000/mcp"
@@ -412,9 +412,9 @@ func handleMCPRemove(args []string) error {
 	return nil
 }
 
-// writeMCPServersJSON writes an mcp-servers.json file to the phantom directory
+// writeMCPServersJSON writes an mcp-servers.json file to the MCP directory
 // so the agent container knows how to connect to sluice's MCP gateway.
-func writeMCPServersJSON(phantomDir, sluiceURL string) {
+func writeMCPServersJSON(mcpDir, sluiceURL string) {
 	mcpConfig := map[string]any{
 		"sluice": map[string]any{
 			"url":       sluiceURL,
@@ -426,7 +426,7 @@ func writeMCPServersJSON(phantomDir, sluiceURL string) {
 		log.Printf("WARNING: failed to marshal mcp-servers.json: %v", err)
 		return
 	}
-	path := filepath.Join(phantomDir, "mcp-servers.json")
+	path := filepath.Join(mcpDir, "mcp-servers.json")
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		log.Printf("WARNING: failed to write %s: %v", path, err)
 	}
