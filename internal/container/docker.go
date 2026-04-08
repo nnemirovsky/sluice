@@ -92,13 +92,43 @@ func (m *DockerManager) InjectEnvVars(ctx context.Context, envMap map[string]str
 	}
 
 	// Signal the agent to reload secrets from the updated env file.
+	// The openclaw CLI hangs in container environments (confirmed bug in
+	// 2026.4.5), so we send the secrets.reload RPC directly via WebSocket
+	// using node which is available in the openclaw container.
 	if reloadErr := m.client.ExecInContainer(ctx, m.containerName,
-		[]string{"openclaw", "secrets", "reload"}); reloadErr != nil {
+		[]string{"node", "-e", reloadSecretsScript}); reloadErr != nil {
 		log.Printf("env vars injected but secrets reload failed: %v", reloadErr)
 	}
 
 	return nil
 }
+
+// reloadSecretsScript is a Node.js one-liner that sends a secrets.reload
+// RPC to the openclaw gateway via WebSocket. It reads the gateway config
+// from disk to discover the port and auth token. This bypasses the openclaw
+// CLI which hangs in container/non-TTY environments.
+const reloadSecretsScript = `const fs=require("fs"),http=require("http"),crypto=require("crypto");` +
+	`let port=18789,token="";` +
+	`try{const c=JSON.parse(fs.readFileSync(process.env.HOME+"/.openclaw/openclaw.json","utf8"));` +
+	`port=c.gateway?.port||18789;token=c.gateway?.auth?.token||"";}catch(e){}` +
+	`const key=crypto.randomBytes(16).toString("base64");` +
+	`const req=http.request({hostname:"127.0.0.1",port,path:"/",headers:{` +
+	`"Upgrade":"websocket","Connection":"Upgrade",` +
+	`"Sec-WebSocket-Key":key,"Sec-WebSocket-Version":"13",` +
+	`"Authorization":"Bearer "+token}});` +
+	`req.on("upgrade",(res,socket)=>{` +
+	`const id=crypto.randomUUID();` +
+	`const msg=JSON.stringify({type:"req",id,method:"secrets.reload"});` +
+	`const p=Buffer.from(msg),mask=crypto.randomBytes(4);` +
+	`let h;if(p.length<126){h=Buffer.alloc(2);h[0]=0x81;h[1]=0x80|p.length;}` +
+	`else{h=Buffer.alloc(4);h[0]=0x81;h[1]=0x80|126;h.writeUInt16BE(p.length,2);}` +
+	`const m=Buffer.alloc(p.length);for(let i=0;i<p.length;i++)m[i]=p[i]^mask[i%4];` +
+	`socket.write(Buffer.concat([h,mask,m]));` +
+	`socket.on("data",()=>{console.log("secrets reloaded");process.exit(0);});` +
+	`setTimeout(()=>process.exit(0),5000);});` +
+	`req.on("error",e=>{console.error(e.message);process.exit(1);});` +
+	`req.setTimeout(5000,()=>{req.destroy();process.exit(1);});` +
+	`req.end();`
 
 // RestartWithEnv recreates the container with updated environment variables.
 // It inspects the current container config, stops and removes it, creates a

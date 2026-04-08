@@ -341,10 +341,27 @@ func main() {
 	// Inject phantom env vars into the agent container at startup.
 	// Bindings with env_var set produce env var entries (e.g. OPENAI_API_KEY=phantom-xxx)
 	// that are written into the agent's .env file via docker exec.
+	// Retry with backoff because the agent container may still be starting
+	// (compose healthcheck ordering ensures sluice starts first).
 	if containerMgr != nil && db != nil {
-		if err := injectEnvVarsFromStore(db, containerMgr); err != nil {
-			log.Printf("WARNING: startup env injection failed: %v", err)
-		}
+		go func() {
+			backoff := []time.Duration{0, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second}
+			for i, delay := range backoff {
+				if delay > 0 {
+					time.Sleep(delay)
+				}
+				if err := injectEnvVarsFromStore(db, containerMgr); err != nil {
+					if i < len(backoff)-1 {
+						log.Printf("startup env injection attempt %d/%d failed: %v (retrying)", i+1, len(backoff), err)
+						continue
+					}
+					log.Printf("WARNING: startup env injection failed after %d attempts: %v", len(backoff), err)
+				} else {
+					log.Printf("startup env injection succeeded (attempt %d/%d)", i+1, len(backoff))
+					return
+				}
+			}
+		}()
 	}
 
 	// Configure the OAuth refresh callback so that after a token refresh

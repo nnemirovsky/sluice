@@ -514,16 +514,11 @@ func TestInjectEnvVarsWritesEnvFile(t *testing.T) {
 		t.Errorf("script should reference .openclaw/.env, got %s", script)
 	}
 
-	// Second call: secrets reload.
-	wantReload := []string{"openclaw", "secrets", "reload"}
+	// Second call: secrets reload via node WebSocket script.
 	if len(mc.execCalls[1]) != 3 {
-		t.Errorf("reload cmd = %v, want %v", mc.execCalls[1], wantReload)
-	} else {
-		for i, w := range wantReload {
-			if mc.execCalls[1][i] != w {
-				t.Errorf("reload cmd[%d] = %q, want %q", i, mc.execCalls[1][i], w)
-			}
-		}
+		t.Errorf("reload cmd len = %d, want 3", len(mc.execCalls[1]))
+	} else if mc.execCalls[1][0] != "node" || mc.execCalls[1][1] != "-e" {
+		t.Errorf("reload cmd = %v, want [node -e <script>]", mc.execCalls[1][:2])
 	}
 }
 

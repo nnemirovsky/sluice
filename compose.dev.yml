@@ -32,7 +32,7 @@ services:
     cap_add: [NET_ADMIN]
     devices:
       - /dev/net/tun:/dev/net/tun
-    command: ["--proxy", "socks5://sluice:1080"]
+    command: ["--proxy", "socks5://sluice:1080", "--bypass", "127.0.0.0/8", "--bypass", "::1/128"]
     ports:
       - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
     healthcheck:
