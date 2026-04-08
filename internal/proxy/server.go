@@ -1096,7 +1096,7 @@ func (s *Server) handleConnect(ctx context.Context, writer io.Writer, request *s
 		}
 		return fmt.Errorf("connect to %v failed: %w", request.RawDestAddr, err)
 	}
-	defer target.Close()
+	defer target.Close() //nolint:errcheck
 
 	if sendErr := socks5.SendReply(writer, statute.RepSuccess, target.LocalAddr()); sendErr != nil {
 		return fmt.Errorf("failed to send reply: %w", sendErr)
@@ -1174,12 +1174,12 @@ func (s *Server) sniPolicyCheck(ctx context.Context, request *socks5.Request, ta
 		return io.MultiReader(bytes.NewReader(buf), request.Reader)
 	case policy.Deny:
 		log.Printf("[SNI->DENY] %s:%d (hostname %s matched deny rule)", ipStr, port, sni)
-		target.Close()
+		_ = target.Close()
 		return nil
 	case policy.Ask:
 		if s.rules.broker == nil {
 			log.Printf("[SNI->DENY] %s:%d (hostname %s: ask treated as deny, no broker)", ipStr, port, sni)
-			target.Close()
+			_ = target.Close()
 			return nil
 		}
 		log.Printf("[SNI->ASK] %s:%d (hostname %s: waiting for approval)", ipStr, port, sni)
@@ -1188,7 +1188,7 @@ func (s *Server) sniPolicyCheck(ctx context.Context, request *socks5.Request, ta
 		resp, reqErr := s.rules.broker.Request(sni, port, proto.String(), timeout)
 		if reqErr != nil {
 			log.Printf("[SNI->DENY] %s:%d (hostname %s: approval timeout: %v)", ipStr, port, sni, reqErr)
-			target.Close()
+			_ = target.Close()
 			return nil
 		}
 		switch resp {
@@ -1232,17 +1232,17 @@ func (s *Server) sniPolicyCheck(ctx context.Context, request *socks5.Request, ta
 					}
 				}
 			}()
-			target.Close()
+			_ = target.Close()
 			return nil
 		default:
 			log.Printf("[SNI->DENY] %s:%d (hostname %s: user denied)", ipStr, port, sni)
-			target.Close()
+			_ = target.Close()
 			return nil
 		}
 	default:
 		// Default verdict (typically deny). Use it.
 		log.Printf("[SNI->DENY] %s:%d (hostname %s: default deny)", ipStr, port, sni)
-		target.Close()
+		_ = target.Close()
 		return nil
 	}
 }
