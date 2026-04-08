@@ -47,10 +47,10 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     command: ["--proxy", "socks5://sluice:1080", "--bypass", "127.0.0.0/8", "--bypass", "::1/128"]
-    # OpenClaw uses network_mode: "service:tun2proxy", so its ports are
-    # exposed here. Gateway (18789) serves the web UI and API.
-    ports:
-      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
+    # OpenClaw uses network_mode: "service:tun2proxy", sharing this
+    # container's network namespace. The caddy sidecar handles external
+    # access because tun0's default route breaks Docker port forwarding
+    # (routing asymmetry: replies exit via tun0 instead of eth0).
     healthcheck:
       test: ["CMD-SHELL", "ip link show tun0 || exit 1"]
       interval: 10s
@@ -86,6 +86,24 @@ services:
       - openclaw-home:/home/node
       - sluice-ca:/usr/local/share/ca-certificates/sluice:ro
       - sluice-mcp:/mcp:ro
+    depends_on:
+      tun2proxy:
+        condition: service_healthy
+
+  # Reverse proxy for external HTTPS access to the OpenClaw Control UI.
+  # Terminates TLS with a Cloudflare Origin certificate and forwards to
+  # the gateway in tun2proxy's network namespace. This sidesteps the
+  # routing asymmetry that breaks Docker's built-in port forwarding when
+  # tun2proxy's TUN device captures reply packets.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - /etc/cloudflare:/etc/cloudflare:ro
+    networks: [internal, external]
     depends_on:
       tun2proxy:
         condition: service_healthy

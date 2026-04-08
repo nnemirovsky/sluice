@@ -1,0 +1,9 @@
+{
+	auto_https off
+}
+
+:443 {
+	tls /etc/cloudflare/claw.pem /etc/cloudflare/claw.key
+
+	reverse_proxy sluice-tun2proxy-1:18789
+}
