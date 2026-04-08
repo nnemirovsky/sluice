@@ -49,11 +49,11 @@ func buildClientHello(hostname string) []byte {
 
 	// ClientHello body: version(2) + random(32) + sessionID(1) + cipherSuites(4) + compression(2) + extensions
 	chBody := make([]byte, 0, 2+32+1+4+2+2+extsLen)
-	chBody = append(chBody, 0x03, 0x03)      // TLS 1.2
+	chBody = append(chBody, 0x03, 0x03)          // TLS 1.2
 	chBody = append(chBody, make([]byte, 32)...) // random
-	chBody = append(chBody, 0)                // session ID length = 0
-	chBody = append(chBody, 0, 2, 0x00, 0xFF) // cipher suites: length=2, one suite
-	chBody = append(chBody, 1, 0)             // compression: length=1, null
+	chBody = append(chBody, 0)                   // session ID length = 0
+	chBody = append(chBody, 0, 2, 0x00, 0xFF)    // cipher suites: length=2, one suite
+	chBody = append(chBody, 1, 0)                // compression: length=1, null
 	chBody = append(chBody, byte(extsLen>>8), byte(extsLen))
 	chBody = append(chBody, ext...)
 
@@ -67,8 +67,8 @@ func buildClientHello(hostname string) []byte {
 	// TLS record: type=Handshake(0x16), version(2), length(2), handshake
 	recLen := len(hs)
 	record := make([]byte, 0, 5+recLen)
-	record = append(record, 0x16)          // Handshake
-	record = append(record, 0x03, 0x01)    // TLS 1.0 record version
+	record = append(record, 0x16)       // Handshake
+	record = append(record, 0x03, 0x01) // TLS 1.0 record version
 	record = append(record, byte(recLen>>8), byte(recLen))
 	record = append(record, hs...)
 

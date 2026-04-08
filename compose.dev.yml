@@ -51,12 +51,16 @@ services:
     restart: unless-stopped
     container_name: openclaw
     network_mode: "service:tun2proxy"
+    entrypoint: ["/bin/sh", "-c", "[ -f \"$HOME/.openclaw/.env\" ] && set -a && . \"$HOME/.openclaw/.env\" && set +a; exec docker-entrypoint.sh node openclaw.mjs gateway --allow-unconfigured"]
     environment:
       - HOME=/home/node
       - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-}
       - SSL_CERT_FILE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
       - REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
       - NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
+      - NPM_CONFIG_PREFIX=/home/node/.npm-global
+      - PATH=/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      - NODE_COMPILE_CACHE=/home/node/.node-compile-cache
     volumes:
       - openclaw-home:/home/node
       - sluice-ca:/usr/local/share/ca-certificates/sluice:ro
