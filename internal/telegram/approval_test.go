@@ -1743,6 +1743,10 @@ func (m *mockContainerMgr) InjectCACert(_ context.Context, _, _ string) error {
 	return nil
 }
 
+func (m *mockContainerMgr) ReloadSecrets(_ context.Context) error {
+	return nil
+}
+
 func (m *mockContainerMgr) Runtime() container.Runtime {
 	return container.RuntimeDocker
 }

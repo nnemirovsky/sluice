@@ -92,15 +92,17 @@ func (m *DockerManager) InjectEnvVars(ctx context.Context, envMap map[string]str
 	}
 
 	// Signal the agent to reload secrets from the updated env file.
-	// The openclaw CLI hangs in container environments (confirmed bug in
-	// 2026.4.5), so we send the secrets.reload RPC directly via WebSocket
-	// using node which is available in the openclaw container.
-	if reloadErr := m.client.ExecInContainer(ctx, m.containerName,
-		[]string{"node", "-e", reloadSecretsScript}); reloadErr != nil {
+	if reloadErr := m.ReloadSecrets(ctx); reloadErr != nil {
 		log.Printf("env vars injected but secrets reload failed: %v", reloadErr)
 	}
 
 	return nil
+}
+
+// ReloadSecrets signals the openclaw gateway to re-read secrets via WebSocket RPC.
+func (m *DockerManager) ReloadSecrets(ctx context.Context) error {
+	return m.client.ExecInContainer(ctx, m.containerName,
+		[]string{"node", "-e", reloadSecretsScript})
 }
 
 // reloadSecretsScript is a Node.js one-liner that sends a secrets.reload

@@ -68,6 +68,9 @@ type ContainerManager interface { //nolint:revive // stuttering accepted for cla
 	// the cert is still available via env vars (SSL_CERT_FILE, etc.).
 	InjectCACert(ctx context.Context, hostCertPath, certDir string) error
 
+	// ReloadSecrets signals the agent to re-read secrets from the env file.
+	ReloadSecrets(ctx context.Context) error
+
 	// Status returns container health information.
 	Status(ctx context.Context) (ContainerStatus, error)
 
