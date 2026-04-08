@@ -321,8 +321,10 @@ sluice audit verify   # check hash chain integrity
 | WebSocket | Handshake + text frames | Text frame content |
 | SSH | Jump host, key from vault | -- |
 | IMAP/SMTP | AUTH command proxy | -- |
-| DNS | -- | Domain-level policy |
+| DNS | -- | Deny-only (NXDOMAIN for denied domains). See note below. |
 | QUIC/HTTP3 | HTTP/3 MITM | Full request/response |
+
+**DNS policy design**: The DNS interceptor only blocks explicitly denied domains (returns NXDOMAIN). All other verdicts (allow, ask, default) are forwarded to the upstream resolver. This is intentional. Policy enforcement for "ask" destinations happens at the SOCKS5 CONNECT layer, not DNS. Blocking DNS for "ask" destinations would prevent the TCP connection from ever reaching the approval flow. The DNS interceptor populates a reverse cache (IP -> hostname) so the SOCKS5 handler can recover hostnames from IP-only CONNECT requests sent by tun2proxy. For TLS connections, SNI from the ClientHello provides an additional hostname recovery path.
 
 ## Requirements
 
