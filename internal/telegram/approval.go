@@ -207,12 +207,12 @@ func (tc *TelegramChannel) Notify(_ context.Context, text string) error {
 // registerCommands sets the bot's command menu via Telegram's setMyCommands API.
 func (tc *TelegramChannel) registerCommands() {
 	cmds := []tgbotapi.BotCommand{
-		{Command: "start", Description: "Show welcome message"},
-		{Command: "help", Description: "Show available commands"},
 		{Command: "status", Description: "Show proxy status"},
 		{Command: "policy", Description: "Manage policy rules"},
 		{Command: "cred", Description: "Manage credentials"},
 		{Command: "audit", Description: "Show audit log entries"},
+		{Command: "start", Description: "Show welcome message"},
+		{Command: "help", Description: "Show available commands"},
 	}
 	cfg := tgbotapi.NewSetMyCommands(cmds...)
 	if _, err := tc.api.Request(cfg); err != nil {

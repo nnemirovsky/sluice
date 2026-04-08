@@ -665,24 +665,24 @@ func (h *CommandHandler) handleStart() string {
 }
 
 func (h *CommandHandler) handleHelp() string {
-	help := `Available commands:
+	help := `Policy
+/policy show | /policy allow <dest> | /policy deny <dest> | /policy remove <id>
 
-/policy show - List current rules
-/policy allow <dest> - Add allow rule
-/policy deny <dest> - Add deny rule
-/policy remove <id> - Remove rule by ID
-/status - Show proxy status
-/audit recent [N] - Show last N audit entries
-/help - Show this message`
+Monitoring
+/status - Proxy status
+/audit recent [N] - Last N audit entries`
 
 	if h.vault != nil {
 		help += `
 
-/cred list - List stored credentials
-/cred add <name> <value> [--env-var VAR] - Add credential
-/cred rotate <name> <value> - Rotate credential
-/cred remove <name> - Remove credential`
+Credentials
+/cred list | /cred add <name> <value> [--env-var VAR]
+/cred rotate <name> <value> | /cred remove <name>`
 	}
+
+	help += `
+
+More: /start for welcome, /help for this message`
 	return help
 }
 

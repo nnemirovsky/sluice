@@ -549,7 +549,7 @@ func TestStartStop(t *testing.T) {
 		// Look for the help response (sent after getMe during init).
 		helpFound := false
 		for _, m := range msgs {
-			if strings.Contains(m.Text, "Available commands") {
+			if strings.Contains(m.Text, "Policy") {
 				helpFound = true
 				break
 			}
