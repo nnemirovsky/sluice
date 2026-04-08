@@ -270,11 +270,17 @@ func (m *TartManager) InjectEnvVars(ctx context.Context, envMap map[string]strin
 		return fmt.Errorf("inject env vars: %w", execErr)
 	}
 
-	if _, reloadErr := m.cli.Exec(ctx, m.vmName, []string{"openclaw", "secrets", "reload"}); reloadErr != nil {
+	if reloadErr := m.ReloadSecrets(ctx); reloadErr != nil {
 		log.Printf("env vars injected but secrets reload failed: %v", reloadErr)
 	}
 
 	return nil
+}
+
+// ReloadSecrets signals the openclaw gateway to re-read secrets via WebSocket RPC.
+func (m *TartManager) ReloadSecrets(ctx context.Context) error {
+	_, err := m.cli.Exec(ctx, m.vmName, []string{"node", "-e", reloadSecretsScript})
+	return err
 }
 
 // RestartWithEnv stops the VM and re-runs it in the background. Unlike Apple

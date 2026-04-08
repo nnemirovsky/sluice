@@ -1469,6 +1469,10 @@ func (m *mockContainerMgr) Stop(_ context.Context) error {
 	return nil
 }
 
+func (m *mockContainerMgr) ReloadSecrets(_ context.Context) error {
+	return nil
+}
+
 func (m *mockContainerMgr) Runtime() container.Runtime {
 	return container.RuntimeDocker
 }

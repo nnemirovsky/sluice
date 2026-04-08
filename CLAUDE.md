@@ -142,7 +142,7 @@ Extends phantom swap to handle OAuth credentials bidirectionally. Static credent
 | WebSocket | Handshake headers + text frame phantom swap | Text frame deny + redact rules |
 | SSH | Jump host, key from vault | N/A |
 | IMAP/SMTP | AUTH command proxy, phantom password swap | N/A |
-| DNS | N/A | Domain-level policy (NXDOMAIN for denied) |
+| DNS | N/A | Deny-only (NXDOMAIN). See DNS design note below. |
 | QUIC/HTTP3 | HTTP/3 MITM via quic-go | Full HTTP/3 request/response |
 | APNS | Connection-level allow/deny (port 5223) | N/A |
 
@@ -161,6 +161,8 @@ Two-phase detection: port-based guess first, then byte-level for non-standard po
 `Channel` interface with `Broker` coordinating across channels (Telegram, HTTP). Broadcast-and-first-wins. Rate limiting: `MaxPendingRequests` (50), per-destination (5/min). "Always Allow" writes to SQLite store, recompiles and swaps Engine.
 
 `CouldBeAllowed(dest, includeAsk)`: when broker configured, Ask-matching destinations resolve via DNS for approval flow. When no broker, Ask treated as Deny at DNS stage to prevent leaking queries.
+
+**DNS approval design**: The DNS interceptor intentionally only blocks explicitly denied domains (returns NXDOMAIN). All other queries (allow, ask, default) are forwarded to the upstream resolver. This is by design. Policy enforcement for "ask" destinations happens at the SOCKS5 CONNECT layer, not at DNS. Blocking DNS for "ask" destinations would prevent the TCP connection from ever reaching the SOCKS5 handler where the approval flow triggers. The DNS layer populates the reverse DNS cache (IP -> hostname) so the SOCKS5 handler can recover hostnames from IP-only CONNECT requests.
 
 ### Audit logger
 

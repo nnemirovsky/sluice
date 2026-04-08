@@ -40,6 +40,8 @@ const (
 	ResponseAlwaysAllow
 	// ResponseDeny rejects the connection request.
 	ResponseDeny
+	// ResponseAlwaysDeny rejects the connection and adds a persistent deny rule.
+	ResponseAlwaysDeny
 )
 
 func (r Response) String() string {
@@ -50,6 +52,8 @@ func (r Response) String() string {
 		return "always_allow"
 	case ResponseDeny:
 		return "deny"
+	case ResponseAlwaysDeny:
+		return "always_deny"
 	default:
 		return "unknown"
 	}

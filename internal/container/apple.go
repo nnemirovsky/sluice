@@ -230,11 +230,17 @@ func (m *AppleManager) InjectEnvVars(ctx context.Context, envMap map[string]stri
 		return fmt.Errorf("inject env vars: %w", execErr)
 	}
 
-	if _, reloadErr := m.cli.Exec(ctx, m.containerName, []string{"openclaw", "secrets", "reload"}); reloadErr != nil {
+	if reloadErr := m.ReloadSecrets(ctx); reloadErr != nil {
 		log.Printf("env vars injected but secrets reload failed: %v", reloadErr)
 	}
 
 	return nil
+}
+
+// ReloadSecrets signals the openclaw gateway to re-read secrets via WebSocket RPC.
+func (m *AppleManager) ReloadSecrets(ctx context.Context) error {
+	_, err := m.cli.Exec(ctx, m.containerName, []string{"node", "-e", reloadSecretsScript})
+	return err
 }
 
 // RestartWithEnv stops the VM, removes it, and recreates it with updated

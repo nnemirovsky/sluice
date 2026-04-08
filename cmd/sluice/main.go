@@ -341,10 +341,54 @@ func main() {
 	// Inject phantom env vars into the agent container at startup.
 	// Bindings with env_var set produce env var entries (e.g. OPENAI_API_KEY=phantom-xxx)
 	// that are written into the agent's .env file via docker exec.
+	// Retry with backoff because the agent container may still be starting
+	// (compose healthcheck ordering ensures sluice starts first).
 	if containerMgr != nil && db != nil {
-		if err := injectEnvVarsFromStore(db, containerMgr); err != nil {
-			log.Printf("WARNING: startup env injection failed: %v", err)
-		}
+		go func() {
+			// Phase 1: write .env file into the agent container.
+			// Retry with backoff because the container may still be starting.
+			backoff := []time.Duration{0, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second}
+			injected := false
+			for i, delay := range backoff {
+				if delay > 0 {
+					time.Sleep(delay)
+				}
+				if err := injectEnvVarsFromStore(db, containerMgr); err != nil {
+					if i < len(backoff)-1 {
+						log.Printf("startup env injection attempt %d/%d failed: %v (retrying)", i+1, len(backoff), err)
+						continue
+					}
+					log.Printf("WARNING: startup env injection failed after %d attempts: %v", len(backoff), err)
+				} else {
+					log.Printf("startup env injection succeeded (attempt %d/%d)", i+1, len(backoff))
+					injected = true
+					break
+				}
+			}
+			if !injected {
+				return
+			}
+			// Phase 2: signal the agent to reload secrets.
+			// The gateway takes longer to start than the container itself,
+			// so retry the reload with a longer backoff.
+			reloadBackoff := []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 30 * time.Second, 60 * time.Second}
+			for i, delay := range reloadBackoff {
+				time.Sleep(delay)
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				if err := containerMgr.ReloadSecrets(ctx); err != nil {
+					cancel()
+					if i < len(reloadBackoff)-1 {
+						log.Printf("startup secrets reload attempt %d/%d failed: %v (retrying)", i+1, len(reloadBackoff), err)
+						continue
+					}
+					log.Printf("WARNING: startup secrets reload failed after %d attempts: %v", len(reloadBackoff), err)
+				} else {
+					cancel()
+					log.Printf("startup secrets reload succeeded (attempt %d/%d)", i+1, len(reloadBackoff))
+					return
+				}
+			}
+		}()
 	}
 
 	// Configure the OAuth refresh callback so that after a token refresh
@@ -746,9 +790,10 @@ func injectEnvVarsFromStore(db *store.Store, mgr container.ContainerManager) err
 	}
 	envMap := make(map[string]string, len(envBindings))
 	for _, b := range envBindings {
-		// For OAuth credentials, the env_var maps to the access token phantom.
-		// The credential name is used to generate a format-matching phantom.
-		envMap[b.EnvVar] = vault.GeneratePhantomToken(b.Credential)
+		// Use the MITM-compatible phantom format (SLUICE_PHANTOM:<credname>)
+		// so the proxy's byte-level find-and-replace works when the agent
+		// passes the env var value in HTTP headers or request body.
+		envMap[b.EnvVar] = proxy.PhantomToken(b.Credential)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

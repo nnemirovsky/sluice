@@ -11,23 +11,25 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
-// dockerAPIVersion is the minimum Docker Engine API version required.
-// v1.25 (Docker 1.13+) supports all operations used here.
-const dockerAPIVersion = "v1.25"
+// defaultAPIVersion is used when version negotiation fails.
+const defaultAPIVersion = "v1.47"
 
 // SocketClient implements ContainerClient using the Docker Engine API
 // over a Unix socket. It uses only stdlib net/http with no Docker SDK
 // dependency.
 type SocketClient struct {
-	client *http.Client
+	client     *http.Client
+	apiVersion string
 }
 
 // NewSocketClient creates a ContainerClient that communicates with Docker
 // over the given Unix socket path (typically /var/run/docker.sock).
+// It negotiates the API version with the daemon on creation.
 func NewSocketClient(socketPath string) *SocketClient {
-	return &SocketClient{
+	c := &SocketClient{
 		client: &http.Client{
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -36,11 +38,44 @@ func NewSocketClient(socketPath string) *SocketClient {
 				},
 			},
 		},
+		apiVersion: defaultAPIVersion,
 	}
+	c.negotiateVersion()
+	return c
+}
+
+// negotiateVersion queries the Docker daemon for its API version and uses
+// the lesser of the daemon's version and our default version.
+func (c *SocketClient) negotiateVersion() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// /version works without a version prefix.
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://localhost/version", nil)
+	if err != nil {
+		return
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
+
+	var ver struct {
+		APIVersion string `json:"ApiVersion"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&ver); err != nil || ver.APIVersion == "" {
+		return
+	}
+	c.apiVersion = "v" + ver.APIVersion
 }
 
 func (c *SocketClient) apiURL(path string) string {
-	return "http://localhost/" + dockerAPIVersion + path
+	return "http://localhost/" + c.apiVersion + path
 }
 
 // InspectContainer returns the state of a container by name.

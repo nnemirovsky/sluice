@@ -48,6 +48,12 @@ func (d *DNSInterceptor) ReverseLookup(ip string) string {
 	return d.reverse.Lookup(ip)
 }
 
+// StoreReverse manually adds an IP -> hostname mapping to the reverse cache.
+// Used by the SNI recovery path to populate the cache for future connections.
+func (d *DNSInterceptor) StoreReverse(ip, hostname string) {
+	d.reverse.Store(ip, hostname)
+}
+
 // dnsTimeout bounds how long a single upstream DNS query can block.
 const dnsQueryTimeout = 5 * time.Second
 
