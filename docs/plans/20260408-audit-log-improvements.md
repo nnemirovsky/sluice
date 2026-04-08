@@ -8,7 +8,7 @@ The Telegram `/audit recent N` command dumps raw JSON lines which are unreadable
 
 ## Context
 
-- Audit logger: `internal/audit/audit.go` (FileLogger, Event struct, Log method)
+- Audit logger: `internal/audit/logger.go` (FileLogger, Event struct, Log method)
 - Audit CLI: `cmd/sluice/audit.go` (verify subcommand)
 - Telegram audit command: `internal/telegram/commands.go` (handleAudit)
 - MITM credential injection: `internal/proxy/inject.go` (injectCredentials, phantom swap)
@@ -26,9 +26,10 @@ The Telegram `/audit recent N` command dumps raw JSON lines which are unreadable
 
 ## Testing Strategy
 
-- Unit tests for new event types and formatting functions
-- Integration tests verifying audit events are written during proxy operations
-- Existing `audit_test.go` and `e2e/audit_test.go` cover hash chain integrity
+- Unit tests for new event types and serialization (`internal/audit/logger_test.go`)
+- Unit tests for audit logging calls in inject, ws, oauth_response, dns, and gateway code paths
+- Unit tests for Telegram formatting functions (`internal/telegram/commands_test.go`)
+- Existing `internal/audit/logger_test.go` and `e2e/audit_test.go` cover hash chain integrity
 
 ## What Goes Where
 
@@ -38,7 +39,7 @@ The Telegram `/audit recent N` command dumps raw JSON lines which are unreadable
 ## Solution Overview
 
 1. Extend the `audit.Event` struct with an `EventType` field and add new event types
-2. Add audit logging calls in credential injection, content inspection, OAuth refresh, and MCP evaluation code paths
+2. Add audit logging calls in credential injection, content inspection, OAuth refresh, DNS, and MCP evaluation code paths
 3. Reformat Telegram `/audit recent N` output as a compact human-readable list
 
 ## Progress Tracking
@@ -52,8 +53,8 @@ The Telegram `/audit recent N` command dumps raw JSON lines which are unreadable
 ### Task 1: Extend audit Event with event types
 
 **Files:**
-- Modify: `internal/audit/audit.go`
-- Modify: `internal/audit/audit_test.go`
+- Modify: `internal/audit/logger.go`
+- Modify: `internal/audit/logger_test.go`
 
 - [ ] Add `EventType string` field to `Event` struct (backward compatible, empty = legacy verdict event)
 - [ ] Define event type constants: `EventVerdict`, `EventInject`, `EventRedact`, `EventOAuthRefresh`, `EventMCPTool`, `EventDNS`, `EventPhantomStrip`
@@ -66,7 +67,10 @@ The Telegram `/audit recent N` command dumps raw JSON lines which are unreadable
 
 **Files:**
 - Modify: `internal/proxy/inject.go`
+- Modify: `internal/proxy/server.go`
+- Test: `internal/proxy/inject_test.go`
 
+- [ ] Wire audit logger into `Injector` struct (add field, update `NewInjector` in inject.go, update call site in server.go)
 - [ ] Log `EventInject` when a credential is injected (binding-based header injection)
 - [ ] Log `EventInject` when a phantom token is swapped in request body/headers
 - [ ] Log `EventPhantomStrip` when unbound phantom tokens are stripped as safety net
@@ -75,33 +79,58 @@ The Telegram `/audit recent N` command dumps raw JSON lines which are unreadable
 - [ ] Write tests verifying inject events are logged
 - [ ] Run tests
 
-### Task 3: Add content inspection audit events
+### Task 3a: Add WebSocket content inspection audit events
 
 **Files:**
 - Modify: `internal/proxy/ws.go`
-- Modify: `internal/mcp/gateway.go`
+- Test: `internal/proxy/ws_test.go`
 
+- [ ] Wire audit logger into `WSProxy`/`wsFrameInterceptor`
 - [ ] Log `EventRedact` when WebSocket text frame content is redacted by rules
 - [ ] Log `EventRedact` when WebSocket text frame is denied by content rules
+- [ ] Write tests for WebSocket audit events
+- [ ] Run tests
+
+### Task 3b: Add MCP tool evaluation audit events
+
+**Files:**
+- Modify: `internal/mcp/gateway.go`
+- Test: `internal/mcp/gateway_test.go`
+
+Note: MCP gateway already has `gw.audit` wired in.
+
 - [ ] Log `EventMCPTool` when MCP tool call is evaluated (allow/deny/ask + tool name)
 - [ ] Log `EventRedact` when MCP response content is redacted by ContentInspector
-- [ ] Write tests for content inspection events
+- [ ] Write tests for MCP audit events
 - [ ] Run tests
 
 ### Task 4: Add OAuth refresh audit events
 
 **Files:**
 - Modify: `internal/proxy/oauth_response.go`
+- Test: `internal/proxy/oauth_response_test.go`
 
 - [ ] Log `EventOAuthRefresh` when an OAuth token endpoint response is intercepted
 - [ ] Include credential name and whether vault update succeeded
 - [ ] Write tests for OAuth refresh events
 - [ ] Run tests
 
+### Task 4b: Add DNS audit events
+
+**Files:**
+- Modify: `internal/proxy/dns.go`
+- Test: `internal/proxy/dns_test.go`
+
+- [ ] Log `EventDNS` when a DNS query is denied (NXDOMAIN response)
+- [ ] Include domain name and verdict in the event
+- [ ] Write tests for DNS audit events
+- [ ] Run tests
+
 ### Task 5: Format Telegram audit output
 
 **Files:**
 - Modify: `internal/telegram/commands.go`
+- Test: `internal/telegram/commands_test.go`
 
 - [ ] Parse JSON audit lines in `handleAudit`
 - [ ] Format each entry as a compact one-liner: `HH:MM:SS VERDICT dest:port (protocol) [reason]`
@@ -109,7 +138,8 @@ The Telegram `/audit recent N` command dumps raw JSON lines which are unreadable
 - [ ] For redact events: `HH:MM:SS REDACT dest:port (rule match)`
 - [ ] For OAuth events: `HH:MM:SS OAUTH cred_name (refreshed)`
 - [ ] For MCP events: `HH:MM:SS MCP tool_name ALLOW|DENY`
-- [ ] Group consecutive identical entries with count: `x3` suffix
+- [ ] For DNS events: `HH:MM:SS DNS domain DENIED`
+- [ ] For phantom strip events: `HH:MM:SS STRIP dest:port`
 - [ ] Write tests for formatting functions
 - [ ] Run tests
 
@@ -132,3 +162,6 @@ The Telegram `/audit recent N` command dumps raw JSON lines which are unreadable
 - Deploy to knuth, trigger various operations (web fetch, credential injection, MCP tool call)
 - Run `/audit recent 20` in sluice Telegram bot and verify readable output
 - Run `sluice audit verify` to confirm hash chain integrity
+
+**Deferred:**
+- Grouping consecutive identical audit entries with count suffix (e.g. `x3`) for Telegram output
