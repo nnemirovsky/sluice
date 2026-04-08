@@ -2,16 +2,15 @@
 
 ## Overview
 
-Add MCP upstream management to the Telegram bot and verify full CRUD coverage across all interfaces (CLI, HTTP API, Telegram). Currently:
+Add MCP upstream management to the Telegram bot and verify full coverage across all interfaces (CLI, HTTP API, Telegram). Currently:
 
 | Operation | CLI | HTTP API | Telegram |
 |-----------|-----|----------|----------|
 | List | `sluice mcp list` | `GET /api/mcp/upstreams` | missing |
 | Add | `sluice mcp add` | `POST /api/mcp/upstreams` | missing |
 | Remove | `sluice mcp remove` | `DELETE /api/mcp/upstreams/{name}` | missing |
-| Update | missing | missing | missing |
 
-After this plan, Telegram will have `/mcp list`, `/mcp add`, `/mcp remove`, and an update command will be available across all interfaces.
+After this plan, Telegram will have `/mcp list`, `/mcp add`, and `/mcp remove`.
 
 ## Context
 
@@ -32,7 +31,9 @@ After this plan, Telegram will have `/mcp list`, `/mcp add`, `/mcp remove`, and 
 
 ## Testing Strategy
 
-- Unit tests for new Telegram command handlers
+- Unit tests for dispatch and subcommand parsing: `internal/telegram/commands_test.go`
+- Unit tests for nil-store guard behavior: `internal/telegram/commands_test.go`
+- Unit tests for MCP re-injection trigger: `internal/telegram/commands_test.go`
 - Existing store and API tests cover persistence layer
 
 ## Progress Tracking
@@ -42,68 +43,65 @@ After this plan, Telegram will have `/mcp list`, `/mcp add`, `/mcp remove`, and 
 
 ## Implementation Steps
 
-### Task 1: Add /mcp commands to Telegram bot
+### Task 1: Add /mcp dispatch and /mcp list
 
 **Files:**
 - Modify: `internal/telegram/commands.go`
+- Test: `internal/telegram/commands_test.go`
 
 - [ ] Add `case "mcp"` to Handle() dispatch
-- [ ] Implement `handleMCP(args)` with subcommands: list, add, remove
-- [ ] `/mcp list` - list registered upstreams with name, transport, command/URL
-- [ ] `/mcp add <name> --command <cmd>` - add stdio upstream (parse flags from args)
-- [ ] `/mcp add <name> --url <url>` - add HTTP/WebSocket upstream
-- [ ] `/mcp remove <name>` - remove upstream by name
-- [ ] After add/remove: trigger MCP config re-injection into agent container
+- [ ] Add nil-store guard (check `h.store != nil` like handleCred does)
+- [ ] Implement `handleMCP(args)` with subcommand routing: list, add, remove
+- [ ] `/mcp list` - list registered upstreams with name, transport, command
 - [ ] Format list output for Telegram readability (not JSON)
-- [ ] Write tests for each subcommand
-- [ ] Run tests
+- [ ] Write tests for dispatch, nil-store guard, and list subcommand
+- [ ] Run tests - must pass before next task
 
-### Task 2: Add /mcp to Telegram command menu
+### Task 2: Add /mcp add with flag parsing
+
+**Files:**
+- Modify: `internal/telegram/commands.go`
+- Test: `internal/telegram/commands_test.go`
+
+- [ ] `/mcp add <name> --command <cmd>` - add stdio upstream (parse flags from args)
+- [ ] `/mcp add <name> --command <url> --transport http` - add HTTP/WebSocket upstream (use `--command` for URLs, matching CLI convention)
+- [ ] Support optional flags: `--transport`, `--args`, `--env`, `--timeout`
+- [ ] Note: `--env` flag may contain secrets. Delete the Telegram message after processing (same treatment as `/cred add`)
+- [ ] Write tests for add subcommand with various flag combinations
+- [ ] Run tests - must pass before next task
+
+### Task 3: Add /mcp remove with auto-injection
+
+**Files:**
+- Modify: `internal/telegram/commands.go`
+- Test: `internal/telegram/commands_test.go`
+
+- [ ] `/mcp remove <name>` - remove upstream by name
+- [ ] After add/remove: trigger MCP config re-injection into agent container. Add `mcpDir` field to `CommandHandler` (or accept it via constructor) so the handler can call the same MCP config write logic used in `cmd/sluice/main.go`
+- [ ] Write tests for remove subcommand and re-injection trigger
+- [ ] Run tests - must pass before next task
+
+### Task 4: Add /mcp to Telegram command menu
 
 **Files:**
 - Modify: `internal/telegram/approval.go`
+- Test: `internal/telegram/approval_test.go`
 
 - [ ] Add `{Command: "mcp", Description: "Manage MCP upstreams"}` to registerCommands
 - [ ] Update help output to include MCP section
-- [ ] Write tests for updated help
-- [ ] Run tests
-
-### Task 3: Add update/edit support to CLI and store
-
-**Files:**
-- Modify: `internal/store/store.go`
-- Modify: `cmd/sluice/mcp.go`
-
-- [ ] Add `UpdateMCPUpstream(name, opts)` to store (update command, transport, args, env, timeout)
-- [ ] Add `sluice mcp update <name> [--command <cmd>] [--timeout N]` CLI subcommand
-- [ ] Write tests for store update
-- [ ] Write tests for CLI update
-- [ ] Run tests
-
-### Task 4: Add update endpoint to HTTP API
-
-**Files:**
-- Modify: `internal/api/server.go`
-- Modify: `api/openapi.yaml` (if exists)
-
-- [ ] Add `PATCH /api/mcp/upstreams/{name}` handler
-- [ ] Accept partial update (only fields provided are changed)
-- [ ] Write tests for PATCH endpoint
-- [ ] Run tests
+- [ ] Write tests for updated help and command registration
+- [ ] Run tests - must pass before next task
 
 ### Task 5: Verify acceptance criteria
 
 - [ ] Verify `/mcp list` in Telegram shows upstreams
 - [ ] Verify `/mcp add` creates upstream and triggers auto-injection
 - [ ] Verify `/mcp remove` removes upstream
-- [ ] Verify CLI `sluice mcp update` works
-- [ ] Verify API `PATCH /api/mcp/upstreams/{name}` works
 - [ ] Run full test suite: `go test ./... -v -timeout 30s`
 
 ### Task 6: [Final] Update documentation
 
-- [ ] Update CLAUDE.md CLI subcommands section with mcp update
-- [ ] Update help command output
+- [ ] Update CLAUDE.md CLI subcommands section if needed
 - [ ] Move this plan to `docs/plans/completed/`
 
 ## Post-Completion
@@ -115,3 +113,6 @@ After this plan, Telegram will have `/mcp list`, `/mcp add`, `/mcp remove`, and 
 - Verify `mcp-servers.json` is written to shared volume
 - Verify OpenClaw discovers the new MCP server
 - Remove it: `/mcp remove test-server`
+
+**Future work:**
+- Update/edit support for MCP upstreams (CLI, API, Telegram). Users can remove+add for now.
