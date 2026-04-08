@@ -46,7 +46,7 @@ type TelegramChannel struct { //nolint:revive // stuttering accepted for clarity
 	chatID   int64
 	broker   *channel.Broker
 	commands *CommandHandler
-	msgMap   sync.Map // request ID -> int (Telegram message ID)
+	msgMap   sync.Map // request ID -> approvalMsg{messageID, text}
 	cmdCh    chan channel.Command
 	done     chan struct{}
 	stopOnce sync.Once
@@ -101,6 +101,13 @@ func NewTelegramChannel(cfg ChannelConfig) (*TelegramChannel, error) {
 	return tc, nil
 }
 
+// approvalMsg stores the Telegram message ID and original text for an
+// approval request so that timeout/cancel edits can preserve context.
+type approvalMsg struct {
+	messageID int
+	text      string
+}
+
 // SetBroker sets the broker reference for resolving approval requests.
 // Must be called after channel.NewBroker creates the broker with this channel.
 func (tc *TelegramChannel) SetBroker(b *channel.Broker) {
@@ -127,9 +134,12 @@ func (tc *TelegramChannel) sendApprovalMessage(req channel.ApprovalRequest) {
 	msg := tgbotapi.NewMessage(tc.chatID, FormatApprovalMessage(req))
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Allow Once", req.ID+"|allow_once"),
-			tgbotapi.NewInlineKeyboardButtonData("Always Allow", req.ID+"|always_allow"),
+			tgbotapi.NewInlineKeyboardButtonData("Allow", req.ID+"|allow_once"),
 			tgbotapi.NewInlineKeyboardButtonData("Deny", req.ID+"|deny"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Always Allow", req.ID+"|always_allow"),
+			tgbotapi.NewInlineKeyboardButtonData("Always Deny", req.ID+"|always_deny"),
 		),
 	)
 	sent, err := tc.api.Send(msg)
@@ -144,14 +154,15 @@ func (tc *TelegramChannel) sendApprovalMessage(req channel.ApprovalRequest) {
 		}
 		return
 	}
-	tc.msgMap.Store(req.ID, sent.MessageID)
+	originalText := FormatApprovalMessage(req)
+	tc.msgMap.Store(req.ID, approvalMsg{messageID: sent.MessageID, text: originalText})
 
 	// If the request timed out while the Telegram API call was in
 	// flight, update the message immediately so the user does not
 	// see a stale prompt.
 	if tc.broker != nil && tc.broker.WasTimedOut(req.ID) {
 		edit := tgbotapi.NewEditMessageText(tc.chatID, sent.MessageID,
-			FormatApprovalMessage(req)+"\n\n(request timed out)")
+			originalText+"\n\n(request timed out)")
 		if _, editErr := tc.api.Send(edit); editErr == nil {
 			tc.broker.ClearTimedOut(req.ID)
 		}
@@ -161,11 +172,11 @@ func (tc *TelegramChannel) sendApprovalMessage(req channel.ApprovalRequest) {
 // CancelApproval edits the Telegram message to indicate the request was
 // resolved, timed out, or cancelled, removing the inline keyboard.
 func (tc *TelegramChannel) CancelApproval(id string) error {
-	msgIDVal, ok := tc.msgMap.LoadAndDelete(id)
+	val, ok := tc.msgMap.LoadAndDelete(id)
 	if !ok {
 		return nil
 	}
-	msgID := msgIDVal.(int)
+	am := val.(approvalMsg)
 	reason := "(resolved via another channel)"
 	if tc.broker != nil && tc.broker.WasTimedOut(id) {
 		reason = "(request timed out)"
@@ -173,7 +184,7 @@ func (tc *TelegramChannel) CancelApproval(id string) error {
 	} else if tc.broker != nil && tc.broker.IsClosed() {
 		reason = "(proxy shutting down)"
 	}
-	edit := tgbotapi.NewEditMessageText(tc.chatID, msgID, reason)
+	edit := tgbotapi.NewEditMessageText(tc.chatID, am.messageID, am.text+"\n\n"+reason)
 	_, _ = tc.api.Send(edit)
 	return nil
 }
@@ -193,8 +204,26 @@ func (tc *TelegramChannel) Notify(_ context.Context, text string) error {
 	return nil
 }
 
+// registerCommands sets the bot's command menu via Telegram's setMyCommands API.
+func (tc *TelegramChannel) registerCommands() {
+	cmds := []tgbotapi.BotCommand{
+		{Command: "start", Description: "Show welcome message"},
+		{Command: "help", Description: "Show available commands"},
+		{Command: "status", Description: "Show proxy status"},
+		{Command: "policy", Description: "Manage policy rules"},
+		{Command: "cred", Description: "Manage credentials"},
+		{Command: "audit", Description: "Show audit log entries"},
+	}
+	cfg := tgbotapi.NewSetMyCommands(cmds...)
+	if _, err := tc.api.Request(cfg); err != nil {
+		log.Printf("failed to register bot commands: %s", sanitizeError(err))
+	}
+}
+
 // Start begins polling for Telegram updates (callbacks and commands).
 func (tc *TelegramChannel) Start() error {
+	tc.registerCommands()
+
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 30
 	updates := tc.api.GetUpdatesChan(u)
@@ -261,6 +290,9 @@ func (tc *TelegramChannel) handleCallback(cq *tgbotapi.CallbackQuery) {
 	case "deny":
 		resp = channel.ResponseDeny
 		label = "Denied"
+	case "always_deny":
+		resp = channel.ResponseAlwaysDeny
+		label = "Always denied"
 	default:
 		return
 	}
@@ -291,6 +323,7 @@ func (tc *TelegramChannel) handleCallback(cq *tgbotapi.CallbackQuery) {
 			cq.Message.Text+"\n\n(request timed out)")
 		_, _ = tc.api.Send(edit)
 		tc.msgMap.Delete(reqID)
+
 	} else {
 		// Request was already resolved by a previous callback (e.g. double-tap
 		// or another user in a group chat).

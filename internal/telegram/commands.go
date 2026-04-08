@@ -165,6 +165,8 @@ func NewCommandHandler(enginePtr *atomic.Pointer[policy.Engine], reloadMu *sync.
 // Returns empty string if the command is not recognized.
 func (h *CommandHandler) Handle(cmd *Command) string {
 	switch cmd.Name {
+	case "start":
+		return h.handleStart()
 	case "policy":
 		return h.handlePolicy(cmd.Args)
 	case "cred":
@@ -656,6 +658,10 @@ func (h *CommandHandler) handleAudit(args []string) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+func (h *CommandHandler) handleStart() string {
+	return "Sluice approval proxy is running.\nType /help for available commands."
 }
 
 func (h *CommandHandler) handleHelp() string {

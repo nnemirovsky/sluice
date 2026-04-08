@@ -90,6 +90,7 @@ const (
 	ctxKeyEngine        contextKey = "engine"
 	ctxKeyFallbackAddrs contextKey = "fallbackAddrs"
 	ctxKeyFQDN          contextKey = "fqdn"
+	ctxKeySNIDeferred   contextKey = "sniDeferred" // true when policy check deferred for SNI peeking
 )
 
 // ProtocolFromContext retrieves the detected protocol from the request context.
@@ -106,6 +107,16 @@ func ProtocolFromContext(ctx context.Context) Protocol {
 func isPrivateIP(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+}
+
+// isTLSPort returns true for ports that typically carry TLS traffic.
+func isTLSPort(port int) bool {
+	switch port {
+	case 443, 8443, 993, 995, 465:
+		return true
+	default:
+		return false
+	}
 }
 
 // policyResolver performs DNS resolution only for destinations that could be
@@ -209,6 +220,7 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 	}
 
 	dest := req.DestAddr.FQDN
+	ipOnly := false // true when SOCKS5 CONNECT had no FQDN and DNS cache missed
 	if dest == "" {
 		if req.DestAddr.IP != nil {
 			ipStr := req.DestAddr.IP.String()
@@ -222,9 +234,11 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 					dest = hostname
 				} else {
 					dest = ipStr
+					ipOnly = true
 				}
 			} else {
 				dest = ipStr
+				ipOnly = true
 			}
 		} else {
 			return ctx, false
@@ -260,6 +274,20 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 		eng = r.engine.Load()
 	}
 	verdict := eng.Evaluate(dest, port)
+
+	// SNI deferral: when the destination is an IP with no DNS reverse cache
+	// hit and the port is typically TLS, defer the policy check to the custom
+	// connect handler which will peek the TLS ClientHello for SNI. This lets
+	// hostname-based allow rules match even when tun2proxy sends raw IPs.
+	if ipOnly && verdict != policy.Allow && verdict != policy.Deny && isTLSPort(port) {
+		log.Printf("[SNI-DEFER] %s:%d (deferring policy for SNI peek)", dest, port)
+		proto := DetectProtocol(port)
+		ctx = context.WithValue(ctx, ctxKeyProtocol, proto)
+		ctx = context.WithValue(ctx, ctxKeyFQDN, dest)
+		ctx = context.WithValue(ctx, ctxKeySNIDeferred, true)
+		ctx = context.WithValue(ctx, ctxKeyEngine, eng)
+		return ctx, true
+	}
 
 	// Determine the effective outcome.
 	allowed := false
@@ -313,6 +341,26 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 						} else {
 							if err := r.engine.Load().AddDynamicAllow(dest, port); err != nil { //nolint:staticcheck // backward compat fallback when no store
 								log.Printf("[WARN] failed to add dynamic allow rule for %s:%d: %v", dest, port, err)
+							}
+						}
+					}()
+				case channel.ResponseAlwaysDeny:
+					effectiveVerdict = policy.Deny
+					reason = "user denied always"
+					log.Printf("[ASK->DENY+SAVE] %s:%d (user denied always)", dest, port)
+					r.reloadMu.Lock()
+					func() {
+						defer r.reloadMu.Unlock()
+						if r.store != nil {
+							if _, storeErr := r.store.AddRule("deny", store.RuleOpts{Destination: dest, Ports: []int{port}, Source: "approval"}); storeErr != nil {
+								log.Printf("[WARN] failed to persist deny rule for %s:%d: %v", dest, port, storeErr)
+							}
+							if newEng, recompErr := policy.LoadFromStore(r.store); recompErr != nil {
+								log.Printf("[WARN] failed to recompile engine after always-deny: %v", recompErr)
+							} else if valErr := newEng.Validate(); valErr != nil {
+								log.Printf("[WARN] engine validation failed after always-deny: %v", valErr)
+							} else {
+								r.engine.Store(newEng)
 							}
 						}
 					}()
@@ -440,6 +488,7 @@ func New(cfg Config) (*Server, error) {
 		socks5.WithRule(rules),
 		socks5.WithResolver(dnsRes),
 		socks5.WithDial(srv.dial),
+		socks5.WithConnectHandle(srv.handleConnect),
 		socks5.WithAssociateHandle(srv.handleAssociate),
 	)
 
@@ -1026,6 +1075,178 @@ func dialThroughInjector(injectorAddr, host string, port int, authToken, pinID s
 
 // handleAssociate is the custom SOCKS5 UDP ASSOCIATE handler registered via
 // WithAssociateHandle. It creates a UDP listener, replies with its address,
+// handleConnect is a custom SOCKS5 CONNECT handler that supports SNI-based
+// policy deferral. For most connections it behaves identically to the default
+// go-socks5 handler. When Allow() deferred the policy decision (ctxKeySNIDeferred),
+// it peeks the first bytes from the client after CONNECT success to extract
+// the TLS ClientHello SNI, re-evaluates policy with the recovered hostname,
+// and blocks on the approval flow if needed before relaying data.
+func (s *Server) handleConnect(ctx context.Context, writer io.Writer, request *socks5.Request) error {
+	target, err := s.dial(ctx, "tcp", request.DestAddr.String())
+	if err != nil {
+		msg := err.Error()
+		resp := statute.RepHostUnreachable
+		if strings.Contains(msg, "refused") {
+			resp = statute.RepConnectionRefused
+		} else if strings.Contains(msg, "network is unreachable") {
+			resp = statute.RepNetworkUnreachable
+		}
+		if sendErr := socks5.SendReply(writer, resp, nil); sendErr != nil {
+			return fmt.Errorf("failed to send reply: %w", sendErr)
+		}
+		return fmt.Errorf("connect to %v failed: %w", request.RawDestAddr, err)
+	}
+	defer target.Close()
+
+	if sendErr := socks5.SendReply(writer, statute.RepSuccess, target.LocalAddr()); sendErr != nil {
+		return fmt.Errorf("failed to send reply: %w", sendErr)
+	}
+
+	// SNI-deferred policy check: peek client bytes for TLS ClientHello.
+	clientReader := request.Reader
+	if deferred, _ := ctx.Value(ctxKeySNIDeferred).(bool); deferred {
+		clientReader = s.sniPolicyCheck(ctx, request, target)
+		if clientReader == nil {
+			return nil // connection closed by policy check
+		}
+	}
+
+	errCh := make(chan error, 2)
+	go func() {
+		_, cpErr := io.Copy(target, clientReader)
+		if cw, ok := target.(interface{ CloseWrite() error }); ok {
+			cw.CloseWrite() //nolint:errcheck
+		}
+		errCh <- cpErr
+	}()
+	go func() {
+		_, cpErr := io.Copy(writer, target)
+		if cw, ok := writer.(interface{ CloseWrite() error }); ok {
+			cw.CloseWrite() //nolint:errcheck
+		}
+		errCh <- cpErr
+	}()
+
+	for i := 0; i < 2; i++ {
+		if e := <-errCh; e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+// sniPolicyCheck peeks the first bytes from the client to extract TLS SNI,
+// then re-evaluates policy with the recovered hostname. Returns a reader
+// that replays the peeked bytes followed by the rest of the client stream.
+// Returns nil if the connection should be closed (policy denied or error).
+func (s *Server) sniPolicyCheck(ctx context.Context, request *socks5.Request, target net.Conn) io.Reader {
+	buf, sni, err := peekSNI(request.Reader, 4096)
+	if err != nil || sni == "" {
+		// Not TLS or no SNI. Fall through with original data.
+		if len(buf) > 0 {
+			return io.MultiReader(bytes.NewReader(buf), request.Reader)
+		}
+		return request.Reader
+	}
+
+	sni = strings.TrimRight(sni, ".")
+	dest := request.DestAddr.String()
+	ipStr := strings.Split(dest, ":")[0]
+	port := request.DestAddr.Port
+
+	log.Printf("[SNI] %s -> %s:%d (recovered hostname via TLS ClientHello)", ipStr, sni, port)
+
+	// Populate DNS reverse cache for future connections.
+	if s.dnsInterceptor != nil {
+		s.dnsInterceptor.StoreReverse(ipStr, sni)
+	}
+
+	// Re-evaluate policy with the SNI hostname.
+	eng, _ := ctx.Value(ctxKeyEngine).(*policy.Engine)
+	if eng == nil {
+		eng = s.rules.engine.Load()
+	}
+	verdict := eng.Evaluate(sni, port)
+
+	switch verdict {
+	case policy.Allow:
+		log.Printf("[SNI->ALLOW] %s:%d (hostname %s matched allow rule)", ipStr, port, sni)
+		return io.MultiReader(bytes.NewReader(buf), request.Reader)
+	case policy.Deny:
+		log.Printf("[SNI->DENY] %s:%d (hostname %s matched deny rule)", ipStr, port, sni)
+		target.Close()
+		return nil
+	case policy.Ask:
+		if s.rules.broker == nil {
+			log.Printf("[SNI->DENY] %s:%d (hostname %s: ask treated as deny, no broker)", ipStr, port, sni)
+			target.Close()
+			return nil
+		}
+		log.Printf("[SNI->ASK] %s:%d (hostname %s: waiting for approval)", ipStr, port, sni)
+		timeout := time.Duration(eng.TimeoutSec) * time.Second
+		proto := DetectProtocol(port)
+		resp, reqErr := s.rules.broker.Request(sni, port, proto.String(), timeout)
+		if reqErr != nil {
+			log.Printf("[SNI->DENY] %s:%d (hostname %s: approval timeout: %v)", ipStr, port, sni, reqErr)
+			target.Close()
+			return nil
+		}
+		switch resp {
+		case channel.ResponseAllowOnce:
+			log.Printf("[SNI->ALLOW] %s:%d (hostname %s: user approved once)", ipStr, port, sni)
+			return io.MultiReader(bytes.NewReader(buf), request.Reader)
+		case channel.ResponseAlwaysAllow:
+			log.Printf("[SNI->ALLOW+SAVE] %s:%d (hostname %s: user approved always)", ipStr, port, sni)
+			s.rules.reloadMu.Lock()
+			func() {
+				defer s.rules.reloadMu.Unlock()
+				if s.rules.store != nil {
+					if _, storeErr := s.rules.store.AddRule("allow", store.RuleOpts{Destination: sni, Ports: []int{port}, Source: "approval"}); storeErr != nil {
+						log.Printf("[WARN] failed to persist allow rule for %s:%d: %v", sni, port, storeErr)
+					}
+					if newEng, recompErr := policy.LoadFromStore(s.rules.store); recompErr != nil {
+						log.Printf("[WARN] failed to recompile engine after SNI always-allow: %v", recompErr)
+					} else if valErr := newEng.Validate(); valErr != nil {
+						log.Printf("[WARN] engine validation failed after SNI always-allow: %v", valErr)
+					} else {
+						s.rules.engine.Store(newEng)
+					}
+				}
+			}()
+			return io.MultiReader(bytes.NewReader(buf), request.Reader)
+		case channel.ResponseAlwaysDeny:
+			log.Printf("[SNI->DENY+SAVE] %s:%d (hostname %s: user denied always)", ipStr, port, sni)
+			s.rules.reloadMu.Lock()
+			func() {
+				defer s.rules.reloadMu.Unlock()
+				if s.rules.store != nil {
+					if _, storeErr := s.rules.store.AddRule("deny", store.RuleOpts{Destination: sni, Ports: []int{port}, Source: "approval"}); storeErr != nil {
+						log.Printf("[WARN] failed to persist deny rule for %s:%d: %v", sni, port, storeErr)
+					}
+					if newEng, recompErr := policy.LoadFromStore(s.rules.store); recompErr != nil {
+						log.Printf("[WARN] failed to recompile engine after SNI always-deny: %v", recompErr)
+					} else if valErr := newEng.Validate(); valErr != nil {
+						log.Printf("[WARN] engine validation failed after SNI always-deny: %v", valErr)
+					} else {
+						s.rules.engine.Store(newEng)
+					}
+				}
+			}()
+			target.Close()
+			return nil
+		default:
+			log.Printf("[SNI->DENY] %s:%d (hostname %s: user denied)", ipStr, port, sni)
+			target.Close()
+			return nil
+		}
+	default:
+		// Default verdict (typically deny). Use it.
+		log.Printf("[SNI->DENY] %s:%d (hostname %s: default deny)", ipStr, port, sni)
+		target.Close()
+		return nil
+	}
+}
+
 // then dispatches datagrams to the DNSInterceptor (port 53) or UDPRelay
 // (all other ports). The handler blocks until the TCP control connection
 // closes, at which point all UDP sessions are cleaned up.

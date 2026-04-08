@@ -24,6 +24,11 @@ func newTestServer(t *testing.T) (*SocketClient, *http.ServeMux, func()) {
 	sock := filepath.Join(dir, "d.sock")
 
 	mux := http.NewServeMux()
+	// Serve /version so the client can negotiate the API version.
+	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"ApiVersion": "1.25"}) //nolint:errcheck
+	})
 	listener, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)
