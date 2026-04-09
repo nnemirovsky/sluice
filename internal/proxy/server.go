@@ -220,16 +220,20 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 	}
 
 	dest := req.DestAddr.FQDN
-	ipOnly := false // true when SOCKS5 CONNECT had no FQDN and DNS cache missed
+	ipOnly := false // true when SOCKS5 CONNECT had no FQDN
 	if dest == "" {
 		if req.DestAddr.IP != nil {
 			ipStr := req.DestAddr.IP.String()
-			// Recover hostname from DNS reverse cache. tun2proxy operates
-			// at the network level and sends IP-only CONNECT requests.
-			// The DNS interceptor caches IP -> hostname mappings from
-			// responses, so we can show hostnames in approval messages
-			// and evaluate hostname-based policy rules.
-			if r.dnsInterceptor != nil {
+			port := req.DestAddr.Port
+
+			// For TLS ports, always defer to SNI extraction (happy path).
+			// SNI from the TLS ClientHello is more reliable than the DNS
+			// reverse cache because it comes directly from the client and
+			// doesn't expire. DNS cache is used only for non-TLS protocols.
+			if isTLSPort(port) {
+				dest = ipStr
+				ipOnly = true
+			} else if r.dnsInterceptor != nil {
 				if hostname := r.dnsInterceptor.ReverseLookup(ipStr); hostname != "" {
 					dest = hostname
 				} else {
@@ -1082,6 +1086,51 @@ func dialThroughInjector(injectorAddr, host string, port int, authToken, pinID s
 // the TLS ClientHello SNI, re-evaluates policy with the recovered hostname,
 // and blocks on the approval flow if needed before relaying data.
 func (s *Server) handleConnect(ctx context.Context, writer io.Writer, request *socks5.Request) error {
+	// SNI-deferred connections: extract SNI BEFORE dialing so the MITM proxy
+	// uses the recovered hostname (not the raw IP) for the upstream TLS
+	// ServerName. Without this, the upstream TLS handshake fails because the
+	// real server's cert has DNS SANs (e.g. *.telegram.org) but not IP SANs.
+	//
+	// Hostname recovery priority:
+	//   1. FQDN from SOCKS5 CONNECT (if client sends hostname)
+	//   2. SNI from TLS ClientHello (this code path)
+	//   3. DNS reverse cache (fallback for non-TLS)
+	//   4. Raw IP (last resort)
+	clientReader := request.Reader
+	if deferred, _ := ctx.Value(ctxKeySNIDeferred).(bool); deferred {
+		// Send SOCKS5 CONNECT success early so the client starts the TLS
+		// handshake, allowing us to peek the ClientHello for SNI.
+		// Use the destination address as bind address. The client expects
+		// a valid address in the SOCKS5 reply, not 0.0.0.0:0.
+		bindAddr := &net.TCPAddr{IP: request.DestAddr.IP, Port: request.DestAddr.Port}
+		if sendErr := socks5.SendReply(writer, statute.RepSuccess, bindAddr); sendErr != nil {
+			return fmt.Errorf("failed to send reply: %w", sendErr)
+		}
+
+		// Set a read deadline so SNI peeking doesn't block forever if the
+		// client is slow to send the TLS ClientHello.
+		if conn, ok := writer.(net.Conn); ok {
+			conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
+			defer conn.SetReadDeadline(time.Time{})                //nolint:errcheck
+		}
+
+		var allow bool
+		clientReader, ctx, allow = s.sniPolicyCheckBeforeDial(ctx, request)
+		if !allow {
+			return nil
+		}
+
+		// Dial with the updated context (FQDN now contains the SNI hostname).
+		target, err := s.dial(ctx, "tcp", request.DestAddr.String())
+		if err != nil {
+			return fmt.Errorf("connect to %v failed: %w", request.RawDestAddr, err)
+		}
+		defer target.Close() //nolint:errcheck
+
+		return s.relayData(clientReader, writer, target)
+	}
+
+	// Normal (non-deferred) path: dial first, then relay.
 	target, err := s.dial(ctx, "tcp", request.DestAddr.String())
 	if err != nil {
 		msg := err.Error()
@@ -1102,15 +1151,11 @@ func (s *Server) handleConnect(ctx context.Context, writer io.Writer, request *s
 		return fmt.Errorf("failed to send reply: %w", sendErr)
 	}
 
-	// SNI-deferred policy check: peek client bytes for TLS ClientHello.
-	clientReader := request.Reader
-	if deferred, _ := ctx.Value(ctxKeySNIDeferred).(bool); deferred {
-		clientReader = s.sniPolicyCheck(ctx, request, target)
-		if clientReader == nil {
-			return nil // connection closed by policy check
-		}
-	}
+	return s.relayData(clientReader, writer, target)
+}
 
+// relayData bidirectionally copies data between the client and target.
+func (s *Server) relayData(clientReader io.Reader, writer io.Writer, target net.Conn) error {
 	errCh := make(chan error, 2)
 	go func() {
 		_, cpErr := io.Copy(target, clientReader)
@@ -1135,18 +1180,25 @@ func (s *Server) handleConnect(ctx context.Context, writer io.Writer, request *s
 	return nil
 }
 
-// sniPolicyCheck peeks the first bytes from the client to extract TLS SNI,
-// then re-evaluates policy with the recovered hostname. Returns a reader
-// that replays the peeked bytes followed by the rest of the client stream.
-// Returns nil if the connection should be closed (policy denied or error).
-func (s *Server) sniPolicyCheck(ctx context.Context, request *socks5.Request, target net.Conn) io.Reader {
-	buf, sni, err := peekSNI(request.Reader, 4096)
+// sniPolicyCheckBeforeDial peeks the first bytes from the client to extract
+// TLS SNI, re-evaluates policy with the recovered hostname, and updates the
+// context FQDN so that the subsequent dial uses the hostname (not the raw IP)
+// for the MITM upstream connection. Called BEFORE dial for SNI-deferred
+// connections. Returns the client reader (with peeked bytes prepended), the
+// updated context, and whether the connection should proceed.
+func (s *Server) sniPolicyCheckBeforeDial(ctx context.Context, request *socks5.Request) (io.Reader, context.Context, bool) {
+	buf, sni, err := peekSNI(request.Reader, 8192)
 	if err != nil || sni == "" {
-		// Not TLS or no SNI. Fall through with original data.
-		if len(buf) > 0 {
-			return io.MultiReader(bytes.NewReader(buf), request.Reader)
+		// Not TLS or no SNI. Fall through with original data and IP-based context.
+		hexPrefix := ""
+		if len(buf) >= 6 {
+			hexPrefix = fmt.Sprintf(" first6=%02x", buf[:6])
 		}
-		return request.Reader
+		log.Printf("[SNI-PEEK] no SNI extracted (err=%v, bufLen=%d, sni=%q%s)", err, len(buf), sni, hexPrefix)
+		if len(buf) > 0 {
+			return io.MultiReader(bytes.NewReader(buf), request.Reader), ctx, true
+		}
+		return request.Reader, ctx, true
 	}
 
 	sni = strings.TrimRight(sni, ".")
@@ -1155,6 +1207,9 @@ func (s *Server) sniPolicyCheck(ctx context.Context, request *socks5.Request, ta
 	port := request.DestAddr.Port
 
 	log.Printf("[SNI] %s -> %s:%d (recovered hostname via TLS ClientHello)", ipStr, sni, port)
+
+	// Update context FQDN so dial() uses the hostname for the MITM upstream.
+	ctx = context.WithValue(ctx, ctxKeyFQDN, sni)
 
 	// Populate DNS reverse cache for future connections.
 	if s.dnsInterceptor != nil {
@@ -1167,20 +1222,19 @@ func (s *Server) sniPolicyCheck(ctx context.Context, request *socks5.Request, ta
 		eng = s.rules.engine.Load()
 	}
 	verdict := eng.Evaluate(sni, port)
+	reader := io.MultiReader(bytes.NewReader(buf), request.Reader)
 
 	switch verdict {
 	case policy.Allow:
 		log.Printf("[SNI->ALLOW] %s:%d (hostname %s matched allow rule)", ipStr, port, sni)
-		return io.MultiReader(bytes.NewReader(buf), request.Reader)
+		return reader, ctx, true
 	case policy.Deny:
 		log.Printf("[SNI->DENY] %s:%d (hostname %s matched deny rule)", ipStr, port, sni)
-		_ = target.Close()
-		return nil
+		return nil, ctx, false
 	case policy.Ask:
 		if s.rules.broker == nil {
 			log.Printf("[SNI->DENY] %s:%d (hostname %s: ask treated as deny, no broker)", ipStr, port, sni)
-			_ = target.Close()
-			return nil
+			return nil, ctx, false
 		}
 		log.Printf("[SNI->ASK] %s:%d (hostname %s: waiting for approval)", ipStr, port, sni)
 		timeout := time.Duration(eng.TimeoutSec) * time.Second
@@ -1188,62 +1242,45 @@ func (s *Server) sniPolicyCheck(ctx context.Context, request *socks5.Request, ta
 		resp, reqErr := s.rules.broker.Request(sni, port, proto.String(), timeout)
 		if reqErr != nil {
 			log.Printf("[SNI->DENY] %s:%d (hostname %s: approval timeout: %v)", ipStr, port, sni, reqErr)
-			_ = target.Close()
-			return nil
+			return nil, ctx, false
 		}
 		switch resp {
 		case channel.ResponseAllowOnce:
 			log.Printf("[SNI->ALLOW] %s:%d (hostname %s: user approved once)", ipStr, port, sni)
-			return io.MultiReader(bytes.NewReader(buf), request.Reader)
+			return reader, ctx, true
 		case channel.ResponseAlwaysAllow:
 			log.Printf("[SNI->ALLOW+SAVE] %s:%d (hostname %s: user approved always)", ipStr, port, sni)
-			s.rules.reloadMu.Lock()
-			func() {
-				defer s.rules.reloadMu.Unlock()
-				if s.rules.store != nil {
-					if _, storeErr := s.rules.store.AddRule("allow", store.RuleOpts{Destination: sni, Ports: []int{port}, Source: "approval"}); storeErr != nil {
-						log.Printf("[WARN] failed to persist allow rule for %s:%d: %v", sni, port, storeErr)
-					}
-					if newEng, recompErr := policy.LoadFromStore(s.rules.store); recompErr != nil {
-						log.Printf("[WARN] failed to recompile engine after SNI always-allow: %v", recompErr)
-					} else if valErr := newEng.Validate(); valErr != nil {
-						log.Printf("[WARN] engine validation failed after SNI always-allow: %v", valErr)
-					} else {
-						s.rules.engine.Store(newEng)
-					}
-				}
-			}()
-			return io.MultiReader(bytes.NewReader(buf), request.Reader)
+			s.sniSaveRule("allow", sni, port)
+			return reader, ctx, true
 		case channel.ResponseAlwaysDeny:
 			log.Printf("[SNI->DENY+SAVE] %s:%d (hostname %s: user denied always)", ipStr, port, sni)
-			s.rules.reloadMu.Lock()
-			func() {
-				defer s.rules.reloadMu.Unlock()
-				if s.rules.store != nil {
-					if _, storeErr := s.rules.store.AddRule("deny", store.RuleOpts{Destination: sni, Ports: []int{port}, Source: "approval"}); storeErr != nil {
-						log.Printf("[WARN] failed to persist deny rule for %s:%d: %v", sni, port, storeErr)
-					}
-					if newEng, recompErr := policy.LoadFromStore(s.rules.store); recompErr != nil {
-						log.Printf("[WARN] failed to recompile engine after SNI always-deny: %v", recompErr)
-					} else if valErr := newEng.Validate(); valErr != nil {
-						log.Printf("[WARN] engine validation failed after SNI always-deny: %v", valErr)
-					} else {
-						s.rules.engine.Store(newEng)
-					}
-				}
-			}()
-			_ = target.Close()
-			return nil
+			s.sniSaveRule("deny", sni, port)
+			return nil, ctx, false
 		default:
 			log.Printf("[SNI->DENY] %s:%d (hostname %s: user denied)", ipStr, port, sni)
-			_ = target.Close()
-			return nil
+			return nil, ctx, false
 		}
 	default:
-		// Default verdict (typically deny). Use it.
 		log.Printf("[SNI->DENY] %s:%d (hostname %s: default deny)", ipStr, port, sni)
-		_ = target.Close()
-		return nil
+		return nil, ctx, false
+	}
+}
+
+// sniSaveRule persists an allow or deny rule from an SNI-based approval.
+func (s *Server) sniSaveRule(verdict, dest string, port int) {
+	s.rules.reloadMu.Lock()
+	defer s.rules.reloadMu.Unlock()
+	if s.rules.store != nil {
+		if _, storeErr := s.rules.store.AddRule(verdict, store.RuleOpts{Destination: dest, Ports: []int{port}, Source: "approval"}); storeErr != nil {
+			log.Printf("[WARN] failed to persist %s rule for %s:%d: %v", verdict, dest, port, storeErr)
+		}
+		if newEng, recompErr := policy.LoadFromStore(s.rules.store); recompErr != nil {
+			log.Printf("[WARN] failed to recompile engine after SNI %s: %v", verdict, recompErr)
+		} else if valErr := newEng.Validate(); valErr != nil {
+			log.Printf("[WARN] engine validation failed after SNI %s: %v", verdict, valErr)
+		} else {
+			s.rules.engine.Store(newEng)
+		}
 	}
 }
 

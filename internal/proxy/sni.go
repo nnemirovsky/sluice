@@ -1,9 +1,6 @@
 package proxy
 
-import (
-	"errors"
-	"io"
-)
+import "io"
 
 // extractSNI reads a TLS ClientHello from buf and returns the SNI hostname.
 // Returns empty string if the data is not a TLS ClientHello or contains no SNI.
@@ -113,19 +110,35 @@ func parseSNIExtension(data []byte) string {
 	return ""
 }
 
-// peekSNI reads up to maxBytes from r without consuming the bytes. It returns
-// the peeked buffer and any error. The caller should prepend the buffer to
-// subsequent reads (e.g. via io.MultiReader).
+// peekSNI reads enough bytes from r to extract the SNI from a TLS ClientHello.
+// A single Read may not return the full TLS record, so this function reads
+// until it has enough data (up to maxBytes). Returns the peeked buffer and
+// any error. The caller should prepend the buffer to subsequent reads.
 func peekSNI(r io.Reader, maxBytes int) ([]byte, string, error) {
-	buf := make([]byte, maxBytes)
-	n, err := r.Read(buf)
-	if n == 0 {
+	buf := make([]byte, 0, maxBytes)
+	tmp := make([]byte, maxBytes)
+
+	for len(buf) < maxBytes {
+		n, err := r.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+		}
+		// Try extracting SNI after each read. The parser returns empty
+		// if the buffer is too short, so we keep reading until it succeeds
+		// or we hit an error/limit.
+		if sni := extractSNI(buf); sni != "" {
+			return buf, sni, nil
+		}
 		if err != nil {
+			if len(buf) > 0 {
+				return buf, "", nil
+			}
 			return nil, "", err
 		}
-		return nil, "", errors.New("no data")
+		// If the first bytes are not a TLS handshake, stop reading.
+		if len(buf) >= 1 && buf[0] != 0x16 {
+			return buf, "", nil
+		}
 	}
-	buf = buf[:n]
-	sni := extractSNI(buf)
-	return buf, sni, nil
+	return buf, extractSNI(buf), nil
 }
