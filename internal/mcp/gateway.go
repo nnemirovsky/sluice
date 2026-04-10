@@ -86,15 +86,21 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 		// Store the original config (with vault: prefixes intact) for restart.
 		gw.upstreamCfgs[ucfg.Name] = ucfg
 
-		// Resolve vault: prefixed env values before spawning.
+		// Resolve vault: prefixed env and header values before spawning.
 		spawnCfg := ucfg
 		if gw.credResolver != nil {
-			resolved, err := resolveVaultEnv(ucfg.Env, gw.credResolver)
+			resolvedEnv, err := resolveVaultEnv(ucfg.Env, gw.credResolver)
 			if err != nil {
 				gw.Stop()
 				return nil, fmt.Errorf("upstream %s: %w", ucfg.Name, err)
 			}
-			spawnCfg.Env = resolved
+			spawnCfg.Env = resolvedEnv
+			resolvedHeaders, err := resolveVaultHeaders(ucfg.Headers, gw.credResolver)
+			if err != nil {
+				gw.Stop()
+				return nil, fmt.Errorf("upstream %s: %w", ucfg.Name, err)
+			}
+			spawnCfg.Headers = resolvedHeaders
 		}
 
 		u, err := StartUpstreamForTransport(spawnCfg)
@@ -300,14 +306,19 @@ func (gw *Gateway) RestartUpstream(name string) error {
 	log.Printf("restarting upstream %s for credential rotation", name)
 	_ = u.Stop()
 
-	// Re-resolve vault: prefixed env values to pick up rotated credentials.
+	// Re-resolve vault: prefixed env and header values to pick up rotated credentials.
 	spawnCfg := cfg
 	if gw.credResolver != nil {
-		resolved, err := resolveVaultEnv(cfg.Env, gw.credResolver)
+		resolvedEnv, err := resolveVaultEnv(cfg.Env, gw.credResolver)
 		if err != nil {
 			return fmt.Errorf("upstream %s: %w", name, err)
 		}
-		spawnCfg.Env = resolved
+		spawnCfg.Env = resolvedEnv
+		resolvedHeaders, err := resolveVaultHeaders(cfg.Headers, gw.credResolver)
+		if err != nil {
+			return fmt.Errorf("upstream %s: %w", name, err)
+		}
+		spawnCfg.Headers = resolvedHeaders
 	}
 
 	newU, err := StartUpstreamForTransport(spawnCfg)

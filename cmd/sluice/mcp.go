@@ -104,6 +104,7 @@ func handleMCPGateway(args []string) error {
 			Command:    r.Command,
 			Args:       r.Args,
 			Env:        r.Env,
+			Headers:    r.Headers,
 			TimeoutSec: r.TimeoutSec,
 			Transport:  r.Transport,
 		}
@@ -251,15 +252,24 @@ func handleMCPAdd(args []string) error {
 	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	command := fs.String("command", "", "command to run (stdio) or URL (http/websocket)")
 	argsStr := fs.String("args", "", "comma-separated arguments for the command")
-	envStr := fs.String("env", "", "comma-separated KEY=VAL environment variables")
+	envStr := fs.String("env", "", "comma-separated KEY=VAL environment variables (VAL may be vault:<name> for the whole value, or contain {vault:<name>} substrings for templated substitution)")
 	timeout := fs.Int("timeout", 120, "upstream timeout in seconds")
 	transport := fs.String("transport", "stdio", "transport type: stdio, http, or websocket")
+	headers := make(map[string]string)
+	fs.Func("header", "HTTP header to send on every request to an http upstream (repeatable, format: KEY=VAL; VAL may be vault:<name> for the whole value, or contain {vault:<name>} substrings for templated substitution, e.g. \"Authorization=Bearer {vault:github_pat}\")", func(s string) error {
+		parts := strings.SplitN(s, "=", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid header format %q (expected KEY=VAL)", s)
+		}
+		headers[parts[0]] = parts[1]
+		return nil
+	})
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	if fs.NArg() == 0 || *command == "" {
-		return fmt.Errorf("usage: sluice mcp add <name> --command <cmd> [--transport stdio|http|websocket] [--args \"arg1,arg2\"] [--env \"KEY=VAL,...\"] [--timeout 120]")
+		return fmt.Errorf("usage: sluice mcp add <name> --command <cmd> [--transport stdio|http|websocket] [--args \"arg1,arg2\"] [--env \"KEY=VAL,...\"] [--header \"KEY=VAL\" ...] [--timeout 120]")
 	}
 	name := fs.Arg(0)
 
@@ -269,6 +279,10 @@ func handleMCPAdd(args []string) error {
 
 	if !mcp.ValidTransport(*transport) {
 		return fmt.Errorf("invalid transport %q: must be stdio, http, or websocket", *transport)
+	}
+
+	if len(headers) > 0 && *transport != "http" {
+		return fmt.Errorf("--header is only valid for --transport http")
 	}
 
 	var cmdArgs []string
@@ -296,6 +310,7 @@ func handleMCPAdd(args []string) error {
 	id, err := db.AddMCPUpstream(name, *command, store.MCPUpstreamOpts{
 		Args:       cmdArgs,
 		Env:        env,
+		Headers:    headers,
 		TimeoutSec: *timeout,
 		Transport:  *transport,
 	})
@@ -363,11 +378,24 @@ func handleMCPList(args []string) error {
 			}
 			envStr = " env=" + strings.Join(pairs, ",")
 		}
+		headersStr := ""
+		if len(u.Headers) > 0 {
+			keys := make([]string, 0, len(u.Headers))
+			for k := range u.Headers {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			pairs := make([]string, 0, len(u.Headers))
+			for _, k := range keys {
+				pairs = append(pairs, k+"="+u.Headers[k])
+			}
+			headersStr = " headers=" + strings.Join(pairs, ",")
+		}
 		timeoutStr := ""
 		if u.TimeoutSec != 120 {
 			timeoutStr = fmt.Sprintf(" timeout=%ds", u.TimeoutSec)
 		}
-		fmt.Printf("[%d] %s command=%s%s%s%s%s\n", u.ID, u.Name, u.Command, transportStr, argsStr, envStr, timeoutStr)
+		fmt.Printf("[%d] %s command=%s%s%s%s%s%s\n", u.ID, u.Name, u.Command, transportStr, argsStr, envStr, headersStr, timeoutStr)
 	}
 	return nil
 }

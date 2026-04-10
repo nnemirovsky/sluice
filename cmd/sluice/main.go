@@ -525,6 +525,7 @@ func main() {
 				Command:    r.Command,
 				Args:       r.Args,
 				Env:        r.Env,
+				Headers:    r.Headers,
 				TimeoutSec: r.TimeoutSec,
 				Transport:  r.Transport,
 			}
