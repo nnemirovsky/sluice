@@ -36,8 +36,10 @@ func handleCredCommand(args []string) error {
 		return handleCredList(args[1:])
 	case "remove":
 		return handleCredRemove(args[1:])
+	case "update":
+		return handleCredUpdate(args[1:])
 	default:
-		return fmt.Errorf("unknown cred command: %s (usage: sluice cred [add|list|remove] ...)", args[0])
+		return fmt.Errorf("unknown cred command: %s (usage: sluice cred [add|list|remove|update] ...)", args[0])
 	}
 }
 
@@ -575,6 +577,111 @@ func handleCredRemove(args []string) error {
 			fmt.Printf("removed credential metadata for %q\n", name)
 		}
 	}
+	return nil
+}
+
+// handleCredUpdate replaces the value of an existing credential without
+// touching its bindings, rules, or metadata. The caller is prompted for the
+// new value (static) or new access/refresh tokens (oauth) on stdin or the
+// terminal. The existing value is never displayed. Vault.Add is atomic
+// (temp file + rename), so a failed write leaves the old value intact.
+//
+// Since phantom tokens are deterministic and derived from the credential
+// name, they do not need to be regenerated when only the value changes.
+// The proxy picks up the new value on the next request or SIGHUP.
+func handleCredUpdate(args []string) error {
+	// Reorder args so the positional name is always at the end, matching
+	// the pattern used by "cred add".
+	args = reorderPositionalLast(args)
+
+	fs := flag.NewFlagSet("cred update", flag.ContinueOnError)
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if fs.NArg() == 0 {
+		return fmt.Errorf("usage: sluice cred update <name>")
+	}
+	name := fs.Arg(0)
+
+	vs, err := openVaultStore(*dbPath)
+	if err != nil {
+		return err
+	}
+
+	// Verify the credential exists before prompting so the user is not
+	// asked for a secret and then told the name is invalid.
+	names, err := vs.List()
+	if err != nil {
+		return fmt.Errorf("list credentials: %w", err)
+	}
+	found := false
+	for _, n := range names {
+		if n == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("credential %q not found", name)
+	}
+
+	// Read the existing credential to detect whether it is OAuth. We need
+	// the token URL from the existing blob so we can rebuild the JSON with
+	// new tokens but the same endpoint. The value itself is never shown.
+	existing, err := vs.Get(name)
+	if err != nil {
+		return fmt.Errorf("read existing credential: %w", err)
+	}
+	isOAuth := vault.IsOAuth(existing.Bytes())
+	var existingTokenURL string
+	if isOAuth {
+		parsed, parseErr := vault.ParseOAuth(existing.Bytes())
+		if parseErr != nil {
+			existing.Release()
+			return fmt.Errorf("parse existing oauth credential: %w", parseErr)
+		}
+		existingTokenURL = parsed.TokenURL
+	}
+	existing.Release()
+
+	// Prompt for the new value(s). Reuses the same helpers as "cred add"
+	// so terminal and piped-stdin input work identically.
+	var secret []byte
+	if isOAuth {
+		oauthCred, readErr := readOAuthCredentialInput(existingTokenURL)
+		if readErr != nil {
+			return readErr
+		}
+		data, marshalErr := oauthCred.Marshal()
+		if marshalErr != nil {
+			return fmt.Errorf("marshal oauth credential: %w", marshalErr)
+		}
+		secret = data
+	} else {
+		s, readErr := readStaticSecretInput()
+		if readErr != nil {
+			return readErr
+		}
+		secret = s
+	}
+
+	if _, addErr := vs.Add(name, string(secret)); addErr != nil {
+		for i := range secret {
+			secret[i] = 0
+		}
+		return fmt.Errorf("update credential: %w", addErr)
+	}
+	for i := range secret {
+		secret[i] = 0
+	}
+
+	credType := "static"
+	if isOAuth {
+		credType = "oauth"
+	}
+	fmt.Printf("credential %q updated (type: %s)\n", name, credType)
 	return nil
 }
 

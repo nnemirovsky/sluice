@@ -1889,3 +1889,254 @@ func TestHandleCredAddMultipleDestinationsBadPortRollback(t *testing.T) {
 		}
 	}
 }
+
+// TestHandleCredUpdateStatic verifies that a static credential value can be
+// replaced via "sluice cred update". Bindings and rules must be preserved.
+func TestHandleCredUpdateStatic(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	// Seed a credential with an allow rule and a binding so the update
+	// path exercises preservation of metadata.
+	cleanup := pipeStdin(t, "old-value\n")
+	_ = captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--destination", "api.example.com",
+			"--ports", "443",
+			"--header", "Authorization",
+			"update_static",
+		}); err != nil {
+			t.Fatalf("seed credential: %v", err)
+		}
+	})
+	cleanup()
+
+	// Replace the value via update.
+	cleanup = pipeStdin(t, "new-value\n")
+	defer cleanup()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"update",
+			"--db", dbPath,
+			"update_static",
+		}); err != nil {
+			t.Fatalf("handleCredCommand update: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, `credential "update_static" updated (type: static)`) {
+		t.Errorf("expected update confirmation, got: %s", output)
+	}
+
+	// Vault should now hold the new value.
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("open vault: %v", err)
+	}
+	sb, err := vs.Get("update_static")
+	if err != nil {
+		t.Fatalf("get credential: %v", err)
+	}
+	defer sb.Release()
+	if sb.String() != "new-value" {
+		t.Errorf("vault value = %q, want %q", sb.String(), "new-value")
+	}
+
+	// Bindings and rules must be preserved.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	bindings, err := db.ListBindingsByCredential("update_static")
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding after update, got %d", len(bindings))
+	}
+	if bindings[0].Destination != "api.example.com" {
+		t.Errorf("binding destination = %q, want api.example.com", bindings[0].Destination)
+	}
+	if bindings[0].Header != "Authorization" {
+		t.Errorf("binding header = %q, want Authorization", bindings[0].Header)
+	}
+
+	rules, err := db.ListRules(store.RuleFilter{Verdict: "allow"})
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 allow rule after update, got %d", len(rules))
+	}
+}
+
+// TestHandleCredUpdateOAuthBoth verifies that an OAuth credential can be
+// updated with both a new access token and a new refresh token. The token
+// URL must be preserved from the existing blob (not re-prompted).
+func TestHandleCredUpdateOAuthBoth(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	// Seed an OAuth credential.
+	cleanup := pipeStdin(t, "old-access\nold-refresh\n")
+	_ = captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--type", "oauth",
+			"--token-url", "https://auth.example.com/token",
+			"update_oauth_both",
+		}); err != nil {
+			t.Fatalf("seed oauth credential: %v", err)
+		}
+	})
+	cleanup()
+
+	// Replace access + refresh via update.
+	cleanup = pipeStdin(t, "new-access\nnew-refresh\n")
+	defer cleanup()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"update",
+			"--db", dbPath,
+			"update_oauth_both",
+		}); err != nil {
+			t.Fatalf("handleCredCommand update oauth: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, `credential "update_oauth_both" updated (type: oauth)`) {
+		t.Errorf("expected oauth update confirmation, got: %s", output)
+	}
+
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("open vault: %v", err)
+	}
+	sb, err := vs.Get("update_oauth_both")
+	if err != nil {
+		t.Fatalf("get credential: %v", err)
+	}
+	defer sb.Release()
+
+	if !vault.IsOAuth(sb.Bytes()) {
+		t.Fatal("expected updated credential to still be OAuth JSON")
+	}
+	cred, err := vault.ParseOAuth(sb.Bytes())
+	if err != nil {
+		t.Fatalf("parse oauth: %v", err)
+	}
+	if cred.AccessToken != "new-access" {
+		t.Errorf("access token = %q, want new-access", cred.AccessToken)
+	}
+	if cred.RefreshToken != "new-refresh" {
+		t.Errorf("refresh token = %q, want new-refresh", cred.RefreshToken)
+	}
+	if cred.TokenURL != "https://auth.example.com/token" {
+		t.Errorf("token url = %q, want preserved from seed", cred.TokenURL)
+	}
+}
+
+// TestHandleCredUpdateOAuthAccessOnly verifies that updating an OAuth
+// credential with only an access token (empty refresh line on stdin) clears
+// the refresh token in the vault. The stdin path distinguishes omitted from
+// explicitly-empty only by end-of-input, matching readOAuthCredentialInput.
+func TestHandleCredUpdateOAuthAccessOnly(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	// Seed an OAuth credential with both tokens.
+	cleanup := pipeStdin(t, "seed-access\nseed-refresh\n")
+	_ = captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--type", "oauth",
+			"--token-url", "https://auth.example.com/token",
+			"update_oauth_access",
+		}); err != nil {
+			t.Fatalf("seed oauth credential: %v", err)
+		}
+	})
+	cleanup()
+
+	// Update with only an access token (single line, no refresh).
+	cleanup = pipeStdin(t, "fresh-access\n")
+	defer cleanup()
+
+	_ = captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"update",
+			"--db", dbPath,
+			"update_oauth_access",
+		}); err != nil {
+			t.Fatalf("handleCredCommand update oauth access-only: %v", err)
+		}
+	})
+
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("open vault: %v", err)
+	}
+	sb, err := vs.Get("update_oauth_access")
+	if err != nil {
+		t.Fatalf("get credential: %v", err)
+	}
+	defer sb.Release()
+
+	cred, err := vault.ParseOAuth(sb.Bytes())
+	if err != nil {
+		t.Fatalf("parse oauth: %v", err)
+	}
+	if cred.AccessToken != "fresh-access" {
+		t.Errorf("access token = %q, want fresh-access", cred.AccessToken)
+	}
+	if cred.RefreshToken != "" {
+		t.Errorf("refresh token = %q, want empty when stdin omits second line", cred.RefreshToken)
+	}
+	if cred.TokenURL != "https://auth.example.com/token" {
+		t.Errorf("token url = %q, want preserved from seed", cred.TokenURL)
+	}
+}
+
+// TestHandleCredUpdateNotFound verifies that updating a credential that does
+// not exist returns a clear error and never prompts for input.
+func TestHandleCredUpdateNotFound(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	// Initialize the vault so the credentials dir exists.
+	if _, err := vault.NewStore(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	err := handleCredCommand([]string{
+		"update",
+		"--db", dbPath,
+		"missing_cred",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing credential")
+	}
+	if !strings.Contains(err.Error(), `credential "missing_cred" not found`) {
+		t.Errorf("expected not-found error, got: %v", err)
+	}
+}
+
+// TestHandleCredUpdateNoName verifies that running update without a name
+// returns a usage error.
+func TestHandleCredUpdateNoName(t *testing.T) {
+	err := handleCredCommand([]string{"update"})
+	if err == nil {
+		t.Fatal("expected error for update without name")
+	}
+	if !strings.Contains(err.Error(), "usage:") {
+		t.Errorf("expected usage error, got: %v", err)
+	}
+}

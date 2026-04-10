@@ -141,13 +141,13 @@ The vault's `Add()` already does atomic overwrite (temp file + rename). For OAut
 **Files:**
 - Modify: `cmd/sluice/cred.go`
 
-- [ ] Implement `sluice cred update <name>`: verify credential exists via `vault.List()`, prompt for new value via stdin/terminal (never show current value), call `vault.Add()` to overwrite
-- [ ] For OAuth credentials (detected via `IsOAuth()`): prompt for new access token and optionally refresh token, rebuild OAuth JSON blob, overwrite in vault, regenerate phantom files
-- [ ] Print confirmation message after successful update
-- [ ] Write tests for static credential update
-- [ ] Write tests for OAuth credential update (access only, access + refresh)
-- [ ] Write tests for update of nonexistent credential
-- [ ] Run tests: `go test ./cmd/sluice/ -timeout 30s`
+- [x] Implement `sluice cred update <name>`: verify credential exists via `vault.List()`, prompt for new value via stdin/terminal (never show current value), call `vault.Add()` to overwrite
+- [x] For OAuth credentials (detected via `IsOAuth()`): prompt for new access token and optionally refresh token, rebuild OAuth JSON blob, overwrite in vault, regenerate phantom files
+- [x] Print confirmation message after successful update
+- [x] Write tests for static credential update
+- [x] Write tests for OAuth credential update (access only, access + refresh)
+- [x] Write tests for update of nonexistent credential
+- [x] Run tests: `go test ./cmd/sluice/ -timeout 30s`
 
 ### Task 5: API endpoints for binding update and credential update
 
