@@ -1111,13 +1111,20 @@ func (s *Server) handleConnect(ctx context.Context, writer io.Writer, request *s
 		// client is slow to send the TLS ClientHello.
 		if conn, ok := writer.(net.Conn); ok {
 			conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
-			defer conn.SetReadDeadline(time.Time{})                //nolint:errcheck
 		}
 
 		var allow bool
 		clientReader, ctx, allow = s.sniPolicyCheckBeforeDial(ctx, request)
 		if !allow {
 			return nil
+		}
+
+		// Clear the read deadline before the relay phase. The deadline was
+		// only needed for the SNI peek. Leaving it active would kill the
+		// relay after 10 seconds, terminating long-running connections
+		// (streaming API responses, tool calls, etc.).
+		if conn, ok := writer.(net.Conn); ok {
+			conn.SetReadDeadline(time.Time{}) //nolint:errcheck
 		}
 
 		// Dial with the updated context (FQDN now contains the SNI hostname).
@@ -1155,6 +1162,14 @@ func (s *Server) handleConnect(ctx context.Context, writer io.Writer, request *s
 }
 
 // relayData bidirectionally copies data between the client and target.
+//
+// When the first direction finishes (either client or target closes), the
+// writer (SOCKS5 connection) is closed to unblock the second goroutine.
+// target is NOT closed here to avoid triggering broken pipe warnings in
+// goproxy. The caller's deferred target.Close() handles final cleanup.
+// If the second goroutine is blocked reading from target (e.g. pending
+// long-poll), a short deadline forces it to return instead of blocking
+// indefinitely and leaking the SOCKS5 connection in CLOSE_WAIT state.
 func (s *Server) relayData(clientReader io.Reader, writer io.Writer, target net.Conn) error {
 	errCh := make(chan error, 2)
 	go func() {
@@ -1172,12 +1187,25 @@ func (s *Server) relayData(clientReader io.Reader, writer io.Writer, target net.
 		errCh <- cpErr
 	}()
 
-	for i := 0; i < 2; i++ {
-		if e := <-errCh; e != nil {
-			return e
-		}
+	// Wait for the first direction to complete.
+	e1 := <-errCh
+
+	// Close writer to unblock goroutine 2 if it's stuck writing. Set a
+	// read deadline on target to unblock goroutine 2 if it's stuck reading
+	// (e.g. goproxy waiting for a long-poll response). This avoids closing
+	// target directly, which would trigger broken pipe warnings in goproxy.
+	if cl, ok := writer.(io.Closer); ok {
+		cl.Close() //nolint:errcheck
 	}
-	return nil
+	target.SetReadDeadline(time.Now().Add(3 * time.Second)) //nolint:errcheck
+
+	// Drain the second result so the goroutine is not leaked.
+	e2 := <-errCh
+
+	if e1 != nil {
+		return e1
+	}
+	return e2
 }
 
 // sniPolicyCheckBeforeDial peeks the first bytes from the client to extract
