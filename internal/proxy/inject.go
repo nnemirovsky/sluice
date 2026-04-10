@@ -78,6 +78,25 @@ func sniAwareTLSConfig(ca *tls.Certificate) func(host string, ctx *goproxy.Proxy
 	}
 }
 
+// filteredWriter wraps an io.Writer and silently drops lines containing any
+// of the configured substrings. Used to suppress expected goproxy warnings
+// (broken pipe, handshake EOF) that are harmless noise in a proxy with
+// short-lived polling connections.
+type filteredWriter struct {
+	inner io.Writer
+	drop  []string
+}
+
+func (fw *filteredWriter) Write(p []byte) (int, error) {
+	s := string(p)
+	for _, d := range fw.drop {
+		if strings.Contains(s, d) {
+			return len(p), nil
+		}
+	}
+	return fw.inner.Write(p)
+}
+
 // Injector is an HTTP/HTTPS MITM proxy that intercepts requests and injects
 // credentials from the vault. It resolves bindings by destination, decrypts
 // credentials, and performs byte-level replacement of phantom tokens in
@@ -177,6 +196,13 @@ func NewInjector(provider vault.Provider, resolver *atomic.Pointer[vault.Binding
 
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Verbose = false
+	// Suppress noisy goproxy warnings for expected conditions:
+	// - "broken pipe" from client closing before response delivery (Telegram polling)
+	// - "Cannot handshake" from client aborting during TLS setup (timeouts, retries)
+	proxy.Logger = log.New(&filteredWriter{
+		inner: log.Writer(),
+		drop:  []string{"broken pipe", "Cannot handshake"},
+	}, "", 0)
 
 	// Build a root CA pool for the outbound transport. Start with system
 	// roots and add the sluice MITM CA cert. Adding the MITM CA is
