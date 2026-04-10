@@ -111,17 +111,17 @@ The vault's `Add()` already does atomic overwrite (temp file + rename). For OAut
 - Create: `cmd/sluice/binding.go`
 - Modify: `cmd/sluice/main.go`
 
-- [ ] Add `case "binding"` dispatch in `cmd/sluice/main.go`
-- [ ] Create `cmd/sluice/binding.go` with subcommand registration
-- [ ] Implement `sluice binding add <credential> --destination <host> [--ports 443] [--header Authorization] [--template "Bearer {value}"]`: calls `store.AddBinding()`, also creates allow rule for the destination
-- [ ] Implement `sluice binding list [--credential <name>]`: calls `store.ListBindings()` or `store.ListBindingsByCredential()`, prints formatted output (ID, credential, destination, ports, header, template)
-- [ ] Implement `sluice binding update <id> [--destination <host>] [--ports 443] [--header Authorization] [--template "Bearer {value}"]`: calls `store.UpdateBinding()`, only updates provided flags
-- [ ] Implement `sluice binding remove <id>`: calls `store.RemoveBinding()`
-- [ ] Write tests for add (success, missing args)
-- [ ] Write tests for list (all, filtered by credential)
-- [ ] Write tests for update (single field, multiple fields, not found)
-- [ ] Write tests for remove (success, not found)
-- [ ] Run tests: `go test ./cmd/sluice/ -timeout 30s`
+- [x] Add `case "binding"` dispatch in `cmd/sluice/main.go`
+- [x] Create `cmd/sluice/binding.go` with subcommand registration
+- [x] Implement `sluice binding add <credential> --destination <host> [--ports 443] [--header Authorization] [--template "Bearer {value}"]`: calls `store.AddBinding()`, also creates allow rule for the destination
+- [x] Implement `sluice binding list [--credential <name>]`: calls `store.ListBindings()` or `store.ListBindingsByCredential()`, prints formatted output (ID, credential, destination, ports, header, template)
+- [x] Implement `sluice binding update <id> [--destination <host>] [--ports 443] [--header Authorization] [--template "Bearer {value}"]`: calls `store.UpdateBinding()`, only updates provided flags
+- [x] Implement `sluice binding remove <id>`: calls `store.RemoveBinding()`
+- [x] Write tests for add (success, missing args)
+- [x] Write tests for list (all, filtered by credential)
+- [x] Write tests for update (single field, multiple fields, not found)
+- [x] Write tests for remove (success, not found)
+- [x] Run tests: `go test ./cmd/sluice/ -timeout 30s`
 
 ### Task 3: Support multiple `--destination` on `cred add`
 

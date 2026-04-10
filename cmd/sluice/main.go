@@ -60,6 +60,11 @@ func main() {
 				log.Fatalf("audit: %v", err)
 			}
 			return
+		case "binding":
+			if err := handleBindingCommand(os.Args[2:]); err != nil {
+				log.Fatalf("binding: %v", err)
+			}
+			return
 		case "channel":
 			if err := handleChannelCommand(os.Args[2:]); err != nil {
 				log.Fatalf("channel: %v", err)
