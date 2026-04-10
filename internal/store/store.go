@@ -579,6 +579,72 @@ func (s *Store) RemoveBinding(id int64) (bool, error) {
 	return n > 0, nil
 }
 
+// BindingUpdateOpts holds optional fields for UpdateBinding. Only non-nil
+// fields are written. Nil fields are left unchanged.
+type BindingUpdateOpts struct {
+	Destination *string
+	Ports       *[]int
+	Header      *string
+	Template    *string
+	Protocols   *[]string
+}
+
+// UpdateBinding updates a binding row. Only non-nil fields in the update
+// struct are written. Returns an error if the binding does not exist.
+func (s *Store) UpdateBinding(id int64, u BindingUpdateOpts) error {
+	var setClauses []string
+	var args []any
+	if u.Destination != nil {
+		if *u.Destination == "" {
+			return fmt.Errorf("destination cannot be empty")
+		}
+		setClauses = append(setClauses, "destination = ?")
+		args = append(args, *u.Destination)
+	}
+	if u.Ports != nil {
+		setClauses = append(setClauses, "ports = ?")
+		args = append(args, portsToJSONPtr(*u.Ports))
+	}
+	if u.Header != nil {
+		setClauses = append(setClauses, "header = ?")
+		args = append(args, nilIfEmpty(*u.Header))
+	}
+	if u.Template != nil {
+		setClauses = append(setClauses, "template = ?")
+		args = append(args, nilIfEmpty(*u.Template))
+	}
+	if u.Protocols != nil {
+		setClauses = append(setClauses, "protocols = ?")
+		args = append(args, protocolsToJSONPtr(*u.Protocols))
+	}
+	if len(setClauses) == 0 {
+		// verify the row exists even when nothing to update, so callers
+		// get a consistent not-found error.
+		var count int
+		if err := s.db.QueryRow("SELECT COUNT(*) FROM bindings WHERE id = ?", id).Scan(&count); err != nil {
+			return fmt.Errorf("check binding %d: %w", id, err)
+		}
+		if count == 0 {
+			return fmt.Errorf("binding %d not found", id)
+		}
+		return nil
+	}
+	args = append(args, id)
+	query := "UPDATE bindings SET " + strings.Join(setClauses, ", ") + " WHERE id = ?"
+	res, err := s.db.Exec(query, args...)
+	if err != nil {
+		return fmt.Errorf("update binding %d: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected for binding %d: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("binding %d not found", id)
+	}
+	return nil
+}
+
 // ListBindings returns all bindings.
 func (s *Store) ListBindings() ([]BindingRow, error) {
 	rows, err := s.db.Query(

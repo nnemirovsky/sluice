@@ -837,6 +837,164 @@ func TestBindingValidation(t *testing.T) {
 	}
 }
 
+func TestUpdateBindingSingleField(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{
+		Ports:    []int{443},
+		Header:   "Authorization",
+		Template: "Bearer {value}",
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	newHeader := "X-Api-Key"
+	if err := s.UpdateBinding(id, BindingUpdateOpts{Header: &newHeader}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	bindings, _ := s.ListBindings()
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	b := bindings[0]
+	if b.Header != "X-Api-Key" {
+		t.Errorf("header = %q, want %q", b.Header, "X-Api-Key")
+	}
+	// Other fields unchanged.
+	if b.Destination != "api.example.com" {
+		t.Errorf("destination changed unexpectedly: %q", b.Destination)
+	}
+	if b.Template != "Bearer {value}" {
+		t.Errorf("template changed unexpectedly: %q", b.Template)
+	}
+	if len(b.Ports) != 1 || b.Ports[0] != 443 {
+		t.Errorf("ports changed unexpectedly: %v", b.Ports)
+	}
+}
+
+func TestUpdateBindingMultipleFields(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{
+		Ports:     []int{443},
+		Header:    "Authorization",
+		Template:  "Bearer {value}",
+		Protocols: []string{"https"},
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	newDest := "api.other.com"
+	newPorts := []int{8080, 8443}
+	newHeader := "X-Token"
+	newTemplate := "Token {value}"
+	newProtocols := []string{"http", "https"}
+	if err := s.UpdateBinding(id, BindingUpdateOpts{
+		Destination: &newDest,
+		Ports:       &newPorts,
+		Header:      &newHeader,
+		Template:    &newTemplate,
+		Protocols:   &newProtocols,
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	bindings, _ := s.ListBindings()
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	b := bindings[0]
+	if b.Destination != newDest {
+		t.Errorf("destination = %q, want %q", b.Destination, newDest)
+	}
+	if len(b.Ports) != 2 || b.Ports[0] != 8080 || b.Ports[1] != 8443 {
+		t.Errorf("ports = %v, want %v", b.Ports, newPorts)
+	}
+	if b.Header != newHeader {
+		t.Errorf("header = %q, want %q", b.Header, newHeader)
+	}
+	if b.Template != newTemplate {
+		t.Errorf("template = %q, want %q", b.Template, newTemplate)
+	}
+	if len(b.Protocols) != 2 || b.Protocols[0] != "http" || b.Protocols[1] != "https" {
+		t.Errorf("protocols = %v, want %v", b.Protocols, newProtocols)
+	}
+	// Credential unchanged.
+	if b.Credential != "my_key" {
+		t.Errorf("credential changed unexpectedly: %q", b.Credential)
+	}
+}
+
+func TestUpdateBindingClearFields(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{
+		Ports:    []int{443},
+		Header:   "Authorization",
+		Template: "Bearer {value}",
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	// Clearing string fields with empty string should set them to NULL.
+	empty := ""
+	if err := s.UpdateBinding(id, BindingUpdateOpts{
+		Header:   &empty,
+		Template: &empty,
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	bindings, _ := s.ListBindings()
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding")
+	}
+	if bindings[0].Header != "" {
+		t.Errorf("header should be empty, got %q", bindings[0].Header)
+	}
+	if bindings[0].Template != "" {
+		t.Errorf("template should be empty, got %q", bindings[0].Template)
+	}
+}
+
+func TestUpdateBindingNotFound(t *testing.T) {
+	s := newTestStore(t)
+	newDest := "api.example.com"
+	err := s.UpdateBinding(9999, BindingUpdateOpts{Destination: &newDest})
+	if err == nil {
+		t.Fatal("expected error for nonexistent binding")
+	}
+}
+
+func TestUpdateBindingEmptyOpts(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{Ports: []int{443}})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	// Empty update should succeed (no-op) when the row exists.
+	if err := s.UpdateBinding(id, BindingUpdateOpts{}); err != nil {
+		t.Errorf("empty update on existing row should succeed, got %v", err)
+	}
+	// Empty update on nonexistent row should still fail.
+	if err := s.UpdateBinding(9999, BindingUpdateOpts{}); err == nil {
+		t.Error("empty update on nonexistent row should fail")
+	}
+}
+
+func TestUpdateBindingEmptyDestination(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	empty := ""
+	if err := s.UpdateBinding(id, BindingUpdateOpts{Destination: &empty}); err == nil {
+		t.Error("empty destination should be rejected")
+	}
+}
+
 // --- MCP Upstream CRUD ---
 
 func TestMCPUpstreamCRUD(t *testing.T) {

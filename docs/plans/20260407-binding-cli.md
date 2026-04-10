@@ -101,9 +101,9 @@ The vault's `Add()` already does atomic overwrite (temp file + rename). For OAut
 **Files:**
 - Modify: `internal/store/store.go`
 
-- [ ] Add `UpdateBinding(id int64, opts BindingUpdateOpts) error` method. `BindingUpdateOpts` has optional fields (Destination, Ports, Header, Template, Protocols) using pointer-nil-means-skip pattern (same as `ChannelUpdate`).
-- [ ] Write tests for UpdateBinding (update single field, update multiple fields, not found)
-- [ ] Run tests: `go test ./internal/store/ -timeout 30s`
+- [x] Add `UpdateBinding(id int64, opts BindingUpdateOpts) error` method. `BindingUpdateOpts` has optional fields (Destination, Ports, Header, Template, Protocols) using pointer-nil-means-skip pattern (same as `ChannelUpdate`).
+- [x] Write tests for UpdateBinding (update single field, update multiple fields, not found)
+- [x] Run tests: `go test ./internal/store/ -timeout 30s`
 
 ### Task 2: Add `sluice binding` CLI subcommand
 
