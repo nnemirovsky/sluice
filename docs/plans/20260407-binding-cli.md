@@ -167,13 +167,13 @@ The vault's `Add()` already does atomic overwrite (temp file + rename). For OAut
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] Verify all binding CRUD operations work via CLI
-- [ ] Verify all binding CRUD operations work via API
-- [ ] Verify `cred add` with multiple `--destination` flags creates multiple bindings
-- [ ] Verify `cred update` replaces value without affecting bindings
-- [ ] Verify `cred update` works for OAuth credentials
-- [ ] Verify existing single `--destination` behavior unchanged
-- [ ] Run full test suite: `go test ./... -v -timeout 30s`
+- [x] Verify all binding CRUD operations work via CLI
+- [x] Verify all binding CRUD operations work via API
+- [x] Verify `cred add` with multiple `--destination` flags creates multiple bindings
+- [x] Verify `cred update` replaces value without affecting bindings
+- [x] Verify `cred update` works for OAuth credentials
+- [x] Verify existing single `--destination` behavior unchanged
+- [x] Run full test suite: `go test ./... -v -timeout 30s`
 
 ### Task 7: [Final] Update documentation
 
