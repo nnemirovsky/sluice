@@ -215,6 +215,16 @@ func (r *BindingResolver) CredentialsForDestination(dest string, port int, proto
 
 // FormatValue applies the binding's template to a secret value.
 // If no template is set, the raw secret is returned.
+//
+// Binding templates use the `{value}` placeholder because the binding
+// already owns a specific credential (via the Credential field); the
+// template only needs to say where to place it.
+//
+// Note: this is a deliberately different template syntax from MCP
+// upstream env/header templates (internal/mcp/upstream.go), which use
+// `{vault:<name>}` because they can reference any credential by name and
+// need an explicit reference. Do not attempt to unify the two: they
+// solve different problems.
 func (b Binding) FormatValue(secret string) string {
 	if b.Template == "" {
 		return secret

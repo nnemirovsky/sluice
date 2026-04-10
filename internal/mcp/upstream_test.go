@@ -380,6 +380,109 @@ func TestResolveVaultEnvEmptyMap(t *testing.T) {
 	}
 }
 
+func TestResolveVaultEnvTemplateSubstitution(t *testing.T) {
+	// Env vars support both the whole-value "vault:name" form and the
+	// "{vault:name}" substring template form, sharing the same
+	// resolveVaultMap helper as headers.
+	resolver := func(name string) (string, error) {
+		if name == "api_key" {
+			return "sk-secret-xyz", nil
+		}
+		return "", fmt.Errorf("credential %q not found", name)
+	}
+
+	env := map[string]string{
+		"AUTH_STRING": "Bearer {vault:api_key}",
+	}
+
+	resolved, err := resolveVaultEnv(env, resolver)
+	if err != nil {
+		t.Fatalf("resolveVaultEnv: %v", err)
+	}
+	if got := resolved["AUTH_STRING"]; got != "Bearer sk-secret-xyz" {
+		t.Errorf("AUTH_STRING: expected Bearer sk-secret-xyz, got %q", got)
+	}
+}
+
+func TestResolveVaultHeadersTemplateSubstitution(t *testing.T) {
+	resolver := func(name string) (string, error) {
+		if name == "github_pat" {
+			return "ghp_real_secret_xyz", nil
+		}
+		return "", fmt.Errorf("credential %q not found", name)
+	}
+
+	headers := map[string]string{
+		"Authorization":   "Bearer {vault:github_pat}",
+		"X-Custom-Header": "static-value",
+	}
+
+	resolved, err := resolveVaultHeaders(headers, resolver)
+	if err != nil {
+		t.Fatalf("resolveVaultHeaders: %v", err)
+	}
+	if got := resolved["Authorization"]; got != "Bearer ghp_real_secret_xyz" {
+		t.Errorf("Authorization: expected Bearer ghp_real_secret_xyz, got %q", got)
+	}
+	if got := resolved["X-Custom-Header"]; got != "static-value" {
+		t.Errorf("X-Custom-Header: expected static-value, got %q", got)
+	}
+}
+
+func TestResolveVaultHeadersWholeValueForm(t *testing.T) {
+	resolver := func(name string) (string, error) {
+		if name == "raw_token" {
+			return "just_the_token", nil
+		}
+		return "", fmt.Errorf("credential %q not found", name)
+	}
+
+	headers := map[string]string{"X-Token": "vault:raw_token"}
+	resolved, err := resolveVaultHeaders(headers, resolver)
+	if err != nil {
+		t.Fatalf("resolveVaultHeaders: %v", err)
+	}
+	if got := resolved["X-Token"]; got != "just_the_token" {
+		t.Errorf("X-Token: expected just_the_token, got %q", got)
+	}
+}
+
+func TestResolveVaultHeadersMultipleSubstitutions(t *testing.T) {
+	resolver := func(name string) (string, error) {
+		vals := map[string]string{"id": "abc", "key": "xyz"}
+		v, ok := vals[name]
+		if !ok {
+			return "", fmt.Errorf("not found: %s", name)
+		}
+		return v, nil
+	}
+
+	headers := map[string]string{
+		"X-Compound": "id={vault:id};key={vault:key}",
+	}
+	resolved, err := resolveVaultHeaders(headers, resolver)
+	if err != nil {
+		t.Fatalf("resolveVaultHeaders: %v", err)
+	}
+	if got := resolved["X-Compound"]; got != "id=abc;key=xyz" {
+		t.Errorf("X-Compound: expected id=abc;key=xyz, got %q", got)
+	}
+}
+
+func TestResolveVaultHeadersTemplateMissingCredential(t *testing.T) {
+	resolver := func(name string) (string, error) {
+		return "", fmt.Errorf("credential %q not found", name)
+	}
+	headers := map[string]string{"Authorization": "Bearer {vault:missing}"}
+	_, err := resolveVaultHeaders(headers, resolver)
+	if err == nil {
+		t.Fatal("expected error for missing credential in template")
+	}
+	if !strings.Contains(err.Error(), "missing") {
+		t.Errorf("error should mention credential name, got: %v", err)
+	}
+}
+
 // mockMCPServerEnv echoes environment variables in the tool call response
 // so tests can verify credential injection.
 const mockMCPServerEnv = `#!/bin/bash

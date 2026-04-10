@@ -58,7 +58,7 @@ func StartUpstreamForTransport(cfg UpstreamConfig) (MCPUpstream, error) {
 	case TransportStdio:
 		return StartUpstream(cfg)
 	case TransportHTTP:
-		return NewHTTPUpstream(cfg.Name, cfg.Command, cfg.TimeoutSec), nil
+		return NewHTTPUpstream(cfg.Name, cfg.Command, cfg.Headers, cfg.TimeoutSec), nil
 	case TransportWS:
 		return NewWSUpstream(cfg.Name, cfg.Command, cfg.TimeoutSec), nil
 	default:
@@ -72,6 +72,7 @@ type UpstreamConfig struct {
 	Command    string
 	Args       []string
 	Env        map[string]string
+	Headers    map[string]string // only applies to http transport
 	TimeoutSec int
 	Transport  string // "stdio" (default), "http", or "websocket"
 }
@@ -80,21 +81,69 @@ type UpstreamConfig struct {
 // through the credential resolver. Plain values are copied unchanged. Returns
 // an error if any vault credential cannot be resolved.
 func resolveVaultEnv(env map[string]string, resolver CredentialResolver) (map[string]string, error) {
-	if resolver == nil || len(env) == 0 {
-		return env, nil
+	return resolveVaultMap(env, resolver, "env var")
+}
+
+// resolveVaultHeaders returns a copy of headers with "vault:" prefixed values
+// resolved through the credential resolver. Plain values are copied unchanged.
+func resolveVaultHeaders(headers map[string]string, resolver CredentialResolver) (map[string]string, error) {
+	return resolveVaultMap(headers, resolver, "header")
+}
+
+// vaultTemplateRe matches "{vault:<credname>}" substrings for template
+// substitution inside header/env values. Credential names are restricted to
+// letters, digits, underscore, dash, and dot.
+var vaultTemplateRe = regexp.MustCompile(`\{vault:([a-zA-Z0-9_\-.]+)\}`)
+
+// resolveVaultMap is a shared helper for env and header vault resolution.
+// fieldLabel is used in error messages for the affected field type.
+//
+// Two syntaxes are supported:
+//
+//  1. Whole-value: a value that is exactly "vault:<name>" resolves to the
+//     raw credential. Used for env vars where the value IS the credential.
+//  2. Template: any value containing "{vault:<name>}" has that substring
+//     substituted with the credential. Use this for headers like
+//     "Authorization=Bearer {vault:github_pat}" where the credential is
+//     embedded in a larger string.
+func resolveVaultMap(m map[string]string, resolver CredentialResolver, fieldLabel string) (map[string]string, error) {
+	if resolver == nil || len(m) == 0 {
+		return m, nil
 	}
-	resolved := make(map[string]string, len(env))
-	for k, v := range env {
-		if strings.HasPrefix(v, vaultPrefix) {
+	resolved := make(map[string]string, len(m))
+	for k, v := range m {
+		// Whole-value form.
+		if strings.HasPrefix(v, vaultPrefix) && !strings.Contains(v, "{") {
 			credName := strings.TrimPrefix(v, vaultPrefix)
 			val, err := resolver(credName)
 			if err != nil {
-				return nil, fmt.Errorf("resolve credential %q for env var %s: %w", credName, k, err)
+				return nil, fmt.Errorf("resolve credential %q for %s %s: %w", credName, fieldLabel, k, err)
 			}
 			resolved[k] = val
-		} else {
-			resolved[k] = v
+			continue
 		}
+		// Template form: substitute all {vault:<name>} occurrences.
+		if strings.Contains(v, "{vault:") {
+			var resolveErr error
+			out := vaultTemplateRe.ReplaceAllStringFunc(v, func(match string) string {
+				if resolveErr != nil {
+					return ""
+				}
+				credName := match[len("{vault:") : len(match)-1]
+				val, err := resolver(credName)
+				if err != nil {
+					resolveErr = fmt.Errorf("resolve credential %q for %s %s: %w", credName, fieldLabel, k, err)
+					return ""
+				}
+				return val
+			})
+			if resolveErr != nil {
+				return nil, resolveErr
+			}
+			resolved[k] = out
+			continue
+		}
+		resolved[k] = v
 	}
 	return resolved, nil
 }

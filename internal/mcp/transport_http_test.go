@@ -112,7 +112,7 @@ func TestHTTPUpstreamInitialize(t *testing.T) {
 	srv := mockHTTPMCPServer(t)
 	defer srv.Close()
 
-	h := NewHTTPUpstream("remote", srv.URL, 0)
+	h := NewHTTPUpstream("remote", srv.URL, nil, 0)
 
 	if err := h.Initialize(); err != nil {
 		t.Fatalf("Initialize: %v", err)
@@ -127,7 +127,7 @@ func TestHTTPUpstreamDiscoverTools(t *testing.T) {
 	srv := mockHTTPMCPServer(t)
 	defer srv.Close()
 
-	h := NewHTTPUpstream("remote", srv.URL, 0)
+	h := NewHTTPUpstream("remote", srv.URL, nil, 0)
 
 	if err := h.Initialize(); err != nil {
 		t.Fatalf("Initialize: %v", err)
@@ -157,7 +157,7 @@ func TestHTTPUpstreamCallTool(t *testing.T) {
 	srv := mockHTTPMCPServer(t)
 	defer srv.Close()
 
-	h := NewHTTPUpstream("remote", srv.URL, 0)
+	h := NewHTTPUpstream("remote", srv.URL, nil, 0)
 
 	if err := h.Initialize(); err != nil {
 		t.Fatalf("Initialize: %v", err)
@@ -186,7 +186,7 @@ func TestHTTPUpstreamSessionIDRequired(t *testing.T) {
 	defer srv.Close()
 
 	// Skip Initialize so no session ID is set.
-	h := NewHTTPUpstream("remote", srv.URL, 0)
+	h := NewHTTPUpstream("remote", srv.URL, nil, 0)
 
 	_, err := h.DiscoverTools()
 	if err == nil {
@@ -198,7 +198,7 @@ func TestHTTPUpstreamSessionIDPersists(t *testing.T) {
 	srv := mockHTTPMCPServer(t)
 	defer srv.Close()
 
-	h := NewHTTPUpstream("remote", srv.URL, 0)
+	h := NewHTTPUpstream("remote", srv.URL, nil, 0)
 
 	if err := h.Initialize(); err != nil {
 		t.Fatalf("Initialize: %v", err)
@@ -219,7 +219,7 @@ func TestHTTPUpstreamStop(t *testing.T) {
 	srv := mockHTTPMCPServer(t)
 	defer srv.Close()
 
-	h := NewHTTPUpstream("remote", srv.URL, 0)
+	h := NewHTTPUpstream("remote", srv.URL, nil, 0)
 
 	if err := h.Initialize(); err != nil {
 		t.Fatalf("Initialize: %v", err)
@@ -234,7 +234,7 @@ func TestHTTPUpstreamStopWithoutSession(t *testing.T) {
 	srv := mockHTTPMCPServer(t)
 	defer srv.Close()
 
-	h := NewHTTPUpstream("remote", srv.URL, 0)
+	h := NewHTTPUpstream("remote", srv.URL, nil, 0)
 
 	// Stop without Initialize should be a no-op.
 	if err := h.Stop(); err != nil {
@@ -246,7 +246,7 @@ func TestHTTPUpstreamCustomTimeout(t *testing.T) {
 	srv := mockHTTPMCPServer(t)
 	defer srv.Close()
 
-	h := NewHTTPUpstream("remote", srv.URL, 30)
+	h := NewHTTPUpstream("remote", srv.URL, nil, 30)
 
 	if h.client.Timeout != 30*time.Second {
 		t.Errorf("expected client timeout 30s, got %v", h.client.Timeout)
@@ -254,7 +254,7 @@ func TestHTTPUpstreamCustomTimeout(t *testing.T) {
 }
 
 func TestHTTPUpstreamDefaultTimeout(t *testing.T) {
-	h := NewHTTPUpstream("remote", "http://localhost:9999", 0)
+	h := NewHTTPUpstream("remote", "http://localhost:9999", nil, 0)
 
 	if h.client.Timeout != defaultUpstreamTimeout {
 		t.Errorf("expected default timeout %v, got %v", defaultUpstreamTimeout, h.client.Timeout)
@@ -344,7 +344,7 @@ func TestHTTPUpstreamSSEResponse(t *testing.T) {
 	srv := mockSSEMCPServer(t)
 	defer srv.Close()
 
-	h := NewHTTPUpstream("sse-remote", srv.URL, 0)
+	h := NewHTTPUpstream("sse-remote", srv.URL, nil, 0)
 
 	if err := h.Initialize(); err != nil {
 		t.Fatalf("Initialize: %v", err)
@@ -382,7 +382,7 @@ func TestHTTPUpstreamSSESkipsNotifications(t *testing.T) {
 	srv := mockSSEMCPServer(t)
 	defer srv.Close()
 
-	h := NewHTTPUpstream("sse-remote", srv.URL, 0)
+	h := NewHTTPUpstream("sse-remote", srv.URL, nil, 0)
 	if err := h.Initialize(); err != nil {
 		t.Fatalf("Initialize: %v", err)
 	}
@@ -404,7 +404,7 @@ func TestHTTPUpstreamSSESkipsNotifications(t *testing.T) {
 }
 
 func TestHTTPUpstreamConnectionRefused(t *testing.T) {
-	h := NewHTTPUpstream("dead", "http://127.0.0.1:1", 5)
+	h := NewHTTPUpstream("dead", "http://127.0.0.1:1", nil, 5)
 
 	err := h.Initialize()
 	if err == nil {
@@ -418,7 +418,7 @@ func TestHTTPUpstreamServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	h := NewHTTPUpstream("error-srv", srv.URL, 0)
+	h := NewHTTPUpstream("error-srv", srv.URL, nil, 0)
 	err := h.Initialize()
 	if err == nil {
 		t.Fatal("expected error from 500 response")

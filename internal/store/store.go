@@ -600,6 +600,7 @@ type MCPUpstreamRow struct {
 	Command    string
 	Args       []string
 	Env        map[string]string
+	Headers    map[string]string
 	TimeoutSec int
 	Transport  string
 	CreatedAt  string
@@ -609,6 +610,7 @@ type MCPUpstreamRow struct {
 type MCPUpstreamOpts struct {
 	Args       []string
 	Env        map[string]string
+	Headers    map[string]string
 	TimeoutSec int
 	Transport  string // "stdio" (default), "http", or "websocket"
 }
@@ -630,7 +632,7 @@ func (s *Store) AddMCPUpstream(name, command string, opts MCPUpstreamOpts) (int6
 	if !validTransports[transport] {
 		return 0, fmt.Errorf("invalid transport %q: must be stdio, http, or websocket", transport)
 	}
-	var argsJSON, envJSON *string
+	var argsJSON, envJSON, headersJSON *string
 	if len(opts.Args) > 0 {
 		b, _ := json.Marshal(opts.Args)
 		a := string(b)
@@ -641,9 +643,14 @@ func (s *Store) AddMCPUpstream(name, command string, opts MCPUpstreamOpts) (int6
 		e := string(b)
 		envJSON = &e
 	}
+	if len(opts.Headers) > 0 {
+		b, _ := json.Marshal(opts.Headers)
+		h := string(b)
+		headersJSON = &h
+	}
 	res, err := s.db.Exec(
-		`INSERT INTO mcp_upstreams (name, command, args, env, timeout_sec, transport) VALUES (?, ?, ?, ?, ?, ?)`,
-		name, command, argsJSON, envJSON, timeoutSec, transport,
+		`INSERT INTO mcp_upstreams (name, command, args, env, headers, timeout_sec, transport) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		name, command, argsJSON, envJSON, headersJSON, timeoutSec, transport,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint") {
@@ -667,7 +674,7 @@ func (s *Store) RemoveMCPUpstream(name string) (bool, error) {
 // ListMCPUpstreams returns all MCP upstreams.
 func (s *Store) ListMCPUpstreams() ([]MCPUpstreamRow, error) {
 	rows, err := s.db.Query(
-		"SELECT id, name, command, args, env, timeout_sec, transport, created_at FROM mcp_upstreams ORDER BY id",
+		"SELECT id, name, command, args, env, headers, timeout_sec, transport, created_at FROM mcp_upstreams ORDER BY id",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list upstreams: %w", err)
@@ -677,8 +684,8 @@ func (s *Store) ListMCPUpstreams() ([]MCPUpstreamRow, error) {
 	var upstreams []MCPUpstreamRow
 	for rows.Next() {
 		var u MCPUpstreamRow
-		var argsJSON, envJSON sql.NullString
-		if err := rows.Scan(&u.ID, &u.Name, &u.Command, &argsJSON, &envJSON, &u.TimeoutSec, &u.Transport, &u.CreatedAt); err != nil {
+		var argsJSON, envJSON, headersJSON sql.NullString
+		if err := rows.Scan(&u.ID, &u.Name, &u.Command, &argsJSON, &envJSON, &headersJSON, &u.TimeoutSec, &u.Transport, &u.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan upstream: %w", err)
 		}
 		if argsJSON.Valid {
@@ -689,6 +696,11 @@ func (s *Store) ListMCPUpstreams() ([]MCPUpstreamRow, error) {
 		if envJSON.Valid {
 			if err := json.Unmarshal([]byte(envJSON.String), &u.Env); err != nil {
 				return nil, fmt.Errorf("unmarshal env for upstream %d: %w", u.ID, err)
+			}
+		}
+		if headersJSON.Valid {
+			if err := json.Unmarshal([]byte(headersJSON.String), &u.Headers); err != nil {
+				return nil, fmt.Errorf("unmarshal headers for upstream %d: %w", u.ID, err)
 			}
 		}
 		upstreams = append(upstreams, u)

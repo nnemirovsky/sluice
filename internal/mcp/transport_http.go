@@ -20,22 +20,26 @@ import (
 type HTTPUpstream struct {
 	name      string
 	url       string
+	headers   map[string]string
 	client    *http.Client
 	sessionID string
 	mu        sync.Mutex
 	nextID    atomic.Int64
 }
 
-// NewHTTPUpstream creates an HTTPUpstream for the given URL and timeout.
-func NewHTTPUpstream(name, url string, timeoutSec int) *HTTPUpstream {
+// NewHTTPUpstream creates an HTTPUpstream for the given URL, headers, and timeout.
+// Headers are sent on every outbound request (e.g. Authorization for remote
+// MCP servers requiring auth).
+func NewHTTPUpstream(name, url string, headers map[string]string, timeoutSec int) *HTTPUpstream {
 	timeout := defaultUpstreamTimeout
 	if timeoutSec > 0 {
 		timeout = time.Duration(timeoutSec) * time.Second
 	}
 	return &HTTPUpstream{
-		name:   name,
-		url:    url,
-		client: &http.Client{Timeout: timeout},
+		name:    name,
+		url:     url,
+		headers: headers,
+		client:  &http.Client{Timeout: timeout},
 	}
 }
 
@@ -51,6 +55,11 @@ func (h *HTTPUpstream) Send(req JSONRPCRequest) (*JSONRPCResponse, error) {
 	httpReq, err := http.NewRequest(http.MethodPost, h.url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
+	}
+	// Apply configured headers first so Content-Type and Accept below
+	// override any user-supplied values for protocol correctness.
+	for k, v := range h.headers {
+		httpReq.Header.Set(k, v)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json, text/event-stream")
@@ -272,6 +281,9 @@ func (h *HTTPUpstream) Stop() error {
 	req, err := http.NewRequest(http.MethodDelete, h.url, nil)
 	if err != nil {
 		return fmt.Errorf("upstream %s: create DELETE request: %w", h.name, err)
+	}
+	for k, v := range h.headers {
+		req.Header.Set(k, v)
 	}
 	req.Header.Set("Mcp-Session-Id", sid)
 
