@@ -459,7 +459,10 @@ func TestCancelApproval(t *testing.T) {
 	tc.SetBroker(broker)
 
 	// Store a message ID mapping.
-	tc.msgMap.Store("req_test", approvalMsg{messageID: 42, text: "test approval message"})
+	tc.msgMap.Store("req_test", approvalMsg{
+		messageID: 42,
+		req:       channel.ApprovalRequest{ID: "req_test", Destination: "test.example.com", Port: 443, Protocol: "https"},
+	})
 
 	err := tc.CancelApproval("req_test")
 	if err != nil {
@@ -508,7 +511,10 @@ func TestCancelApprovalShowsShutdownReason(t *testing.T) {
 	tc.SetBroker(broker)
 	broker.CancelAll() // Mark broker as closed.
 
-	tc.msgMap.Store("req_shutdown", approvalMsg{messageID: 43, text: "shutdown test message"})
+	tc.msgMap.Store("req_shutdown", approvalMsg{
+		messageID: 43,
+		req:       channel.ApprovalRequest{ID: "req_shutdown", Destination: "shutdown.example.com", Port: 443, Protocol: "https"},
+	})
 	_ = tc.CancelApproval("req_shutdown")
 
 	time.Sleep(50 * time.Millisecond)
