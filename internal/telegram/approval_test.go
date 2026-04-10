@@ -459,7 +459,10 @@ func TestCancelApproval(t *testing.T) {
 	tc.SetBroker(broker)
 
 	// Store a message ID mapping.
-	tc.msgMap.Store("req_test", approvalMsg{messageID: 42, text: "test approval message"})
+	tc.msgMap.Store("req_test", approvalMsg{
+		messageID: 42,
+		req:       channel.ApprovalRequest{ID: "req_test", Destination: "test.example.com", Port: 443, Protocol: "https"},
+	})
 
 	err := tc.CancelApproval("req_test")
 	if err != nil {
@@ -508,7 +511,10 @@ func TestCancelApprovalShowsShutdownReason(t *testing.T) {
 	tc.SetBroker(broker)
 	broker.CancelAll() // Mark broker as closed.
 
-	tc.msgMap.Store("req_shutdown", approvalMsg{messageID: 43, text: "shutdown test message"})
+	tc.msgMap.Store("req_shutdown", approvalMsg{
+		messageID: 43,
+		req:       channel.ApprovalRequest{ID: "req_shutdown", Destination: "shutdown.example.com", Port: 443, Protocol: "https"},
+	})
 	_ = tc.CancelApproval("req_shutdown")
 
 	time.Sleep(50 * time.Millisecond)
@@ -806,6 +812,90 @@ func TestHandleCallbackUnknownAction(t *testing.T) {
 		},
 		Data: "req_1|unknown_action",
 	})
+}
+
+// TestHandleCallbackAllowOncePreservesCodeBlockOnEdit reproduces the bug
+// where the <pre><code> args block was lost from the final edit after the
+// user tapped Allow. The root cause was that broker.Resolve synchronously
+// calls cancelOnChannels -> tc.CancelApproval on the same Telegram channel,
+// which LoadAndDelete'd the msgMap entry and issued its own edit. Control
+// then returned to handleCallback, which could not find the entry in
+// msgMap and fell back to editing with cq.Message.Text (Telegram's
+// plain-text extraction, where <pre>/<code> tags are already stripped).
+// That second edit clobbered the first and lost the code block. The fix
+// is for handleCallback to take ownership of the msgMap entry BEFORE
+// calling broker.Resolve so CancelApproval becomes a no-op.
+func TestHandleCallbackAllowOncePreservesCodeBlockOnEdit(t *testing.T) {
+	mock := newMockTelegramAPI(t)
+	s := newTestStore(t)
+	tc := newTestTelegramChannel(t, mock, s)
+
+	broker := channel.NewBroker([]channel.Channel{tc})
+	tc.SetBroker(broker)
+
+	const toolArgs = `{"owner":"me","repo":"x"}`
+	done := make(chan channel.Response, 1)
+	go func() {
+		resp, _ := broker.Request(
+			"github__list_branches", 0, "mcp", 5*time.Second,
+			channel.WithToolArgs(toolArgs),
+		)
+		done <- resp
+	}()
+
+	waitForPending(t, broker, 1)
+	reqs := broker.PendingRequests()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 pending request, got %d", len(reqs))
+	}
+	req := reqs[0]
+
+	// Wait for sendApprovalMessage goroutine to populate msgMap (it runs
+	// async after broadcast). The mock API returns immediately so this is
+	// typically fast.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if _, ok := tc.msgMap.Load(req.ID); ok {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, ok := tc.msgMap.Load(req.ID); !ok {
+		t.Fatal("msgMap entry was not populated by sendApprovalMessage")
+	}
+
+	// Simulate user tapping "Allow". Message.Text is what Telegram returns
+	// in callback queries: the sent HTML text with all formatting tags
+	// stripped. The JSON content is still present (newlines preserved)
+	// but the <pre><code> wrapping is gone.
+	tc.handleCallback(&tgbotapi.CallbackQuery{
+		ID: "cb_allow",
+		Message: &tgbotapi.Message{
+			MessageID: 101,
+			Chat:      &tgbotapi.Chat{ID: 12345},
+			Text:      "OpenClaw wants to call tool:\n\ngithub__list_branches\n\nArguments:\n{\n  \"owner\": \"me\",\n  \"repo\": \"x\"\n}\n\nAllow this tool call?",
+		},
+		Data: req.ID + "|allow_once",
+	})
+
+	if resp := <-done; resp != channel.ResponseAllowOnce {
+		t.Errorf("expected AllowOnce, got %v", resp)
+	}
+
+	// The FINAL edit (last-write-wins) must still contain the code block
+	// and the "Allowed (once)" status label. Multiple edits may fire
+	// (cancelOnChannels also triggers one), so we check the last entry.
+	edits := mock.getEditedMessages()
+	if len(edits) == 0 {
+		t.Fatal("expected at least one edit")
+	}
+	last := edits[len(edits)-1]
+	if !strings.Contains(last.Text, `<pre><code class="language-json">`) {
+		t.Errorf("final edit lost <pre><code> block.\nfinal edit text:\n%s", last.Text)
+	}
+	if !strings.Contains(last.Text, "Allowed (once)") {
+		t.Errorf("final edit missing 'Allowed (once)' label.\nfinal edit text:\n%s", last.Text)
+	}
 }
 
 func TestHandleCallbackAlreadyResolved(t *testing.T) {

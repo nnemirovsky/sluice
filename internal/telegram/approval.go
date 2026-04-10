@@ -101,11 +101,15 @@ func NewTelegramChannel(cfg ChannelConfig) (*TelegramChannel, error) {
 	return tc, nil
 }
 
-// approvalMsg stores the Telegram message ID and original text for an
-// approval request so that timeout/cancel edits can preserve context.
+// approvalMsg stores the Telegram message ID and the original approval
+// request so that timeout/cancel/resolved edits can re-render the full
+// HTML-formatted body (including the <pre><code> args block) without
+// worrying about whether the stored text survived appending, parse
+// mode changes, or Telegram's plain-text extraction in callback
+// queries.
 type approvalMsg struct {
 	messageID int
-	text      string
+	req       channel.ApprovalRequest
 }
 
 // SetBroker sets the broker reference for resolving approval requests.
@@ -155,15 +159,14 @@ func (tc *TelegramChannel) sendApprovalMessage(req channel.ApprovalRequest) {
 		}
 		return
 	}
-	originalText := FormatApprovalMessage(req)
-	tc.msgMap.Store(req.ID, approvalMsg{messageID: sent.MessageID, text: originalText})
+	tc.msgMap.Store(req.ID, approvalMsg{messageID: sent.MessageID, req: req})
 
 	// If the request timed out while the Telegram API call was in
 	// flight, update the message immediately so the user does not
 	// see a stale prompt.
 	if tc.broker != nil && tc.broker.WasTimedOut(req.ID) {
 		edit := tgbotapi.NewEditMessageText(tc.chatID, sent.MessageID,
-			originalText+"\n\n(request timed out)")
+			FormatApprovalMessage(req)+"\n\n(request timed out)")
 		edit.ParseMode = tgbotapi.ModeHTML
 		if _, editErr := tc.api.Send(edit); editErr == nil {
 			tc.broker.ClearTimedOut(req.ID)
@@ -186,7 +189,8 @@ func (tc *TelegramChannel) CancelApproval(id string) error {
 	} else if tc.broker != nil && tc.broker.IsClosed() {
 		reason = "(proxy shutting down)"
 	}
-	edit := tgbotapi.NewEditMessageText(tc.chatID, am.messageID, am.text+"\n\n"+reason)
+	edit := tgbotapi.NewEditMessageText(tc.chatID, am.messageID,
+		FormatApprovalMessage(am.req)+"\n\n"+reason)
 	edit.ParseMode = tgbotapi.ModeHTML
 	_, _ = tc.api.Send(edit)
 	return nil
@@ -300,6 +304,22 @@ func (tc *TelegramChannel) handleCallback(cq *tgbotapi.CallbackQuery) {
 		return
 	}
 
+	// Take ownership of the msgMap entry BEFORE calling broker.Resolve.
+	// Resolve synchronously calls cancelOnChannels, which invokes
+	// tc.CancelApproval on this same Telegram channel. CancelApproval
+	// does its own LoadAndDelete and issues a "(resolved via another
+	// channel)" edit. If we let that happen first, the msgMap entry is
+	// gone by the time handleCallback runs its own edit, and we fall
+	// back to cq.Message.Text (Telegram's plain-text extraction where
+	// <pre><code> tags are already stripped). Pre-loading makes
+	// CancelApproval a no-op so handleCallback owns the final render.
+	var am approvalMsg
+	haveAM := false
+	if val, ok := tc.msgMap.LoadAndDelete(reqID); ok {
+		am = val.(approvalMsg)
+		haveAM = true
+	}
+
 	resolved := false
 	if tc.broker != nil {
 		resolved = tc.broker.Resolve(reqID, resp)
@@ -309,32 +329,37 @@ func (tc *TelegramChannel) handleCallback(cq *tgbotapi.CallbackQuery) {
 		callback := tgbotapi.NewCallback(cq.ID, label)
 		_, _ = tc.api.Request(callback)
 
-		// Use the original stored text (with HTML markup) rather than
-		// cq.Message.Text, which is Telegram's plain-text extraction
-		// and loses our <pre><code> formatting on tool arguments.
-		originalText := cq.Message.Text
-		if val, ok := tc.msgMap.Load(reqID); ok {
-			originalText = val.(approvalMsg).text
+		// Re-render the full HTML body from the stored request. This
+		// preserves the <pre><code> args block because we are not
+		// appending to or reusing a string that already contains HTML
+		// tags. cq.Message.Text is Telegram's plain-text extraction and
+		// loses the code block formatting entirely, so we fall back to
+		// a minimal plain message only if the msgMap entry is gone.
+		var body string
+		if haveAM {
+			body = fmt.Sprintf("%s\n\n%s at %s",
+				FormatApprovalMessage(am.req), label, time.Now().UTC().Format("15:04:05"))
+		} else {
+			body = fmt.Sprintf("%s\n\n%s at %s",
+				cq.Message.Text, label, time.Now().UTC().Format("15:04:05"))
 		}
-		edit := tgbotapi.NewEditMessageText(tc.chatID, cq.Message.MessageID,
-			fmt.Sprintf("%s\n\n%s at %s", originalText, label, time.Now().UTC().Format("15:04:05")))
+		edit := tgbotapi.NewEditMessageText(tc.chatID, cq.Message.MessageID, body)
 		edit.ParseMode = tgbotapi.ModeHTML
 		_, _ = tc.api.Send(edit)
-		tc.msgMap.Delete(reqID)
 	} else if tc.broker != nil && tc.broker.WasTimedOut(reqID) {
 		tc.broker.ClearTimedOut(reqID)
 		callback := tgbotapi.NewCallback(cq.ID, "Request timed out")
 		_, _ = tc.api.Request(callback)
 
-		originalText := cq.Message.Text
-		if val, ok := tc.msgMap.Load(reqID); ok {
-			originalText = val.(approvalMsg).text
+		var body string
+		if haveAM {
+			body = FormatApprovalMessage(am.req) + "\n\n(request timed out)"
+		} else {
+			body = cq.Message.Text + "\n\n(request timed out)"
 		}
-		edit := tgbotapi.NewEditMessageText(tc.chatID, cq.Message.MessageID,
-			originalText+"\n\n(request timed out)")
+		edit := tgbotapi.NewEditMessageText(tc.chatID, cq.Message.MessageID, body)
 		edit.ParseMode = tgbotapi.ModeHTML
 		_, _ = tc.api.Send(edit)
-		tc.msgMap.Delete(reqID)
 
 	} else {
 		// Request was already resolved by a previous callback (e.g. double-tap
