@@ -319,12 +319,23 @@ req.on("upgrade", (_res, socket) => {
           clearTimeout(deadline);
           fail("config.get response missing hash");
         }
-        // Step 2 of wire-mcp: merge-patch mcp.servers.<name> = {url}.
+        // Step 2 of wire-mcp: merge-patch mcp.servers.<name>. We must
+        // set transport: "streamable-http" explicitly because openclaw's
+        // pi-bundle-mcp-runtime defaults to the legacy SSE transport
+        // when the field is omitted, and the SSE transport requires a
+        // long-lived GET stream that sluice's gateway does not expose.
         // restartDelayMs gives us time to receive the response and exit
         // cleanly before the gateway restarts and kills our docker exec
         // (which would otherwise result in exit code 137).
         const raw = JSON.stringify({
-          mcp: { servers: { [wireMcpName]: { url: wireMcpURL } } },
+          mcp: {
+            servers: {
+              [wireMcpName]: {
+                transport: "streamable-http",
+                url: wireMcpURL,
+              },
+            },
+          },
         });
         step = "sent-method";
         socket.write(
