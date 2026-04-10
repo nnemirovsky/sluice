@@ -1,8 +1,11 @@
 package telegram
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/nemirovsky/sluice/internal/channel"
 )
@@ -44,11 +47,18 @@ var protoDisplayName = map[string]string{
 // FormatApprovalMessage builds the Telegram message text for an approval
 // request. MCP tool calls (protocol == "mcp") show the tool name and
 // arguments. Network connections show the protocol, destination, and port.
+//
+// The returned string uses Telegram HTML parse mode: the tool name is
+// escaped plain text and arguments are rendered inside a <pre><code>
+// block with pretty-printed JSON when the input parses, falling back
+// to the raw string otherwise (truncated args may not be valid JSON).
+// Callers must set ParseMode to HTML when sending the message.
 func FormatApprovalMessage(req channel.ApprovalRequest) string {
 	if req.Protocol == "mcp" {
-		msg := fmt.Sprintf("OpenClaw wants to call tool:\n\n%s", req.Destination)
+		msg := "OpenClaw wants to call tool:\n\n" + htmlEscape(req.Destination)
 		if req.ToolArgs != "" {
-			msg += fmt.Sprintf("\n\nArguments:\n%s", req.ToolArgs)
+			pretty := prettyJSONOrRaw(req.ToolArgs)
+			msg += "\n\nArguments:\n<pre><code class=\"language-json\">" + htmlEscape(pretty) + "</code></pre>"
 		}
 		msg += "\n\nAllow this tool call?"
 		return msg
@@ -57,5 +67,25 @@ func FormatApprovalMessage(req channel.ApprovalRequest) string {
 	if display == "" {
 		display = req.Protocol
 	}
-	return fmt.Sprintf("OpenClaw wants to connect to:\n\n%s %s:%d\n\nAllow this connection?", display, req.Destination, req.Port)
+	return fmt.Sprintf(
+		"OpenClaw wants to connect to:\n\n%s %s:%d\n\nAllow this connection?",
+		htmlEscape(display), htmlEscape(req.Destination), req.Port,
+	)
+}
+
+// htmlEscape escapes the minimum set of characters required by Telegram
+// HTML parse mode: & < >. See https://core.telegram.org/bots/api#html-style
+func htmlEscape(s string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
+}
+
+// prettyJSONOrRaw attempts to re-indent the input as JSON with 2-space
+// indent. If parsing fails (e.g. the caller truncated mid-object) the
+// raw string is returned unchanged so the user still sees something.
+func prettyJSONOrRaw(raw string) string {
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, []byte(raw), "", "  "); err != nil {
+		return raw
+	}
+	return buf.String()
 }
