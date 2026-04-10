@@ -362,6 +362,15 @@ func insertRuleIfNew(tx *sql.Tx, verdict string, r importRule) (bool, error) {
 		return false, err
 	}
 
+	// Validate destination glob up front so a bad seed fails the import
+	// with a clear error instead of sneaking a row into the database that
+	// only blows up later when policy.LoadFromStore recompiles live state.
+	if r.Destination != "" {
+		if err := validateDestinationGlob(r.Destination); err != nil {
+			return false, fmt.Errorf("%s rule: %w", verdict, err)
+		}
+	}
+
 	// Validate regex for pattern rules.
 	if r.Pattern != "" {
 		if _, err := regexp.Compile(r.Pattern); err != nil {
@@ -479,17 +488,26 @@ func ruleExistsTx(tx *sql.Tx, verdict, destination, tool, pattern string, ports 
 	return count > 0, nil
 }
 
-// insertBindingIfNew inserts a binding if no matching
-// destination+credential+ports+header+template+protocols combination exists.
-// Returns true if inserted. All behavioral fields are included in the dedupe
-// check so that distinct bindings (e.g., different headers or protocol scopes
-// for the same credential) are not collapsed.
+// insertBindingIfNew inserts a binding if no matching (credential, destination)
+// pair already exists. Returns true if inserted. Migration 000005 enforces
+// a global UNIQUE index on (credential, destination), so the dedupe key here
+// must match that uniqueness: keying on the full behavioral tuple
+// (ports/header/template/protocols/env_var) would miss an existing row that
+// differs only in those fields and then abort the whole import with a UNIQUE
+// violation when the INSERT fires. Import uses merge semantics (skip
+// duplicates, preserving existing rows) to match how rule imports behave.
 func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
 	if b.Destination == "" {
 		return false, fmt.Errorf("binding has empty destination")
 	}
 	if b.Credential == "" {
 		return false, fmt.Errorf("binding has empty credential")
+	}
+	// Validate destination glob before hitting the DB so a bad seed fails
+	// the import with row context instead of landing as a row that only
+	// fails later when vault.NewBindingResolver recompiles globs.
+	if err := validateDestinationGlob(b.Destination); err != nil {
+		return false, fmt.Errorf("binding %q->%q: %w", b.Destination, b.Credential, err)
 	}
 	for _, p := range b.Ports {
 		if p < 1 || p > 65535 {
@@ -504,17 +522,20 @@ func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
 		if err := container.ValidateEnvVarKey(b.EnvVar); err != nil {
 			return false, fmt.Errorf("binding %q->%q: %w", b.Destination, b.Credential, err)
 		}
-		if err := checkEnvVarUniqueWith(tx, b.EnvVar); err != nil {
+		if err := checkEnvVarUniqueWith(tx, b.EnvVar, b.Credential); err != nil {
 			return false, fmt.Errorf("binding %q->%q: %w", b.Destination, b.Credential, err)
 		}
 	}
 
-	portsJSON := portsToJSONPtr(b.Ports)
-	protocolsJSON := protocolsToJSONPtr(b.Protocols)
+	// Migration 000007 enforces case-insensitive uniqueness on
+	// (credential, LOWER(destination)). Dedup here must match that so an
+	// import of "API.example.com" when "api.example.com" is already stored
+	// skips the row cleanly instead of hitting the unique index and aborting
+	// the whole import.
 	var count int
 	err := tx.QueryRow(
-		"SELECT COUNT(*) FROM bindings WHERE destination = ? AND credential = ? AND ports IS ? AND header IS ? AND template IS ? AND protocols IS ? AND env_var IS ?",
-		b.Destination, b.Credential, portsJSON, nilIfEmpty(b.Header), nilIfEmpty(b.Template), protocolsJSON, nilIfEmpty(b.EnvVar),
+		"SELECT COUNT(*) FROM bindings WHERE credential = ? AND LOWER(destination) = LOWER(?)",
+		b.Credential, b.Destination,
 	).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("check binding exists: %w", err)
@@ -523,6 +544,8 @@ func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
 		return false, nil
 	}
 
+	portsJSON := portsToJSONPtr(b.Ports)
+	protocolsJSON := protocolsToJSONPtr(b.Protocols)
 	if _, err := tx.Exec(
 		`INSERT INTO bindings (destination, ports, credential, header, template, protocols, env_var) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		b.Destination, portsJSON, b.Credential,

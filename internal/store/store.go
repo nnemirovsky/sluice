@@ -16,6 +16,18 @@ import (
 	_ "modernc.org/sqlite" // SQLite driver registration
 )
 
+// Source tag prefixes for rules auto-created by credential and binding
+// management. They are shared between the CLI and the REST API so that
+// cleanup and paired-rule lookups use identical tags regardless of code path.
+const (
+	// CredAddSourcePrefix tags rules auto-created by "sluice cred add
+	// --destination" or the equivalent POST /api/credentials path.
+	CredAddSourcePrefix = "cred-add:"
+	// BindingAddSourcePrefix tags rules auto-created by "sluice binding add"
+	// or the equivalent POST /api/bindings path.
+	BindingAddSourcePrefix = "binding-add:"
+)
+
 // Store wraps a SQLite database for policy and configuration persistence.
 type Store struct {
 	db *sql.DB
@@ -542,31 +554,166 @@ type BindingOpts struct {
 	EnvVar    string
 }
 
-// AddBinding inserts a binding and returns its ID.
+// AddBinding inserts a binding and returns its ID. Returns
+// ErrBindingDuplicate when a binding on the same (credential, destination)
+// pair already exists (enforced by a partial UNIQUE index).
+//
+// The env_var uniqueness check and the INSERT run inside a single
+// transaction so concurrent AddBinding callers cannot race past a
+// check-then-insert window after migration 000006 dropped the DB-level
+// env_var unique index. With SetMaxOpenConns(1), the shared tx
+// serializes both operations on the same connection, making
+// cross-credential env_var collisions impossible.
 func (s *Store) AddBinding(destination, credential string, opts BindingOpts) (int64, error) {
-	if destination == "" || credential == "" {
-		return 0, fmt.Errorf("destination and credential are required")
+	if destination == "" {
+		return 0, fmt.Errorf("%w: destination is required", ErrBindingValidation)
+	}
+	if credential == "" {
+		return 0, fmt.Errorf("%w: credential is required", ErrBindingValidation)
+	}
+	// Validate the destination glob up front so invalid patterns are
+	// rejected before the insert. Without this, a malformed glob would
+	// only surface later at engine recompile time (rebuildResolver), long
+	// after the bad row was persisted. Mirrors AddRuleAndBinding and
+	// updateBindingTx so every store write path enforces the same
+	// validation contract.
+	if err := validateDestinationGlob(destination); err != nil {
+		return 0, fmt.Errorf("%w: %s", ErrBindingValidation, err)
+	}
+	// Port range validation (1-65535) matches AddRule and
+	// AddRuleAndBinding. Out-of-range ports would otherwise be persisted
+	// and silently skipped at connection-match time.
+	for _, p := range opts.Ports {
+		if p < 1 || p > 65535 {
+			return 0, fmt.Errorf("%w: invalid binding port %d (must be 1-65535)", ErrBindingValidation, p)
+		}
+	}
+	// Reject unknown protocol names up front. Without this, a typo like
+	// "htp" would be stored silently and later fail protocol matching at
+	// connection time, making the binding look broken for no apparent
+	// reason. Share the allow list with TOML import via validateProtocols.
+	if err := validateProtocols(opts.Protocols, fmt.Sprintf("binding %q->%q", destination, credential)); err != nil {
+		return 0, fmt.Errorf("%w: %s", ErrBindingValidation, err)
 	}
 	if opts.EnvVar != "" {
 		if err := container.ValidateEnvVarKey(opts.EnvVar); err != nil {
-			return 0, err
+			return 0, fmt.Errorf("%w: %s", ErrBindingValidation, err)
 		}
-		if err := checkEnvVarUniqueWith(s.db, opts.EnvVar); err != nil {
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("begin transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Uniqueness check runs on the same tx as the INSERT so the single
+	// connection serializes them. Without this, concurrent callers could
+	// both observe no collision and then both insert the same env_var
+	// for different credentials, making env injection nondeterministic.
+	if opts.EnvVar != "" {
+		if err := checkEnvVarUniqueWith(tx, opts.EnvVar, credential); err != nil {
 			return 0, err
 		}
 	}
+
 	portsJSON := portsToJSONPtr(opts.Ports)
 	protocolsJSON := protocolsToJSONPtr(opts.Protocols)
-	res, err := s.db.Exec(
+	res, err := tx.Exec(
 		`INSERT INTO bindings (destination, ports, credential, header, template, protocols, env_var) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		destination, portsJSON, credential,
 		nilIfEmpty(opts.Header), nilIfEmpty(opts.Template), protocolsJSON,
 		nilIfEmpty(opts.EnvVar),
 	)
 	if err != nil {
+		if isBindingUniqueViolation(err) {
+			// Query via the same tx because the single-connection pool
+			// still owns this connection until commit/rollback.
+			return 0, duplicateBindingError(tx, credential, destination)
+		}
 		return 0, fmt.Errorf("insert binding: %w", err)
 	}
-	return res.LastInsertId()
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("last insert id: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit transaction: %w", err)
+	}
+	committed = true
+	return id, nil
+}
+
+// ErrBindingNotFound is returned by UpdateBindingWithRuleSync when the
+// binding row identified by id does not exist. Callers should test with
+// errors.Is so the API layer can map it to a 404 response and the CLI to
+// a clean exit code without parsing error strings.
+var ErrBindingNotFound = fmt.Errorf("binding not found")
+
+// ErrBindingDuplicate is returned by AddBinding / AddRuleAndBinding when a
+// binding with the same (credential, destination) pair already exists.
+// Callers that want to show a friendlier message can use errors.Is to
+// detect this sentinel.
+var ErrBindingDuplicate = fmt.Errorf("binding already exists for credential/destination")
+
+// ErrBindingValidation wraps all client-facing validation errors raised
+// by AddRuleAndBinding and updateBindingTx (empty destination, bad port
+// range, invalid protocol, invalid env var key, invalid destination
+// glob). The API layer tests with errors.Is to return 400 for these and
+// 500 for anything else (SQL errors, transaction failures, etc). Without
+// this sentinel every store failure collapses into a 400, hiding real
+// server faults from clients.
+var ErrBindingValidation = fmt.Errorf("binding validation failed")
+
+// isBindingUniqueViolation detects the SQLite UNIQUE constraint violation
+// that indicates a duplicate binding on (credential, destination).
+func isBindingUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "UNIQUE constraint") {
+		return false
+	}
+	// The partial index name shows up in the driver error for SQLite.
+	return strings.Contains(msg, "idx_bindings_credential_destination") ||
+		(strings.Contains(msg, "bindings.credential") && strings.Contains(msg, "bindings.destination"))
+}
+
+// duplicateBindingError builds a user-facing error for a duplicate binding
+// attempt. When the existing row can be looked up, the error includes its
+// ID so the operator knows which binding to update instead. The qr may be
+// nil (no lookup) or an open *sql.Tx (lookup happens inside the same
+// transaction). It must never be the outer *sql.DB while a transaction is
+// in flight on a single-connection pool because that would deadlock.
+func duplicateBindingError(qr queryRower, credential, destination string) error {
+	if qr != nil {
+		var id int64
+		// Lookup matches the unique index, which is case-insensitive on
+		// destination (migration 000007). Using LOWER() here means that a
+		// duplicate detected on, for example, "API.example.com" can still
+		// point the caller at the existing "api.example.com" row instead
+		// of returning the anonymous fallback message below.
+		err := qr.QueryRow(
+			"SELECT id FROM bindings WHERE credential = ? AND LOWER(destination) = LOWER(?) ORDER BY id LIMIT 1",
+			credential, destination,
+		).Scan(&id)
+		if err == nil {
+			return fmt.Errorf(
+				"%w: credential %q on destination %q already exists as id %d; use \"sluice binding update %d\" to modify it",
+				ErrBindingDuplicate, credential, destination, id, id,
+			)
+		}
+	}
+	return fmt.Errorf(
+		"%w: credential %q on destination %q",
+		ErrBindingDuplicate, credential, destination,
+	)
 }
 
 // RemoveBinding deletes a binding by ID. Returns true if a row was deleted.
@@ -579,70 +726,90 @@ func (s *Store) RemoveBinding(id int64) (bool, error) {
 	return n > 0, nil
 }
 
-// BindingUpdateOpts holds optional fields for UpdateBinding. Only non-nil
-// fields are written. Nil fields are left unchanged.
+// RemoveBindingWithRuleCleanup atomically reads a binding by id, deletes it,
+// and removes the paired auto-created allow rule (matched on
+// BindingAddSourcePrefix or CredAddSourcePrefix) in a single transaction.
+// This eliminates the TOCTOU window between the ListBindings -> RemoveBinding
+// -> RemoveRuleByBindingPair sequence used by earlier code paths, where a
+// concurrent writer could update the binding's destination between snapshot
+// and delete and leave an orphaned rule pointing at the previous destination.
+//
+// Returns the credential and destination that were attached to the binding
+// (so callers can refresh env vars and log mutations), the number of paired
+// rules removed, a boolean indicating whether the binding existed, and any
+// error. When found is false the other return values are zero/empty and err
+// is nil.
+func (s *Store) RemoveBindingWithRuleCleanup(id int64) (credential, destination string, removedRules int64, envVar string, found bool, err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", "", 0, "", false, fmt.Errorf("begin transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var envVarNS sql.NullString
+	row := tx.QueryRow(
+		"SELECT credential, destination, env_var FROM bindings WHERE id = ?",
+		id,
+	)
+	if scanErr := row.Scan(&credential, &destination, &envVarNS); scanErr != nil {
+		if scanErr == sql.ErrNoRows {
+			return "", "", 0, "", false, nil
+		}
+		return "", "", 0, "", false, fmt.Errorf("load binding %d: %w", id, scanErr)
+	}
+	envVar = envVarNS.String
+
+	res, err := tx.Exec("DELETE FROM bindings WHERE id = ?", id)
+	if err != nil {
+		return "", "", 0, "", false, fmt.Errorf("delete binding %d: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// The row vanished between the SELECT and DELETE. This can only
+		// happen with concurrent writers on the same connection, which
+		// SQLite serializes, so it should not occur in practice. Treat
+		// it the same as "not found" rather than asserting.
+		return "", "", 0, "", false, nil
+	}
+
+	// Match the destination case-insensitively. Policy compilation and the
+	// bindings UNIQUE index both treat destinations as case-insensitive, so
+	// upgraded databases may still carry a paired rule whose destination
+	// differs in case from the binding. A case-sensitive delete would leave
+	// that rule orphaned.
+	res, err = tx.Exec(
+		`DELETE FROM rules
+		 WHERE LOWER(destination) = LOWER(?)
+		   AND source IN (?, ?)`,
+		destination,
+		BindingAddSourcePrefix+credential,
+		CredAddSourcePrefix+credential,
+	)
+	if err != nil {
+		return "", "", 0, "", false, fmt.Errorf("delete paired rule for binding %d: %w", id, err)
+	}
+	removedRules, _ = res.RowsAffected()
+
+	if err := tx.Commit(); err != nil {
+		return "", "", 0, "", false, fmt.Errorf("commit transaction: %w", err)
+	}
+	committed = true
+	return credential, destination, removedRules, envVar, true, nil
+}
+
+// BindingUpdateOpts holds optional fields for UpdateBindingWithRuleSync.
+// Only non-nil fields are written. Nil fields are left unchanged.
 type BindingUpdateOpts struct {
 	Destination *string
 	Ports       *[]int
 	Header      *string
 	Template    *string
 	Protocols   *[]string
-}
-
-// UpdateBinding updates a binding row. Only non-nil fields in the update
-// struct are written. Returns an error if the binding does not exist.
-func (s *Store) UpdateBinding(id int64, u BindingUpdateOpts) error {
-	var setClauses []string
-	var args []any
-	if u.Destination != nil {
-		if *u.Destination == "" {
-			return fmt.Errorf("destination cannot be empty")
-		}
-		setClauses = append(setClauses, "destination = ?")
-		args = append(args, *u.Destination)
-	}
-	if u.Ports != nil {
-		setClauses = append(setClauses, "ports = ?")
-		args = append(args, portsToJSONPtr(*u.Ports))
-	}
-	if u.Header != nil {
-		setClauses = append(setClauses, "header = ?")
-		args = append(args, nilIfEmpty(*u.Header))
-	}
-	if u.Template != nil {
-		setClauses = append(setClauses, "template = ?")
-		args = append(args, nilIfEmpty(*u.Template))
-	}
-	if u.Protocols != nil {
-		setClauses = append(setClauses, "protocols = ?")
-		args = append(args, protocolsToJSONPtr(*u.Protocols))
-	}
-	if len(setClauses) == 0 {
-		// verify the row exists even when nothing to update, so callers
-		// get a consistent not-found error.
-		var count int
-		if err := s.db.QueryRow("SELECT COUNT(*) FROM bindings WHERE id = ?", id).Scan(&count); err != nil {
-			return fmt.Errorf("check binding %d: %w", id, err)
-		}
-		if count == 0 {
-			return fmt.Errorf("binding %d not found", id)
-		}
-		return nil
-	}
-	args = append(args, id)
-	query := "UPDATE bindings SET " + strings.Join(setClauses, ", ") + " WHERE id = ?"
-	res, err := s.db.Exec(query, args...)
-	if err != nil {
-		return fmt.Errorf("update binding %d: %w", id, err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("rows affected for binding %d: %w", id, err)
-	}
-	if n == 0 {
-		return fmt.Errorf("binding %d not found", id)
-	}
-	return nil
+	EnvVar      *string
 }
 
 // ListBindings returns all bindings.
@@ -973,19 +1140,43 @@ type queryRower interface {
 	QueryRow(query string, args ...any) *sql.Row
 }
 
-// checkEnvVarUniqueWith verifies that no other binding uses the same env_var.
-// The qr parameter allows this to work both inside and outside transactions.
-func checkEnvVarUniqueWith(qr queryRower, envVar string) error {
+// checkEnvVarUniqueWith verifies that no binding belonging to a different
+// credential uses the same env_var. Multiple bindings for the same credential
+// are allowed to share one env_var because they all resolve to the same
+// phantom value (the phantom is derived from the credential name), so no
+// container injection conflict can arise. The qr parameter allows this to
+// work both inside and outside transactions.
+func checkEnvVarUniqueWith(qr queryRower, envVar, credential string) error {
 	var count int
 	err := qr.QueryRow(
-		"SELECT COUNT(*) FROM bindings WHERE env_var = ?",
-		envVar,
+		"SELECT COUNT(*) FROM bindings WHERE env_var = ? AND credential != ?",
+		envVar, credential,
 	).Scan(&count)
 	if err != nil {
 		return fmt.Errorf("check env_var uniqueness: %w", err)
 	}
 	if count > 0 {
-		return fmt.Errorf("env_var %q is already used by another binding", envVar)
+		return fmt.Errorf("env_var %q is already used by another credential's binding", envVar)
+	}
+	return nil
+}
+
+// checkEnvVarUniqueWithExcluding is like checkEnvVarUniqueWith but ignores a
+// specific binding ID. Used by UpdateBindingWithRuleSync so a binding can
+// keep its own env_var during a partial update without tripping the
+// uniqueness check. Like checkEnvVarUniqueWith, bindings that belong to the
+// same credential are excluded from the collision check.
+func checkEnvVarUniqueWithExcluding(qr queryRower, envVar, credential string, excludeID int64) error {
+	var count int
+	err := qr.QueryRow(
+		"SELECT COUNT(*) FROM bindings WHERE env_var = ? AND credential != ? AND id != ?",
+		envVar, credential, excludeID,
+	).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("check env_var uniqueness: %w", err)
+	}
+	if count > 0 {
+		return fmt.Errorf("env_var %q is already used by another credential's binding", envVar)
 	}
 	return nil
 }
@@ -1007,6 +1198,343 @@ func (s *Store) RemoveRulesBySource(source string) (int64, error) {
 		return 0, fmt.Errorf("delete rules by source: %w", err)
 	}
 	return res.RowsAffected()
+}
+
+// RemoveRuleByBindingPair deletes the auto-created allow rule paired with a
+// binding on the given credential and destination. It tries both
+// BindingAddSourcePrefix and CredAddSourcePrefix source tags (either code
+// path could have created the rule). Returns the number of rules deleted.
+// A zero return is not an error: the rule may have been removed manually.
+// The destination match is case-insensitive because policy compilation and
+// the bindings UNIQUE index both treat destinations as case-insensitive.
+// A case-sensitive delete would leave the rule orphaned when an upgraded
+// database stored the binding and rule at different cases.
+func (s *Store) RemoveRuleByBindingPair(credential, destination string) (int64, error) {
+	if credential == "" || destination == "" {
+		return 0, fmt.Errorf("credential and destination are required")
+	}
+	res, err := s.db.Exec(
+		`DELETE FROM rules
+		 WHERE LOWER(destination) = LOWER(?)
+		   AND source IN (?, ?)`,
+		destination,
+		BindingAddSourcePrefix+credential,
+		CredAddSourcePrefix+credential,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("delete paired rule: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// UpdateBindingWithRuleSync updates a binding and, when the destination
+// changes, atomically syncs the paired auto-created allow rule in the same
+// transaction. Returns the paired rule ID, a boolean indicating whether a
+// paired rule was found and updated, and any error. When the destination is
+// not changing, the rule sync is skipped and (0, false, nil) is returned for
+// the rule portion of the result. A missing binding is reported via
+// ErrBindingNotFound (use errors.Is to detect it).
+//
+// The binding read, the binding update, and the rule update all run inside
+// a single database transaction. Combined with the single-connection pool
+// that serializes writes, this eliminates the TOCTOU window between the
+// ListBindings / update / rule-update sequence used in earlier versions of
+// the code.
+func (s *Store) UpdateBindingWithRuleSync(id int64, u BindingUpdateOpts) (ruleID int64, ruleFound bool, current BindingRow, err error) {
+	// Validate the destination glob and protocol names before opening a
+	// transaction so a malformed pattern or typo is rejected with a clean
+	// error message instead of failing later inside the transaction (which
+	// surfaces as a less helpful "update binding" error).
+	if u.Destination != nil {
+		if err := validateDestinationGlob(*u.Destination); err != nil {
+			return 0, false, BindingRow{}, fmt.Errorf("%w: %s", ErrBindingValidation, err)
+		}
+	}
+	if u.Protocols != nil {
+		if err := validateProtocols(*u.Protocols, fmt.Sprintf("binding id %d", id)); err != nil {
+			return 0, false, BindingRow{}, fmt.Errorf("%w: %s", ErrBindingValidation, err)
+		}
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, false, BindingRow{}, fmt.Errorf("begin transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Load the current binding inside the transaction so the destination we
+	// read matches the one we update.
+	row := tx.QueryRow(
+		"SELECT id, destination, ports, credential, header, template, protocols, env_var, created_at FROM bindings WHERE id = ?",
+		id,
+	)
+	var b BindingRow
+	var portsStr, protocolsStr sql.NullString
+	var header, template, envVar sql.NullString
+	if scanErr := row.Scan(&b.ID, &b.Destination, &portsStr, &b.Credential, &header, &template, &protocolsStr, &envVar, &b.CreatedAt); scanErr != nil {
+		if scanErr == sql.ErrNoRows {
+			return 0, false, BindingRow{}, fmt.Errorf("%w: id %d", ErrBindingNotFound, id)
+		}
+		return 0, false, BindingRow{}, fmt.Errorf("load binding %d: %w", id, scanErr)
+	}
+	if portsStr.Valid && portsStr.String != "" {
+		if jsonErr := json.Unmarshal([]byte(portsStr.String), &b.Ports); jsonErr != nil {
+			return 0, false, BindingRow{}, fmt.Errorf("unmarshal ports for binding %d: %w", id, jsonErr)
+		}
+	}
+	if protocolsStr.Valid && protocolsStr.String != "" {
+		if jsonErr := json.Unmarshal([]byte(protocolsStr.String), &b.Protocols); jsonErr != nil {
+			return 0, false, BindingRow{}, fmt.Errorf("unmarshal protocols for binding %d: %w", id, jsonErr)
+		}
+	}
+	b.Header = header.String
+	b.Template = template.String
+	b.EnvVar = envVar.String
+
+	// Apply the update. The credential is passed in so updateBindingTx does
+	// not have to re-query the bindings table for the env_var uniqueness
+	// check or the duplicate-destination error path.
+	if err := updateBindingTx(tx, id, b.Credential, u); err != nil {
+		return 0, false, BindingRow{}, err
+	}
+
+	// If destination, ports, or protocols changed, sync the paired allow
+	// rule in the same transaction so concurrent writers cannot leave an
+	// orphan rule. Header, template, and env_var are binding-only and do
+	// not affect the paired rule.
+	destChanged := u.Destination != nil && *u.Destination != b.Destination
+	portsChanged := u.Ports != nil
+	protocolsChanged := u.Protocols != nil
+	if destChanged || portsChanged || protocolsChanged {
+		sync := pairedRuleSync{}
+		if destChanged {
+			sync.newDestination = u.Destination
+		}
+		if portsChanged {
+			sync.newPorts = u.Ports
+		}
+		if protocolsChanged {
+			sync.newProtocols = u.Protocols
+		}
+		ruleID, ruleFound, err = updatePairedRuleTx(tx, b.Credential, b.Destination, sync)
+		if err != nil {
+			return 0, false, BindingRow{}, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, false, BindingRow{}, fmt.Errorf("commit transaction: %w", err)
+	}
+	committed = true
+	return ruleID, ruleFound, b, nil
+}
+
+// updateBindingTx contains the shared UPDATE-binding logic used by
+// UpdateBindingWithRuleSync. It runs inside an existing *sql.Tx and
+// returns an error if the binding does not exist or if any field fails
+// validation. The credential is passed in by the caller (which has already
+// loaded the row) so this helper does not need to re-query the bindings
+// table for the env_var uniqueness check or the duplicate-destination
+// error path.
+func updateBindingTx(tx *sql.Tx, id int64, credential string, u BindingUpdateOpts) error {
+	// Validate protocol names up front so a typo like "htp" is rejected
+	// with a clean error before any UPDATE runs. Shares the allow list
+	// with TOML import via validateProtocols.
+	if u.Protocols != nil {
+		if err := validateProtocols(*u.Protocols, fmt.Sprintf("binding id %d", id)); err != nil {
+			return fmt.Errorf("%w: %s", ErrBindingValidation, err)
+		}
+	}
+	// Port range is validated before building the SET clause so a bad
+	// value does not reach the DB; matches AddRuleAndBinding.
+	if u.Ports != nil {
+		for _, p := range *u.Ports {
+			if p < 1 || p > 65535 {
+				return fmt.Errorf("%w: invalid binding port %d (must be 1-65535)", ErrBindingValidation, p)
+			}
+		}
+	}
+	var setClauses []string
+	var args []any
+	if u.Destination != nil {
+		if err := validateDestinationGlob(*u.Destination); err != nil {
+			return fmt.Errorf("%w: %s", ErrBindingValidation, err)
+		}
+		setClauses = append(setClauses, "destination = ?")
+		args = append(args, *u.Destination)
+	}
+	if u.Ports != nil {
+		setClauses = append(setClauses, "ports = ?")
+		args = append(args, portsToJSONPtr(*u.Ports))
+	}
+	if u.Header != nil {
+		setClauses = append(setClauses, "header = ?")
+		args = append(args, nilIfEmpty(*u.Header))
+	}
+	if u.Template != nil {
+		setClauses = append(setClauses, "template = ?")
+		args = append(args, nilIfEmpty(*u.Template))
+	}
+	if u.Protocols != nil {
+		setClauses = append(setClauses, "protocols = ?")
+		args = append(args, protocolsToJSONPtr(*u.Protocols))
+	}
+	if u.EnvVar != nil {
+		if *u.EnvVar != "" {
+			if err := container.ValidateEnvVarKey(*u.EnvVar); err != nil {
+				return fmt.Errorf("%w: %s", ErrBindingValidation, err)
+			}
+			// The uniqueness check excludes this binding so other bindings
+			// of the same credential can share an env_var (they resolve to
+			// the same phantom value).
+			if err := checkEnvVarUniqueWithExcluding(tx, *u.EnvVar, credential, id); err != nil {
+				return fmt.Errorf("%w: %s", ErrBindingValidation, err)
+			}
+		}
+		setClauses = append(setClauses, "env_var = ?")
+		args = append(args, nilIfEmpty(*u.EnvVar))
+	}
+	if len(setClauses) == 0 {
+		// Empty update is treated as a no-op once the caller has confirmed
+		// the row exists. UpdateBindingWithRuleSync already loaded the row
+		// before calling us, so we know the binding exists at this point.
+		return nil
+	}
+	args = append(args, id)
+	query := "UPDATE bindings SET " + strings.Join(setClauses, ", ") + " WHERE id = ?"
+	res, err := tx.Exec(query, args...)
+	if err != nil {
+		if isBindingUniqueViolation(err) && u.Destination != nil {
+			return duplicateBindingError(tx, credential, *u.Destination)
+		}
+		return fmt.Errorf("update binding %d: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected for binding %d: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: id %d", ErrBindingNotFound, id)
+	}
+	return nil
+}
+
+// pairedRuleSync describes the fields a caller wants to propagate from a
+// binding update to the paired auto-created allow rule. Non-nil fields are
+// written to the rule, nil fields are left untouched. newDestination is also
+// used to locate the paired rule (together with the old destination) so
+// updates stay idempotent when callers pass only ports/protocols changes.
+type pairedRuleSync struct {
+	newDestination *string
+	newPorts       *[]int
+	newProtocols   *[]string
+}
+
+// updatePairedRuleTx finds the auto-created allow rules paired with a
+// binding (tagged "binding-add:<credential>" or "cred-add:<credential>")
+// at the old destination and rewrites the requested fields. Destination,
+// ports, and protocols are propagated to each matching rule when present
+// in sync. Header, template, and env_var are binding-only and are not
+// handled here. It runs inside an existing *sql.Tx so the rule update
+// joins the binding update in the same serialized write, avoiding any
+// TOCTOU window.
+//
+// Both source prefixes are walked even when the first query returns a
+// match. A credential may carry an auto-created rule from its initial
+// "cred add --destination" (cred-add:<cred>) alongside a later
+// "binding add" against the same destination (binding-add:<cred>).
+// Updating only one leaves the other stale, so we update every matching
+// row and return the id of the first match (or 0 if nothing matched)
+// plus a bool indicating whether any rule was found. The caller uses
+// the returned id only for logging.
+func updatePairedRuleTx(tx *sql.Tx, credential, oldDestination string, sync pairedRuleSync) (int64, bool, error) {
+	if sync.newDestination != nil && *sync.newDestination == "" {
+		return 0, false, fmt.Errorf("%w: new destination cannot be empty", ErrBindingValidation)
+	}
+	if sync.newPorts != nil {
+		for _, p := range *sync.newPorts {
+			if p < 1 || p > 65535 {
+				return 0, false, fmt.Errorf("%w: invalid port %d (must be 1-65535)", ErrBindingValidation, p)
+			}
+		}
+	}
+
+	// Collect ids across both source prefixes. A credential may legitimately
+	// own rules tagged with both prefixes at the same destination, so we
+	// cannot stop after the first hit. Iterating with rows.Next() would keep
+	// the read cursor open across the UPDATE below; buffer into a slice
+	// instead so the UPDATE does not contend with an open query.
+	var ruleIDs []int64
+	for _, src := range []string{
+		BindingAddSourcePrefix + credential,
+		CredAddSourcePrefix + credential,
+	} {
+		// Match destinations case-insensitively. Policy compilation and
+		// the bindings UNIQUE index both treat destinations as
+		// case-insensitive, so upgraded databases may still carry a
+		// paired rule whose destination differs in case from the binding.
+		// A case-sensitive lookup would miss that rule and leave it
+		// orphaned after an update.
+		rows, err := tx.Query(
+			"SELECT id FROM rules WHERE source = ? AND LOWER(destination) = LOWER(?) ORDER BY id",
+			src, oldDestination,
+		)
+		if err != nil {
+			return 0, false, fmt.Errorf("find rule by source: %w", err)
+		}
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return 0, false, fmt.Errorf("scan rule id: %w", err)
+			}
+			ruleIDs = append(ruleIDs, id)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return 0, false, fmt.Errorf("iterate rule ids: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return 0, false, fmt.Errorf("close rule query: %w", err)
+		}
+	}
+
+	if len(ruleIDs) == 0 {
+		return 0, false, nil
+	}
+
+	var setClauses []string
+	var baseArgs []any
+	if sync.newDestination != nil {
+		setClauses = append(setClauses, "destination = ?")
+		baseArgs = append(baseArgs, *sync.newDestination)
+	}
+	if sync.newPorts != nil {
+		setClauses = append(setClauses, "ports = ?")
+		baseArgs = append(baseArgs, portsToJSONPtr(*sync.newPorts))
+	}
+	if sync.newProtocols != nil {
+		setClauses = append(setClauses, "protocols = ?")
+		baseArgs = append(baseArgs, protocolsToJSONPtr(*sync.newProtocols))
+	}
+	if len(setClauses) == 0 {
+		// Nothing to propagate, but we still report the match so the caller
+		// can log a clean "paired rule found" path instead of "no rule".
+		return ruleIDs[0], true, nil
+	}
+
+	query := "UPDATE rules SET " + strings.Join(setClauses, ", ") + " WHERE id = ?"
+	for _, id := range ruleIDs {
+		args := append(append([]any(nil), baseArgs...), id)
+		if _, err := tx.Exec(query, args...); err != nil {
+			return 0, false, fmt.Errorf("update paired rule %d: %w", id, err)
+		}
+	}
+	return ruleIDs[0], true, nil
 }
 
 // RemoveRulesByName deletes all rules matching a name.
@@ -1044,16 +1572,44 @@ func (s *Store) AddRuleAndBinding(
 	credential string, bindingOpts BindingOpts,
 ) (ruleID, bindingID int64, err error) {
 	if verdict == "" {
-		return 0, 0, fmt.Errorf("verdict is required")
+		return 0, 0, fmt.Errorf("%w: verdict is required", ErrBindingValidation)
 	}
 	if !validVerdict(verdict) {
-		return 0, 0, fmt.Errorf("invalid verdict %q: must be allow, deny, ask, or redact", verdict)
+		return 0, 0, fmt.Errorf("%w: invalid verdict %q: must be allow, deny, ask, or redact", ErrBindingValidation, verdict)
 	}
 	if ruleOpts.Destination == "" {
-		return 0, 0, fmt.Errorf("destination is required for rule+binding")
+		return 0, 0, fmt.Errorf("%w: destination is required for rule+binding", ErrBindingValidation)
+	}
+	if err := validateDestinationGlob(ruleOpts.Destination); err != nil {
+		return 0, 0, fmt.Errorf("%w: %s", ErrBindingValidation, err)
 	}
 	if credential == "" {
-		return 0, 0, fmt.Errorf("credential name is required")
+		return 0, 0, fmt.Errorf("%w: credential name is required", ErrBindingValidation)
+	}
+	// Validate port ranges up front so bad input is rejected before the
+	// insert. AddRule performs the same 1-65535 check for plain rule adds;
+	// without this here, out-of-range ports only fail later at engine
+	// recompile time, which the API layer logs but does not surface.
+	for _, p := range ruleOpts.Ports {
+		if p < 1 || p > 65535 {
+			return 0, 0, fmt.Errorf("%w: invalid rule port %d (must be 1-65535)", ErrBindingValidation, p)
+		}
+	}
+	for _, p := range bindingOpts.Ports {
+		if p < 1 || p > 65535 {
+			return 0, 0, fmt.Errorf("%w: invalid binding port %d (must be 1-65535)", ErrBindingValidation, p)
+		}
+	}
+	// Validate protocol names on both the rule and the binding before
+	// touching the database. Without this, a typo like "htp" would be
+	// stored silently and only surface as a protocol mismatch at
+	// connection time. Share the allow list with TOML import via
+	// validateProtocols.
+	if err := validateProtocols(ruleOpts.Protocols, fmt.Sprintf("rule %q", ruleOpts.Destination)); err != nil {
+		return 0, 0, fmt.Errorf("%w: %s", ErrBindingValidation, err)
+	}
+	if err := validateProtocols(bindingOpts.Protocols, fmt.Sprintf("binding %q->%q", ruleOpts.Destination, credential)); err != nil {
+		return 0, 0, fmt.Errorf("%w: %s", ErrBindingValidation, err)
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -1085,10 +1641,10 @@ func (s *Store) AddRuleAndBinding(
 	// avoid deadlock with the single-connection pool).
 	if bindingOpts.EnvVar != "" {
 		if valErr := container.ValidateEnvVarKey(bindingOpts.EnvVar); valErr != nil {
-			return 0, 0, valErr
+			return 0, 0, fmt.Errorf("%w: %s", ErrBindingValidation, valErr)
 		}
-		if uniqueErr := checkEnvVarUniqueWith(tx, bindingOpts.EnvVar); uniqueErr != nil {
-			return 0, 0, uniqueErr
+		if uniqueErr := checkEnvVarUniqueWith(tx, bindingOpts.EnvVar, credential); uniqueErr != nil {
+			return 0, 0, fmt.Errorf("%w: %s", ErrBindingValidation, uniqueErr)
 		}
 	}
 
@@ -1102,6 +1658,11 @@ func (s *Store) AddRuleAndBinding(
 		nilIfEmpty(bindingOpts.EnvVar),
 	)
 	if err != nil {
+		if isBindingUniqueViolation(err) {
+			// Query via the same transaction because the pool holds one
+			// connection and the outer tx still owns it.
+			return 0, 0, duplicateBindingError(tx, credential, ruleOpts.Destination)
+		}
 		return 0, 0, fmt.Errorf("insert binding: %w", err)
 	}
 	bindingID, _ = res.LastInsertId()
@@ -1199,6 +1760,59 @@ func (s *Store) RemoveCredentialMeta(name string) (bool, error) {
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+// RemoveCredentialMetaCAS deletes a credential metadata row only when its
+// current cred_type and token_url match the supplied expected values. It is
+// the compare-and-swap counterpart to RemoveCredentialMeta and is used during
+// rollback after a failed cred add path: a concurrent writer may have
+// upserted the row with different values in between our insert and our
+// rollback, and deleting blindly would wipe their state.
+//
+// Returned values:
+//   - removed=true, noConcurrent=true: the row matched and was deleted
+//   - removed=false, noConcurrent=true: the row was already gone
+//   - removed=false, noConcurrent=false: the row exists but was modified by
+//     a concurrent writer. The caller should log a warning and leave it alone
+//   - err is non-nil only on a real I/O failure
+func (s *Store) RemoveCredentialMetaCAS(name, expectedType, expectedTokenURL string) (removed, noConcurrent bool, err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, false, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var credType string
+	var tokenURL sql.NullString
+	row := tx.QueryRow("SELECT cred_type, token_url FROM credential_meta WHERE name = ?", name)
+	if scanErr := row.Scan(&credType, &tokenURL); scanErr != nil {
+		if scanErr == sql.ErrNoRows {
+			// Row is already gone. Treat this as a benign no-op: the caller
+			// was going to delete it anyway, so there is nothing left to
+			// protect.
+			if commitErr := tx.Commit(); commitErr != nil {
+				return false, true, fmt.Errorf("commit: %w", commitErr)
+			}
+			return false, true, nil
+		}
+		return false, false, fmt.Errorf("read credential meta for CAS: %w", scanErr)
+	}
+
+	if credType != expectedType || tokenURL.String != expectedTokenURL {
+		// Concurrent writer has overwritten the row. Leave it alone.
+		return false, false, nil
+	}
+
+	res, err := tx.Exec("DELETE FROM credential_meta WHERE name = ? AND cred_type = ? AND COALESCE(token_url, '') = ?",
+		name, expectedType, expectedTokenURL)
+	if err != nil {
+		return false, false, fmt.Errorf("delete credential meta: %w", err)
+	}
+	if commitErr := tx.Commit(); commitErr != nil {
+		return false, false, fmt.Errorf("commit: %w", commitErr)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, true, nil
 }
 
 // --- Helpers ---

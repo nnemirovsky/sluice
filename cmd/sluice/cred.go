@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"flag"
 	"fmt"
 	"log"
@@ -17,12 +16,6 @@ import (
 	"github.com/nemirovsky/sluice/internal/vault"
 	"golang.org/x/term"
 )
-
-// credAddSourcePrefix is the source tag prefix for rules auto-created by
-// "sluice cred add --destination". The full source is "cred-add:<credential_name>"
-// so that removing one credential does not delete rules belonging to another
-// credential that shares the same destination.
-const credAddSourcePrefix = "cred-add:"
 
 func handleCredCommand(args []string) error {
 	if len(args) == 0 {
@@ -121,16 +114,20 @@ func openVaultStore(dbPath string) (*vault.Store, error) {
 }
 
 func handleCredAdd(args []string) error {
-	// Reorder args so the positional name is always at the end.
-	// Go's flag package stops at the first non-flag argument, so
-	// "cred add myname --type oauth" silently ignores --type.
-	// We move the name to the end: "cred add --type oauth myname".
-	args = reorderPositionalLast(args)
-
 	fs := flag.NewFlagSet("cred add", flag.ContinueOnError)
 	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	var destinations []string
+	seenDest := make(map[string]bool)
 	fs.Func("destination", "auto-create allow rule and binding for this destination (repeatable)", func(s string) error {
+		// De-duplicate destinations so "--destination foo --destination foo"
+		// does not try to create two bindings on the same (cred, dest) pair.
+		// The partial UNIQUE index would otherwise reject the second insert
+		// with a duplicate error after the first one succeeded, leaving the
+		// credential in a partially-applied state for the caller to untangle.
+		if seenDest[s] {
+			return nil
+		}
+		seenDest[s] = true
 		destinations = append(destinations, s)
 		return nil
 	})
@@ -140,7 +137,12 @@ func handleCredAdd(args []string) error {
 	credType := fs.String("type", "static", "credential type: static or oauth")
 	tokenURL := fs.String("token-url", "", "OAuth token endpoint URL (required when type=oauth)")
 	envVar := fs.String("env-var", "", "environment variable name for phantom injection (e.g. OPENAI_API_KEY)")
-	if err := fs.Parse(args); err != nil {
+	// Reorder args so the positional name is always last. Go's flag package
+	// stops at the first non-flag argument, so "cred add myname --type oauth"
+	// would otherwise silently ignore --type. Using the shared helper keeps
+	// this logic in sync with the binding/mcp subcommands and avoids a stale
+	// hardcoded value-flag list.
+	if err := fs.Parse(reorderFlagsBeforePositional(args, fs)); err != nil {
 		return err
 	}
 
@@ -212,18 +214,10 @@ func handleCredAdd(args []string) error {
 			}
 		}
 
-		if *portsStr != "" {
-			for _, ps := range strings.Split(*portsStr, ",") {
-				ps = strings.TrimSpace(ps)
-				p, err := strconv.Atoi(ps)
-				if err != nil {
-					return fmt.Errorf("invalid port %q: %w", ps, err)
-				}
-				if p < 1 || p > 65535 {
-					return fmt.Errorf("port %d out of range (1-65535)", p)
-				}
-				ports = append(ports, p)
-			}
+		var err error
+		ports, err = parsePortsList(*portsStr)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -257,20 +251,31 @@ func handleCredAdd(args []string) error {
 		return fmt.Errorf("add credential: %w", addErr)
 	}
 
-	// rollbackVault restores or removes the vault credential on DB failure.
+	// rollbackVault restores or removes the vault credential on DB failure
+	// using compare-and-swap. See (*vault.Store).RollbackAdd for semantics.
 	rollbackVault := func() {
-		currentCiphertext, casErr := vs.ReadRawCredential(name)
-		concurrentWrite := casErr != nil || !bytes.Equal(currentCiphertext, ourCiphertext)
-		if concurrentWrite {
+		owned, rbErr := vs.RollbackAdd(name, prevCiphertext, ourCiphertext)
+		if !owned {
 			log.Printf("warning: credential %q was modified concurrently; skipping vault rollback", name)
-		} else if prevCiphertext != nil {
-			if restoreErr := vs.WriteRawCredential(name, prevCiphertext); restoreErr != nil {
-				log.Printf("warning: failed to restore previous credential %q after DB error: %v", name, restoreErr)
-			}
-		} else {
-			if rmErr := vs.Remove(name); rmErr != nil {
-				log.Printf("warning: failed to clean up vault credential %q after DB error: %v", name, rmErr)
-			}
+			return
+		}
+		if rbErr != nil {
+			log.Printf("warning: failed to roll back vault credential %q after DB error: %v", name, rbErr)
+		}
+	}
+
+	// rollbackCredentialMeta removes the credential_meta row we just inserted
+	// using compare-and-swap on (cred_type, token_url). If a concurrent writer
+	// has already overwritten the row with different values we leave their
+	// state alone and log a warning so operators can investigate.
+	rollbackCredentialMeta := func() {
+		_, noConcurrent, rmErr := db.RemoveCredentialMetaCAS(name, *credType, *tokenURL)
+		if rmErr != nil {
+			log.Printf("warning: failed to remove credential meta for %q after rollback: %v", name, rmErr)
+			return
+		}
+		if !noConcurrent {
+			log.Printf("warning: credential meta %q was modified concurrently; skipping meta rollback", name)
 		}
 	}
 
@@ -287,20 +292,20 @@ func handleCredAdd(args []string) error {
 	// credential still matches what we wrote, avoiding clobber of concurrent
 	// writes.
 	if len(destinations) > 0 {
-		type created struct {
+		type addedRuleBinding struct {
 			destination string
 			ruleID      int64
 			bindingID   int64
 		}
-		var addedEntries []created
+		var addedEntries []addedRuleBinding
 
 		rollbackDB := func() {
-			for _, c := range addedEntries {
-				if _, rmErr := db.RemoveBinding(c.bindingID); rmErr != nil {
-					log.Printf("warning: failed to remove binding [%d] during rollback: %v", c.bindingID, rmErr)
+			for _, entry := range addedEntries {
+				if _, rmErr := db.RemoveBinding(entry.bindingID); rmErr != nil {
+					log.Printf("warning: failed to remove binding [%d] during rollback: %v", entry.bindingID, rmErr)
 				}
-				if _, rmErr := db.RemoveRule(c.ruleID); rmErr != nil {
-					log.Printf("warning: failed to remove rule [%d] during rollback: %v", c.ruleID, rmErr)
+				if _, rmErr := db.RemoveRule(entry.ruleID); rmErr != nil {
+					log.Printf("warning: failed to remove rule [%d] during rollback: %v", entry.ruleID, rmErr)
 				}
 			}
 		}
@@ -312,7 +317,7 @@ func handleCredAdd(args []string) error {
 					Destination: dest,
 					Ports:       ports,
 					Name:        fmt.Sprintf("auto-created for credential %q", name),
-					Source:      credAddSourcePrefix + name,
+					Source:      store.CredAddSourcePrefix + name,
 				},
 				name,
 				store.BindingOpts{
@@ -324,20 +329,19 @@ func handleCredAdd(args []string) error {
 			)
 			if addErr != nil {
 				rollbackDB()
-				// Also clean up credential_meta if it was just created.
-				if _, rmErr := db.RemoveCredentialMeta(name); rmErr != nil {
-					log.Printf("warning: failed to remove credential meta for %q after rule/binding error: %v", name, rmErr)
-				}
+				// Also clean up credential_meta with CAS so a concurrent
+				// writer that overwrote our row is not clobbered.
+				rollbackCredentialMeta()
 				rollbackVault()
 				return fmt.Errorf("add rule and binding for %q: %w", dest, addErr)
 			}
-			addedEntries = append(addedEntries, created{destination: dest, ruleID: ruleID, bindingID: bindingID})
+			addedEntries = append(addedEntries, addedRuleBinding{destination: dest, ruleID: ruleID, bindingID: bindingID})
 		}
 
 		fmt.Printf("credential %q added (type: %s)\n", name, *credType)
-		for _, c := range addedEntries {
-			fmt.Printf("added allow rule [%d] for %s\n", c.ruleID, c.destination)
-			fmt.Printf("added binding [%d] %s -> %s\n", c.bindingID, c.destination, name)
+		for _, entry := range addedEntries {
+			fmt.Printf("added allow rule [%d] for %s\n", entry.ruleID, entry.destination)
+			fmt.Printf("added binding [%d] %s -> %s\n", entry.bindingID, entry.destination, name)
 		}
 	} else {
 		fmt.Printf("credential %q added (type: %s)\n", name, *credType)
@@ -375,7 +379,26 @@ func readStaticSecretInput() ([]byte, error) {
 // (piped input), it expects one or two lines: access token, then optional
 // refresh token.
 func readOAuthCredentialInput(tokenURL string) (*vault.OAuthCredential, error) {
+	return readOAuthCredentialForUpdate(tokenURL, "", false)
+}
+
+// readOAuthCredentialForUpdate reads an access token and optional refresh
+// token from terminal or stdin. When preserveExisting is true, an empty
+// response for the refresh token means "keep the existing refresh token"
+// rather than "clear it".
+//
+// Terminal mode:
+//   - Enter access token (required).
+//   - Enter refresh token (empty means preserve existing when preserveExisting,
+//     otherwise skip/clear).
+//
+// Stdin (piped) mode:
+//   - Line 1: access token.
+//   - Line 2 (optional): refresh token. Absence means preserve existing when
+//     preserveExisting, otherwise leave empty.
+func readOAuthCredentialForUpdate(tokenURL, existingRefreshToken string, preserveExisting bool) (*vault.OAuthCredential, error) {
 	var accessToken, refreshToken string
+	refreshProvided := false
 
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		fmt.Print("Enter access token: ")
@@ -386,13 +409,17 @@ func readOAuthCredentialInput(tokenURL string) (*vault.OAuthCredential, error) {
 		}
 		accessToken = string(at)
 
-		fmt.Print("Enter refresh token (press Enter to skip): ")
+		// Single prompt works for both the add path (no existing token, so
+		// "keep current" is effectively "leave empty") and the update path
+		// (preserveExisting=true actually keeps the stored refresh token).
+		fmt.Print("Enter refresh token (press Enter to keep current): ")
 		rt, err := term.ReadPassword(int(os.Stdin.Fd()))
 		fmt.Println()
 		if err != nil {
 			return nil, fmt.Errorf("read refresh token: %w", err)
 		}
 		refreshToken = string(rt)
+		refreshProvided = refreshToken != ""
 	} else {
 		scanner := bufio.NewScanner(os.Stdin)
 		if !scanner.Scan() {
@@ -401,11 +428,19 @@ func readOAuthCredentialInput(tokenURL string) (*vault.OAuthCredential, error) {
 		accessToken = strings.TrimRight(scanner.Text(), "\r\n")
 		if scanner.Scan() {
 			refreshToken = strings.TrimRight(scanner.Text(), "\r\n")
+			refreshProvided = true
 		}
 	}
 
 	if accessToken == "" {
 		return nil, fmt.Errorf("access token is required for oauth credentials")
+	}
+
+	// Preserve the existing refresh token when the user did not explicitly
+	// provide a new one. In stdin mode "did not provide" means only one line
+	// was piped; in terminal mode it means the second prompt was empty.
+	if preserveExisting && !refreshProvided {
+		refreshToken = existingRefreshToken
 	}
 
 	cred := &vault.OAuthCredential{
@@ -534,48 +569,56 @@ func handleCredRemove(args []string) error {
 		fmt.Printf("credential %q removed\n", name)
 	}
 
-	// Clean up associated bindings and auto-created rules.
-	// Only open the store if the DB file exists to avoid creating it as a side effect.
-	dbExists := false
-	if _, statErr := os.Stat(*dbPath); statErr == nil {
-		dbExists = true
-	} else if !os.IsNotExist(statErr) {
-		log.Printf("warning: cannot access database %q for cleanup: %v (stale rules/bindings may remain)", *dbPath, statErr)
+	// Clean up associated bindings and auto-created rules. Only open the
+	// store if the DB file exists to avoid creating it as a side effect of
+	// a credential removal.
+	if _, statErr := os.Stat(*dbPath); statErr != nil {
+		if !os.IsNotExist(statErr) {
+			log.Printf("warning: cannot access database %q for cleanup: %v (stale rules/bindings may remain)", *dbPath, statErr)
+		}
+		return nil
 	}
-	var db *store.Store
-	var dbErr error
-	if dbExists {
-		db, dbErr = store.New(*dbPath)
-	} else {
-		dbErr = fmt.Errorf("database file not found or inaccessible")
-	}
-	if dbErr != nil && dbExists {
-		log.Printf("warning: could not open database %q for cleanup: %v (stale rules/bindings may remain)", *dbPath, dbErr)
-	}
-	if dbErr == nil {
-		defer func() { _ = db.Close() }()
 
-		credSource := credAddSourcePrefix + name
-		n, rmErr := db.RemoveRulesBySource(credSource)
+	db, err := store.New(*dbPath)
+	if err != nil {
+		log.Printf("warning: could not open database %q for cleanup: %v (stale rules/bindings may remain)", *dbPath, err)
+		return nil
+	}
+	defer func() { _ = db.Close() }()
+
+	// Remove rules tagged either by "sluice cred add --destination"
+	// (cred-add:<name>) or by "sluice binding add" (binding-add:<name>).
+	// Both paths may have produced rules associated with this credential,
+	// and failing to clean up either set leaves orphan allow rules in
+	// the store.
+	var total int64
+	for _, src := range []string{
+		store.CredAddSourcePrefix + name,
+		store.BindingAddSourcePrefix + name,
+	} {
+		n, rmErr := db.RemoveRulesBySource(src)
 		if rmErr != nil {
-			log.Printf("warning: failed to remove rules for credential %q: %v", name, rmErr)
-		} else if n > 0 {
-			fmt.Printf("removed %d auto-created rule(s) for credential %q\n", n, name)
+			log.Printf("warning: failed to remove rules with source %q for credential %q: %v", src, name, rmErr)
+			continue
 		}
-		removed, rmBindErr := db.RemoveBindingsByCredential(name)
-		if rmBindErr != nil {
-			log.Printf("warning: failed to remove bindings for %q: %v", name, rmBindErr)
-		} else if removed > 0 {
-			fmt.Printf("removed %d binding(s) for %q\n", removed, name)
-		}
+		total += n
+	}
+	if total > 0 {
+		fmt.Printf("removed %d auto-created rule(s) for credential %q\n", total, name)
+	}
+	removed, rmBindErr := db.RemoveBindingsByCredential(name)
+	if rmBindErr != nil {
+		log.Printf("warning: failed to remove bindings for %q: %v", name, rmBindErr)
+	} else if removed > 0 {
+		fmt.Printf("removed %d binding(s) for %q\n", removed, name)
+	}
 
-		// Remove credential metadata (type, token_url).
-		metaDeleted, rmMetaErr := db.RemoveCredentialMeta(name)
-		if rmMetaErr != nil {
-			log.Printf("warning: failed to remove credential meta for %q: %v", name, rmMetaErr)
-		} else if metaDeleted {
-			fmt.Printf("removed credential metadata for %q\n", name)
-		}
+	// Remove credential metadata (type, token_url).
+	metaDeleted, rmMetaErr := db.RemoveCredentialMeta(name)
+	if rmMetaErr != nil {
+		log.Printf("warning: failed to remove credential meta for %q: %v", name, rmMetaErr)
+	} else if metaDeleted {
+		fmt.Printf("removed credential metadata for %q\n", name)
 	}
 	return nil
 }
@@ -590,13 +633,11 @@ func handleCredRemove(args []string) error {
 // name, they do not need to be regenerated when only the value changes.
 // The proxy picks up the new value on the next request or SIGHUP.
 func handleCredUpdate(args []string) error {
-	// Reorder args so the positional name is always at the end, matching
-	// the pattern used by "cred add".
-	args = reorderPositionalLast(args)
-
 	fs := flag.NewFlagSet("cred update", flag.ContinueOnError)
 	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
-	if err := fs.Parse(args); err != nil {
+	// Same name-before-flags convention as "cred add": use the shared
+	// reorderFlagsBeforePositional helper.
+	if err := fs.Parse(reorderFlagsBeforePositional(args, fs)); err != nil {
 		return err
 	}
 
@@ -627,15 +668,44 @@ func handleCredUpdate(args []string) error {
 		return fmt.Errorf("credential %q not found", name)
 	}
 
-	// Read the existing credential to detect whether it is OAuth. We need
-	// the token URL from the existing blob so we can rebuild the JSON with
-	// new tokens but the same endpoint. The value itself is never shown.
+	// Determine credential type from credential_meta (authoritative source).
+	// Using vault.IsOAuth on the stored bytes alone would misclassify a
+	// static credential whose value happens to be JSON matching the OAuth
+	// shape. We only fall back to payload-shape detection for legacy bare
+	// credentials that have no credential_meta row (pre-migration 000002).
+	var credMeta *store.CredentialMeta
+	if _, statErr := os.Stat(*dbPath); statErr == nil {
+		db, dbErr := store.New(*dbPath)
+		if dbErr != nil {
+			return fmt.Errorf("open store %s: %w", *dbPath, dbErr)
+		}
+		m, metaErr := db.GetCredentialMeta(name)
+		_ = db.Close()
+		if metaErr != nil {
+			return fmt.Errorf("read credential metadata: %w", metaErr)
+		}
+		credMeta = m
+	}
+
+	// Read the existing credential. For OAuth we need the token URL from the
+	// existing blob so we can rebuild the JSON with new tokens but the same
+	// endpoint. We also preserve the existing refresh token so an update
+	// that only supplies a new access token does not silently clear refresh.
+	// The value itself is never shown to the user. The existing secret bytes
+	// are released as soon as we have extracted the fields we need.
 	existing, err := vs.Get(name)
 	if err != nil {
 		return fmt.Errorf("read existing credential: %w", err)
 	}
-	isOAuth := vault.IsOAuth(existing.Bytes())
-	var existingTokenURL string
+	var isOAuth bool
+	switch {
+	case credMeta != nil:
+		isOAuth = credMeta.CredType == "oauth"
+	default:
+		// Legacy row with no credential_meta. Fall back to payload shape.
+		isOAuth = vault.IsOAuth(existing.Bytes())
+	}
+	var existingTokenURL, existingRefreshToken string
 	if isOAuth {
 		parsed, parseErr := vault.ParseOAuth(existing.Bytes())
 		if parseErr != nil {
@@ -643,14 +713,17 @@ func handleCredUpdate(args []string) error {
 			return fmt.Errorf("parse existing oauth credential: %w", parseErr)
 		}
 		existingTokenURL = parsed.TokenURL
+		existingRefreshToken = parsed.RefreshToken
 	}
 	existing.Release()
 
 	// Prompt for the new value(s). Reuses the same helpers as "cred add"
-	// so terminal and piped-stdin input work identically.
+	// so terminal and piped-stdin input work identically. For OAuth we use
+	// the preserve-existing variant so pressing Enter (terminal) or
+	// omitting the second line (stdin) keeps the stored refresh token.
 	var secret []byte
 	if isOAuth {
-		oauthCred, readErr := readOAuthCredentialInput(existingTokenURL)
+		oauthCred, readErr := readOAuthCredentialForUpdate(existingTokenURL, existingRefreshToken, true)
 		if readErr != nil {
 			return readErr
 		}
@@ -683,50 +756,4 @@ func handleCredUpdate(args []string) error {
 	}
 	fmt.Printf("credential %q updated (type: %s)\n", name, credType)
 	return nil
-}
-
-// reorderPositionalLast moves the first positional (non-flag) argument to the
-// end of the slice so Go's flag package sees all flags before stopping at the
-// positional. Flags and their values (e.g. "--db path") are kept in order.
-// This lets users write "cred add myname --type oauth" or
-// "cred add --type oauth myname" interchangeably.
-func reorderPositionalLast(args []string) []string {
-	// Known flags that consume the next argument as a value.
-	valueFlags := map[string]bool{
-		"-db": true, "--db": true,
-		"-destination": true, "--destination": true,
-		"-ports": true, "--ports": true,
-		"-header": true, "--header": true,
-		"-template": true, "--template": true,
-		"-type": true, "--type": true,
-		"-token-url": true, "--token-url": true,
-		"-env-var": true, "--env-var": true,
-	}
-
-	var positional string
-	var reordered []string
-	skip := false
-	for i, a := range args {
-		if skip {
-			skip = false
-			reordered = append(reordered, a)
-			continue
-		}
-		if strings.HasPrefix(a, "-") {
-			reordered = append(reordered, a)
-			if !strings.Contains(a, "=") && valueFlags[a] && i+1 < len(args) {
-				skip = true
-			}
-			continue
-		}
-		if positional == "" {
-			positional = a
-		} else {
-			reordered = append(reordered, a)
-		}
-	}
-	if positional != "" {
-		reordered = append(reordered, positional)
-	}
-	return reordered
 }

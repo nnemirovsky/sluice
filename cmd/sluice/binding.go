@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"sort"
@@ -10,11 +11,6 @@ import (
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 )
-
-// bindingAddSourcePrefix is the source tag prefix for rules auto-created by
-// "sluice binding add". Mirrors credAddSourcePrefix so that rules created as
-// part of a binding add are easy to identify and clean up.
-const bindingAddSourcePrefix = "binding-add:"
 
 func handleBindingCommand(args []string) error {
 	if len(args) == 0 {
@@ -60,19 +56,9 @@ func handleBindingAdd(args []string) error {
 		return fmt.Errorf("invalid destination pattern %q: %w", *destination, err)
 	}
 
-	var ports []int
-	if *portsStr != "" {
-		for _, ps := range strings.Split(*portsStr, ",") {
-			ps = strings.TrimSpace(ps)
-			p, err := strconv.Atoi(ps)
-			if err != nil {
-				return fmt.Errorf("invalid port %q: %w", ps, err)
-			}
-			if p < 1 || p > 65535 {
-				return fmt.Errorf("port %d out of range (1-65535)", p)
-			}
-			ports = append(ports, p)
-		}
+	ports, err := parsePortsList(*portsStr)
+	if err != nil {
+		return err
 	}
 
 	db, err := store.New(*dbPath)
@@ -83,14 +69,18 @@ func handleBindingAdd(args []string) error {
 
 	// Create both the allow rule and the binding atomically, matching the
 	// behavior of "sluice cred add --destination". The rule source is tagged
-	// with bindingAddSourcePrefix+credential so cleanup can find it later.
+	// with store.BindingAddSourcePrefix+credential so cleanup can find it
+	// later. The partial UNIQUE index on bindings(credential, destination)
+	// rejects duplicates across all writers. A duplicate returns
+	// store.ErrBindingDuplicate which we translate into the CLI's friendlier
+	// message including the existing binding id.
 	ruleID, bindingID, err := db.AddRuleAndBinding(
 		"allow",
 		store.RuleOpts{
 			Destination: *destination,
 			Ports:       ports,
 			Name:        fmt.Sprintf("auto-created for binding on credential %q", credential),
-			Source:      bindingAddSourcePrefix + credential,
+			Source:      store.BindingAddSourcePrefix + credential,
 		},
 		credential,
 		store.BindingOpts{
@@ -101,6 +91,9 @@ func handleBindingAdd(args []string) error {
 		},
 	)
 	if err != nil {
+		if errors.Is(err, store.ErrBindingDuplicate) {
+			return err
+		}
 		return fmt.Errorf("add rule and binding: %w", err)
 	}
 	fmt.Printf("added allow rule [%d] for %s\n", ruleID, *destination)
@@ -180,12 +173,14 @@ func handleBindingUpdate(args []string) error {
 	portsStr := fs.String("ports", "", "new comma-separated port list (empty string to clear)")
 	header := fs.String("header", "", "new header (empty string to clear)")
 	template := fs.String("template", "", "new template (empty string to clear)")
+	protocolsStr := fs.String("protocols", "", "new comma-separated protocol list (e.g. http,grpc; empty string to clear)")
+	envVar := fs.String("env-var", "", "new environment variable name (empty string to clear)")
 	if err := fs.Parse(reorderFlagsBeforePositional(args, fs)); err != nil {
 		return err
 	}
 
 	if fs.NArg() == 0 {
-		return fmt.Errorf("usage: sluice binding update <id> [--destination <host>] [--ports 443] [--header Authorization] [--template \"Bearer {value}\"]")
+		return fmt.Errorf("usage: sluice binding update <id> [--destination <host>] [--ports 443] [--header Authorization] [--template \"Bearer {value}\"] [--protocols http,grpc] [--env-var OPENAI_API_KEY]")
 	}
 	idStr := fs.Arg(0)
 	id, err := strconv.ParseInt(idStr, 10, 64)
@@ -197,8 +192,8 @@ func handleBindingUpdate(args []string) error {
 	set := make(map[string]bool)
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 
-	if !set["destination"] && !set["ports"] && !set["header"] && !set["template"] {
-		return fmt.Errorf("no fields to update: provide at least one of --destination, --ports, --header, --template")
+	if !set["destination"] && !set["ports"] && !set["header"] && !set["template"] && !set["protocols"] && !set["env-var"] {
+		return fmt.Errorf("no fields to update: provide at least one of --destination, --ports, --header, --template, --protocols, --env-var")
 	}
 
 	opts := store.BindingUpdateOpts{}
@@ -210,19 +205,9 @@ func handleBindingUpdate(args []string) error {
 		opts.Destination = &d
 	}
 	if set["ports"] {
-		var ports []int
-		if *portsStr != "" {
-			for _, ps := range strings.Split(*portsStr, ",") {
-				ps = strings.TrimSpace(ps)
-				p, pErr := strconv.Atoi(ps)
-				if pErr != nil {
-					return fmt.Errorf("invalid port %q: %w", ps, pErr)
-				}
-				if p < 1 || p > 65535 {
-					return fmt.Errorf("port %d out of range (1-65535)", p)
-				}
-				ports = append(ports, p)
-			}
+		ports, pErr := parsePortsList(*portsStr)
+		if pErr != nil {
+			return pErr
 		}
 		opts.Ports = &ports
 	}
@@ -234,6 +219,22 @@ func handleBindingUpdate(args []string) error {
 		t := *template
 		opts.Template = &t
 	}
+	if set["protocols"] {
+		var protocols []string
+		if *protocolsStr != "" {
+			for _, p := range strings.Split(*protocolsStr, ",") {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					protocols = append(protocols, p)
+				}
+			}
+		}
+		opts.Protocols = &protocols
+	}
+	if set["env-var"] {
+		e := *envVar
+		opts.EnvVar = &e
+	}
 
 	db, err := store.New(*dbPath)
 	if err != nil {
@@ -241,9 +242,34 @@ func handleBindingUpdate(args []string) error {
 	}
 	defer func() { _ = db.Close() }()
 
-	if err := db.UpdateBinding(id, opts); err != nil {
+	// UpdateBindingWithRuleSync performs the read, the binding update, and
+	// (when destination, ports, or protocols change) the paired-rule update
+	// all inside one transaction, so concurrent writers cannot observe a
+	// partial state.
+	ruleID, ruleFound, currentBinding, err := db.UpdateBindingWithRuleSync(id, opts)
+	if err != nil {
+		if errors.Is(err, store.ErrBindingDuplicate) || errors.Is(err, store.ErrBindingNotFound) {
+			return err
+		}
 		return fmt.Errorf("update binding: %w", err)
 	}
+
+	// Report the paired-rule sync outcome. Intentionally no fallback rule is
+	// created when the paired rule was missing: an operator may have removed
+	// it on purpose. We warn instead so the change is visible in stdout.
+	destChanged := opts.Destination != nil && *opts.Destination != currentBinding.Destination
+	portsChanged := opts.Ports != nil
+	protocolsChanged := opts.Protocols != nil
+	if destChanged || portsChanged || protocolsChanged {
+		if ruleFound {
+			fmt.Printf("updated paired allow rule [%d] (destination=%t ports=%t protocols=%t)\n",
+				ruleID, destChanged, portsChanged, protocolsChanged)
+		} else {
+			fmt.Printf("warning: no paired allow rule found for credential %q destination %q; binding updated without a matching rule\n",
+				currentBinding.Credential, currentBinding.Destination)
+		}
+	}
+
 	fmt.Printf("updated binding [%d]\n", id)
 	return nil
 }
@@ -270,12 +296,21 @@ func handleBindingRemove(args []string) error {
 	}
 	defer func() { _ = db.Close() }()
 
-	deleted, err := db.RemoveBinding(id)
+	// RemoveBindingWithRuleCleanup atomically reads the binding, deletes it,
+	// and removes the paired auto-created allow rule in a single transaction.
+	// This closes the TOCTOU window where a concurrent writer (e.g. via the
+	// REST API or another CLI invocation) could move the binding to a new
+	// destination between the snapshot and the delete and leave an orphaned
+	// rule pointing at the previous destination.
+	_, _, removedRules, _, found, err := db.RemoveBindingWithRuleCleanup(id)
 	if err != nil {
 		return fmt.Errorf("remove binding: %w", err)
 	}
-	if !deleted {
+	if !found {
 		return fmt.Errorf("binding %d not found", id)
+	}
+	if removedRules > 0 {
+		fmt.Printf("removed %d paired allow rule(s) for binding [%d]\n", removedRules, id)
 	}
 	fmt.Printf("removed binding [%d]\n", id)
 	return nil

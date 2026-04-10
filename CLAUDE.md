@@ -75,13 +75,13 @@ sluice mcp                          # start MCP gateway
 
 sluice cred add <name> [--type static|oauth] [--destination host] [--ports 443] [--header Authorization] [--template "Bearer {value}"] [--env-var OPENAI_API_KEY]
 sluice cred add <name> --type oauth --token-url <url> --destination <host> --ports 443 [--env-var OPENAI_API_KEY]
-sluice cred update <name>           # replace credential value (prompts via stdin, handles static and OAuth)
+sluice cred update <name>           # replace credential value (prompts via stdin, handles static and OAuth; OAuth refresh token is preserved if left blank)
 sluice cred list
 sluice cred remove <name>
 
-sluice binding add <credential> --destination <host> [--ports 443] [--header Authorization] [--template "Bearer {value}"]
+sluice binding add <credential> --destination <host> [--ports 443] [--header Authorization] [--template "Bearer {value}"] [--env-var OPENAI_API_KEY]
 sluice binding list [--credential <name>]
-sluice binding update <id> [--destination <host>] [--ports 443] [--header Authorization] [--template "Bearer {value}"]
+sluice binding update <id> [--destination <host>] [--ports 443] [--header Authorization] [--template "Bearer {value}"] [--protocols http,grpc] [--env-var OPENAI_API_KEY]
 sluice binding remove <id>
 
 sluice cert generate                # generate CA certificate for HTTPS MITM
@@ -91,6 +91,10 @@ sluice audit verify                 # verify audit log hash chain integrity
 When `--destination` is provided, `sluice cred add` also creates an allow rule and binding in the store. The flag may be repeated to create multiple bindings that share the same `--ports`, `--header`, and `--template` values (use `sluice binding add` afterwards for per-destination customization). When `--env-var` is provided, the phantom token is injected into the agent container as that environment variable via `docker exec` (no shared volume needed). For HTTP/WebSocket upstreams, `--command` holds the URL. Env values prefixed with `vault:` are resolved from the credential vault at upstream spawn time.
 
 Two credential types: `static` (default) for API keys and `oauth` for OAuth access/refresh token pairs. OAuth credentials prompt for tokens via stdin (not CLI flags) to avoid shell history exposure.
+
+`sluice cred update` uses PATCH partial-update semantics for OAuth credentials. Pressing Enter at the refresh token prompt (or omitting the second line when piping via stdin) preserves the currently stored refresh token. To explicitly clear the refresh token, update the credential again with the desired empty value through the REST API (`PATCH /api/credentials/<name>` with `"refresh_token": ""`). This prevents an access-token rotation from silently destroying the stored refresh token.
+
+`sluice binding update --destination` also updates the paired auto-created allow rule (tagged `binding-add:<credential>` or `cred-add:<credential>`) so the new destination is not orphaned. If no paired rule exists (e.g. because it was manually removed), the binding destination is still updated and a warning is printed. No fallback rule is created so an operator's intentional removal is not silently reverted. `--env-var` on binding update can be used to change or clear the env var name after the initial binding was created.
 
 Runtime flags: `--mcp-base-url` sets the external URL the agent uses to reach sluice's MCP gateway (e.g. `http://sluice:3000`). This is added to `SelfBypass` so sluice does not policy-check its own MCP traffic. Defaults to deriving from `--health-addr`.
 

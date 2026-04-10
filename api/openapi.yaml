@@ -383,6 +383,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Binding already exists for this credential and destination
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /api/bindings/{id}:
     patch:
@@ -417,6 +423,12 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "404":
           description: Binding not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Destination collides with an existing binding for the same credential
           content:
             application/json:
               schema:
@@ -861,6 +873,10 @@ components:
 
     CreateBindingRequest:
       type: object
+      description: |
+        Creates a binding between a credential and a destination. The server
+        rejects duplicates: a binding on the same (credential, destination)
+        pair may only exist once. Repeated POSTs return 409 Conflict.
       required: [destination, credential]
       properties:
         destination:
@@ -885,7 +901,19 @@ components:
 
     BindingUpdate:
       type: object
-      description: Partial update for a binding. Only fields that are set will be updated.
+      description: |
+        Partial update for a binding. At least one field must be set in the
+        request body, otherwise the server returns 400 Bad Request (matching
+        the CLI). Only fields that are present are modified. Setting
+        `destination` to a non-empty value also updates the paired
+        auto-created allow rule (tagged with `binding-add:<credential>` or
+        `cred-add:<credential>`) so the new destination is not orphaned. If
+        the paired rule has been removed manually, the binding destination
+        is still updated and a warning is logged (no fallback rule is
+        created). Passing an empty array for `ports` or `protocols` clears
+        them. Passing an empty string for `header`, `template`, or `env_var`
+        clears the field. Updating `destination` to a value that collides
+        with another binding on the same credential returns 409 Conflict.
       properties:
         destination:
           type: string
@@ -901,13 +929,22 @@ components:
           type: array
           items:
             type: string
+        env_var:
+          type: string
+          description: Environment variable name for phantom token injection
 
     CredentialUpdate:
       type: object
       description: |
-        New value for an existing credential. For static credentials, set `value`.
-        For OAuth credentials, set `access_token` and optionally `refresh_token`.
-        The existing token_url is preserved.
+        New value for an existing credential. For static credentials, set
+        `value`. For OAuth credentials, set `access_token` and optionally
+        `refresh_token`. The existing `token_url` is preserved.
+
+        PATCH semantics: omitting `refresh_token` for an OAuth credential
+        preserves the currently stored refresh token. To explicitly clear
+        the refresh token, send an empty string (`"refresh_token": ""`).
+        This prevents clients that rotate only the access token from
+        silently destroying the stored refresh token.
       properties:
         value:
           type: string
@@ -917,7 +954,10 @@ components:
           description: New OAuth access token (for oauth credentials)
         refresh_token:
           type: string
-          description: New OAuth refresh token (optional, for oauth credentials)
+          description: |
+            New OAuth refresh token (for oauth credentials). Omit to
+            preserve the existing refresh token. Send an empty string to
+            clear it.
 
     MCPUpstream:
       type: object

@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/container"
+	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
 )
@@ -1319,6 +1322,81 @@ func TestPostApiCredentials_Duplicate(t *testing.T) {
 	}
 }
 
+// TestPostApiCredentials_DuplicateBinding verifies that creating a
+// credential with a destination for a (credential, destination) pair that
+// already has a binding returns 409 Conflict, not 400. Before the fix for
+// codex iteration 6 finding 2, PostApiCredentials collapsed every
+// AddRuleAndBinding failure to 400 so duplicate bindings were
+// indistinguishable from validation errors.
+func TestPostApiCredentials_DuplicateBinding(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	// Seed an existing binding on (existing_cred, api.example.com).
+	if _, err := st.AddBinding("api.example.com", "existing_cred", store.BindingOpts{}); err != nil {
+		t.Fatalf("seed binding: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	// Creating a new credential with the same name and destination as
+	// the pre-seeded binding must return 409 Conflict.
+	body := `{"name": "existing_cred", "value": "secret", "destination": "api.example.com"}`
+	req := httptest.NewRequest("POST", "/api/credentials", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Errorf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Vault must have been rolled back: no "existing_cred" entry should
+	// remain from the failed create.
+	if _, err := v.Get("existing_cred"); err == nil {
+		t.Error("expected vault rollback on duplicate binding; credential still present")
+	}
+}
+
+// TestPostApiCredentials_InvalidDestination verifies that a malformed
+// destination glob surfaces as 400 Bad Request (not 500). The store
+// wraps the validation error with ErrBindingValidation so the handler
+// can classify it as client input failure.
+func TestPostApiCredentials_InvalidDestination(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	// Empty destination is caught by the API layer before the store, but
+	// an invalid port range hits the store layer and must be classified
+	// as 400 (validation) rather than 500 (outage).
+	body := `{"name": "api_key", "value": "secret", "destination": "api.example.com", "ports": [70000]}`
+	req := httptest.NewRequest("POST", "/api/credentials", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Vault must have been rolled back after the failed rule+binding.
+	if _, err := v.Get("api_key"); err == nil {
+		t.Error("expected vault rollback on validation failure; credential still present")
+	}
+}
+
 func TestDeleteApiCredentials_Success(t *testing.T) {
 	st := newTestStore(t)
 	enableHTTPChannel(t, st)
@@ -1362,6 +1440,165 @@ func TestDeleteApiCredentials_Success(t *testing.T) {
 	}
 	if len(bindings) != 0 {
 		t.Errorf("expected 0 bindings, got %d", len(bindings))
+	}
+}
+
+// TestDeleteApiCredentials_ConcurrentRace verifies that two concurrent
+// DELETE requests for the same credential serialize cleanly: one succeeds
+// with 204, the other returns 404. Before the fix, the handler read
+// vault.List() before acquiring reloadMu, so both requests could observe
+// the credential and race on the cleanup path, yielding a 500 from the
+// loser or (worse) wiping a recreated credential.
+func TestDeleteApiCredentials_ConcurrentRace(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	// Wire a reloadMu so the handler exercises the lock path.
+	var mu sync.Mutex
+	srv.SetEnginePtr(new(atomic.Pointer[policy.Engine]), &mu)
+
+	if _, err := v.Add("racer", "value"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if _, err := st.AddBinding("api.example.com", "racer", store.BindingOpts{}); err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	codes := make([]int, 2)
+	for i := 0; i < 2; i++ {
+		idx := i
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest("DELETE", "/api/credentials/racer", nil)
+			req.Header.Set("Authorization", "Bearer tok")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			codes[idx] = rec.Code
+		}()
+	}
+	wg.Wait()
+
+	// One must succeed with 204, the other must get 404. No 500s allowed:
+	// a 500 would indicate partial cleanup from a TOCTOU window.
+	has204, has404 := false, false
+	for _, c := range codes {
+		switch c {
+		case http.StatusNoContent:
+			has204 = true
+		case http.StatusNotFound:
+			has404 = true
+		default:
+			t.Errorf("unexpected status %d in concurrent delete", c)
+		}
+	}
+	if !has204 || !has404 {
+		t.Errorf("expected {204, 404}, got %v", codes)
+	}
+
+	// Final state: credential is gone from the vault.
+	names, err := v.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("expected 0 credentials, got %v", names)
+	}
+}
+
+// TestPostApiCredentials_ConcurrentRace verifies that two concurrent POST
+// requests for the same credential name serialize cleanly: one succeeds
+// with 201, the other returns 409. Before the fix, PostApiCredentials
+// checked vault.List() before taking reloadMu, so both requests could
+// observe the credential as non-existent and both proceed to vault.Add.
+// The loser's rollback on AddRuleAndBinding failure would then delete the
+// winner's freshly created credential and metadata. The bug required a
+// destination to surface (the rollback path only runs when a binding is
+// being created), so the test requests include destination + ports.
+func TestPostApiCredentials_ConcurrentRace(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	// Wire a reloadMu so the handler exercises the lock path. An engine
+	// pointer is also required because the credential-with-destination
+	// path calls recompileEngine after AddRuleAndBinding succeeds.
+	var mu sync.Mutex
+	srv.SetEnginePtr(new(atomic.Pointer[policy.Engine]), &mu)
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"name": "racer", "value": "secret-123", "destination": "api.example.com", "ports": [443]}`
+	var wg sync.WaitGroup
+	wg.Add(2)
+	codes := make([]int, 2)
+	for i := 0; i < 2; i++ {
+		idx := i
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest("POST", "/api/credentials", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer tok")
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			codes[idx] = rec.Code
+		}()
+	}
+	wg.Wait()
+
+	// One must succeed with 201, the other must get 409. No 500s allowed:
+	// a 500 would indicate partial cleanup from a TOCTOU window.
+	has201, has409 := false, false
+	for _, c := range codes {
+		switch c {
+		case http.StatusCreated:
+			has201 = true
+		case http.StatusConflict:
+			has409 = true
+		default:
+			t.Errorf("unexpected status %d in concurrent create", c)
+		}
+	}
+	if !has201 || !has409 {
+		t.Errorf("expected {201, 409}, got %v", codes)
+	}
+
+	// Final state: the winner's credential survives in the vault. The loser
+	// must not have wiped it via its rollback path.
+	names, err := v.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(names) != 1 || names[0] != "racer" {
+		t.Errorf("expected vault to contain racer, got %v", names)
+	}
+
+	// Final state: the winner's credential metadata survives.
+	meta, err := st.GetCredentialMeta("racer")
+	if err != nil {
+		t.Fatalf("get meta: %v", err)
+	}
+	if meta == nil {
+		t.Errorf("expected credential meta for racer, got nil")
+	}
+
+	// Final state: exactly one binding exists for the credential.
+	bindings, err := st.ListBindingsByCredential("racer")
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Errorf("expected 1 binding, got %d", len(bindings))
 	}
 }
 
@@ -1904,6 +2141,44 @@ func TestPostApiBindings_Success(t *testing.T) {
 	}
 }
 
+// TestPostApiBindings_PropagatesProtocolsAndPortsToRule verifies that the
+// auto-created paired allow rule inherits both ports and protocols from the
+// binding request. Before the fix, PostApiBindings dropped Protocols when
+// building ruleOpts, leaving the paired rule protocol-agnostic.
+func TestPostApiBindings_PropagatesProtocolsAndPortsToRule(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"destination":"api.example.com","credential":"my_key","ports":[443,8443],"protocols":["tcp"]}`
+	req := httptest.NewRequest("POST", "/api/bindings", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rules, err := st.ListRules(store.RuleFilter{Verdict: "allow", Type: "network"})
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 allow rule, got %d", len(rules))
+	}
+	if len(rules[0].Ports) != 2 {
+		t.Errorf("expected 2 ports on paired rule, got %v", rules[0].Ports)
+	}
+	if len(rules[0].Protocols) != 1 || rules[0].Protocols[0] != "tcp" {
+		t.Errorf("expected protocols [tcp] on paired rule, got %v", rules[0].Protocols)
+	}
+}
+
 func TestPostApiBindings_MissingFields(t *testing.T) {
 	st := newTestStore(t)
 	enableHTTPChannel(t, st)
@@ -1921,6 +2196,77 @@ func TestPostApiBindings_MissingFields(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPostApiBindings_RejectsUnknownProtocol verifies that a typo in the
+// protocols field is surfaced as a 400 error instead of being stored
+// silently and later failing to match traffic at connection time.
+func TestPostApiBindings_RejectsUnknownProtocol(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"destination":"api.example.com","credential":"my_key","protocols":["htp"]}`
+	req := httptest.NewRequest("POST", "/api/bindings", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "unknown protocol") {
+		t.Errorf("expected body to mention unknown protocol, got %q", rec.Body.String())
+	}
+
+	// Verify nothing was persisted.
+	bindings, _ := st.ListBindings()
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 bindings after rejected insert, got %d", len(bindings))
+	}
+	rules, _ := st.ListRules(store.RuleFilter{})
+	if len(rules) != 0 {
+		t.Errorf("expected 0 rules after rejected insert, got %d", len(rules))
+	}
+}
+
+// TestPatchApiBindingsId_RejectsUnknownProtocol verifies that the update
+// path rejects unknown protocol names.
+func TestPatchApiBindingsId_RejectsUnknownProtocol(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	_, bindingID, err := st.AddRuleAndBinding(
+		"allow",
+		store.RuleOpts{Destination: "api.example.com", Source: store.BindingAddSourcePrefix + "cred"},
+		"cred",
+		store.BindingOpts{},
+	)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"protocols":["htp"]}`
+	req := httptest.NewRequest("PATCH", fmt.Sprintf("/api/bindings/%d", bindingID), strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "unknown protocol") {
+		t.Errorf("expected body to mention unknown protocol, got %q", rec.Body.String())
 	}
 }
 
@@ -2872,6 +3218,116 @@ func TestPatchApiBindingsId_InvalidBody(t *testing.T) {
 	}
 }
 
+// TestPatchApiBindingsId_DestinationSyncsPairedRule verifies that updating
+// a binding's destination via PATCH also updates the paired auto-created
+// allow rule tagged with binding-add:<credential>. Without this sync the
+// new destination would be orphaned (no allow rule) and the stale rule
+// would remain pointing at the old destination.
+func TestPatchApiBindingsId_DestinationSyncsPairedRule(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	ruleID, bindingID, err := st.AddRuleAndBinding(
+		"allow",
+		store.RuleOpts{
+			Destination: "api.old.com",
+			Ports:       []int{443},
+			Name:        "auto-created for binding on credential \"my_key\"",
+			Source:      "binding-add:my_key",
+		},
+		"my_key",
+		store.BindingOpts{Ports: []int{443}},
+	)
+	if err != nil {
+		t.Fatalf("add rule+binding: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"destination": "api.new.com"}`
+	req := httptest.NewRequest("PATCH", fmt.Sprintf("/api/bindings/%d", bindingID), strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	bindings, err := st.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 1 || bindings[0].Destination != "api.new.com" {
+		t.Errorf("binding destination = %v, want api.new.com", bindings)
+	}
+
+	rules, err := st.ListRules(store.RuleFilter{Verdict: "allow"})
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 allow rule, got %d", len(rules))
+	}
+	if rules[0].ID != ruleID {
+		t.Errorf("rule id = %d, want %d (rule should be updated in place)", rules[0].ID, ruleID)
+	}
+	if rules[0].Destination != "api.new.com" {
+		t.Errorf("rule destination = %q, want api.new.com", rules[0].Destination)
+	}
+}
+
+// TestPatchApiBindingsId_EnvVar verifies that env_var can be set and cleared
+// through the PATCH endpoint.
+func TestPatchApiBindingsId_EnvVar(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{})
+	if err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	// Set env_var.
+	body := `{"env_var": "MY_KEY"}`
+	req := httptest.NewRequest("PATCH", fmt.Sprintf("/api/bindings/%d", id), strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set env_var: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	bindings, _ := st.ListBindings()
+	if bindings[0].EnvVar != "MY_KEY" {
+		t.Errorf("env_var = %q, want MY_KEY", bindings[0].EnvVar)
+	}
+
+	// Clear env_var.
+	body = `{"env_var": ""}`
+	req = httptest.NewRequest("PATCH", fmt.Sprintf("/api/bindings/%d", id), strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear env_var: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	bindings, _ = st.ListBindings()
+	if bindings[0].EnvVar != "" {
+		t.Errorf("env_var should be cleared, got %q", bindings[0].EnvVar)
+	}
+}
+
 func TestPatchApiBindingsId_EmptyDestinationRejected(t *testing.T) {
 	st := newTestStore(t)
 	enableHTTPChannel(t, st)
@@ -2895,6 +3351,213 @@ func TestPatchApiBindingsId_EmptyDestinationRejected(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPatchApiBindingsId_EmptyBodyRejected verifies that an empty PATCH body
+// (no fields set) returns 400, matching the CLI. Earlier implementations ran
+// a silent no-op because UpdateBinding treats an all-nil options struct as
+// "just verify the row exists".
+func TestPatchApiBindingsId_EmptyBodyRejected(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{})
+	if err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("PATCH", fmt.Sprintf("/api/bindings/%d", id), strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for empty PATCH body, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPatchApiBindingsId_DuplicateDestinationRejected verifies that trying to
+// update a binding's destination to one already used by another binding of
+// the same credential returns 409 Conflict. This is the API equivalent of
+// the CLI's duplicate rejection and is enforced by the partial UNIQUE index
+// on bindings(credential, destination).
+func TestPatchApiBindingsId_DuplicateDestinationRejected(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	if _, err := st.AddBinding("api.a.com", "my_key", store.BindingOpts{}); err != nil {
+		t.Fatalf("add first binding: %v", err)
+	}
+	id, err := st.AddBinding("api.b.com", "my_key", store.BindingOpts{})
+	if err != nil {
+		t.Fatalf("add second binding: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"destination": "api.a.com"}`
+	req := httptest.NewRequest("PATCH", fmt.Sprintf("/api/bindings/%d", id), strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Errorf("expected 409 for duplicate destination, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPatchApiBindingsId_ClearsEnvVar verifies that clearing env_var on a
+// binding update triggers a container injection call with the old env var
+// set to empty, so the agent sees the variable removed from its environment.
+func TestPatchApiBindingsId_ClearsEnvVar(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+	mgr := &mockContainerMgr{}
+	srv.SetContainerManager(mgr)
+
+	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{
+		EnvVar: "OLD_KEY",
+	})
+	if err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"env_var": ""}`
+	req := httptest.NewRequest("PATCH", fmt.Sprintf("/api/bindings/%d", id), strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if mgr.injectedEnv == nil {
+		t.Fatal("expected InjectEnvVars to be called after env_var clear")
+	}
+	val, ok := mgr.injectedEnv["OLD_KEY"]
+	if !ok {
+		t.Error("OLD_KEY not present in injected env (should be cleared)")
+	}
+	if val != "" {
+		t.Errorf("expected empty value for cleared env var, got %q", val)
+	}
+}
+
+// TestDeleteApiBindingsId_CleansUpPairedRule verifies that removing a binding
+// via the REST API also removes the paired auto-created allow rule tagged
+// with binding-add:<credential>. Without this cleanup the destination would
+// silently remain open after its binding is gone.
+func TestDeleteApiBindingsId_CleansUpPairedRule(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	ruleID, bindingID, err := st.AddRuleAndBinding(
+		"allow",
+		store.RuleOpts{
+			Destination: "api.example.com",
+			Ports:       []int{443},
+			Name:        "auto-created for binding on credential \"my_key\"",
+			Source:      "binding-add:my_key",
+		},
+		"my_key",
+		store.BindingOpts{Ports: []int{443}},
+	)
+	if err != nil {
+		t.Fatalf("add rule+binding: %v", err)
+	}
+	_ = ruleID
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("DELETE", fmt.Sprintf("/api/bindings/%d", bindingID), nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rules, err := st.ListRules(store.RuleFilter{Verdict: "allow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("expected 0 allow rules after binding delete, got %d", len(rules))
+	}
+}
+
+// TestDeleteApiCredentials_CleansUpBindingAddRules verifies that removing a
+// credential via the REST API also removes rules tagged with
+// binding-add:<name>, not just cred-add:<name>. Without this, operators who
+// built their credential via "sluice binding add" (or the API equivalent)
+// would see stale allow rules persist after removing the credential.
+func TestDeleteApiCredentials_CleansUpBindingAddRules(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	if _, err := v.Add("my_key", "s3cr3t"); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+	if _, _, err := st.AddRuleAndBinding(
+		"allow",
+		store.RuleOpts{
+			Destination: "api.example.com",
+			Ports:       []int{443},
+			Name:        "auto-created for binding on credential \"my_key\"",
+			Source:      "binding-add:my_key",
+		},
+		"my_key",
+		store.BindingOpts{Ports: []int{443}},
+	); err != nil {
+		t.Fatalf("add rule+binding: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("DELETE", "/api/credentials/my_key", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rules, err := st.ListRules(store.RuleFilter{Verdict: "allow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("expected 0 allow rules after credential delete, got %d", len(rules))
+	}
+	bindings, err := st.ListBindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 bindings after credential delete, got %d", len(bindings))
 	}
 }
 
@@ -2963,6 +3626,46 @@ func TestPatchApiCredentialsName_StaticMissingValue(t *testing.T) {
 	}
 }
 
+// TestPatchApiCredentialsName_StaticEmptyValue verifies that an explicit
+// empty string for `value` is rejected with 400, matching the
+// "empty-string counts as missing" behavior enforced for static credentials.
+// The original stored value must not be overwritten.
+func TestPatchApiCredentialsName_StaticEmptyValue(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	if _, err := v.Add("my_key", "old-value"); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"value": ""}`
+	req := httptest.NewRequest("PATCH", "/api/credentials/my_key", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify the original value is intact.
+	sb, err := v.Get("my_key")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer sb.Release()
+	if string(sb.Bytes()) != "old-value" {
+		t.Errorf("vault value = %q, want old-value", string(sb.Bytes()))
+	}
+}
+
 func TestPatchApiCredentialsName_OAuthSuccess(t *testing.T) {
 	st := newTestStore(t)
 	enableHTTPChannel(t, st)
@@ -3019,6 +3722,9 @@ func TestPatchApiCredentialsName_OAuthSuccess(t *testing.T) {
 	}
 }
 
+// TestPatchApiCredentialsName_OAuthAccessOnly verifies PATCH partial-update
+// semantics: when the request body omits refresh_token, the existing
+// refresh token is preserved. Only the access token is replaced.
 func TestPatchApiCredentialsName_OAuthAccessOnly(t *testing.T) {
 	st := newTestStore(t)
 	enableHTTPChannel(t, st)
@@ -3065,11 +3771,67 @@ func TestPatchApiCredentialsName_OAuthAccessOnly(t *testing.T) {
 	if parsed.AccessToken != "new-access" {
 		t.Errorf("expected access new-access, got %q", parsed.AccessToken)
 	}
-	// When refresh_token is not provided, the PATCH does not preserve it.
-	// It gets cleared because the handler builds a fresh OAuthCredential.
-	// Document this behavior via the assertion.
+	// PATCH semantics: omitting refresh_token preserves the existing value.
+	if parsed.RefreshToken != "keep-refresh" {
+		t.Errorf("expected refresh preserved, got %q", parsed.RefreshToken)
+	}
+	if parsed.TokenURL != "https://auth.example.com/token" {
+		t.Errorf("expected token_url preserved, got %q", parsed.TokenURL)
+	}
+}
+
+// TestPatchApiCredentialsName_OAuthClearRefresh verifies that explicitly
+// sending an empty refresh_token string clears the stored refresh token.
+// This is the escape hatch for a caller that really wants to drop the
+// refresh token (e.g. after a forced logout or token revocation).
+func TestPatchApiCredentialsName_OAuthClearRefresh(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	seed := &vault.OAuthCredential{
+		AccessToken:  "old-access",
+		RefreshToken: "to-be-cleared",
+		TokenURL:     "https://auth.example.com/token",
+	}
+	seedData, err := seed.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := v.Add("oauth_cred", string(seedData)); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"access_token": "new-access", "refresh_token": ""}`
+	req := httptest.NewRequest("PATCH", "/api/credentials/oauth_cred", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	sb, err := v.Get("oauth_cred")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer sb.Release()
+	parsed, err := vault.ParseOAuth(sb.Bytes())
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if parsed.AccessToken != "new-access" {
+		t.Errorf("expected access new-access, got %q", parsed.AccessToken)
+	}
 	if parsed.RefreshToken != "" {
-		t.Errorf("expected refresh cleared when not provided, got %q", parsed.RefreshToken)
+		t.Errorf("expected refresh explicitly cleared, got %q", parsed.RefreshToken)
 	}
 	if parsed.TokenURL != "https://auth.example.com/token" {
 		t.Errorf("expected token_url preserved, got %q", parsed.TokenURL)
@@ -3107,6 +3869,56 @@ func TestPatchApiCredentialsName_OAuthMissingAccessToken(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPatchApiCredentialsName_StaticWithOAuthShapedValue verifies that a
+// static credential whose stored value happens to be JSON matching the
+// OAuth shape (access_token + token_url) is still treated as static. The
+// authoritative type comes from credential_meta, not payload shape. Without
+// this check, the handler would fall into the OAuth branch and reject a
+// valid `{"value": "..."}` request with "access_token is required".
+func TestPatchApiCredentialsName_StaticWithOAuthShapedValue(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	// Seed a static credential whose value is OAuth-shaped JSON. This
+	// simulates a user who legitimately stores a JSON blob as a static
+	// secret (for example, a service account file). The credential_meta
+	// row records the authoritative type as "static".
+	oauthShaped := `{"access_token":"value-not-real-oauth","token_url":"https://example.com/token"}`
+	if _, err := v.Add("json_static", oauthShaped); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+	if err := st.AddCredentialMeta("json_static", "static", ""); err != nil {
+		t.Fatalf("add meta: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"value": "new-json-value"}`
+	req := httptest.NewRequest("PATCH", "/api/credentials/json_static", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify the value was replaced verbatim (no OAuth rebuild).
+	sb, err := v.Get("json_static")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer sb.Release()
+	if string(sb.Bytes()) != "new-json-value" {
+		t.Errorf("expected new-json-value, got %q", string(sb.Bytes()))
 	}
 }
 

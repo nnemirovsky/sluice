@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -892,6 +893,19 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) { //
 		return
 	}
 
+	// Take the reload mutex BEFORE the existence check so concurrent creates
+	// of the same credential name serialize end to end. Without this, two
+	// racing requests could both observe that the credential does not exist,
+	// both call vault.Add, and then the loser's rollback on AddRuleAndBinding
+	// failure would delete the winner's freshly created credential and
+	// metadata. Holding reloadMu across existence check, vault.Add,
+	// AddCredentialMeta, AddRuleAndBinding, and any rollback guarantees that
+	// a rollback only ever touches state that this request just created.
+	if s.reloadMu != nil {
+		s.reloadMu.Lock()
+		defer s.reloadMu.Unlock()
+	}
+
 	// Check if credential already exists.
 	existing, err := s.vault.List()
 	if err != nil {
@@ -905,7 +919,20 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) { //
 		}
 	}
 
-	// Store the credential value in the vault.
+	// Back up any pre-existing ciphertext so we can restore it on rollback.
+	// reloadMu serializes in-process writers, but another sluice instance or
+	// a separate CLI process writing to the same vault directory can still
+	// overwrite this credential concurrently. Backup-then-restore keeps a
+	// transient DB error from wiping their state.
+	prevCiphertext, readErr := s.vault.ReadRawCredential(req.Name)
+	if readErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to back up existing credential: "+readErr.Error(), "")
+		return
+	}
+
+	// Store the credential value in the vault, capturing the ciphertext we
+	// just wrote so the rollback path can use compare-and-swap.
+	var ourCiphertext []byte
 	if credType == "oauth" {
 		oauthCred := &vault.OAuthCredential{
 			AccessToken: *req.AccessToken,
@@ -919,14 +946,32 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) { //
 			writeError(w, http.StatusInternalServerError, "failed to marshal oauth credential: "+err.Error(), "")
 			return
 		}
-		if _, err := s.vault.Add(req.Name, string(data)); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to store credential: "+err.Error(), "")
+		ct, addErr := s.vault.Add(req.Name, string(data))
+		if addErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to store credential: "+addErr.Error(), "")
 			return
 		}
+		ourCiphertext = ct
 	} else {
-		if _, err := s.vault.Add(req.Name, *req.Value); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to store credential: "+err.Error(), "")
+		ct, addErr := s.vault.Add(req.Name, *req.Value)
+		if addErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to store credential: "+addErr.Error(), "")
 			return
+		}
+		ourCiphertext = ct
+	}
+
+	// rollbackVault reverts the vault entry using compare-and-swap so a
+	// concurrent writer that has since overwritten the credential is not
+	// clobbered. See (*vault.Store).RollbackAdd for semantics.
+	rollbackVault := func() {
+		owned, rbErr := s.vault.RollbackAdd(req.Name, prevCiphertext, ourCiphertext)
+		if !owned {
+			log.Printf("[WARN] credential %q was modified concurrently; skipping vault rollback", req.Name)
+			return
+		}
+		if rbErr != nil {
+			log.Printf("[WARN] failed to roll back vault credential %q: %v", req.Name, rbErr)
 		}
 	}
 
@@ -936,12 +981,24 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) { //
 		tokenURL = *req.TokenUrl
 	}
 	if err := s.store.AddCredentialMeta(req.Name, credType, tokenURL); err != nil {
-		// Roll back vault on meta failure.
-		if rmErr := s.vault.Remove(req.Name); rmErr != nil {
-			log.Printf("[WARN] failed to clean up credential %q after meta failure: %v", req.Name, rmErr)
-		}
+		rollbackVault()
 		writeError(w, http.StatusInternalServerError, "failed to store credential metadata: "+err.Error(), "")
 		return
+	}
+
+	// rollbackCredentialMeta removes the credential_meta row we just
+	// inserted using compare-and-swap on (cred_type, token_url). If a
+	// concurrent writer has already overwritten the row with different
+	// values, leave their state alone and log a warning.
+	rollbackCredentialMeta := func() {
+		_, noConcurrent, rmErr := s.store.RemoveCredentialMetaCAS(req.Name, credType, tokenURL)
+		if rmErr != nil {
+			log.Printf("[WARN] failed to remove credential meta %q after rollback: %v", req.Name, rmErr)
+			return
+		}
+		if !noConcurrent {
+			log.Printf("[WARN] credential meta %q was modified concurrently; skipping meta rollback", req.Name)
+		}
 	}
 
 	// If destination is provided, create allow rule + binding.
@@ -949,7 +1006,7 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) { //
 		ruleOpts := store.RuleOpts{
 			Destination: *req.Destination,
 			Name:        "credential: " + req.Name,
-			Source:      "cred-add:" + req.Name,
+			Source:      store.CredAddSourcePrefix + req.Name,
 		}
 		if req.Ports != nil {
 			ruleOpts.Ports = *req.Ports
@@ -964,20 +1021,26 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) { //
 			bindingOpts.Ports = *req.Ports
 		}
 
-		if s.reloadMu != nil {
-			s.reloadMu.Lock()
-			defer s.reloadMu.Unlock()
-		}
-
 		if _, _, err := s.store.AddRuleAndBinding("allow", ruleOpts, req.Name, bindingOpts); err != nil {
-			// Roll back the vault credential and meta to keep state consistent.
-			if rmErr := s.vault.Remove(req.Name); rmErr != nil {
-				log.Printf("[WARN] failed to clean up credential %q after rule/binding failure: %v", req.Name, rmErr)
+			// Roll back credential_meta and vault using compare-and-swap
+			// to avoid clobbering a concurrent writer.
+			rollbackCredentialMeta()
+			rollbackVault()
+			// Distinguish conflict (duplicate binding for this
+			// credential/destination), validation (bad input), and
+			// unexpected store failures. Collapsing everything to 400
+			// hid real outages and made conflicts indistinguishable
+			// from client errors. Mirrors PostApiBindings.
+			if errors.Is(err, store.ErrBindingDuplicate) {
+				writeError(w, http.StatusConflict, err.Error(), "")
+				return
 			}
-			if _, rmErr := s.store.RemoveCredentialMeta(req.Name); rmErr != nil {
-				log.Printf("[WARN] failed to clean up credential meta %q after rule/binding failure: %v", req.Name, rmErr)
+			if errors.Is(err, store.ErrBindingValidation) {
+				writeError(w, http.StatusBadRequest, err.Error(), "")
+				return
 			}
-			writeError(w, http.StatusBadRequest, "failed to create rule/binding: "+err.Error(), "")
+			log.Printf("[ERROR] add rule and binding for credential %q failed: %v", req.Name, err)
+			writeError(w, http.StatusInternalServerError, "failed to create rule/binding", "")
 			return
 		}
 
@@ -986,8 +1049,18 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) { //
 			return
 		}
 
+		// Fail loudly if the live resolver cannot be rebuilt after a
+		// credential mutation created a binding. Silently logging and
+		// returning 201 would leave the live BindingResolver stale while
+		// the store already has the new binding: the agent would keep
+		// using pre-change resolver state until the next successful reload
+		// or a SIGHUP. Mirror PostApiBindings, which already surfaces this
+		// as a 500.
 		if err := s.rebuildResolver(); err != nil {
-			log.Printf("[WARN] rebuild resolver after cred add failed: %v", err)
+			log.Printf("[ERROR] rebuild resolver after cred add failed: %v", err)
+			writeError(w, http.StatusInternalServerError,
+				"credential stored but resolver rebuild failed, live resolver is stale (send SIGHUP to recover): "+err.Error(), "")
+			return
 		}
 	}
 
@@ -1030,6 +1103,13 @@ func (s *Server) PatchApiCredentialsName(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Serialize with concurrent POST/DELETE on credentials so the vault
+	// write is not racing against a concurrent add/remove of the same name.
+	if s.reloadMu != nil {
+		s.reloadMu.Lock()
+		defer s.reloadMu.Unlock()
+	}
+
 	// Check if credential exists.
 	existing, err := s.vault.List()
 	if err != nil {
@@ -1048,16 +1128,34 @@ func (s *Server) PatchApiCredentialsName(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Read the existing value to detect OAuth vs static. For OAuth we need
-	// the token_url so we can rebuild the JSON blob with new tokens. The
-	// existing secret bytes are released immediately after use.
+	// Determine credential type from credential_meta (authoritative source),
+	// falling back to payload-shape detection only for legacy bare credentials
+	// with no meta row. Using vault.IsOAuth on the stored bytes alone would
+	// misclassify a static credential whose value happens to be JSON that
+	// matches the OAuth shape (e.g. access_token + token_url fields).
+	meta, metaErr := s.store.GetCredentialMeta(name)
+	if metaErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read credential metadata: "+metaErr.Error(), "")
+		return
+	}
+
+	// Read the existing value. For OAuth we need the token_url so we can
+	// rebuild the JSON blob with new tokens. The existing secret bytes are
+	// released immediately after use.
 	current, err := s.vault.Get(name)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read existing credential", "")
 		return
 	}
-	isOAuth := vault.IsOAuth(current.Bytes())
-	var existingTokenURL string
+	var isOAuth bool
+	switch {
+	case meta != nil:
+		isOAuth = meta.CredType == "oauth"
+	default:
+		// Legacy row with no credential_meta. Fall back to payload shape.
+		isOAuth = vault.IsOAuth(current.Bytes())
+	}
+	var existingTokenURL, existingRefreshToken string
 	if isOAuth {
 		parsed, parseErr := vault.ParseOAuth(current.Bytes())
 		if parseErr != nil {
@@ -1066,6 +1164,7 @@ func (s *Server) PatchApiCredentialsName(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		existingTokenURL = parsed.TokenURL
+		existingRefreshToken = parsed.RefreshToken
 	}
 	current.Release()
 
@@ -1076,9 +1175,15 @@ func (s *Server) PatchApiCredentialsName(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusBadRequest, "access_token is required for oauth credentials", "")
 			return
 		}
+		// PATCH partial-update semantics: a missing refresh_token field
+		// preserves the stored value. An explicitly supplied empty string
+		// clears it. This matches the CLI "press Enter to keep current"
+		// behavior and prevents a client that only rotates access from
+		// silently destroying the refresh token.
 		oauthCred := &vault.OAuthCredential{
-			AccessToken: *req.AccessToken,
-			TokenURL:    existingTokenURL,
+			AccessToken:  *req.AccessToken,
+			RefreshToken: existingRefreshToken,
+			TokenURL:     existingTokenURL,
 		}
 		if req.RefreshToken != nil {
 			oauthCred.RefreshToken = *req.RefreshToken
@@ -1112,6 +1217,17 @@ func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Take the reload mutex FIRST, before the existence check. A concurrent
+	// delete + recreate of the same credential name could otherwise observe
+	// the credential, lose the race to the other handler, and then either
+	// delete the freshly created credential (wrong) or return 500 after
+	// partial cleanup (wrong). Holding reloadMu across the existence check
+	// and the delete serializes these operations end to end.
+	if s.reloadMu != nil {
+		s.reloadMu.Lock()
+		defer s.reloadMu.Unlock()
+	}
+
 	// Check if credential exists.
 	existing, err := s.vault.List()
 	if err != nil {
@@ -1136,11 +1252,6 @@ func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request
 		wasOAuth = meta.CredType == "oauth"
 	}
 
-	if s.reloadMu != nil {
-		s.reloadMu.Lock()
-		defer s.reloadMu.Unlock()
-	}
-
 	// Read env_var values from bindings before removal so we can clear
 	// them from the agent container after the bindings are deleted.
 	var removedEnvVars []string
@@ -1161,9 +1272,19 @@ func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "failed to remove bindings: "+err.Error(), "")
 		return
 	}
-	if _, err := s.store.RemoveRulesBySource("cred-add:" + name); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to remove associated rules: "+err.Error(), "")
-		return
+	// Rules may have been created by either "cred add --destination" (tagged
+	// cred-add:<name>) or by "binding add" against the same credential
+	// (tagged binding-add:<name>). Remove both so cleanup is symmetric with
+	// the CLI, otherwise orphan allow rules would persist after the
+	// credential is gone.
+	for _, src := range []string{
+		store.CredAddSourcePrefix + name,
+		store.BindingAddSourcePrefix + name,
+	} {
+		if _, err := s.store.RemoveRulesBySource(src); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to remove associated rules: "+err.Error(), "")
+			return
+		}
 	}
 
 	// Remove the credential from the vault first. If this fails, metadata
@@ -1183,8 +1304,17 @@ func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Fail loudly if the live resolver cannot be rebuilt after a credential
+	// removal deleted bindings. Silently logging and returning 204 would
+	// leave the live BindingResolver stale while the store already reflects
+	// the deletion: the agent would keep resolving the removed bindings
+	// until the next successful reload or a SIGHUP. Mirror the binding
+	// handlers which already surface this as a 500.
 	if err := s.rebuildResolver(); err != nil {
-		log.Printf("[WARN] rebuild resolver after cred remove failed: %v", err)
+		log.Printf("[ERROR] rebuild resolver after cred remove failed: %v", err)
+		writeError(w, http.StatusInternalServerError,
+			"credential removed but resolver rebuild failed, live resolver is stale (send SIGHUP to recover): "+err.Error(), "")
+		return
 	}
 
 	// If this was an OAuth credential, rebuild the OAuth index.
@@ -1218,7 +1348,12 @@ func (s *Server) GetApiBindings(w http.ResponseWriter, r *http.Request) { //noli
 	_ = json.NewEncoder(w).Encode(bindings)
 }
 
-// PostApiBindings adds a new credential binding.
+// PostApiBindings adds a new credential binding. To match the CLI
+// (`sluice binding add`), this also creates a paired auto-allow rule
+// tagged "binding-add:<credential>" so the destination becomes reachable
+// without a separate policy add. Both inserts run inside one transaction
+// via AddRuleAndBinding so a duplicate-binding error rolls back the rule
+// and leaves no orphan policy.
 func (s *Server) PostApiBindings(w http.ResponseWriter, r *http.Request) { //nolint:revive // generated interface name
 	var req CreateBindingRequest
 	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
@@ -1231,16 +1366,23 @@ func (s *Server) PostApiBindings(w http.ResponseWriter, r *http.Request) { //nol
 		return
 	}
 
-	opts := store.BindingOpts{
+	bindingOpts := store.BindingOpts{
 		Header:   ptrStr(req.Header),
 		Template: ptrStr(req.Template),
 		EnvVar:   ptrStr(req.EnvVar),
 	}
 	if req.Ports != nil {
-		opts.Ports = *req.Ports
+		bindingOpts.Ports = *req.Ports
 	}
 	if req.Protocols != nil {
-		opts.Protocols = *req.Protocols
+		bindingOpts.Protocols = *req.Protocols
+	}
+	ruleOpts := store.RuleOpts{
+		Destination: req.Destination,
+		Ports:       bindingOpts.Ports,
+		Protocols:   bindingOpts.Protocols,
+		Name:        fmt.Sprintf("auto-created for binding on credential %q", req.Credential),
+		Source:      store.BindingAddSourcePrefix + req.Credential,
 	}
 
 	if s.reloadMu != nil {
@@ -1248,14 +1390,41 @@ func (s *Server) PostApiBindings(w http.ResponseWriter, r *http.Request) { //nol
 		defer s.reloadMu.Unlock()
 	}
 
-	id, err := s.store.AddBinding(req.Destination, req.Credential, opts)
+	_, id, err := s.store.AddRuleAndBinding("allow", ruleOpts, req.Credential, bindingOpts)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error(), "")
+		if errors.Is(err, store.ErrBindingDuplicate) {
+			writeError(w, http.StatusConflict, err.Error(), "")
+			return
+		}
+		// Only tagged validation errors map to 400. Anything else
+		// (SQL failures, tx begin/commit errors, etc) is a server
+		// fault and must surface as 500 so clients do not see DB
+		// outages as "bad request".
+		if errors.Is(err, store.ErrBindingValidation) {
+			writeError(w, http.StatusBadRequest, err.Error(), "")
+			return
+		}
+		log.Printf("[ERROR] add rule and binding failed: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to add binding", "")
 		return
 	}
 
+	// Fail loudly if the live engine or resolver cannot be rebuilt after a
+	// binding mutation. Silently logging and returning 201 would leave the
+	// client believing the binding is enforced while the in-memory policy
+	// still reflects the pre-change state, so enforcement would lag behind
+	// storage until the next successful reload.
+	if err := s.recompileEngine(); err != nil {
+		log.Printf("[ERROR] recompile engine after binding add failed: %v", err)
+		writeError(w, http.StatusInternalServerError,
+			"binding stored but engine recompile failed: "+err.Error(), "")
+		return
+	}
 	if err := s.rebuildResolver(); err != nil {
-		log.Printf("[WARN] rebuild resolver after binding add failed: %v", err)
+		log.Printf("[ERROR] rebuild resolver after binding add failed: %v", err)
+		writeError(w, http.StatusInternalServerError,
+			"binding stored but resolver rebuild failed: "+err.Error(), "")
+		return
 	}
 
 	if err := s.credMutationComplete(); err != nil {
@@ -1284,11 +1453,28 @@ func (s *Server) PostApiBindings(w http.ResponseWriter, r *http.Request) { //nol
 }
 
 // PatchApiBindingsId updates a credential binding. Only fields present in
-// the request body are updated. Not-found returns 404.
+// the request body are updated. Not-found returns 404. An empty body
+// (no fields set) returns 400, matching the CLI.
+//
+// When the destination, ports, or protocols change, the paired auto-created
+// allow rule (tagged with "binding-add:<credential>" or "cred-add:<credential>")
+// is updated in lockstep so the binding's network scope matches the rule
+// that authorizes it. If no paired rule exists, the binding still updates
+// but no fallback rule is created: an operator may have removed the rule
+// on purpose, and silently recreating it would mask that decision.
 func (s *Server) PatchApiBindingsId(w http.ResponseWriter, r *http.Request, id int64) { //nolint:revive // generated interface name
 	var req BindingUpdate
 	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "")
+		return
+	}
+
+	// Reject empty updates to align with the CLI, which fails the same way.
+	// An empty body previously ran as a no-op because UpdateBinding treats
+	// the all-nil options struct as "verify the row exists and return".
+	if req.Destination == nil && req.Ports == nil && req.Header == nil &&
+		req.Template == nil && req.Protocols == nil && req.EnvVar == nil {
+		writeError(w, http.StatusBadRequest, "no fields to update: provide at least one of destination, ports, header, template, protocols, env_var", "")
 		return
 	}
 
@@ -1297,47 +1483,83 @@ func (s *Server) PatchApiBindingsId(w http.ResponseWriter, r *http.Request, id i
 		defer s.reloadMu.Unlock()
 	}
 
-	// Verify the binding exists up front so we can return 404 cleanly.
-	rows, err := s.store.ListBindings()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list bindings", "")
-		return
-	}
-	var current *store.BindingRow
-	for i := range rows {
-		if rows[i].ID == id {
-			current = &rows[i]
-			break
-		}
-	}
-	if current == nil {
-		writeError(w, http.StatusNotFound, "binding not found", "")
-		return
-	}
-
 	opts := store.BindingUpdateOpts{
 		Destination: req.Destination,
 		Ports:       req.Ports,
 		Header:      req.Header,
 		Template:    req.Template,
 		Protocols:   req.Protocols,
+		EnvVar:      req.EnvVar,
 	}
 
-	if err := s.store.UpdateBinding(id, opts); err != nil {
-		if strings.Contains(err.Error(), "not found") {
+	// UpdateBindingWithRuleSync runs the read, binding update, and paired
+	// rule update in one transaction to eliminate the TOCTOU window. It
+	// returns the (pre-update) current binding so we can diff env_var
+	// values for the container injection refresh.
+	ruleID, ruleFound, current, err := s.store.UpdateBindingWithRuleSync(id, opts)
+	if err != nil {
+		if errors.Is(err, store.ErrBindingDuplicate) {
+			writeError(w, http.StatusConflict, err.Error(), "")
+			return
+		}
+		if errors.Is(err, store.ErrBindingNotFound) {
 			writeError(w, http.StatusNotFound, "binding not found", "")
 			return
 		}
-		writeError(w, http.StatusBadRequest, err.Error(), "")
+		// Only tagged validation errors map to 400. SQL failures and
+		// other internal faults must not masquerade as client errors.
+		if errors.Is(err, store.ErrBindingValidation) {
+			writeError(w, http.StatusBadRequest, err.Error(), "")
+			return
+		}
+		log.Printf("[ERROR] update binding %d failed: %v", id, err)
+		writeError(w, http.StatusInternalServerError, "failed to update binding", "")
 		return
 	}
 
+	// Track env_var changes so we can refresh the container injection
+	// after the update. Clearing env_var on a binding also needs to be
+	// propagated to the agent.
+	var clearedEnvVars []string
+	if req.EnvVar != nil && current.EnvVar != "" && current.EnvVar != *req.EnvVar {
+		clearedEnvVars = append(clearedEnvVars, current.EnvVar)
+	}
+
+	destChanged := req.Destination != nil && *req.Destination != current.Destination
+	portsChanged := req.Ports != nil
+	protocolsChanged := req.Protocols != nil
+	if destChanged || portsChanged || protocolsChanged {
+		if ruleFound {
+			log.Printf("[INFO] updated paired allow rule [%d] for binding %d (dest=%v ports=%v protocols=%v)",
+				ruleID, id, destChanged, portsChanged, protocolsChanged)
+		} else {
+			log.Printf("[WARN] no paired allow rule found for credential %q destination %q; binding updated without a matching rule",
+				current.Credential, current.Destination)
+		}
+	}
+
+	// As with PostApiBindings, a failed recompile or resolver rebuild means
+	// the client cannot rely on the new binding being active. Return 500 so
+	// the caller knows the live engine is out of sync with the store rather
+	// than silently logging and claiming success.
+	if err := s.recompileEngine(); err != nil {
+		log.Printf("[ERROR] recompile engine after binding update failed: %v", err)
+		writeError(w, http.StatusInternalServerError,
+			"binding updated but engine recompile failed: "+err.Error(), "")
+		return
+	}
 	if err := s.rebuildResolver(); err != nil {
-		log.Printf("[WARN] rebuild resolver after binding update failed: %v", err)
+		log.Printf("[ERROR] rebuild resolver after binding update failed: %v", err)
+		writeError(w, http.StatusInternalServerError,
+			"binding updated but resolver rebuild failed: "+err.Error(), "")
+		return
+	}
+	if err := s.credMutationComplete(clearedEnvVars...); err != nil {
+		log.Printf("[WARN] credential mutation complete after binding update failed: %v", err)
 	}
 
 	// Read back the updated binding.
-	rows, err = s.store.ListBindings()
+	rows, err := s.store.ListBindings()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read back binding", "")
 		return
@@ -1354,38 +1576,50 @@ func (s *Server) PatchApiBindingsId(w http.ResponseWriter, r *http.Request, id i
 	writeError(w, http.StatusInternalServerError, "binding disappeared after update", "")
 }
 
-// DeleteApiBindingsId removes a credential binding.
+// DeleteApiBindingsId removes a credential binding and the auto-created
+// allow rule paired with it. Without the paired-rule cleanup, removing a
+// binding would leave an orphaned allow rule that silently keeps the
+// destination open.
 func (s *Server) DeleteApiBindingsId(w http.ResponseWriter, r *http.Request, id int64) { //nolint:revive // generated interface name
 	if s.reloadMu != nil {
 		s.reloadMu.Lock()
 		defer s.reloadMu.Unlock()
 	}
 
-	// Read env_var before deletion so we can clear it from the agent.
-	var removedEnvVars []string
-	if s.store != nil {
-		rows, listErr := s.store.ListBindings()
-		if listErr == nil {
-			for _, b := range rows {
-				if b.ID == id && b.EnvVar != "" {
-					removedEnvVars = append(removedEnvVars, b.EnvVar)
-				}
-			}
-		}
-	}
-
-	deleted, err := s.store.RemoveBinding(id)
+	// Atomically read the binding, delete it, and clean up the paired
+	// auto-created allow rule in one transaction. RemoveBindingWithRuleCleanup
+	// closes the TOCTOU window where a concurrent writer could move the
+	// binding to a new destination between snapshot and delete and leave an
+	// orphaned rule pointing at the previous destination.
+	_, _, _, envVar, found, err := s.store.RemoveBindingWithRuleCleanup(id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to remove binding", "")
 		return
 	}
-	if !deleted {
+	if !found {
 		writeError(w, http.StatusNotFound, "binding not found", "")
 		return
 	}
+	var removedEnvVars []string
+	if envVar != "" {
+		removedEnvVars = append(removedEnvVars, envVar)
+	}
 
+	// As with PostApiBindings and PatchApiBindingsId, silently logging a
+	// recompile failure on delete would leave stale allow/binding entries
+	// in the live engine even though the store has moved on. Surface a 500
+	// so the client can retry or alert.
+	if err := s.recompileEngine(); err != nil {
+		log.Printf("[ERROR] recompile engine after binding remove failed: %v", err)
+		writeError(w, http.StatusInternalServerError,
+			"binding removed but engine recompile failed: "+err.Error(), "")
+		return
+	}
 	if err := s.rebuildResolver(); err != nil {
-		log.Printf("[WARN] rebuild resolver after binding remove failed: %v", err)
+		log.Printf("[ERROR] rebuild resolver after binding remove failed: %v", err)
+		writeError(w, http.StatusInternalServerError,
+			"binding removed but resolver rebuild failed: "+err.Error(), "")
+		return
 	}
 
 	if err := s.credMutationComplete(removedEnvVars...); err != nil {
