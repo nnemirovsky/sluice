@@ -2735,3 +2735,419 @@ func TestDeleteApiBindingsId_ClearsEnvVar(t *testing.T) {
 		t.Errorf("expected empty value for removed env var, got %q", val)
 	}
 }
+
+// --- PATCH /api/bindings/{id} tests ---
+
+func TestPatchApiBindingsId_Success(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{
+		Ports:    []int{443},
+		Header:   "Authorization",
+		Template: "Bearer {value}",
+	})
+	if err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	// Partial update: only header.
+	body := `{"header": "X-API-Key"}`
+	req := httptest.NewRequest("PATCH", fmt.Sprintf("/api/bindings/%d", id), strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var binding api.Binding
+	if err := json.NewDecoder(rec.Body).Decode(&binding); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if binding.Header == nil || *binding.Header != "X-API-Key" {
+		t.Errorf("expected header X-API-Key, got %v", binding.Header)
+	}
+	// Other fields unchanged.
+	if binding.Destination != "api.example.com" {
+		t.Errorf("expected destination unchanged, got %q", binding.Destination)
+	}
+	if binding.Template == nil || *binding.Template != "Bearer {value}" {
+		t.Errorf("expected template unchanged, got %v", binding.Template)
+	}
+}
+
+func TestPatchApiBindingsId_MultipleFields(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{
+		Ports: []int{443},
+	})
+	if err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"destination": "api.new.com", "ports": [8443], "header": "X-Auth", "template": "Token {value}"}`
+	req := httptest.NewRequest("PATCH", fmt.Sprintf("/api/bindings/%d", id), strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var binding api.Binding
+	if err := json.NewDecoder(rec.Body).Decode(&binding); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if binding.Destination != "api.new.com" {
+		t.Errorf("expected destination api.new.com, got %q", binding.Destination)
+	}
+	if binding.Ports == nil || len(*binding.Ports) != 1 || (*binding.Ports)[0] != 8443 {
+		t.Errorf("expected ports [8443], got %v", binding.Ports)
+	}
+	if binding.Header == nil || *binding.Header != "X-Auth" {
+		t.Errorf("expected header X-Auth, got %v", binding.Header)
+	}
+	if binding.Template == nil || *binding.Template != "Token {value}" {
+		t.Errorf("expected template Token {value}, got %v", binding.Template)
+	}
+}
+
+func TestPatchApiBindingsId_NotFound(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"header": "X-Thing"}`
+	req := httptest.NewRequest("PATCH", "/api/bindings/9999", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPatchApiBindingsId_InvalidBody(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{})
+	if err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{not valid json`
+	req := httptest.NewRequest("PATCH", fmt.Sprintf("/api/bindings/%d", id), strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPatchApiBindingsId_EmptyDestinationRejected(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{})
+	if err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	// An empty destination string is rejected by UpdateBinding.
+	body := `{"destination": ""}`
+	req := httptest.NewRequest("PATCH", fmt.Sprintf("/api/bindings/%d", id), strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- PATCH /api/credentials/{name} tests ---
+
+func TestPatchApiCredentialsName_StaticSuccess(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	// Seed a static credential.
+	if _, err := v.Add("my_key", "old-value"); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"value": "new-secret-value"}`
+	req := httptest.NewRequest("PATCH", "/api/credentials/my_key", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify value was overwritten.
+	sb, err := v.Get("my_key")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer sb.Release()
+	if string(sb.Bytes()) != "new-secret-value" {
+		t.Errorf("expected new-secret-value, got %q", string(sb.Bytes()))
+	}
+}
+
+func TestPatchApiCredentialsName_StaticMissingValue(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	if _, err := v.Add("my_key", "old-value"); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{}`
+	req := httptest.NewRequest("PATCH", "/api/credentials/my_key", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPatchApiCredentialsName_OAuthSuccess(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	// Seed an OAuth credential directly in the vault.
+	seed := &vault.OAuthCredential{
+		AccessToken:  "old-access",
+		RefreshToken: "old-refresh",
+		TokenURL:     "https://auth.example.com/token",
+	}
+	seedData, err := seed.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := v.Add("oauth_cred", string(seedData)); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"access_token": "new-access", "refresh_token": "new-refresh"}`
+	req := httptest.NewRequest("PATCH", "/api/credentials/oauth_cred", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify OAuth blob was rewritten with new tokens and existing token_url.
+	sb, err := v.Get("oauth_cred")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer sb.Release()
+	parsed, err := vault.ParseOAuth(sb.Bytes())
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if parsed.AccessToken != "new-access" {
+		t.Errorf("expected access new-access, got %q", parsed.AccessToken)
+	}
+	if parsed.RefreshToken != "new-refresh" {
+		t.Errorf("expected refresh new-refresh, got %q", parsed.RefreshToken)
+	}
+	if parsed.TokenURL != "https://auth.example.com/token" {
+		t.Errorf("expected token_url preserved, got %q", parsed.TokenURL)
+	}
+}
+
+func TestPatchApiCredentialsName_OAuthAccessOnly(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	seed := &vault.OAuthCredential{
+		AccessToken:  "old-access",
+		RefreshToken: "keep-refresh",
+		TokenURL:     "https://auth.example.com/token",
+	}
+	seedData, err := seed.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := v.Add("oauth_cred", string(seedData)); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"access_token": "new-access"}`
+	req := httptest.NewRequest("PATCH", "/api/credentials/oauth_cred", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	sb, err := v.Get("oauth_cred")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer sb.Release()
+	parsed, err := vault.ParseOAuth(sb.Bytes())
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if parsed.AccessToken != "new-access" {
+		t.Errorf("expected access new-access, got %q", parsed.AccessToken)
+	}
+	// When refresh_token is not provided, the PATCH does not preserve it.
+	// It gets cleared because the handler builds a fresh OAuthCredential.
+	// Document this behavior via the assertion.
+	if parsed.RefreshToken != "" {
+		t.Errorf("expected refresh cleared when not provided, got %q", parsed.RefreshToken)
+	}
+	if parsed.TokenURL != "https://auth.example.com/token" {
+		t.Errorf("expected token_url preserved, got %q", parsed.TokenURL)
+	}
+}
+
+func TestPatchApiCredentialsName_OAuthMissingAccessToken(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	seed := &vault.OAuthCredential{
+		AccessToken: "old-access",
+		TokenURL:    "https://auth.example.com/token",
+	}
+	seedData, err := seed.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if _, err := v.Add("oauth_cred", string(seedData)); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"refresh_token": "some-refresh"}`
+	req := httptest.NewRequest("PATCH", "/api/credentials/oauth_cred", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPatchApiCredentialsName_NotFound(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	v := newTestVault(t)
+	srv := api.NewServer(st, nil, nil, "")
+	srv.SetVault(v)
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"value": "anything"}`
+	req := httptest.NewRequest("PATCH", "/api/credentials/nonexistent", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPatchApiCredentialsName_NoVault(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"value": "anything"}`
+	req := httptest.NewRequest("PATCH", "/api/credentials/my_key", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rec.Code)
+	}
+}

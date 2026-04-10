@@ -295,6 +295,37 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
 
   /api/credentials/{name}:
+    patch:
+      operationId: patchApiCredentialsName
+      summary: Replace the value of an existing credential
+      tags: [credentials]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CredentialUpdate"
+      responses:
+        "204":
+          description: Credential updated
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Credential not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
     delete:
       operationId: deleteApiCredentialsName
       summary: Remove a credential
@@ -354,6 +385,42 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
 
   /api/bindings/{id}:
+    patch:
+      operationId: patchApiBindingsId
+      summary: Update a credential binding
+      tags: [bindings]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BindingUpdate"
+      responses:
+        "200":
+          description: Binding updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Binding"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Binding not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
     delete:
       operationId: deleteApiBindingsId
       summary: Remove a credential binding
@@ -815,6 +882,42 @@ components:
         env_var:
           type: string
           description: Environment variable name for phantom token injection
+
+    BindingUpdate:
+      type: object
+      description: Partial update for a binding. Only fields that are set will be updated.
+      properties:
+        destination:
+          type: string
+        ports:
+          type: array
+          items:
+            type: integer
+        header:
+          type: string
+        template:
+          type: string
+        protocols:
+          type: array
+          items:
+            type: string
+
+    CredentialUpdate:
+      type: object
+      description: |
+        New value for an existing credential. For static credentials, set `value`.
+        For OAuth credentials, set `access_token` and optionally `refresh_token`.
+        The existing token_url is preserved.
+      properties:
+        value:
+          type: string
+          description: New secret value (for static credentials)
+        access_token:
+          type: string
+          description: New OAuth access token (for oauth credentials)
+        refresh_token:
+          type: string
+          description: New OAuth refresh token (optional, for oauth credentials)
 
     MCPUpstream:
       type: object

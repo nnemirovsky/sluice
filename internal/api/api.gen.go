@@ -289,6 +289,15 @@ type Binding struct {
 	Template  *string   `json:"template,omitempty"`
 }
 
+// BindingUpdate Partial update for a binding. Only fields that are set will be updated.
+type BindingUpdate struct {
+	Destination *string   `json:"destination,omitempty"`
+	Header      *string   `json:"header,omitempty"`
+	Ports       *[]int    `json:"ports,omitempty"`
+	Protocols   *[]string `json:"protocols,omitempty"`
+	Template    *string   `json:"template,omitempty"`
+}
+
 // BrokenLink defines model for BrokenLink.
 type BrokenLink struct {
 	ActualHash   string `json:"actual_hash"`
@@ -434,6 +443,20 @@ type Credential struct {
 // CredentialType Credential type (static or oauth)
 type CredentialType string
 
+// CredentialUpdate New value for an existing credential. For static credentials, set `value`.
+// For OAuth credentials, set `access_token` and optionally `refresh_token`.
+// The existing token_url is preserved.
+type CredentialUpdate struct {
+	// AccessToken New OAuth access token (for oauth credentials)
+	AccessToken *string `json:"access_token,omitempty"`
+
+	// RefreshToken New OAuth refresh token (optional, for oauth credentials)
+	RefreshToken *string `json:"refresh_token,omitempty"`
+
+	// Value New secret value (for static credentials)
+	Value *string `json:"value,omitempty"`
+}
+
 // ErrorResponse defines model for ErrorResponse.
 type ErrorResponse struct {
 	Code  *string `json:"code,omitempty"`
@@ -546,6 +569,9 @@ type PostApiApprovalsIdResolveJSONRequestBody = ResolveRequest
 // PostApiBindingsJSONRequestBody defines body for PostApiBindings for application/json ContentType.
 type PostApiBindingsJSONRequestBody = CreateBindingRequest
 
+// PatchApiBindingsIdJSONRequestBody defines body for PatchApiBindingsId for application/json ContentType.
+type PatchApiBindingsIdJSONRequestBody = BindingUpdate
+
 // PatchApiChannelsIdJSONRequestBody defines body for PatchApiChannelsId for application/json ContentType.
 type PatchApiChannelsIdJSONRequestBody = ChannelUpdate
 
@@ -554,6 +580,9 @@ type PatchApiConfigJSONRequestBody = ConfigUpdate
 
 // PostApiCredentialsJSONRequestBody defines body for PostApiCredentials for application/json ContentType.
 type PostApiCredentialsJSONRequestBody = CreateCredentialRequest
+
+// PatchApiCredentialsNameJSONRequestBody defines body for PatchApiCredentialsName for application/json ContentType.
+type PatchApiCredentialsNameJSONRequestBody = CredentialUpdate
 
 // PostApiMcpUpstreamsJSONRequestBody defines body for PostApiMcpUpstreams for application/json ContentType.
 type PostApiMcpUpstreamsJSONRequestBody = CreateMCPUpstreamRequest
@@ -587,6 +616,9 @@ type ServerInterface interface {
 	// Remove a credential binding
 	// (DELETE /api/bindings/{id})
 	DeleteApiBindingsId(w http.ResponseWriter, r *http.Request, id int64)
+	// Update a credential binding
+	// (PATCH /api/bindings/{id})
+	PatchApiBindingsId(w http.ResponseWriter, r *http.Request, id int64)
 	// List notification channels
 	// (GET /api/channels)
 	GetApiChannels(w http.ResponseWriter, r *http.Request)
@@ -608,6 +640,9 @@ type ServerInterface interface {
 	// Remove a credential
 	// (DELETE /api/credentials/{name})
 	DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request, name string)
+	// Replace the value of an existing credential
+	// (PATCH /api/credentials/{name})
+	PatchApiCredentialsName(w http.ResponseWriter, r *http.Request, name string)
 	// List MCP upstreams
 	// (GET /api/mcp/upstreams)
 	GetApiMcpUpstreams(w http.ResponseWriter, r *http.Request)
@@ -686,6 +721,12 @@ func (_ Unimplemented) DeleteApiBindingsId(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// Update a credential binding
+// (PATCH /api/bindings/{id})
+func (_ Unimplemented) PatchApiBindingsId(w http.ResponseWriter, r *http.Request, id int64) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // List notification channels
 // (GET /api/channels)
 func (_ Unimplemented) GetApiChannels(w http.ResponseWriter, r *http.Request) {
@@ -725,6 +766,12 @@ func (_ Unimplemented) PostApiCredentials(w http.ResponseWriter, r *http.Request
 // Remove a credential
 // (DELETE /api/credentials/{name})
 func (_ Unimplemented) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request, name string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Replace the value of an existing credential
+// (PATCH /api/credentials/{name})
+func (_ Unimplemented) PatchApiCredentialsName(w http.ResponseWriter, r *http.Request, name string) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -972,6 +1019,37 @@ func (siw *ServerInterfaceWrapper) DeleteApiBindingsId(w http.ResponseWriter, r 
 	handler.ServeHTTP(w, r)
 }
 
+// PatchApiBindingsId operation middleware
+func (siw *ServerInterfaceWrapper) PatchApiBindingsId(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "id" -------------
+	var id int64
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: "int64"})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PatchApiBindingsId(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetApiChannels operation middleware
 func (siw *ServerInterfaceWrapper) GetApiChannels(w http.ResponseWriter, r *http.Request) {
 
@@ -1125,6 +1203,37 @@ func (siw *ServerInterfaceWrapper) DeleteApiCredentialsName(w http.ResponseWrite
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.DeleteApiCredentialsName(w, r, name)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PatchApiCredentialsName operation middleware
+func (siw *ServerInterfaceWrapper) PatchApiCredentialsName(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "name" -------------
+	var name string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", chi.URLParam(r, "name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PatchApiCredentialsName(w, r, name)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1506,6 +1615,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Delete(options.BaseURL+"/api/bindings/{id}", wrapper.DeleteApiBindingsId)
 	})
 	r.Group(func(r chi.Router) {
+		r.Patch(options.BaseURL+"/api/bindings/{id}", wrapper.PatchApiBindingsId)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/channels", wrapper.GetApiChannels)
 	})
 	r.Group(func(r chi.Router) {
@@ -1525,6 +1637,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Delete(options.BaseURL+"/api/credentials/{name}", wrapper.DeleteApiCredentialsName)
+	})
+	r.Group(func(r chi.Router) {
+		r.Patch(options.BaseURL+"/api/credentials/{name}", wrapper.PatchApiCredentialsName)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/mcp/upstreams", wrapper.GetApiMcpUpstreams)
@@ -1563,54 +1678,58 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 // Base64 encoded, gzipped, json marshaled Swagger object
 var swaggerSpec = []string{
 
-	"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",
-	"6PHm8f8BAAD//0V9jpVwRQAA",
+	"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",
+	"Ono9n8+jh6uH/wUAAP//XdvfmD9OAAA=",
 }
 
 // GetSwagger returns the content of the embedded swagger specification file

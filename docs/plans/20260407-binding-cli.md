@@ -156,14 +156,14 @@ The vault's `Add()` already does atomic overwrite (temp file + rename). For OAut
 - Modify: `internal/api/server.go`
 - Modify: `internal/api/api.gen.go` (regenerated)
 
-- [ ] Add `PATCH /api/bindings/{id}` to OpenAPI spec (request: BindingUpdate with optional destination, ports, header, template; response: Binding)
-- [ ] Add `PATCH /api/credentials/{name}` to OpenAPI spec (request: new value; response: 204). For OAuth type, request body includes access_token and optional refresh_token.
-- [ ] Regenerate API code: `go generate ./internal/api/`
-- [ ] Implement `PatchApiBindingsId` handler: validate input, call `store.UpdateBinding()`
-- [ ] Implement `PatchApiCredentialsName` handler: validate credential exists, call `vault.Add()` to overwrite. For OAuth: rebuild JSON blob. Regenerate phantom files.
-- [ ] Write tests for PATCH /api/bindings/{id} (success, not found, partial update)
-- [ ] Write tests for PATCH /api/credentials/{name} (static, OAuth, not found)
-- [ ] Run tests: `go test ./internal/api/ -timeout 30s`
+- [x] Add `PATCH /api/bindings/{id}` to OpenAPI spec (request: BindingUpdate with optional destination, ports, header, template; response: Binding)
+- [x] Add `PATCH /api/credentials/{name}` to OpenAPI spec (request: new value; response: 204). For OAuth type, request body includes access_token and optional refresh_token.
+- [x] Regenerate API code: `go generate ./internal/api/`
+- [x] Implement `PatchApiBindingsId` handler: validate input, call `store.UpdateBinding()`
+- [x] Implement `PatchApiCredentialsName` handler: validate credential exists, call `vault.Add()` to overwrite. For OAuth: rebuild JSON blob. Regenerate phantom files.
+- [x] Write tests for PATCH /api/bindings/{id} (success, not found, partial update)
+- [x] Write tests for PATCH /api/credentials/{name} (static, OAuth, not found)
+- [x] Run tests: `go test ./internal/api/ -timeout 30s`
 
 ### Task 6: Verify acceptance criteria
 

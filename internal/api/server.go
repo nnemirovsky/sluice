@@ -1012,6 +1012,99 @@ func (s *Server) PostApiCredentials(w http.ResponseWriter, r *http.Request) { //
 	_ = json.NewEncoder(w).Encode(respCred)
 }
 
+// PatchApiCredentialsName replaces the value of an existing credential.
+// For static credentials, request body must contain `value`. For OAuth
+// credentials, the body must contain `access_token` and optionally
+// `refresh_token`. The existing token_url is preserved. Bindings, rules,
+// and metadata are untouched. Phantom tokens are deterministic and derived
+// from the credential name, so they do not need regeneration.
+func (s *Server) PatchApiCredentialsName(w http.ResponseWriter, r *http.Request, name string) { //nolint:revive // generated interface name
+	if s.vault == nil {
+		writeError(w, http.StatusServiceUnavailable, "vault not configured", "")
+		return
+	}
+
+	var req CredentialUpdate
+	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", "")
+		return
+	}
+
+	// Check if credential exists.
+	existing, err := s.vault.List()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list credentials", "")
+		return
+	}
+	found := false
+	for _, n := range existing {
+		if n == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "credential not found", "")
+		return
+	}
+
+	// Read the existing value to detect OAuth vs static. For OAuth we need
+	// the token_url so we can rebuild the JSON blob with new tokens. The
+	// existing secret bytes are released immediately after use.
+	current, err := s.vault.Get(name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read existing credential", "")
+		return
+	}
+	isOAuth := vault.IsOAuth(current.Bytes())
+	var existingTokenURL string
+	if isOAuth {
+		parsed, parseErr := vault.ParseOAuth(current.Bytes())
+		if parseErr != nil {
+			current.Release()
+			writeError(w, http.StatusInternalServerError, "failed to parse existing oauth credential: "+parseErr.Error(), "")
+			return
+		}
+		existingTokenURL = parsed.TokenURL
+	}
+	current.Release()
+
+	// Validate body and build new secret bytes.
+	var newSecret string
+	if isOAuth {
+		if req.AccessToken == nil || *req.AccessToken == "" {
+			writeError(w, http.StatusBadRequest, "access_token is required for oauth credentials", "")
+			return
+		}
+		oauthCred := &vault.OAuthCredential{
+			AccessToken: *req.AccessToken,
+			TokenURL:    existingTokenURL,
+		}
+		if req.RefreshToken != nil {
+			oauthCred.RefreshToken = *req.RefreshToken
+		}
+		data, marshalErr := oauthCred.Marshal()
+		if marshalErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to marshal oauth credential: "+marshalErr.Error(), "")
+			return
+		}
+		newSecret = string(data)
+	} else {
+		if req.Value == nil || *req.Value == "" {
+			writeError(w, http.StatusBadRequest, "value is required for static credentials", "")
+			return
+		}
+		newSecret = *req.Value
+	}
+
+	if _, err := s.vault.Add(name, newSecret); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update credential: "+err.Error(), "")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // DeleteApiCredentialsName removes a credential and its associated bindings/rules.
 func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request, name string) { //nolint:revive // generated interface name
 	if s.vault == nil {
@@ -1188,6 +1281,77 @@ func (s *Server) PostApiBindings(w http.ResponseWriter, r *http.Request) { //nol
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(Binding{Id: id, Destination: req.Destination, Credential: req.Credential})
+}
+
+// PatchApiBindingsId updates a credential binding. Only fields present in
+// the request body are updated. Not-found returns 404.
+func (s *Server) PatchApiBindingsId(w http.ResponseWriter, r *http.Request, id int64) { //nolint:revive // generated interface name
+	var req BindingUpdate
+	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", "")
+		return
+	}
+
+	if s.reloadMu != nil {
+		s.reloadMu.Lock()
+		defer s.reloadMu.Unlock()
+	}
+
+	// Verify the binding exists up front so we can return 404 cleanly.
+	rows, err := s.store.ListBindings()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list bindings", "")
+		return
+	}
+	var current *store.BindingRow
+	for i := range rows {
+		if rows[i].ID == id {
+			current = &rows[i]
+			break
+		}
+	}
+	if current == nil {
+		writeError(w, http.StatusNotFound, "binding not found", "")
+		return
+	}
+
+	opts := store.BindingUpdateOpts{
+		Destination: req.Destination,
+		Ports:       req.Ports,
+		Header:      req.Header,
+		Template:    req.Template,
+		Protocols:   req.Protocols,
+	}
+
+	if err := s.store.UpdateBinding(id, opts); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "binding not found", "")
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error(), "")
+		return
+	}
+
+	if err := s.rebuildResolver(); err != nil {
+		log.Printf("[WARN] rebuild resolver after binding update failed: %v", err)
+	}
+
+	// Read back the updated binding.
+	rows, err = s.store.ListBindings()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read back binding", "")
+		return
+	}
+	for _, b := range rows {
+		if b.ID == id {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(storeBindingToAPI(b))
+			return
+		}
+	}
+
+	// Should not happen. Fallback.
+	writeError(w, http.StatusInternalServerError, "binding disappeared after update", "")
 }
 
 // DeleteApiBindingsId removes a credential binding.
