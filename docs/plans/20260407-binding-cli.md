@@ -128,13 +128,13 @@ The vault's `Add()` already does atomic overwrite (temp file + rename). For OAut
 **Files:**
 - Modify: `cmd/sluice/cred.go`
 
-- [ ] Change `--destination` from single string to repeatable string slice flag
-- [ ] When multiple destinations provided: create one credential in vault, then call `AddRuleAndBinding()` for each destination (each gets the same ports/header/template from shared flags)
-- [ ] Maintain backward compatibility: single `--destination` still works as before
-- [ ] Write tests for single destination (backward compat)
-- [ ] Write tests for multiple destinations
-- [ ] Write tests for error cases (no destination provided still works for credential-only add)
-- [ ] Run tests: `go test ./cmd/sluice/ -timeout 30s`
+- [x] Change `--destination` from single string to repeatable string slice flag
+- [x] When multiple destinations provided: create one credential in vault, then call `AddRuleAndBinding()` for each destination (each gets the same ports/header/template from shared flags)
+- [x] Maintain backward compatibility: single `--destination` still works as before
+- [x] Write tests for single destination (backward compat)
+- [x] Write tests for multiple destinations
+- [x] Write tests for error cases (no destination provided still works for credential-only add)
+- [x] Run tests: `go test ./cmd/sluice/ -timeout 30s`
 
 ### Task 4: Add `sluice cred update` for value replacement
 

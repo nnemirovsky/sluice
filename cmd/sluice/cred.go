@@ -127,7 +127,11 @@ func handleCredAdd(args []string) error {
 
 	fs := flag.NewFlagSet("cred add", flag.ContinueOnError)
 	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
-	destination := fs.String("destination", "", "auto-create allow rule and binding for this destination")
+	var destinations []string
+	fs.Func("destination", "auto-create allow rule and binding for this destination (repeatable)", func(s string) error {
+		destinations = append(destinations, s)
+		return nil
+	})
 	portsStr := fs.String("ports", "", "comma-separated port list for the allow rule (e.g. 443,80)")
 	header := fs.String("header", "", "header for the binding (e.g. Authorization)")
 	template := fs.String("template", "", "template for credential injection (e.g. \"Bearer {value}\")")
@@ -139,7 +143,7 @@ func handleCredAdd(args []string) error {
 	}
 
 	if fs.NArg() == 0 {
-		return fmt.Errorf("usage: sluice cred add <name> [--type static|oauth] [--token-url URL] [--destination host] [--ports 443] [--header Authorization] [--template \"Bearer {value}\"] [--env-var OPENAI_API_KEY]")
+		return fmt.Errorf("usage: sluice cred add <name> [--type static|oauth] [--token-url URL] [--destination host]... [--ports 443] [--header Authorization] [--template \"Bearer {value}\"] [--env-var OPENAI_API_KEY]")
 	}
 	name := fs.Arg(0)
 
@@ -169,7 +173,7 @@ func handleCredAdd(args []string) error {
 
 	// --env-var requires --destination because the env var is stored on the
 	// binding, which only exists when a destination is provided.
-	if *envVar != "" && *destination == "" {
+	if *envVar != "" && len(destinations) == 0 {
 		return fmt.Errorf("--env-var requires --destination (env var is stored on the binding)")
 	}
 
@@ -199,9 +203,11 @@ func handleCredAdd(args []string) error {
 	// DB path is unreachable.
 	var ports []int
 
-	if *destination != "" {
-		if _, err := policy.CompileGlob(*destination); err != nil {
-			return fmt.Errorf("invalid destination pattern %q: %w", *destination, err)
+	if len(destinations) > 0 {
+		for _, d := range destinations {
+			if _, err := policy.CompileGlob(d); err != nil {
+				return fmt.Errorf("invalid destination pattern %q: %w", d, err)
+			}
 		}
 
 		if *portsStr != "" {
@@ -272,39 +278,65 @@ func handleCredAdd(args []string) error {
 		return fmt.Errorf("add credential meta: %w", err)
 	}
 
-	// Create rule and binding atomically. If the DB insert fails, roll back
-	// the vault change: restore the previous ciphertext if overwriting, or
-	// remove the new file if the credential was brand new. Rollback uses
-	// compare-and-swap: only restore/delete if the credential still matches
-	// what we wrote, avoiding clobber of concurrent writes.
-	if *destination != "" {
-		ruleID, bindingID, err := db.AddRuleAndBinding(
-			"allow",
-			store.RuleOpts{
-				Destination: *destination,
-				Ports:       ports,
-				Name:        fmt.Sprintf("auto-created for credential %q", name),
-				Source:      credAddSourcePrefix + name,
-			},
-			name,
-			store.BindingOpts{
-				Ports:    ports,
-				Header:   *header,
-				Template: *template,
-				EnvVar:   *envVar,
-			},
-		)
-		if err != nil {
-			// Also clean up credential_meta if it was just created.
-			if _, rmErr := db.RemoveCredentialMeta(name); rmErr != nil {
-				log.Printf("warning: failed to remove credential meta for %q after rule/binding error: %v", name, rmErr)
-			}
-			rollbackVault()
-			return fmt.Errorf("add rule and binding: %w", err)
+	// Create rule and binding atomically for each destination. If any DB
+	// insert fails, roll back: remove all previously created rules and
+	// bindings for this credential, then restore or remove the vault entry.
+	// The vault rollback uses compare-and-swap: only restore/delete if the
+	// credential still matches what we wrote, avoiding clobber of concurrent
+	// writes.
+	if len(destinations) > 0 {
+		type created struct {
+			destination string
+			ruleID      int64
+			bindingID   int64
 		}
+		var addedEntries []created
+
+		rollbackDB := func() {
+			for _, c := range addedEntries {
+				if _, rmErr := db.RemoveBinding(c.bindingID); rmErr != nil {
+					log.Printf("warning: failed to remove binding [%d] during rollback: %v", c.bindingID, rmErr)
+				}
+				if _, rmErr := db.RemoveRule(c.ruleID); rmErr != nil {
+					log.Printf("warning: failed to remove rule [%d] during rollback: %v", c.ruleID, rmErr)
+				}
+			}
+		}
+
+		for _, dest := range destinations {
+			ruleID, bindingID, addErr := db.AddRuleAndBinding(
+				"allow",
+				store.RuleOpts{
+					Destination: dest,
+					Ports:       ports,
+					Name:        fmt.Sprintf("auto-created for credential %q", name),
+					Source:      credAddSourcePrefix + name,
+				},
+				name,
+				store.BindingOpts{
+					Ports:    ports,
+					Header:   *header,
+					Template: *template,
+					EnvVar:   *envVar,
+				},
+			)
+			if addErr != nil {
+				rollbackDB()
+				// Also clean up credential_meta if it was just created.
+				if _, rmErr := db.RemoveCredentialMeta(name); rmErr != nil {
+					log.Printf("warning: failed to remove credential meta for %q after rule/binding error: %v", name, rmErr)
+				}
+				rollbackVault()
+				return fmt.Errorf("add rule and binding for %q: %w", dest, addErr)
+			}
+			addedEntries = append(addedEntries, created{destination: dest, ruleID: ruleID, bindingID: bindingID})
+		}
+
 		fmt.Printf("credential %q added (type: %s)\n", name, *credType)
-		fmt.Printf("added allow rule [%d] for %s\n", ruleID, *destination)
-		fmt.Printf("added binding [%d] %s -> %s\n", bindingID, *destination, name)
+		for _, c := range addedEntries {
+			fmt.Printf("added allow rule [%d] for %s\n", c.ruleID, c.destination)
+			fmt.Printf("added binding [%d] %s -> %s\n", c.bindingID, c.destination, name)
+		}
 	} else {
 		fmt.Printf("credential %q added (type: %s)\n", name, *credType)
 	}

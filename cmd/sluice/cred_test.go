@@ -1551,3 +1551,341 @@ func TestHandleCredListHidesEnvVarWhenEmpty(t *testing.T) {
 		t.Errorf("unexpected 'env=' in list output when env_var is empty: %s", output)
 	}
 }
+
+// TestHandleCredAddMultipleDestinations tests that passing --destination
+// multiple times creates one credential in the vault and one allow rule plus
+// one binding per destination. All bindings share the same ports/header/
+// template supplied via the shared flags.
+func TestHandleCredAddMultipleDestinations(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	if _, err := w.Write([]byte("ghp_multi\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	defer func() { os.Stdin = oldStdin }()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--destination", "api.github.com",
+			"--destination", "uploads.github.com",
+			"--ports", "443",
+			"--header", "Authorization",
+			"--template", "Bearer {value}",
+			"github_pat",
+		}); err != nil {
+			t.Fatalf("handleCredCommand add with multiple destinations: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, `credential "github_pat" added`) {
+		t.Errorf("expected credential added message, got: %s", output)
+	}
+	if !strings.Contains(output, "api.github.com") {
+		t.Errorf("expected api.github.com in output, got: %s", output)
+	}
+	if !strings.Contains(output, "uploads.github.com") {
+		t.Errorf("expected uploads.github.com in output, got: %s", output)
+	}
+
+	// Verify only one credential was stored in the vault.
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("open vault: %v", err)
+	}
+	names, err := vs.List()
+	if err != nil {
+		t.Fatalf("list vault: %v", err)
+	}
+	if len(names) != 1 {
+		t.Fatalf("expected 1 credential in vault, got %d: %v", len(names), names)
+	}
+	if names[0] != "github_pat" {
+		t.Errorf("vault credential name = %q, want %q", names[0], "github_pat")
+	}
+
+	sb, err := vs.Get("github_pat")
+	if err != nil {
+		t.Fatalf("get credential: %v", err)
+	}
+	defer sb.Release()
+	if sb.String() != "ghp_multi" {
+		t.Errorf("vault value = %q, want %q", sb.String(), "ghp_multi")
+	}
+
+	// Verify two allow rules were created, one per destination.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rules, err := db.ListRules(store.RuleFilter{Verdict: "allow"})
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 allow rules, got %d", len(rules))
+	}
+	ruleDests := map[string]bool{}
+	for _, r := range rules {
+		ruleDests[r.Destination] = true
+		if r.Source != credAddSourcePrefix+"github_pat" {
+			t.Errorf("rule source = %q, want %q", r.Source, credAddSourcePrefix+"github_pat")
+		}
+	}
+	if !ruleDests["api.github.com"] || !ruleDests["uploads.github.com"] {
+		t.Errorf("missing expected destinations in rules, got: %v", ruleDests)
+	}
+
+	// Verify two bindings, one per destination, both pointing at github_pat
+	// and sharing the same header/template/ports.
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 2 {
+		t.Fatalf("expected 2 bindings, got %d", len(bindings))
+	}
+	bindDests := map[string]bool{}
+	for _, b := range bindings {
+		bindDests[b.Destination] = true
+		if b.Credential != "github_pat" {
+			t.Errorf("binding credential = %q, want %q", b.Credential, "github_pat")
+		}
+		if b.Header != "Authorization" {
+			t.Errorf("binding header = %q, want %q", b.Header, "Authorization")
+		}
+		if b.Template != "Bearer {value}" {
+			t.Errorf("binding template = %q, want %q", b.Template, "Bearer {value}")
+		}
+		if len(b.Ports) != 1 || b.Ports[0] != 443 {
+			t.Errorf("binding ports = %v, want [443]", b.Ports)
+		}
+	}
+	if !bindDests["api.github.com"] || !bindDests["uploads.github.com"] {
+		t.Errorf("missing expected destinations in bindings, got: %v", bindDests)
+	}
+}
+
+// TestHandleCredAddSingleDestinationBackwardCompat ensures that the single
+// --destination form still works identically after the flag was made
+// repeatable.
+func TestHandleCredAddSingleDestinationBackwardCompat(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	if _, err := w.Write([]byte("single-secret\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	defer func() { os.Stdin = oldStdin }()
+
+	_ = captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--destination", "api.single.com",
+			"--ports", "443",
+			"--header", "Authorization",
+			"single_key",
+		}); err != nil {
+			t.Fatalf("handleCredCommand add single destination: %v", err)
+		}
+	})
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rules, err := db.ListRules(store.RuleFilter{Verdict: "allow"})
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rules))
+	}
+	if rules[0].Destination != "api.single.com" {
+		t.Errorf("rule destination = %q, want %q", rules[0].Destination, "api.single.com")
+	}
+
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if bindings[0].Destination != "api.single.com" {
+		t.Errorf("binding destination = %q, want %q", bindings[0].Destination, "api.single.com")
+	}
+}
+
+// TestHandleCredAddNoDestinationStillWorks verifies that omitting --destination
+// still allows creating a credential in the vault without any rules or bindings.
+func TestHandleCredAddNoDestinationStillWorks(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	if _, err := w.Write([]byte("bare-secret\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	defer func() { os.Stdin = oldStdin }()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"bare_key",
+		}); err != nil {
+			t.Fatalf("handleCredCommand add without destination: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, `credential "bare_key" added`) {
+		t.Errorf("expected credential added message, got: %s", output)
+	}
+	if strings.Contains(output, "added allow rule") {
+		t.Errorf("did not expect rule creation message, got: %s", output)
+	}
+	if strings.Contains(output, "added binding") {
+		t.Errorf("did not expect binding creation message, got: %s", output)
+	}
+
+	// Verify no rules or bindings were created.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rules, err := db.ListRules(store.RuleFilter{})
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("expected 0 rules, got %d", len(rules))
+	}
+
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 bindings, got %d", len(bindings))
+	}
+
+	// Verify the credential is in the vault.
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("open vault: %v", err)
+	}
+	sb, err := vs.Get("bare_key")
+	if err != nil {
+		t.Fatalf("get credential: %v", err)
+	}
+	defer sb.Release()
+	if sb.String() != "bare-secret" {
+		t.Errorf("vault value = %q, want %q", sb.String(), "bare-secret")
+	}
+}
+
+// TestHandleCredAddMultipleDestinationsBadPortRollback verifies that when
+// a port is invalid, nothing is written to the vault or the DB. This tests
+// the upfront-validation path: failures before any DB or vault writes should
+// leave the system in a clean state when multiple destinations are supplied.
+func TestHandleCredAddMultipleDestinationsBadPortRollback(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	if _, err := w.Write([]byte("rollback-secret\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	defer func() { os.Stdin = oldStdin }()
+
+	// Invalid port triggers a validation error after destination validation
+	// but before any vault or DB writes.
+	err = handleCredCommand([]string{
+		"add",
+		"--db", dbPath,
+		"--destination", "api.first.com",
+		"--destination", "api.second.com",
+		"--ports", "70000",
+		"rollback_key",
+	})
+	if err == nil {
+		t.Fatal("expected error for out-of-range port")
+	}
+	if !strings.Contains(err.Error(), "out of range") {
+		t.Errorf("expected out-of-range error, got: %v", err)
+	}
+
+	// Verify no rules or bindings were created (validation fails before DB writes).
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rules, err := db.ListRules(store.RuleFilter{})
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("expected 0 rules after rollback, got %d", len(rules))
+	}
+
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 bindings after rollback, got %d", len(bindings))
+	}
+
+	// Verify no credential was stored in the vault (validation ran before vault write).
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("open vault: %v", err)
+	}
+	names, err := vs.List()
+	if err != nil {
+		t.Fatalf("list vault: %v", err)
+	}
+	for _, n := range names {
+		if n == "rollback_key" {
+			t.Error("credential should not have been added to vault after validation failure")
+		}
+	}
+}
