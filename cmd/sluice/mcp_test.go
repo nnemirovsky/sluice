@@ -253,6 +253,53 @@ func TestHandleMCPAddAndList(t *testing.T) {
 	}
 }
 
+// TestHandleMCPAddNameBeforeFlags verifies that the upstream name can appear
+// before the flags, matching what the usage string documents. The stdlib
+// flag parser normally stops at the first non-flag arg; handleMCPAdd
+// reorders args via reorderFlagsBeforePositional to handle both orders.
+func TestHandleMCPAddNameBeforeFlags(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	err := handleMCPAdd([]string{
+		"github", // name first
+		"--db", dbPath,
+		"--transport", "http",
+		"--command", "https://api.githubcopilot.com/mcp/",
+		"--header", "Authorization=Bearer token123",
+	})
+	if err != nil {
+		t.Fatalf("mcp add: %v", err)
+	}
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	upstreams, err := db.ListMCPUpstreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upstreams) != 1 {
+		t.Fatalf("expected 1 upstream, got %d", len(upstreams))
+	}
+	u := upstreams[0]
+	if u.Name != "github" {
+		t.Errorf("expected name github, got %q", u.Name)
+	}
+	if u.Transport != "http" {
+		t.Errorf("expected transport http, got %q", u.Transport)
+	}
+	if u.Command != "https://api.githubcopilot.com/mcp/" {
+		t.Errorf("expected command URL, got %q", u.Command)
+	}
+	if u.Headers["Authorization"] != "Bearer token123" {
+		t.Errorf("expected Authorization header, got %v", u.Headers)
+	}
+}
+
 // TestHandleMCPAddWithEnv verifies that environment variables are parsed correctly.
 func TestHandleMCPAddWithEnv(t *testing.T) {
 	dir := t.TempDir()

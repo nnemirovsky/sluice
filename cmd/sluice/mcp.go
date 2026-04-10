@@ -264,7 +264,9 @@ func handleMCPAdd(args []string) error {
 		headers[parts[0]] = parts[1]
 		return nil
 	})
-	if err := fs.Parse(args); err != nil {
+	// Go's stdlib flag parser stops at the first non-flag argument. Reorder
+	// so positional args (upstream name) can come before flags too.
+	if err := fs.Parse(reorderFlagsBeforePositional(args, fs)); err != nil {
 		return err
 	}
 
