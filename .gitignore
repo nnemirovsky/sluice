@@ -2,6 +2,9 @@
 bin/
 /sluice
 
+# Go compiled test binaries (e.g. `go test -c`)
+*.test
+
 # SQLite databases (runtime, not checked in)
 *.db
 *.db-shm
@@ -39,5 +42,6 @@ dist/
 
 # Claude
 .claude/settings.local.json
+.claude/worktrees/
 CLAUDE.local.md
 go/
