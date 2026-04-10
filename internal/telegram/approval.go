@@ -132,6 +132,7 @@ func (tc *TelegramChannel) sendApprovalMessage(req channel.ApprovalRequest) {
 	}
 
 	msg := tgbotapi.NewMessage(tc.chatID, FormatApprovalMessage(req))
+	msg.ParseMode = tgbotapi.ModeHTML
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("Allow", req.ID+"|allow_once"),
@@ -163,6 +164,7 @@ func (tc *TelegramChannel) sendApprovalMessage(req channel.ApprovalRequest) {
 	if tc.broker != nil && tc.broker.WasTimedOut(req.ID) {
 		edit := tgbotapi.NewEditMessageText(tc.chatID, sent.MessageID,
 			originalText+"\n\n(request timed out)")
+		edit.ParseMode = tgbotapi.ModeHTML
 		if _, editErr := tc.api.Send(edit); editErr == nil {
 			tc.broker.ClearTimedOut(req.ID)
 		}
@@ -185,6 +187,7 @@ func (tc *TelegramChannel) CancelApproval(id string) error {
 		reason = "(proxy shutting down)"
 	}
 	edit := tgbotapi.NewEditMessageText(tc.chatID, am.messageID, am.text+"\n\n"+reason)
+	edit.ParseMode = tgbotapi.ModeHTML
 	_, _ = tc.api.Send(edit)
 	return nil
 }
@@ -306,12 +309,16 @@ func (tc *TelegramChannel) handleCallback(cq *tgbotapi.CallbackQuery) {
 		callback := tgbotapi.NewCallback(cq.ID, label)
 		_, _ = tc.api.Request(callback)
 
-		// Do not use Markdown parse mode here: cq.Message.Text is Telegram's
-		// plain-text extraction of the original Markdown message. Re-parsing
-		// it as Markdown breaks when the destination contains underscores or
-		// other Markdown-special characters (common in DNS names).
+		// Use the original stored text (with HTML markup) rather than
+		// cq.Message.Text, which is Telegram's plain-text extraction
+		// and loses our <pre><code> formatting on tool arguments.
+		originalText := cq.Message.Text
+		if val, ok := tc.msgMap.Load(reqID); ok {
+			originalText = val.(approvalMsg).text
+		}
 		edit := tgbotapi.NewEditMessageText(tc.chatID, cq.Message.MessageID,
-			fmt.Sprintf("%s\n\n%s at %s", cq.Message.Text, label, time.Now().UTC().Format("15:04:05")))
+			fmt.Sprintf("%s\n\n%s at %s", originalText, label, time.Now().UTC().Format("15:04:05")))
+		edit.ParseMode = tgbotapi.ModeHTML
 		_, _ = tc.api.Send(edit)
 		tc.msgMap.Delete(reqID)
 	} else if tc.broker != nil && tc.broker.WasTimedOut(reqID) {
@@ -319,8 +326,13 @@ func (tc *TelegramChannel) handleCallback(cq *tgbotapi.CallbackQuery) {
 		callback := tgbotapi.NewCallback(cq.ID, "Request timed out")
 		_, _ = tc.api.Request(callback)
 
+		originalText := cq.Message.Text
+		if val, ok := tc.msgMap.Load(reqID); ok {
+			originalText = val.(approvalMsg).text
+		}
 		edit := tgbotapi.NewEditMessageText(tc.chatID, cq.Message.MessageID,
-			cq.Message.Text+"\n\n(request timed out)")
+			originalText+"\n\n(request timed out)")
+		edit.ParseMode = tgbotapi.ModeHTML
 		_, _ = tc.api.Send(edit)
 		tc.msgMap.Delete(reqID)
 

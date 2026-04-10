@@ -82,7 +82,7 @@ func TestFormatApprovalMessage(t *testing.T) {
 		}
 	})
 
-	t.Run("mcp tool call", func(t *testing.T) {
+	t.Run("mcp tool call with valid json args", func(t *testing.T) {
 		req := channel.ApprovalRequest{
 			Destination: "github__delete_repository",
 			Port:        0,
@@ -96,11 +96,53 @@ func TestFormatApprovalMessage(t *testing.T) {
 		if !strings.Contains(msg, "OpenClaw wants to call tool") {
 			t.Error("message should use MCP tool call wording")
 		}
-		if !strings.Contains(msg, `{"owner":"test","repo":"my-repo"}`) {
-			t.Error("message should contain tool arguments")
+		// Args should be pretty-printed inside an HTML <pre><code> block.
+		if !strings.Contains(msg, `<pre><code class="language-json">`) {
+			t.Error("args should be wrapped in <pre><code> block")
+		}
+		if !strings.Contains(msg, "\"owner\": \"test\"") {
+			t.Errorf("args should be pretty-printed with 2-space indent, got: %s", msg)
+		}
+		if !strings.Contains(msg, "</code></pre>") {
+			t.Error("args code block should be closed")
 		}
 		if !strings.Contains(msg, "Allow this tool call?") {
 			t.Error("message should ask about tool call, not connection")
+		}
+	})
+
+	t.Run("mcp tool call with invalid json args falls back to raw", func(t *testing.T) {
+		req := channel.ApprovalRequest{
+			Destination: "github__search_repositories",
+			Port:        0,
+			Protocol:    "mcp",
+			// Truncated JSON as produced when the gateway enforces the
+			// 200-char limit mid-object.
+			ToolArgs: `{"query": "is:private", "perPage": 10, "sor...`,
+		}
+		msg := FormatApprovalMessage(req)
+		if !strings.Contains(msg, `<pre><code class="language-json">`) {
+			t.Error("args should still be wrapped in code block")
+		}
+		// Raw string preserved when it cannot be parsed.
+		if !strings.Contains(msg, "is:private") {
+			t.Error("raw args should appear when JSON parse fails")
+		}
+	})
+
+	t.Run("mcp tool call args with html special chars are escaped", func(t *testing.T) {
+		req := channel.ApprovalRequest{
+			Destination: "shell__exec",
+			Port:        0,
+			Protocol:    "mcp",
+			ToolArgs:    `{"cmd":"<script>alert('xss')</script>"}`,
+		}
+		msg := FormatApprovalMessage(req)
+		if strings.Contains(msg, "<script>") {
+			t.Error("html special chars in args must be escaped")
+		}
+		if !strings.Contains(msg, "&lt;script&gt;") {
+			t.Error("expected escaped <script> tag")
 		}
 	})
 
