@@ -3,8 +3,6 @@ package container
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -90,81 +88,6 @@ func TestDockerManagerImplementsContainerManager(t *testing.T) {
 	// Verify Runtime() returns Docker.
 	if mgr.Runtime() != RuntimeDocker {
 		t.Errorf("Runtime() = %v, want %v", mgr.Runtime(), RuntimeDocker)
-	}
-}
-
-func TestDockerManagerInjectMCPConfig(t *testing.T) {
-	mc := &mockClient{}
-	mgr := NewDockerManager(mc, "openclaw")
-
-	tmpDir := t.TempDir()
-	err := mgr.InjectMCPConfig(tmpDir, "http://sluice:3000/mcp")
-	if err != nil {
-		t.Fatalf("InjectMCPConfig() = %v, want nil", err)
-	}
-
-	// Verify mcp-servers.json was written.
-	data, readErr := os.ReadFile(filepath.Join(tmpDir, "mcp-servers.json"))
-	if readErr != nil {
-		t.Fatalf("read mcp-servers.json: %v", readErr)
-	}
-
-	want := `{"sluice":{"transport":"streamable-http","url":"http://sluice:3000/mcp"}}`
-	if string(data) != want {
-		t.Errorf("mcp-servers.json = %s, want %s", string(data), want)
-	}
-
-	// Verify exec was called to reload MCP config.
-	if !mc.execCalled {
-		t.Error("expected exec call for mcp reload")
-	}
-	if mc.execName != "openclaw" {
-		t.Errorf("exec container = %q, want %q", mc.execName, "openclaw")
-	}
-	wantCmd := []string{"openclaw", "mcp", "reload"}
-	if len(mc.execCmd) != len(wantCmd) {
-		t.Errorf("exec cmd = %v, want %v", mc.execCmd, wantCmd)
-	} else {
-		for i := range wantCmd {
-			if mc.execCmd[i] != wantCmd[i] {
-				t.Errorf("exec cmd[%d] = %q, want %q", i, mc.execCmd[i], wantCmd[i])
-			}
-		}
-	}
-}
-
-func TestDockerManagerInjectMCPConfigExecError(t *testing.T) {
-	mc := &mockClient{execErr: fmt.Errorf("exec failed")}
-	mgr := NewDockerManager(mc, "openclaw")
-
-	tmpDir := t.TempDir()
-	// Exec failure should not cause InjectMCPConfig to fail.
-	// The file should still be written, and the error is logged.
-	err := mgr.InjectMCPConfig(tmpDir, "http://sluice:3000/mcp")
-	if err != nil {
-		t.Fatalf("InjectMCPConfig() = %v, want nil (exec error is best-effort)", err)
-	}
-
-	// Verify the file was still written despite exec failure.
-	data, readErr := os.ReadFile(filepath.Join(tmpDir, "mcp-servers.json"))
-	if readErr != nil {
-		t.Fatalf("read mcp-servers.json: %v", readErr)
-	}
-	if !strings.Contains(string(data), "sluice") {
-		t.Error("mcp-servers.json should contain sluice config")
-	}
-}
-
-func TestDockerManagerInjectMCPConfigBadDir(t *testing.T) {
-	mc := &mockClient{}
-	mgr := NewDockerManager(mc, "openclaw")
-
-	err := mgr.InjectMCPConfig("/nonexistent/path/xyz", "http://sluice:3000/mcp")
-	if err == nil {
-		t.Fatal("expected error for nonexistent directory")
-	}
-	if !strings.Contains(err.Error(), "write mcp config") {
-		t.Errorf("error = %v, want to contain 'write mcp config'", err)
 	}
 }
 
@@ -514,11 +437,13 @@ func TestInjectEnvVarsWritesEnvFile(t *testing.T) {
 		t.Errorf("script should reference .openclaw/.env, got %s", script)
 	}
 
-	// Second call: secrets reload via node WebSocket script.
-	if len(mc.execCalls[1]) != 3 {
-		t.Errorf("reload cmd len = %d, want 3", len(mc.execCalls[1]))
-	} else if mc.execCalls[1][0] != "node" || mc.execCalls[1][1] != "-e" {
-		t.Errorf("reload cmd = %v, want [node -e <script>]", mc.execCalls[1][:2])
+	// Second call: secrets reload via node WebSocket script. The new
+	// script takes the RPC method as argv, so the command is
+	// [node, -e, <script>, "secrets.reload"].
+	if len(mc.execCalls[1]) != 4 {
+		t.Errorf("reload cmd len = %d, want 4", len(mc.execCalls[1]))
+	} else if mc.execCalls[1][0] != "node" || mc.execCalls[1][1] != "-e" || mc.execCalls[1][3] != "secrets.reload" {
+		t.Errorf("reload cmd = %v, want [node -e <script> secrets.reload]", mc.execCalls[1][:2])
 	}
 }
 

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -289,7 +290,8 @@ func TestMCPHTTPNotificationReturns202(t *testing.T) {
 func TestMCPHTTPMethodNotAllowed(t *testing.T) {
 	handler := newTestMCPHandler(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	// PUT is not a valid MCP method; GET is handled as SSE stream.
+	req := httptest.NewRequest(http.MethodPut, "/mcp", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -298,8 +300,38 @@ func TestMCPHTTPMethodNotAllowed(t *testing.T) {
 	}
 
 	allow := rec.Header().Get("Allow")
-	if !strings.Contains(allow, "POST") || !strings.Contains(allow, "DELETE") {
-		t.Errorf("expected Allow header with POST and DELETE, got %q", allow)
+	if !strings.Contains(allow, "POST") || !strings.Contains(allow, "GET") || !strings.Contains(allow, "DELETE") {
+		t.Errorf("expected Allow header with POST, GET, and DELETE, got %q", allow)
+	}
+}
+
+func TestMCPHTTPGetOpensSSEStream(t *testing.T) {
+	handler := newTestMCPHandler(t)
+
+	// GET should open an SSE stream and return immediately when the
+	// request context is cancelled.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/mcp", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler did not return after context cancel")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("expected text/event-stream, got %q", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "sluice mcp sse") {
+		t.Errorf("expected initial SSE comment, got %q", rec.Body.String())
 	}
 }
 

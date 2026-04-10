@@ -530,10 +530,9 @@ func TestTartVMStateNotFound(t *testing.T) {
 var _ ContainerManager = (*TartManager)(nil)
 
 // newTestTartManager creates a TartManager with a mock runner for testing.
-// Returns the manager, mock runner, and a temp dir for phantom files.
 // The startVM function is replaced with a mock that records the call and
 // returns a nil Cmd (tests that need cmd.Wait() must override startVM).
-func newTestTartManager(t *testing.T) (*TartManager, *mockRunner, string) {
+func newTestTartManager(t *testing.T) (*TartManager, *mockRunner) {
 	t.Helper()
 	runner := newMockRunner()
 	runner.onCommand("tart --version", []byte("tart 2.15.0\n"), nil)
@@ -542,8 +541,6 @@ func newTestTartManager(t *testing.T) (*TartManager, *mockRunner, string) {
 	if err != nil {
 		t.Fatalf("create CLI: %v", err)
 	}
-
-	tmpDir := t.TempDir()
 
 	mgr := NewTartManager(TartManagerConfig{
 		CLI:    cli,
@@ -572,11 +569,11 @@ func newTestTartManager(t *testing.T) (*TartManager, *mockRunner, string) {
 		return cmd, nil
 	}
 
-	return mgr, runner, tmpDir
+	return mgr, runner
 }
 
 func TestTartManagerRestartWithEnv(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 
 	runner.onCommand("tart stop", nil, nil)
 	runner.onCommand("tart run", nil, nil)
@@ -621,7 +618,7 @@ func TestTartManagerRestartWithEnv(t *testing.T) {
 }
 
 func TestTartManagerInjectEnvVars(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 	runner.onCommand("tart exec openclaw -- sh", []byte(""), nil)
 	runner.onCommand("tart exec openclaw -- openclaw secrets reload", []byte("ok\n"), nil)
 
@@ -646,7 +643,7 @@ func TestTartManagerInjectEnvVars(t *testing.T) {
 }
 
 func TestTartManagerInjectEnvVarsEmpty(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 
 	err := mgr.InjectEnvVars(context.Background(), map[string]string{}, false)
 	if err != nil {
@@ -662,7 +659,7 @@ func TestTartManagerInjectEnvVarsEmpty(t *testing.T) {
 }
 
 func TestTartManagerRestartWithEnvStopError(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 	runner.onCommand("tart stop", nil, errors.New("VM already stopped"))
 
 	err := mgr.RestartWithEnv(context.Background(), map[string]string{"K": "V"})
@@ -675,7 +672,7 @@ func TestTartManagerRestartWithEnvStopError(t *testing.T) {
 }
 
 func TestTartManagerRestartWithEnvRunError(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 	runner.onCommand("tart stop", nil, nil)
 	runner.onCommand("tart run", nil, errors.New("failed to start VM"))
 
@@ -688,56 +685,8 @@ func TestTartManagerRestartWithEnvRunError(t *testing.T) {
 	}
 }
 
-func TestTartManagerInjectMCPConfig(t *testing.T) {
-	mgr, runner, tmpDir := newTestTartManager(t)
-	runner.onCommand("tart exec openclaw -- openclaw mcp reload", []byte("ok\n"), nil)
-
-	err := mgr.InjectMCPConfig(tmpDir, "http://localhost:3000/mcp")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Verify mcp-servers.json was written.
-	data, err := os.ReadFile(filepath.Join(tmpDir, "mcp-servers.json"))
-	if err != nil {
-		t.Fatalf("mcp-servers.json not found: %v", err)
-	}
-	if !strings.Contains(string(data), "http://localhost:3000/mcp") {
-		t.Errorf("mcp config should contain sluice URL: %s", string(data))
-	}
-	if !strings.Contains(string(data), "sluice") {
-		t.Errorf("mcp config should contain sluice key: %s", string(data))
-	}
-
-	// Verify exec was called.
-	if !runner.called("tart exec openclaw -- openclaw mcp reload") {
-		t.Error("expected exec call for mcp reload")
-	}
-}
-
-func TestTartManagerInjectMCPConfigExecError(t *testing.T) {
-	mgr, runner, tmpDir := newTestTartManager(t)
-	runner.onCommand("tart exec", nil, errors.New("exec failed"))
-
-	// Exec failure should not cause InjectMCPConfig to fail.
-	// The file should still be written, and the error is logged.
-	err := mgr.InjectMCPConfig(tmpDir, "http://localhost:3000/mcp")
-	if err != nil {
-		t.Fatalf("InjectMCPConfig() = %v, want nil (exec error is best-effort)", err)
-	}
-
-	// Verify the file was still written despite exec failure.
-	data, readErr := os.ReadFile(filepath.Join(tmpDir, "mcp-servers.json"))
-	if readErr != nil {
-		t.Fatalf("read mcp-servers.json: %v", readErr)
-	}
-	if !strings.Contains(string(data), "sluice") {
-		t.Error("mcp-servers.json should contain sluice config")
-	}
-}
-
 func TestTartManagerStatus(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 
 	entries := []TartVMEntry{
 		{Name: "openclaw", Source: "ghcr.io/cirruslabs/macos-sequoia-base:latest", State: "running", OS: "darwin"},
@@ -761,7 +710,7 @@ func TestTartManagerStatus(t *testing.T) {
 }
 
 func TestTartManagerStatusStopped(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 
 	entries := []TartVMEntry{
 		{Name: "openclaw", Source: "local", State: "stopped"},
@@ -779,7 +728,7 @@ func TestTartManagerStatusStopped(t *testing.T) {
 }
 
 func TestTartManagerStatusNotFound(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 
 	entries := []TartVMEntry{
 		{Name: "other-vm", State: "running"},
@@ -797,7 +746,7 @@ func TestTartManagerStatusNotFound(t *testing.T) {
 }
 
 func TestTartManagerStatusListError(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 	runner.onCommand("tart list", nil, errors.New("tart daemon not running"))
 
 	_, err := mgr.Status(context.Background())
@@ -807,7 +756,7 @@ func TestTartManagerStatusListError(t *testing.T) {
 }
 
 func TestTartManagerStop(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 	runner.onCommand("tart stop", nil, nil)
 
 	err := mgr.Stop(context.Background())
@@ -821,7 +770,7 @@ func TestTartManagerStop(t *testing.T) {
 }
 
 func TestTartManagerStopError(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 	runner.onCommand("tart stop", nil, errors.New("already stopped"))
 
 	err := mgr.Stop(context.Background())
@@ -831,14 +780,14 @@ func TestTartManagerStopError(t *testing.T) {
 }
 
 func TestTartManagerRuntime(t *testing.T) {
-	mgr, _, _ := newTestTartManager(t)
+	mgr, _ := newTestTartManager(t)
 	if mgr.Runtime() != RuntimeMacOS {
 		t.Errorf("Runtime() = %v, want RuntimeMacOS", mgr.Runtime())
 	}
 }
 
 func TestTartManagerInjectCACert(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 
 	// security add-trusted-cert succeeds.
 	runner.onCommand("tart exec openclaw -- security", []byte("ok\n"), nil)
@@ -893,7 +842,7 @@ func TestTartManagerInjectCACert(t *testing.T) {
 }
 
 func TestTartManagerInjectCACertSecurityFails(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 
 	// security add-trusted-cert fails (non-admin, guest not ready, etc.).
 	runner.onCommand("tart exec openclaw -- security", nil, errors.New("errSecAuthFailed"))
@@ -919,7 +868,7 @@ func TestTartManagerInjectCACertSecurityFails(t *testing.T) {
 }
 
 func TestTartManagerInjectCACertMissingHostCert(t *testing.T) {
-	mgr, _, _ := newTestTartManager(t)
+	mgr, _ := newTestTartManager(t)
 
 	err := mgr.InjectCACert(context.Background(), "/nonexistent/ca-cert.pem", t.TempDir())
 	if err == nil {
@@ -931,7 +880,7 @@ func TestTartManagerInjectCACertMissingHostCert(t *testing.T) {
 }
 
 func TestTartManagerInjectCACertWriteError(t *testing.T) {
-	mgr, _, _ := newTestTartManager(t)
+	mgr, _ := newTestTartManager(t)
 
 	hostCertDir := t.TempDir()
 	hostCertPath := filepath.Join(hostCertDir, "ca-cert.pem")
@@ -947,7 +896,7 @@ func TestTartManagerInjectCACertWriteError(t *testing.T) {
 }
 
 func TestTartManagerInjectCACertEnvVarNames(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 
 	// Both commands succeed.
 	runner.onCommand("tart exec openclaw -- security", []byte("ok\n"), nil)
@@ -981,7 +930,7 @@ func TestTartManagerInjectCACertEnvVarNames(t *testing.T) {
 }
 
 func TestTartManagerVMIP(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 	runner.onCommand("tart ip", []byte("192.168.64.5\n"), nil)
 
 	ip, err := mgr.VMIP(context.Background())
@@ -994,7 +943,7 @@ func TestTartManagerVMIP(t *testing.T) {
 }
 
 func TestTartManagerVMIPError(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 	runner.onCommand("tart ip", nil, errors.New("VM not running"))
 
 	_, err := mgr.VMIP(context.Background())
@@ -1007,7 +956,7 @@ func TestTartManagerVMIPError(t *testing.T) {
 }
 
 func TestTartManagerSetupNetworkRouting(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 
 	// Mock tart ip response.
 	runner.onCommand("tart ip", []byte("192.168.64.5\n"), nil)
@@ -1054,7 +1003,7 @@ func TestTartManagerSetupNetworkRouting(t *testing.T) {
 }
 
 func TestTartManagerSetupNetworkRoutingIPError(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 
 	// tart ip fails.
 	runner.onCommand("tart ip", nil, errors.New("VM not running"))
@@ -1078,7 +1027,7 @@ func TestTartManagerSetupNetworkRoutingIPError(t *testing.T) {
 }
 
 func TestTartManagerSetupNetworkRoutingTun2proxyNotRunning(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 
 	// tart ip succeeds.
 	runner.onCommand("tart ip", []byte("192.168.64.5\n"), nil)
@@ -1110,7 +1059,7 @@ func TestTartManagerSetupNetworkRoutingTun2proxyNotRunning(t *testing.T) {
 }
 
 func TestTartManagerTeardownNetworkRouting(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 
 	runner.onCommand("pfctl -a sluice -F all", nil, nil)
 
@@ -1138,7 +1087,7 @@ func TestTartManagerTeardownNetworkRouting(t *testing.T) {
 }
 
 func TestTartManagerTeardownNetworkRoutingError(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 
 	runner.onCommand("pfctl", nil, errors.New("permission denied"))
 
@@ -1209,7 +1158,7 @@ func TestGatewayFromIP(t *testing.T) {
 }
 
 func TestSetupNetworkRoutingDerivesGateway(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 
 	// Mock tart ip response.
 	runner.onCommand("tart ip", []byte("192.168.64.5\n"), nil)
@@ -1241,7 +1190,7 @@ func TestSetupNetworkRoutingDerivesGateway(t *testing.T) {
 }
 
 func TestRestartWithEnvNonBlocking(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 
 	runner.onCommand("tart stop", nil, nil)
 	runner.onCommand("tart run", nil, nil)
@@ -1262,7 +1211,7 @@ func TestRestartWithEnvNonBlocking(t *testing.T) {
 }
 
 func TestRestartWithEnvStartVMError(t *testing.T) {
-	mgr, runner, _ := newTestTartManager(t)
+	mgr, runner := newTestTartManager(t)
 
 	runner.onCommand("tart stop", nil, nil)
 	// Override startVM to return an error.

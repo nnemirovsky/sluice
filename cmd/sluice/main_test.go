@@ -1253,39 +1253,20 @@ func TestBuildTartRunConfig(t *testing.T) {
 	tests := []struct {
 		name       string
 		vmName     string
-		mcpDir     string
 		certDir    string
 		wantMounts int
 		wantName   string
 	}{
 		{
-			name:       "both dirs set",
+			name:       "cert dir set",
 			vmName:     "openclaw",
-			mcpDir:     "/tmp/mcp",
 			certDir:    "/tmp/ca",
-			wantMounts: 2,
+			wantMounts: 1,
 			wantName:   "openclaw",
-		},
-		{
-			name:       "mcp only",
-			vmName:     "testvm",
-			mcpDir:     "/tmp/mcp",
-			certDir:    "",
-			wantMounts: 1,
-			wantName:   "testvm",
-		},
-		{
-			name:       "cert only",
-			vmName:     "testvm",
-			mcpDir:     "",
-			certDir:    "/tmp/ca",
-			wantMounts: 1,
-			wantName:   "testvm",
 		},
 		{
 			name:       "no dirs",
 			vmName:     "testvm",
-			mcpDir:     "",
 			certDir:    "",
 			wantMounts: 0,
 			wantName:   "testvm",
@@ -1294,7 +1275,7 @@ func TestBuildTartRunConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := buildTartRunConfig(tt.vmName, tt.mcpDir, tt.certDir)
+			cfg := buildTartRunConfig(tt.vmName, tt.certDir)
 			if cfg.Name != tt.wantName {
 				t.Errorf("Name = %q, want %q", cfg.Name, tt.wantName)
 			}
@@ -1305,24 +1286,15 @@ func TestBuildTartRunConfig(t *testing.T) {
 				t.Errorf("DirMounts count = %d, want %d", len(cfg.DirMounts), tt.wantMounts)
 			}
 
-			// When both dirs are set, verify mount names, paths, and readonly flags.
-			if tt.mcpDir != "" && tt.certDir != "" && len(cfg.DirMounts) == 2 {
-				if cfg.DirMounts[0].Name != "mcp" {
-					t.Errorf("mount[0].Name = %q, want mcp", cfg.DirMounts[0].Name)
+			// When cert dir is set, verify it is mounted read-only as "ca".
+			if tt.certDir != "" && len(cfg.DirMounts) == 1 {
+				if cfg.DirMounts[0].Name != "ca" {
+					t.Errorf("mount[0].Name = %q, want ca", cfg.DirMounts[0].Name)
 				}
-				if cfg.DirMounts[0].HostPath != tt.mcpDir {
-					t.Errorf("mount[0].HostPath = %q, want %q", cfg.DirMounts[0].HostPath, tt.mcpDir)
+				if cfg.DirMounts[0].HostPath != tt.certDir {
+					t.Errorf("mount[0].HostPath = %q, want %q", cfg.DirMounts[0].HostPath, tt.certDir)
 				}
-				if cfg.DirMounts[0].ReadOnly {
-					t.Error("mcp mount should be writable")
-				}
-				if cfg.DirMounts[1].Name != "ca" {
-					t.Errorf("mount[1].Name = %q, want ca", cfg.DirMounts[1].Name)
-				}
-				if cfg.DirMounts[1].HostPath != tt.certDir {
-					t.Errorf("mount[1].HostPath = %q, want %q", cfg.DirMounts[1].HostPath, tt.certDir)
-				}
-				if !cfg.DirMounts[1].ReadOnly {
+				if !cfg.DirMounts[0].ReadOnly {
 					t.Error("ca mount should be read-only")
 				}
 			}
@@ -1453,10 +1425,6 @@ func (m *mockContainerMgr) RestartWithEnv(_ context.Context, _ map[string]string
 	return nil
 }
 
-func (m *mockContainerMgr) InjectMCPConfig(_, _ string) error {
-	return nil
-}
-
 func (m *mockContainerMgr) InjectCACert(_ context.Context, _, _ string) error {
 	return nil
 }
@@ -1466,6 +1434,10 @@ func (m *mockContainerMgr) Status(_ context.Context) (container.ContainerStatus,
 }
 
 func (m *mockContainerMgr) Stop(_ context.Context) error {
+	return nil
+}
+
+func (m *mockContainerMgr) WireMCPGateway(_ context.Context, _, _ string) error {
 	return nil
 }
 

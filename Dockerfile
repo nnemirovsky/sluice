@@ -26,8 +26,8 @@ RUN apk add --no-cache ca-certificates wget nodejs npm python3 && \
     mv "/tmp/uv-${UV_ARCH}/uvx" /usr/local/bin/uvx && \
     rm -rf "/tmp/uv-${UV_ARCH}" && \
     adduser -D -h /home/sluice sluice && \
-    mkdir -p /home/sluice/ca /home/sluice/.sluice /home/sluice/data /home/sluice/mcp /var/log/sluice /etc/sluice && \
-    chown sluice:sluice /home/sluice/ca /home/sluice/.sluice /home/sluice/data /home/sluice/mcp /var/log/sluice /etc/sluice
+    mkdir -p /home/sluice/ca /home/sluice/.sluice /home/sluice/data /var/log/sluice /etc/sluice && \
+    chown sluice:sluice /home/sluice/ca /home/sluice/.sluice /home/sluice/data /var/log/sluice /etc/sluice
 COPY --from=builder /sluice /usr/local/bin/sluice
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
@@ -36,4 +36,4 @@ WORKDIR /home/sluice
 EXPOSE 1080 3000
 HEALTHCHECK --interval=10s --timeout=3s CMD wget -qO- http://localhost:3000/healthz || exit 1
 ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["-listen", "0.0.0.0:1080", "-health-addr", "0.0.0.0:3000", "-mcp-base-url", "http://sluice:3000", "-db", "data/sluice.db", "-config", "/etc/sluice/config.toml", "-audit", "/var/log/sluice/audit.jsonl", "-mcp-dir", "/home/sluice/mcp"]
+CMD ["-listen", "0.0.0.0:1080", "-health-addr", "0.0.0.0:3000", "-mcp-base-url", "http://sluice:3000", "-db", "data/sluice.db", "-config", "/etc/sluice/config.toml", "-audit", "/var/log/sluice/audit.jsonl"]

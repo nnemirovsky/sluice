@@ -13,7 +13,6 @@ services:
       - sluice-vault:/home/sluice/.sluice
       - sluice-audit:/var/log/sluice
       - sluice-ca:/home/sluice/ca
-      - sluice-mcp:/home/sluice/mcp
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
       interval: 5s
@@ -50,7 +49,6 @@ services:
       - SSL_CERT_FILE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
     volumes:
       - sluice-ca:/usr/local/share/ca-certificates/sluice:ro
-      - sluice-mcp:/mcp:ro
     depends_on:
       tun2proxy:
         condition: service_healthy
@@ -64,4 +62,3 @@ volumes:
   sluice-vault:
   sluice-audit:
   sluice-ca:
-  sluice-mcp:

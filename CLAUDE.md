@@ -86,7 +86,19 @@ When `--destination` is provided, `sluice cred add` also creates an allow rule a
 
 Two credential types: `static` (default) for API keys and `oauth` for OAuth access/refresh token pairs. OAuth credentials prompt for tokens via stdin (not CLI flags) to avoid shell history exposure.
 
-Runtime flags: `--mcp-dir` (or `SLUICE_MCP_DIR` env var) sets the shared volume path for `mcp-servers.json` auto-injection. Defaults to the MCP volume path in compose files (`/home/sluice/mcp`).
+Runtime flags: `--mcp-base-url` sets the external URL the agent uses to reach sluice's MCP gateway (e.g. `http://sluice:3000`). This is added to `SelfBypass` so sluice does not policy-check its own MCP traffic. Defaults to deriving from `--health-addr`.
+
+## MCP Gateway Setup
+
+OpenClaw connects to sluice's MCP gateway via Streamable HTTP. This is a one-time setup per deployment:
+
+```bash
+docker exec openclaw openclaw mcp set sluice '{"url":"http://sluice:3000/mcp"}'
+```
+
+For the hostname `sluice` to resolve inside OpenClaw, the compose file pins sluice's IP on the internal network (172.30.0.2) and adds an `extra_hosts` entry on tun2proxy (which OpenClaw shares). Docker's embedded DNS (127.0.0.11) is not reachable from OpenClaw because its DNS is routed through the TUN device. The `/etc/hosts` entry bypasses DNS entirely.
+
+When new MCP upstreams are added to sluice via `sluice mcp add`, restart sluice so the gateway picks them up. OpenClaw does not need to be restarted - its connection to sluice:3000/mcp remains valid and it re-queries the tool list on subsequent agent runs.
 
 ## Policy Store
 
@@ -174,7 +186,7 @@ Three upstream transports: stdio (child processes), Streamable HTTP, WebSocket. 
 
 `MCPHTTPHandler` serves `POST /mcp` and `DELETE /mcp` on port 3000 (alongside `/healthz`). Session tracking via `Mcp-Session-Id` header. SSE response support.
 
-Auto-injection: when container runtime active, writes `mcp-servers.json` to shared MCP volume (`sluice-mcp`), signals agent to reload. SOCKS5 auto-bypasses connections to sluice's own listeners (`SelfBypass`).
+Agent connection: OpenClaw is configured once (via `openclaw mcp set`) to connect to `http://sluice:3000/mcp`. Sluice's `SelfBypass` auto-allows connections to its own MCP listener so the traffic is not policy-checked.
 
 ### Vault providers
 
@@ -196,7 +208,7 @@ Chain provider: `providers = ["1password", "age"]` tries in order, first hit win
 
 All backends implement `ContainerManager` interface (`internal/container/types.go`).
 
-**Docker**: Three-container compose (sluice + tun2proxy + openclaw). Hot-reload via `docker exec` env var injection into `~/.openclaw/.env` + `docker exec openclaw openclaw secrets reload`. MCP config shared via `sluice-mcp` volume. Fallback: container restart.
+**Docker**: Three-container compose (sluice + tun2proxy + openclaw). Hot-reload via `docker exec` env var injection into `~/.openclaw/.env` + `docker exec openclaw openclaw secrets reload`. MCP wiring is a one-time `openclaw mcp set` (see "MCP Gateway Setup" above). Fallback: container restart.
 
 **Apple Container**: Linux micro-VMs via Virtualization.framework. tun2proxy runs on host. `NetworkRouter` manages pf anchor rules to redirect VM bridge traffic. VirtioFS for shared volumes.
 

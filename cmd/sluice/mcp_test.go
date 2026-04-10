@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -751,58 +750,6 @@ func TestHandleMCPAddDefaultTransportIsStdio(t *testing.T) {
 	if upstreams[0].Transport != "stdio" {
 		t.Errorf("expected transport stdio, got %q", upstreams[0].Transport)
 	}
-}
-
-// TestWriteMCPServersJSON verifies that the helper writes a valid JSON file.
-func TestWriteMCPServersJSON(t *testing.T) {
-	dir := t.TempDir()
-	writeMCPServersJSON(dir, "http://127.0.0.1:3000/mcp")
-
-	data, err := os.ReadFile(filepath.Join(dir, "mcp-servers.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var parsed map[string]map[string]string
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
-	}
-
-	sluice, ok := parsed["sluice"]
-	if !ok {
-		t.Fatal("expected 'sluice' key in mcp-servers.json")
-	}
-	if sluice["url"] != "http://127.0.0.1:3000/mcp" {
-		t.Errorf("url = %q, want %q", sluice["url"], "http://127.0.0.1:3000/mcp")
-	}
-	if sluice["transport"] != "streamable-http" {
-		t.Errorf("transport = %q, want %q", sluice["transport"], "streamable-http")
-	}
-}
-
-// TestWriteMCPServersJSONCustomURL tests with a custom URL.
-func TestWriteMCPServersJSONCustomURL(t *testing.T) {
-	dir := t.TempDir()
-	writeMCPServersJSON(dir, "https://sluice.example.com/mcp")
-
-	data, err := os.ReadFile(filepath.Join(dir, "mcp-servers.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var parsed map[string]map[string]string
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
-	}
-	if parsed["sluice"]["url"] != "https://sluice.example.com/mcp" {
-		t.Errorf("url = %q, want custom URL", parsed["sluice"]["url"])
-	}
-}
-
-// TestWriteMCPServersJSONInvalidDir verifies graceful handling of invalid dir.
-func TestWriteMCPServersJSONInvalidDir(_ *testing.T) {
-	// Should not panic on unwritable path.
-	writeMCPServersJSON("/nonexistent/path/foo", "http://127.0.0.1:3000/mcp")
 }
 
 // TestHandleMCPGatewayInvalidDB verifies error on bad database path.

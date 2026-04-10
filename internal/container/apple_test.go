@@ -507,8 +507,7 @@ func TestRunConfigNoEnvNoVolumes(t *testing.T) {
 }
 
 // newTestAppleManager creates an AppleManager with a mock runner for testing.
-// Returns the manager, mock runner, and a temp dir for phantom files.
-func newTestAppleManager(t *testing.T) (*AppleManager, *mockRunner, string) {
+func newTestAppleManager(t *testing.T) (*AppleManager, *mockRunner) {
 	t.Helper()
 	runner := newMockRunner()
 	runner.onCommand("container --version", []byte("v1.0\n"), nil)
@@ -518,18 +517,16 @@ func newTestAppleManager(t *testing.T) (*AppleManager, *mockRunner, string) {
 		t.Fatalf("create CLI: %v", err)
 	}
 
-	tmpDir := t.TempDir()
-
 	mgr := NewAppleManager(AppleManagerConfig{
 		CLI:           cli,
 		ContainerName: "openclaw",
 	})
 
-	return mgr, runner, tmpDir
+	return mgr, runner
 }
 
 func TestAppleManagerInjectEnvVars(t *testing.T) {
-	mgr, runner, _ := newTestAppleManager(t)
+	mgr, runner := newTestAppleManager(t)
 	runner.onCommand("container exec openclaw sh", []byte(""), nil)
 	runner.onCommand("container exec openclaw openclaw secrets reload", []byte("ok\n"), nil)
 
@@ -554,7 +551,7 @@ func TestAppleManagerInjectEnvVars(t *testing.T) {
 }
 
 func TestAppleManagerInjectEnvVarsEmpty(t *testing.T) {
-	mgr, _, _ := newTestAppleManager(t)
+	mgr, _ := newTestAppleManager(t)
 
 	err := mgr.InjectEnvVars(context.Background(), map[string]string{}, false)
 	if err != nil {
@@ -563,7 +560,7 @@ func TestAppleManagerInjectEnvVarsEmpty(t *testing.T) {
 }
 
 func TestAppleManagerRestartWithEnv(t *testing.T) {
-	mgr, runner, _ := newTestAppleManager(t)
+	mgr, runner := newTestAppleManager(t)
 
 	inspectJSON, _ := json.Marshal([]VMInfo{{
 		Name:   "openclaw",
@@ -620,7 +617,7 @@ func TestAppleManagerRestartWithEnv(t *testing.T) {
 }
 
 func TestAppleManagerRestartWithEnvRemoval(t *testing.T) {
-	mgr, runner, _ := newTestAppleManager(t)
+	mgr, runner := newTestAppleManager(t)
 
 	inspectJSON, _ := json.Marshal([]VMInfo{{
 		Name:  "openclaw",
@@ -651,7 +648,7 @@ func TestAppleManagerRestartWithEnvRemoval(t *testing.T) {
 }
 
 func TestAppleManagerRestartWithEnvInspectError(t *testing.T) {
-	mgr, runner, _ := newTestAppleManager(t)
+	mgr, runner := newTestAppleManager(t)
 	runner.onCommand("container inspect", nil, errors.New("VM not found"))
 
 	err := mgr.RestartWithEnv(context.Background(), map[string]string{"K": "V"})
@@ -664,7 +661,7 @@ func TestAppleManagerRestartWithEnvInspectError(t *testing.T) {
 }
 
 func TestAppleManagerRestartWithEnvStopError(t *testing.T) {
-	mgr, runner, _ := newTestAppleManager(t)
+	mgr, runner := newTestAppleManager(t)
 
 	inspectJSON, _ := json.Marshal([]VMInfo{{
 		Name: "openclaw", Image: "img:latest", State: VMState{Running: true},
@@ -681,56 +678,8 @@ func TestAppleManagerRestartWithEnvStopError(t *testing.T) {
 	}
 }
 
-func TestAppleManagerInjectMCPConfig(t *testing.T) {
-	mgr, runner, tmpDir := newTestAppleManager(t)
-	runner.onCommand("container exec openclaw openclaw mcp reload", []byte("ok\n"), nil)
-
-	err := mgr.InjectMCPConfig(tmpDir, "http://localhost:3000/mcp")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Verify mcp-servers.json was written.
-	data, err := os.ReadFile(filepath.Join(tmpDir, "mcp-servers.json"))
-	if err != nil {
-		t.Fatalf("mcp-servers.json not found: %v", err)
-	}
-	if !strings.Contains(string(data), "http://localhost:3000/mcp") {
-		t.Errorf("mcp config should contain sluice URL: %s", string(data))
-	}
-	if !strings.Contains(string(data), "sluice") {
-		t.Errorf("mcp config should contain sluice key: %s", string(data))
-	}
-
-	// Verify exec was called.
-	if !runner.called("container exec openclaw openclaw mcp reload") {
-		t.Error("expected exec call for mcp reload")
-	}
-}
-
-func TestAppleManagerInjectMCPConfigExecError(t *testing.T) {
-	mgr, runner, tmpDir := newTestAppleManager(t)
-	runner.onCommand("container exec", nil, errors.New("exec failed"))
-
-	// Exec failure should not cause InjectMCPConfig to fail.
-	// The file should still be written, and the error is logged.
-	err := mgr.InjectMCPConfig(tmpDir, "http://localhost:3000/mcp")
-	if err != nil {
-		t.Fatalf("InjectMCPConfig() = %v, want nil (exec error is best-effort)", err)
-	}
-
-	// Verify the file was still written despite exec failure.
-	data, readErr := os.ReadFile(filepath.Join(tmpDir, "mcp-servers.json"))
-	if readErr != nil {
-		t.Fatalf("read mcp-servers.json: %v", readErr)
-	}
-	if !strings.Contains(string(data), "sluice") {
-		t.Error("mcp-servers.json should contain sluice config")
-	}
-}
-
 func TestAppleManagerStatus(t *testing.T) {
-	mgr, runner, _ := newTestAppleManager(t)
+	mgr, runner := newTestAppleManager(t)
 
 	inspectJSON, _ := json.Marshal([]VMInfo{{
 		Name:  "openclaw",
@@ -756,7 +705,7 @@ func TestAppleManagerStatus(t *testing.T) {
 }
 
 func TestAppleManagerStatusStopped(t *testing.T) {
-	mgr, runner, _ := newTestAppleManager(t)
+	mgr, runner := newTestAppleManager(t)
 
 	inspectJSON, _ := json.Marshal([]VMInfo{{
 		Name:  "openclaw",
@@ -776,7 +725,7 @@ func TestAppleManagerStatusStopped(t *testing.T) {
 }
 
 func TestAppleManagerStatusError(t *testing.T) {
-	mgr, runner, _ := newTestAppleManager(t)
+	mgr, runner := newTestAppleManager(t)
 	runner.onCommand("container inspect", nil, errors.New("VM not found"))
 
 	_, err := mgr.Status(context.Background())
@@ -786,7 +735,7 @@ func TestAppleManagerStatusError(t *testing.T) {
 }
 
 func TestAppleManagerStop(t *testing.T) {
-	mgr, runner, _ := newTestAppleManager(t)
+	mgr, runner := newTestAppleManager(t)
 	runner.onCommand("container stop", nil, nil)
 
 	err := mgr.Stop(context.Background())
@@ -800,7 +749,7 @@ func TestAppleManagerStop(t *testing.T) {
 }
 
 func TestAppleManagerStopError(t *testing.T) {
-	mgr, runner, _ := newTestAppleManager(t)
+	mgr, runner := newTestAppleManager(t)
 	runner.onCommand("container stop", nil, errors.New("already stopped"))
 
 	err := mgr.Stop(context.Background())
@@ -810,7 +759,7 @@ func TestAppleManagerStopError(t *testing.T) {
 }
 
 func TestAppleManagerRuntime(t *testing.T) {
-	mgr, _, _ := newTestAppleManager(t)
+	mgr, _ := newTestAppleManager(t)
 	if mgr.Runtime() != RuntimeApple {
 		t.Errorf("Runtime() = %v, want RuntimeApple", mgr.Runtime())
 	}
@@ -844,7 +793,7 @@ func TestCACertGuestPath(t *testing.T) {
 }
 
 func TestInjectCACertLinuxGuest(t *testing.T) {
-	mgr, runner, _ := newTestAppleManager(t)
+	mgr, runner := newTestAppleManager(t)
 
 	// update-ca-certificates succeeds (Linux guest).
 	runner.onCommand("container exec openclaw update-ca-certificates", []byte("ok\n"), nil)
@@ -879,7 +828,7 @@ func TestInjectCACertLinuxGuest(t *testing.T) {
 }
 
 func TestInjectCACertMacOSGuest(t *testing.T) {
-	mgr, runner, _ := newTestAppleManager(t)
+	mgr, runner := newTestAppleManager(t)
 
 	// Linux update-ca-certificates fails, macOS security command succeeds.
 	runner.onCommand("container exec openclaw update-ca-certificates", nil, errors.New("command not found"))
@@ -914,7 +863,7 @@ func TestInjectCACertMacOSGuest(t *testing.T) {
 }
 
 func TestInjectCACertBothTrustCommandsFail(t *testing.T) {
-	mgr, runner, _ := newTestAppleManager(t)
+	mgr, runner := newTestAppleManager(t)
 
 	// Both trust commands fail. Should still succeed (env vars cover it).
 	runner.onCommand("container exec openclaw update-ca-certificates", nil, errors.New("not found"))
@@ -939,7 +888,7 @@ func TestInjectCACertBothTrustCommandsFail(t *testing.T) {
 }
 
 func TestInjectCACertMissingHostCert(t *testing.T) {
-	mgr, _, _ := newTestAppleManager(t)
+	mgr, _ := newTestAppleManager(t)
 
 	err := mgr.InjectCACert(context.Background(), "/nonexistent/ca-cert.pem", t.TempDir())
 	if err == nil {
@@ -951,7 +900,7 @@ func TestInjectCACertMissingHostCert(t *testing.T) {
 }
 
 func TestInjectCACertWriteError(t *testing.T) {
-	mgr, _, _ := newTestAppleManager(t)
+	mgr, _ := newTestAppleManager(t)
 
 	hostCertDir := t.TempDir()
 	hostCertPath := filepath.Join(hostCertDir, "ca-cert.pem")
