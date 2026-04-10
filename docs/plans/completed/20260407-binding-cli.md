@@ -177,8 +177,8 @@ The vault's `Add()` already does atomic overwrite (temp file + rename). For OAut
 
 ### Task 7: [Final] Update documentation
 
-- [ ] Update CLAUDE.md CLI subcommands with `sluice binding` and `sluice cred update`
-- [ ] Move this plan to `docs/plans/completed/`
+- [x] Update CLAUDE.md CLI subcommands with `sluice binding` and `sluice cred update`
+- [x] Move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

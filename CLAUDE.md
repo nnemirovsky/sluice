@@ -75,14 +75,20 @@ sluice mcp                          # start MCP gateway
 
 sluice cred add <name> [--type static|oauth] [--destination host] [--ports 443] [--header Authorization] [--template "Bearer {value}"] [--env-var OPENAI_API_KEY]
 sluice cred add <name> --type oauth --token-url <url> --destination <host> --ports 443 [--env-var OPENAI_API_KEY]
+sluice cred update <name>           # replace credential value (prompts via stdin, handles static and OAuth)
 sluice cred list
 sluice cred remove <name>
+
+sluice binding add <credential> --destination <host> [--ports 443] [--header Authorization] [--template "Bearer {value}"]
+sluice binding list [--credential <name>]
+sluice binding update <id> [--destination <host>] [--ports 443] [--header Authorization] [--template "Bearer {value}"]
+sluice binding remove <id>
 
 sluice cert generate                # generate CA certificate for HTTPS MITM
 sluice audit verify                 # verify audit log hash chain integrity
 ```
 
-When `--destination` is provided, `sluice cred add` also creates an allow rule and binding in the store. When `--env-var` is provided, the phantom token is injected into the agent container as that environment variable via `docker exec` (no shared volume needed). For HTTP/WebSocket upstreams, `--command` holds the URL. Env values prefixed with `vault:` are resolved from the credential vault at upstream spawn time.
+When `--destination` is provided, `sluice cred add` also creates an allow rule and binding in the store. The flag may be repeated to create multiple bindings that share the same `--ports`, `--header`, and `--template` values (use `sluice binding add` afterwards for per-destination customization). When `--env-var` is provided, the phantom token is injected into the agent container as that environment variable via `docker exec` (no shared volume needed). For HTTP/WebSocket upstreams, `--command` holds the URL. Env values prefixed with `vault:` are resolved from the credential vault at upstream spawn time.
 
 Two credential types: `static` (default) for API keys and `oauth` for OAuth access/refresh token pairs. OAuth credentials prompt for tokens via stdin (not CLI flags) to avoid shell history exposure.
 
