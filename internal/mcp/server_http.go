@@ -33,56 +33,22 @@ func NewMCPHTTPHandler(gw *Gateway) *MCPHTTPHandler {
 	return &MCPHTTPHandler{gw: gw}
 }
 
-// ServeHTTP dispatches POST, GET, and DELETE requests for the MCP
-// Streamable HTTP protocol.
+// ServeHTTP dispatches POST and DELETE requests for the MCP Streamable
+// HTTP protocol. GET returns 405 explicitly: the MCP spec allows servers
+// to optionally expose a GET SSE stream for server-initiated events,
+// but openclaw's bundle-mcp client blocks waiting for events on the
+// stream. Returning 405 tells the client to use POST-only mode, which
+// matches how sluice's gateway actually works (request-response, no
+// unsolicited events).
 func (h *MCPHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		h.handlePost(w, r)
-	case http.MethodGet:
-		h.handleGet(w, r)
 	case http.MethodDelete:
 		h.handleDelete(w, r)
 	default:
-		w.Header().Set("Allow", "POST, GET, DELETE")
+		w.Header().Set("Allow", "POST, DELETE")
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-// handleGet opens a long-lived SSE stream for server-initiated events.
-// The MCP Streamable HTTP spec optionally allows clients to open a GET
-// connection for server-to-client events. Sluice does not currently
-// produce unsolicited events, so this handler keeps the stream open
-// with periodic SSE comments as keepalives until the client closes it
-// or the request context is cancelled.
-//
-// Without this, clients that probe with GET (e.g. openclaw's bundle-mcp
-// SSE transport) see HTTP 405 and log warnings on every probe.
-func (h *MCPHTTPHandler) handleGet(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		return
-	}
-	// Initial keepalive comment so the client sees the stream open.
-	_, _ = w.Write([]byte(": sluice mcp sse\n\n"))
-	flusher.Flush()
-
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case <-ticker.C:
-			if _, err := w.Write([]byte(": keepalive\n\n")); err != nil {
-				return
-			}
-			flusher.Flush()
-		}
 	}
 }
 
