@@ -6,10 +6,7 @@ package container
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -56,10 +53,6 @@ type ContainerManager interface { //nolint:revive // stuttering accepted for cla
 	// RestartWithEnv recreates the container with updated environment variables.
 	RestartWithEnv(ctx context.Context, env map[string]string) error
 
-	// InjectMCPConfig writes mcp-servers.json to the shared MCP volume and
-	// signals the agent to reload MCP configuration.
-	InjectMCPConfig(mcpDir, sluiceURL string) error
-
 	// InjectCACert copies the sluice MITM CA certificate into the guest and
 	// updates the system trust store so TLS interception works. hostCertPath
 	// is the path to the CA cert on the host. certDir is the shared volume
@@ -70,6 +63,12 @@ type ContainerManager interface { //nolint:revive // stuttering accepted for cla
 
 	// ReloadSecrets signals the agent to re-read secrets from the env file.
 	ReloadSecrets(ctx context.Context) error
+
+	// WireMCPGateway registers sluice's MCP gateway URL under
+	// mcp.servers.<name> in the agent's config so the embedded runtime
+	// discovers sluice as an MCP server. Idempotent: a second call with
+	// the same arguments is a noop.
+	WireMCPGateway(ctx context.Context, name, sluiceURL string) error
 
 	// Status returns container health information.
 	Status(ctx context.Context) (ContainerStatus, error)
@@ -86,28 +85,6 @@ type ContainerStatus struct { //nolint:revive // stuttering accepted for clarity
 	ID      string
 	Running bool
 	Image   string
-}
-
-// WriteMCPConfig writes an mcp-servers.json file to the shared MCP volume
-// directory. This logic is shared by all container backends.
-func WriteMCPConfig(mcpDir, sluiceURL string) error {
-	mcpConfig := map[string]any{
-		"sluice": map[string]any{
-			"url":       sluiceURL,
-			"transport": "streamable-http",
-		},
-	}
-
-	data, err := json.Marshal(mcpConfig)
-	if err != nil {
-		return fmt.Errorf("marshal mcp config: %w", err)
-	}
-
-	path := filepath.Join(mcpDir, "mcp-servers.json")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write mcp config: %w", err)
-	}
-	return nil
 }
 
 // envVarKeyRe matches valid POSIX environment variable names.

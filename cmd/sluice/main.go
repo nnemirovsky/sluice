@@ -82,18 +82,8 @@ func main() {
 	containerName := flag.String("container-name", envDefault("SLUICE_AGENT_CONTAINER", "openclaw"), "agent container/VM name")
 	certDir := flag.String("cert-dir", "", "shared volume path for CA certificate (enables MITM trust injection into guest)")
 	dnsResolver := flag.String("dns-resolver", "", "upstream DNS resolver address for DNS interception (default: 8.8.8.8:53)")
-	autoInjectMCP := flag.Bool("auto-inject-mcp", false, "auto-inject MCP config into agent container (default true for docker/apple runtimes)")
-	mcpBaseURL := flag.String("mcp-base-url", "", "base URL for auto-injected MCP config (e.g. http://sluice:3000); derived from --health-addr when empty")
-	mcpDir := flag.String("mcp-dir", "", "shared volume path for MCP config (mcp-servers.json); enables MCP auto-injection into agent container")
-	autoInjectMCPSet := false
+	mcpBaseURL := flag.String("mcp-base-url", "", "external base URL the agent uses to reach sluice's MCP gateway (e.g. http://sluice:3000); added to SelfBypass so sluice does not policy-check its own MCP traffic")
 	flag.Parse()
-
-	// Track whether the flag was explicitly set by the user.
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "auto-inject-mcp" {
-			autoInjectMCPSet = true
-		}
-	})
 
 	// Validate --runtime flag early.
 	switch *runtimeFlag {
@@ -278,26 +268,24 @@ func main() {
 			log.Printf("apple container manager enabled: container=%s", *containerName)
 		}
 	case "macos":
-		tartMgr, tartRouter, containerMgr, tartVMOwned = startMacOSVM(*vmImage, *containerName, *mcpDir, *certDir)
+		tartMgr, tartRouter, containerMgr, tartVMOwned = startMacOSVM(*vmImage, *containerName, *certDir)
 	case "none":
 		log.Printf("standalone mode: no container runtime (configure ALL_PROXY=socks5://%s manually)", *listenAddr)
 	case "":
 		log.Printf("no container runtime detected; container management disabled")
 	}
 
-	// Default auto-inject-mcp to true when a container runtime is active
-	// and the user did not explicitly set the flag.
-	if !autoInjectMCPSet && containerMgr != nil {
-		*autoInjectMCP = true
-	}
-
 	// Build self-bypass addresses so the agent's MCP HTTP connection to
-	// sluice is auto-allowed without policy evaluation.
+	// sluice is auto-allowed without policy evaluation. This applies
+	// whenever a health address is configured; if no agent exists, the
+	// bypass list has no effect.
 	var selfBypass []string
-	if *autoInjectMCP && *healthAddr != "" {
+	if *healthAddr != "" {
 		selfBypass = buildSelfBypass(*healthAddr)
-		// When mcp-base-url is set, also bypass the external hostname (e.g.
-		// "sluice:3000" in Docker Compose) that the agent uses to reach us.
+		// When --mcp-base-url is set, also bypass the external hostname
+		// (e.g. "sluice:3000" in Docker Compose) that the agent uses to
+		// reach us, in case the connection is routed through the SOCKS5
+		// proxy instead of directly on the Docker network.
 		if *mcpBaseURL != "" {
 			if extra := selfBypassFromURL(*mcpBaseURL, *healthAddr); extra != "" {
 				selfBypass = append(selfBypass, extra)
@@ -336,59 +324,6 @@ func main() {
 			srv.UpdateOAuthIndex(metas)
 			log.Printf("oauth index initialized: %d entries", len(metas))
 		}
-	}
-
-	// Inject phantom env vars into the agent container at startup.
-	// Bindings with env_var set produce env var entries (e.g. OPENAI_API_KEY=phantom-xxx)
-	// that are written into the agent's .env file via docker exec.
-	// Retry with backoff because the agent container may still be starting
-	// (compose healthcheck ordering ensures sluice starts first).
-	if containerMgr != nil && db != nil {
-		go func() {
-			// Phase 1: write .env file into the agent container.
-			// Retry with backoff because the container may still be starting.
-			backoff := []time.Duration{0, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second}
-			injected := false
-			for i, delay := range backoff {
-				if delay > 0 {
-					time.Sleep(delay)
-				}
-				if err := injectEnvVarsFromStore(db, containerMgr); err != nil {
-					if i < len(backoff)-1 {
-						log.Printf("startup env injection attempt %d/%d failed: %v (retrying)", i+1, len(backoff), err)
-						continue
-					}
-					log.Printf("WARNING: startup env injection failed after %d attempts: %v", len(backoff), err)
-				} else {
-					log.Printf("startup env injection succeeded (attempt %d/%d)", i+1, len(backoff))
-					injected = true
-					break
-				}
-			}
-			if !injected {
-				return
-			}
-			// Phase 2: signal the agent to reload secrets.
-			// The gateway takes longer to start than the container itself,
-			// so retry the reload with a longer backoff.
-			reloadBackoff := []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 30 * time.Second, 60 * time.Second}
-			for i, delay := range reloadBackoff {
-				time.Sleep(delay)
-				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				if err := containerMgr.ReloadSecrets(ctx); err != nil {
-					cancel()
-					if i < len(reloadBackoff)-1 {
-						log.Printf("startup secrets reload attempt %d/%d failed: %v (retrying)", i+1, len(reloadBackoff), err)
-						continue
-					}
-					log.Printf("WARNING: startup secrets reload failed after %d attempts: %v", len(reloadBackoff), err)
-				} else {
-					cancel()
-					log.Printf("startup secrets reload succeeded (attempt %d/%d)", i+1, len(reloadBackoff))
-					return
-				}
-			}
-		}()
 	}
 
 	// Configure the OAuth refresh callback so that after a token refresh
@@ -512,7 +447,9 @@ func main() {
 	}
 
 	// MCP gateway: if upstreams are configured, start the gateway and
-	// serve it via HTTP on /mcp alongside the API.
+	// serve it via HTTP on /mcp alongside the API. The mcpHandler local
+	// is consumed by the startup goroutine below and by the HTTP API
+	// server that exposes /mcp.
 	var mcpHandler http.Handler
 	upstreamRows, mcpListErr := db.ListMCPUpstreams()
 	if mcpListErr != nil {
@@ -575,19 +512,77 @@ func main() {
 
 		mcpHandler = mcp.NewMCPHTTPHandler(mcpGW)
 		log.Printf("MCP gateway on /mcp: %d tools from %d upstreams", len(mcpGW.Tools()), len(mcpUpstreams))
+	}
 
-		// Auto-inject MCP config into the agent container so it connects
-		// to sluice's gateway via Streamable HTTP.
-		if *autoInjectMCP && containerMgr != nil && *mcpDir != "" {
-			mcpURL := deriveMCPBaseURL(*mcpBaseURL, *healthAddr)
-			if injectErr := containerMgr.InjectMCPConfig(*mcpDir, mcpURL); injectErr != nil {
-				log.Printf("WARNING: MCP auto-inject failed: %v", injectErr)
-			} else {
-				log.Printf("MCP config auto-injected to %s (url=%s)", *mcpDir, mcpURL)
+	// Startup agent container setup: env var injection, secrets reload,
+	// and MCP gateway wiring. All phases retry with backoff because the
+	// agent container may still be starting (compose healthcheck ordering
+	// ensures sluice starts first). Runs in a goroutine so sluice's HTTP
+	// API and SOCKS5 listeners come up immediately. All phases are no-ops
+	// outside a container runtime setup.
+	if containerMgr != nil && db != nil {
+		hasMCPGateway := mcpHandler != nil
+		go func() {
+			// Phase 1: write .env file into the agent container with
+			// phantom tokens from bindings that declare env_var.
+			backoff := []time.Duration{0, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second}
+			injected := false
+			for i, delay := range backoff {
+				if delay > 0 {
+					time.Sleep(delay)
+				}
+				if err := injectEnvVarsFromStore(db, containerMgr); err != nil {
+					if i < len(backoff)-1 {
+						log.Printf("startup env injection attempt %d/%d failed: %v (retrying)", i+1, len(backoff), err)
+						continue
+					}
+					log.Printf("WARNING: startup env injection failed after %d attempts: %v", len(backoff), err)
+				} else {
+					log.Printf("startup env injection succeeded (attempt %d/%d)", i+1, len(backoff))
+					injected = true
+					break
+				}
 			}
-		} else if *autoInjectMCP && containerMgr != nil && *mcpDir == "" {
-			log.Printf("MCP auto-inject skipped: no shared volume path configured (use -mcp-dir)")
-		}
+			if !injected {
+				return
+			}
+			// Phase 2: signal the agent to reload secrets. The gateway
+			// takes longer to start than the container itself, so retry
+			// with a longer backoff.
+			reloadBackoff := []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 30 * time.Second, 60 * time.Second}
+			reloadedSecrets := false
+			for i, delay := range reloadBackoff {
+				time.Sleep(delay)
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				if err := containerMgr.ReloadSecrets(ctx); err != nil {
+					cancel()
+					if i < len(reloadBackoff)-1 {
+						log.Printf("startup secrets reload attempt %d/%d failed: %v (retrying)", i+1, len(reloadBackoff), err)
+						continue
+					}
+					log.Printf("WARNING: startup secrets reload failed after %d attempts: %v", len(reloadBackoff), err)
+				} else {
+					cancel()
+					log.Printf("startup secrets reload succeeded (attempt %d/%d)", i+1, len(reloadBackoff))
+					reloadedSecrets = true
+					break
+				}
+			}
+			if !reloadedSecrets || !hasMCPGateway {
+				return
+			}
+			// Phase 3: wire sluice's MCP gateway URL into the agent's
+			// openclaw.json config via WebSocket RPC. Idempotent.
+			// deriveMCPBaseURL already returns a URL ending in /mcp.
+			mcpURL := deriveMCPBaseURL(*mcpBaseURL, *healthAddr)
+			wireCtx, wireCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			if wireErr := containerMgr.WireMCPGateway(wireCtx, "sluice", mcpURL); wireErr != nil {
+				log.Printf("WARNING: failed to wire MCP gateway into agent config: %v", wireErr)
+			} else {
+				log.Printf("MCP gateway wired into agent config: mcp.servers.sluice.url=%s", mcpURL)
+			}
+			wireCancel()
+		}()
 	}
 
 	// Start HTTP server with health check and REST API on :3000 (or --health-addr).
@@ -1040,13 +1035,13 @@ func seedStoreFromConfig(db *store.Store, configPath string) error {
 // routing. Returns the TartManager, NetworkRouter (for shutdown cleanup),
 // the ContainerManager interface, and a boolean indicating whether sluice
 // started the VM. Calls log.Fatalf on unrecoverable errors.
-func startMacOSVM(vmImage, vmName, mcpDir, certDir string) (*container.TartManager, *container.NetworkRouter, container.ContainerManager, bool) {
+func startMacOSVM(vmImage, vmName, certDir string) (*container.TartManager, *container.NetworkRouter, container.ContainerManager, bool) {
 	cli, cliErr := container.NewTartCLI(nil)
 	if cliErr != nil {
 		log.Fatalf("--runtime macos: tart CLI not available: %v", cliErr)
 	}
 
-	mgr, router, owned, err := setupMacOSVM(cli, vmImage, vmName, mcpDir, certDir)
+	mgr, router, owned, err := setupMacOSVM(cli, vmImage, vmName, certDir)
 	if err != nil {
 		log.Fatalf("--runtime macos: %v", err)
 	}
@@ -1054,13 +1049,8 @@ func startMacOSVM(vmImage, vmName, mcpDir, certDir string) (*container.TartManag
 }
 
 // buildTartRunConfig creates the TartRunConfig with VirtioFS mounts.
-func buildTartRunConfig(vmName, mcpDir, certDir string) container.TartRunConfig {
+func buildTartRunConfig(vmName, certDir string) container.TartRunConfig {
 	var dirMounts []container.TartDirMount
-	if mcpDir != "" {
-		dirMounts = append(dirMounts, container.TartDirMount{
-			Name: "mcp", HostPath: mcpDir,
-		})
-	}
 	if certDir != "" {
 		dirMounts = append(dirMounts, container.TartDirMount{
 			Name: "ca", HostPath: certDir, ReadOnly: true,
@@ -1100,7 +1090,7 @@ func waitForVMIP(ctx context.Context, cli *container.TartCLI, vmName string) (st
 // indicates whether sluice started the VM (true) or attached to an
 // already-running VM (false). Only VMs started by sluice should be
 // stopped on shutdown.
-func setupMacOSVM(cli *container.TartCLI, vmImage, vmName, mcpDir, certDir string) (*container.TartManager, *container.NetworkRouter, bool, error) {
+func setupMacOSVM(cli *container.TartCLI, vmImage, vmName, certDir string) (*container.TartManager, *container.NetworkRouter, bool, error) {
 	ctx := context.Background()
 
 	// Check if VM already exists.
@@ -1123,7 +1113,7 @@ func setupMacOSVM(cli *container.TartCLI, vmImage, vmName, mcpDir, certDir strin
 		return nil, nil, false, fmt.Errorf("check VM state: %w", stateErr)
 	}
 
-	runCfg := buildTartRunConfig(vmName, mcpDir, certDir)
+	runCfg := buildTartRunConfig(vmName, certDir)
 
 	// Track whether sluice started the VM so we only stop it on shutdown
 	// if we own it. Attaching to a pre-existing VM and then killing it on

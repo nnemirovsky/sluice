@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // TartCLI wraps the macOS `tart` CLI for managing macOS VMs via the
@@ -279,7 +278,14 @@ func (m *TartManager) InjectEnvVars(ctx context.Context, envMap map[string]strin
 
 // ReloadSecrets signals the openclaw gateway to re-read secrets via WebSocket RPC.
 func (m *TartManager) ReloadSecrets(ctx context.Context) error {
-	_, err := m.cli.Exec(ctx, m.vmName, []string{"node", "-e", reloadSecretsScript})
+	_, err := m.cli.Exec(ctx, m.vmName, GatewayRPCNodeCommand("secrets.reload"))
+	return err
+}
+
+// WireMCPGateway registers sluice's MCP gateway URL in the agent's
+// openclaw.json config via a gateway WebSocket RPC.
+func (m *TartManager) WireMCPGateway(ctx context.Context, name, sluiceURL string) error {
+	_, err := m.cli.Exec(ctx, m.vmName, GatewayRPCNodeCommand("wire-mcp", name, sluiceURL))
 	return err
 }
 
@@ -313,22 +319,6 @@ func (m *TartManager) RestartWithEnv(ctx context.Context, _ map[string]string) e
 			log.Printf("WARNING: macOS VM %q exited after restart: %v", m.vmName, waitErr)
 		}
 	}()
-	return nil
-}
-
-// InjectMCPConfig writes an mcp-servers.json file to the VirtioFS shared MCP
-// volume and signals the macOS VM to reload MCP configuration via tart exec.
-func (m *TartManager) InjectMCPConfig(mcpDir, sluiceURL string) error {
-	if err := WriteMCPConfig(mcpDir, sluiceURL); err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if _, execErr := m.cli.Exec(ctx, m.vmName, []string{"openclaw", "mcp", "reload"}); execErr != nil {
-		path := filepath.Join(mcpDir, "mcp-servers.json")
-		log.Printf("MCP config written to %s but exec reload failed: %v", path, execErr)
-	}
 	return nil
 }
 

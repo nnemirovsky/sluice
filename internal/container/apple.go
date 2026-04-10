@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // CommandRunner abstracts os/exec for testability.
@@ -239,7 +238,14 @@ func (m *AppleManager) InjectEnvVars(ctx context.Context, envMap map[string]stri
 
 // ReloadSecrets signals the openclaw gateway to re-read secrets via WebSocket RPC.
 func (m *AppleManager) ReloadSecrets(ctx context.Context) error {
-	_, err := m.cli.Exec(ctx, m.containerName, []string{"node", "-e", reloadSecretsScript})
+	_, err := m.cli.Exec(ctx, m.containerName, GatewayRPCNodeCommand("secrets.reload"))
+	return err
+}
+
+// WireMCPGateway registers sluice's MCP gateway URL in the agent's
+// openclaw.json config via a gateway WebSocket RPC.
+func (m *AppleManager) WireMCPGateway(ctx context.Context, name, sluiceURL string) error {
+	_, err := m.cli.Exec(ctx, m.containerName, GatewayRPCNodeCommand("wire-mcp", name, sluiceURL))
 	return err
 }
 
@@ -292,22 +298,6 @@ func (m *AppleManager) RestartWithEnv(ctx context.Context, envUpdates map[string
 		Env:     existingEnv,
 		Volumes: vols,
 	})
-}
-
-// InjectMCPConfig writes an mcp-servers.json file to the shared MCP volume
-// and signals the VM to reload MCP configuration via container exec.
-func (m *AppleManager) InjectMCPConfig(mcpDir, sluiceURL string) error {
-	if err := WriteMCPConfig(mcpDir, sluiceURL); err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if _, execErr := m.cli.Exec(ctx, m.containerName, []string{"openclaw", "mcp", "reload"}); execErr != nil {
-		path := filepath.Join(mcpDir, "mcp-servers.json")
-		log.Printf("MCP config written to %s but exec reload failed: %v", path, execErr)
-	}
-	return nil
 }
 
 // Status returns VM health information by running container inspect.

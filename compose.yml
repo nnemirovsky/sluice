@@ -4,12 +4,19 @@
 # Startup order is enforced via healthcheck + condition: service_healthy:
 #   sluice starts first -> tun2proxy waits for sluice /healthz -> openclaw waits for tun2proxy TUN device.
 #
-# MCP auto-injection: sluice writes /home/sluice/mcp/mcp-servers.json to the
-# shared sluice-mcp volume on startup and after upstream changes. OpenClaw reads
-# it from /mcp/mcp-servers.json to discover sluice as an MCP server via
-# Streamable HTTP (http://sluice:3000/mcp). The SOCKS5 proxy auto-bypasses
-# OpenClaw's connection to sluice:3000 so MCP traffic is not double-checked by
-# policy. Set --auto-inject-mcp=false to disable.
+# MCP wiring (one-time setup): OpenClaw connects to sluice's MCP gateway at
+# http://sluice:3000/mcp via Streamable HTTP. Configure this once in OpenClaw:
+#
+#   docker exec openclaw openclaw mcp set sluice '{"url":"http://sluice:3000/mcp"}'
+#
+# For this to work, OpenClaw must be able to resolve the "sluice" hostname.
+# Because OpenClaw shares tun2proxy's network namespace and routes DNS through
+# the TUN, Docker's embedded DNS (127.0.0.11) is not reachable. We pin
+# sluice's IP on the internal network to 172.30.0.2 and give tun2proxy an
+# extra_hosts entry pointing "sluice" at that IP. The shared /etc/hosts file
+# makes OpenClaw resolve sluice correctly. The SOCKS5 proxy's SelfBypass list
+# auto-allows connections to sluice:3000 so MCP traffic is not double-checked
+# by policy.
 services:
   sluice:
     image: ghcr.io/nnemirovsky/sluice:latest
@@ -30,7 +37,6 @@ services:
       - sluice-vault:/home/sluice/.sluice
       - sluice-audit:/var/log/sluice
       - sluice-ca:/home/sluice/ca
-      - sluice-mcp:/home/sluice/mcp
       - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
@@ -38,7 +44,10 @@ services:
       timeout: 3s
       retries: 3
       start_period: 5s
-    networks: [internal, external]
+    networks:
+      internal:
+        ipv4_address: 172.30.0.2
+      external: {}
 
   tun2proxy:
     image: ghcr.io/tun2proxy/tun2proxy-alpine:latest
@@ -51,6 +60,12 @@ services:
     # container's network namespace. The caddy sidecar handles external
     # access because tun0's default route breaks Docker port forwarding
     # (routing asymmetry: replies exit via tun0 instead of eth0).
+    # extra_hosts adds a /etc/hosts entry so OpenClaw (which shares this
+    # network namespace) can resolve "sluice" to its pinned internal IP.
+    # Without this, DNS goes through the TUN and fails to resolve Docker
+    # service names.
+    extra_hosts:
+      - "sluice:172.30.0.2"
     healthcheck:
       test: ["CMD-SHELL", "ip link show tun0 || exit 1"]
       interval: 10s
@@ -85,7 +100,6 @@ services:
     volumes:
       - openclaw-home:/home/node
       - sluice-ca:/usr/local/share/ca-certificates/sluice:ro
-      - sluice-mcp:/mcp:ro
     depends_on:
       tun2proxy:
         condition: service_healthy
@@ -111,6 +125,9 @@ services:
 networks:
   internal:
     internal: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
   external: {}
 
 volumes:
@@ -118,5 +135,4 @@ volumes:
   sluice-vault:
   sluice-audit:
   sluice-ca:
-  sluice-mcp:
   openclaw-home:

@@ -16,7 +16,6 @@ services:
       - sluice-vault:/home/sluice/.sluice
       - sluice-audit:/var/log/sluice
       - sluice-ca:/home/sluice/ca
-      - sluice-mcp:/home/sluice/mcp
       - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
@@ -24,7 +23,10 @@ services:
       timeout: 3s
       retries: 3
       start_period: 5s
-    networks: [internal, external]
+    networks:
+      internal:
+        ipv4_address: 172.30.0.2
+      external: {}
 
   tun2proxy:
     image: ghcr.io/tun2proxy/tun2proxy-alpine:latest
@@ -33,6 +35,9 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     command: ["--proxy", "socks5://sluice:1080", "--bypass", "127.0.0.0/8", "--bypass", "::1/128"]
+    # See compose.yml for the full MCP wiring explanation.
+    extra_hosts:
+      - "sluice:172.30.0.2"
     healthcheck:
       test: ["CMD-SHELL", "ip link show tun0 || exit 1"]
       interval: 10s
@@ -62,7 +67,6 @@ services:
     volumes:
       - openclaw-home:/home/node
       - sluice-ca:/usr/local/share/ca-certificates/sluice:ro
-      - sluice-mcp:/mcp:ro
     depends_on:
       tun2proxy:
         condition: service_healthy
@@ -70,6 +74,9 @@ services:
 networks:
   internal:
     internal: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
   external: {}
 
 volumes:
@@ -77,5 +84,4 @@ volumes:
   sluice-vault:
   sluice-audit:
   sluice-ca:
-  sluice-mcp:
   openclaw-home:

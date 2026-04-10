@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"path/filepath"
 	"strings"
-	"time"
 )
 
 // ContainerClient abstracts Docker Engine API operations for testability.
@@ -100,37 +98,35 @@ func (m *DockerManager) InjectEnvVars(ctx context.Context, envMap map[string]str
 }
 
 // ReloadSecrets signals the openclaw gateway to re-read secrets via WebSocket RPC.
+// Uses the embedded gateway_rpc.js script to do the full device-signed
+// connect handshake before invoking secrets.reload.
 func (m *DockerManager) ReloadSecrets(ctx context.Context) error {
 	return m.client.ExecInContainer(ctx, m.containerName,
-		[]string{"node", "-e", reloadSecretsScript})
+		GatewayRPCNodeCommand("secrets.reload"))
 }
 
-// reloadSecretsScript is a Node.js one-liner that sends a secrets.reload
-// RPC to the openclaw gateway via WebSocket. It reads the gateway config
-// from disk to discover the port and auth token. This bypasses the openclaw
-// CLI which hangs in container/non-TTY environments.
-const reloadSecretsScript = `const fs=require("fs"),http=require("http"),crypto=require("crypto");` +
-	`let port=18789,token="";` +
-	`try{const c=JSON.parse(fs.readFileSync(process.env.HOME+"/.openclaw/openclaw.json","utf8"));` +
-	`port=c.gateway?.port||18789;token=c.gateway?.auth?.token||"";}catch(e){}` +
-	`const key=crypto.randomBytes(16).toString("base64");` +
-	`const req=http.request({hostname:"127.0.0.1",port,path:"/",headers:{` +
-	`"Upgrade":"websocket","Connection":"Upgrade",` +
-	`"Sec-WebSocket-Key":key,"Sec-WebSocket-Version":"13",` +
-	`"Authorization":"Bearer "+token}});` +
-	`req.on("upgrade",(res,socket)=>{` +
-	`const id=crypto.randomUUID();` +
-	`const msg=JSON.stringify({type:"req",id,method:"secrets.reload"});` +
-	`const p=Buffer.from(msg),mask=crypto.randomBytes(4);` +
-	`let h;if(p.length<126){h=Buffer.alloc(2);h[0]=0x81;h[1]=0x80|p.length;}` +
-	`else{h=Buffer.alloc(4);h[0]=0x81;h[1]=0x80|126;h.writeUInt16BE(p.length,2);}` +
-	`const m=Buffer.alloc(p.length);for(let i=0;i<p.length;i++)m[i]=p[i]^mask[i%4];` +
-	`socket.write(Buffer.concat([h,mask,m]));` +
-	`socket.on("data",()=>{console.log("secrets reloaded");process.exit(0);});` +
-	`setTimeout(()=>process.exit(0),5000);});` +
-	`req.on("error",e=>{console.error(e.message);process.exit(1);});` +
-	`req.setTimeout(5000,()=>{req.destroy();process.exit(1);});` +
-	`req.end();`
+// WireMCPGateway registers sluice's MCP gateway URL in the agent's
+// openclaw.json config (at mcp.servers.<name>) via a gateway WebSocket
+// RPC. This is a one-shot idempotent operation: if the entry already
+// matches, openclaw returns a noop. Call this once at sluice startup
+// after the MCP gateway is initialized.
+//
+// On first wire-up the config change triggers an openclaw gateway
+// restart, which kills the docker exec we're running and reports
+// exit code 137. The config write itself has already succeeded at
+// that point, so we swallow 137 and treat it as success. Genuine
+// failures surface as non-zero exit codes other than 137 or
+// connect-time errors before the exec runs.
+func (m *DockerManager) WireMCPGateway(ctx context.Context, name, sluiceURL string) error {
+	err := m.client.ExecInContainer(ctx, m.containerName,
+		GatewayRPCNodeCommand("wire-mcp", name, sluiceURL))
+	if err != nil && strings.Contains(err.Error(), "exit") && strings.Contains(err.Error(), "137") {
+		// The config.patch response was delivered successfully; the
+		// exec was terminated by the subsequent gateway restart.
+		return nil
+	}
+	return err
+}
 
 // RestartWithEnv recreates the container with updated environment variables.
 // It inspects the current container config, stops and removes it, creates a
@@ -183,24 +179,6 @@ func (m *DockerManager) Status(ctx context.Context) (ContainerStatus, error) {
 		Running: info.Running,
 		Image:   info.Image,
 	}, nil
-}
-
-// InjectMCPConfig writes an mcp-servers.json file to the shared MCP volume
-// and signals the agent container to reload MCP configuration via docker exec.
-// If exec fails, the agent picks up the config on next restart.
-func (m *DockerManager) InjectMCPConfig(mcpDir, sluiceURL string) error {
-	if err := WriteMCPConfig(mcpDir, sluiceURL); err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if execErr := m.client.ExecInContainer(ctx, m.containerName,
-		[]string{"openclaw", "mcp", "reload"}); execErr != nil {
-		path := filepath.Join(mcpDir, "mcp-servers.json")
-		log.Printf("MCP config written to %s but exec reload failed: %v", path, execErr)
-	}
-	return nil
 }
 
 // InjectCACert is a no-op for Docker. Docker handles CA trust via compose

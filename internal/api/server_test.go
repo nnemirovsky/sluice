@@ -2615,7 +2615,7 @@ func (m *mockContainerMgr) RestartWithEnv(_ context.Context, _ map[string]string
 	return nil
 }
 
-func (m *mockContainerMgr) InjectMCPConfig(_, _ string) error {
+func (m *mockContainerMgr) WireMCPGateway(_ context.Context, _, _ string) error {
 	return nil
 }
 
