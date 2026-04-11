@@ -377,7 +377,7 @@ name = "Block SSNs"
 
 // TestImportTOMLBindingCaseInsensitiveDedup verifies that binding import
 // treats destinations differing only in case as duplicates, matching the
-// case-insensitive unique index added in migration 000007. A case-sensitive
+// case-insensitive unique index added in migration 000005. A case-sensitive
 // dedup would hit the unique index and abort the whole import.
 func TestImportTOMLBindingCaseInsensitiveDedup(t *testing.T) {
 	s := newTestStore(t)

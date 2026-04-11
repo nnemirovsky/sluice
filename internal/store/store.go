@@ -560,7 +560,7 @@ type BindingOpts struct {
 //
 // The env_var uniqueness check and the INSERT run inside a single
 // transaction so concurrent AddBinding callers cannot race past a
-// check-then-insert window after migration 000006 dropped the DB-level
+// check-then-insert window after migration 000005 dropped the DB-level
 // env_var unique index. With SetMaxOpenConns(1), the shared tx
 // serializes both operations on the same connection, making
 // cross-credential env_var collisions impossible.
@@ -695,7 +695,7 @@ func duplicateBindingError(qr queryRower, credential, destination string) error 
 	if qr != nil {
 		var id int64
 		// Lookup matches the unique index, which is case-insensitive on
-		// destination (migration 000007). Using LOWER() here means that a
+		// destination (migration 000005). Using LOWER() here means that a
 		// duplicate detected on, for example, "API.example.com" can still
 		// point the caller at the existing "api.example.com" row instead
 		// of returning the anonymous fallback message below.

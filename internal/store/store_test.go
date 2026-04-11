@@ -2380,13 +2380,12 @@ func TestMigrationBindingUniqueDedupPreservesSingletonRules(t *testing.T) {
 	}
 }
 
-// TestMigrationBindingUniqueDedupCaseInsensitive verifies that migration 7
+// TestMigrationBindingUniqueDedupCaseInsensitive verifies that migration 5
 // collapses pre-existing rows that differ only in destination case and
-// then installs a case-insensitive unique index. Before this fix, the
-// migration 5 index was case-sensitive, so "api.example.com" and
-// "API.EXAMPLE.COM" could both exist for the same credential even though
-// policy matching treats them as equivalent. Regression for codex
-// iteration 6 finding 1.
+// then installs a case-insensitive unique index. Policy matching is
+// case-insensitive, so "api.example.com" and "API.EXAMPLE.COM" target the
+// exact same set of connections and must be treated as duplicates.
+// Regression for codex iteration 6 finding 1.
 func TestMigrationBindingUniqueDedupCaseInsensitive(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "dedup_nocase.db")
@@ -2420,15 +2419,11 @@ func TestMigrationBindingUniqueDedupCaseInsensitive(t *testing.T) {
 		t.Fatalf("new migrator: %v", err)
 	}
 
-	// Apply migrations 1-6. At this point the schema has the
-	// case-sensitive unique index from migration 5, so we temporarily
-	// drop it to seed case-variant duplicates that migration 7 will
-	// collapse.
-	if err := m.Steps(6); err != nil {
-		t.Fatalf("apply migrations 1-6: %v", err)
-	}
-	if _, err := db.Exec(`DROP INDEX IF EXISTS idx_bindings_credential_destination`); err != nil {
-		t.Fatalf("drop index: %v", err)
+	// Apply migrations 1-4 to reach the schema right before migration 5.
+	// No unique index exists on bindings(credential, destination) yet, so
+	// case-variant duplicates can be seeded directly.
+	if err := m.Steps(4); err != nil {
+		t.Fatalf("apply migrations 1-4: %v", err)
 	}
 
 	// Seed two bindings that share (credential, LOWER(destination)) but
@@ -2461,10 +2456,17 @@ func TestMigrationBindingUniqueDedupCaseInsensitive(t *testing.T) {
 		t.Fatalf("seed second rule: %v", err)
 	}
 
-	// Apply migration 7. The seeded duplicates must be collapsed and the
-	// unique index must be re-created as case-insensitive.
+	// Apply migration 5. The seeded duplicates must be collapsed and the
+	// unique index must be created as case-insensitive.
 	if err := m.Steps(1); err != nil {
-		t.Fatalf("apply migration 7: %v", err)
+		t.Fatalf("apply migration 5: %v", err)
+	}
+	v, dirty, err := m.Version()
+	if err != nil {
+		t.Fatalf("version after step 5: %v", err)
+	}
+	if v != 5 || dirty {
+		t.Fatalf("expected version 5 clean, got version=%d dirty=%v", v, dirty)
 	}
 
 	var after int
@@ -2495,26 +2497,22 @@ func TestMigrationBindingUniqueDedupCaseInsensitive(t *testing.T) {
 		`INSERT INTO bindings (destination, credential) VALUES (?, ?)`,
 		"Api.Example.Com", "my_key",
 	); err == nil {
-		t.Error("expected UNIQUE violation on case-variant insert after migration 7")
+		t.Error("expected UNIQUE violation on case-variant insert after migration 5")
 	}
 }
 
 // TestMigrationBindingUniqueDedupCaseInsensitiveRejectsConflicts verifies
-// that migration 7 refuses to silently drop case-variant duplicates that
+// that migration 5 refuses to silently drop case-variant duplicates that
 // also differ on behavioral columns. The operator must resolve the conflict
 // on the old binary before upgrading.
 func TestMigrationBindingUniqueDedupCaseInsensitiveRejectsConflicts(t *testing.T) {
 	db, m := openMigrationTestDB(t, "dedup_nocase_conflict.db")
 
-	// Apply migrations 1-6 to reach the schema right before migration 7.
-	// Migration 5 installed a case-sensitive unique index, so case-variant
-	// rows are legal at this point. Drop the index so we can seed the
-	// variants freely.
-	if err := m.Steps(6); err != nil {
-		t.Fatalf("apply migrations 1-6: %v", err)
-	}
-	if _, err := db.Exec(`DROP INDEX IF EXISTS idx_bindings_credential_destination`); err != nil {
-		t.Fatalf("drop index: %v", err)
+	// Apply migrations 1-4 to reach the schema right before migration 5.
+	// No unique index exists on bindings(credential, destination) yet, so
+	// case-variant rows can be seeded directly.
+	if err := m.Steps(4); err != nil {
+		t.Fatalf("apply migrations 1-4: %v", err)
 	}
 
 	// Two rows that share (credential, LOWER(destination)) but differ in
@@ -2534,7 +2532,7 @@ func TestMigrationBindingUniqueDedupCaseInsensitiveRejectsConflicts(t *testing.T
 
 	err := m.Steps(1)
 	if err == nil {
-		t.Fatalf("expected migration 7 to fail on case-insensitive conflict")
+		t.Fatalf("expected migration 5 to fail on case-insensitive conflict")
 	}
 	msg := err.Error()
 	if !strings.Contains(msg, "sluice binding list") {
@@ -3476,7 +3474,7 @@ func TestAddBindingEnvVarUniqueness(t *testing.T) {
 // TestAddBindingEnvVarUniquenessConcurrent is a regression test for the
 // check-then-insert race that existed before AddBinding wrapped the
 // env_var uniqueness check and INSERT in a single transaction. Migration
-// 000006 dropped the DB-level env_var unique index, so this invariant is
+// 000005 dropped the DB-level env_var unique index, so this invariant is
 // now enforced purely in Go. Concurrent callers trying to register the
 // same env_var against different credentials must have exactly one
 // succeed; the rest must fail with the "already used" error.
@@ -4476,7 +4474,7 @@ func TestUpdateBindingWithRuleSyncValidationErrorsAreTagged(t *testing.T) {
 }
 
 // TestAddBindingCaseInsensitiveDuplicate verifies that the unique index on
-// (credential, LOWER(destination)) established by migration 000007 rejects
+// (credential, LOWER(destination)) established by migration 000005 rejects
 // duplicate bindings whose destinations differ only in case. Policy
 // matching is case-insensitive, so these bindings target the exact same
 // set of connections and must not coexist. Regression for codex iteration

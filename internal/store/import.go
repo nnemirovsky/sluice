@@ -527,7 +527,7 @@ func insertBindingIfNew(tx *sql.Tx, b importBinding) (bool, error) {
 		}
 	}
 
-	// Migration 000007 enforces case-insensitive uniqueness on
+	// Migration 000005 enforces case-insensitive uniqueness on
 	// (credential, LOWER(destination)). Dedup here must match that so an
 	// import of "API.example.com" when "api.example.com" is already stored
 	// skips the row cleanly instead of hitting the unique index and aborting
