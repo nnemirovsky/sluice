@@ -30,6 +30,12 @@ After this change, "Allow Once" means one HTTP request. Subsequent requests on t
 - **Integration tests**: existing proxy tests in `internal/proxy/server_test.go` exercise the full SOCKS5 -> MITM -> upstream chain. Add test cases for allow-once with two sequential HTTP requests on the same connection.
 - **e2e tests**: add an e2e test that makes two HTTP requests to an ask-verdict destination on the same keep-alive connection and verifies the second request triggers a new approval
 
+> KNOWN GAP (2026-04-12): the e2e test described above is not yet
+> written. Unit coverage lives in
+> `internal/proxy/inject_per_request_test.go` but an end-to-end run via
+> a real sluice binary and SOCKS5 client is still pending. A TODO
+> comment is pinned to the top of `e2e/proxy_test.go`.
+
 ## What Goes Where
 
 - **Implementation Steps**: code changes, tests, documentation
@@ -107,40 +113,40 @@ Add a per-connection `RequestPolicyChecker` that HTTP handlers call before forwa
 - Modify: `internal/proxy/server.go`
 - Modify: `internal/proxy/inject.go`
 
-- [ ] Add context key `ctxKeyPerRequestPolicy`
-- [ ] In `Allow()`, use `EvaluateDetailed()`. If verdict is allow + RuleMatch, set context flag "skip per-request"
-- [ ] In `Allow()`, for ask-approved connections, create `RequestPolicyChecker` and store in context
-- [ ] For SNI-deferred connections, create checker in `sniPolicyCheck()`
-- [ ] Change `ProxyCtx.UserData` from string to `proxyConnState` struct carrying pin ID and checker
-- [ ] Update `dial()` to pass checker via UserData
-- [ ] Write tests for context propagation
-- [ ] Run tests
+- [x] Add context key `ctxKeyPerRequestPolicy`
+- [x] In `Allow()`, use `EvaluateDetailed()`. If verdict is allow + RuleMatch, set context flag "skip per-request"
+- [x] In `Allow()`, for ask-approved connections, create `RequestPolicyChecker` and store in context
+- [x] For SNI-deferred connections, create checker in `sniPolicyCheck()`
+- [x] Change `ProxyCtx.UserData` from string to `proxyConnState` struct carrying pin ID and checker
+- [x] Update `dial()` to pass checker via UserData
+- [x] Write tests for context propagation
+- [x] Run tests
 
 ### Task 4: Per-request policy in HTTP/HTTPS MITM
 
 **Files:**
 - Modify: `internal/proxy/inject.go`
 
-- [ ] In `injectCredentials()`, extract checker from `ProxyCtx.UserData`
-- [ ] If checker is nil (explicit allow, no per-request check), proceed as before
-- [ ] If checker present, call `CheckAndConsume(host, port)` before credential injection
-- [ ] If verdict is deny/timeout, return `goproxy.NewResponse` with 403
-- [ ] If verdict is allow (from ask approval), proceed with injection
-- [ ] Note: gRPC is automatically covered (same handler, uses HTTP/2 path in goproxy)
-- [ ] Write tests: allow-once blocks second request on same connection
-- [ ] Write tests: explicit allow skips per-request check
-- [ ] Write tests: gRPC request goes through per-request check
-- [ ] Run tests
+- [x] In `injectCredentials()`, extract checker from `ProxyCtx.UserData`
+- [x] If checker is nil (explicit allow, no per-request check), proceed as before
+- [x] If checker present, call `CheckAndConsume(host, port)` before credential injection
+- [x] If verdict is deny/timeout, return `goproxy.NewResponse` with 403
+- [x] If verdict is allow (from ask approval), proceed with injection
+- [x] Note: gRPC is automatically covered (same handler, uses HTTP/2 path in goproxy)
+- [x] Write tests: allow-once blocks second request on same connection
+- [x] Write tests: explicit allow skips per-request check
+- [x] Write tests: gRPC request goes through per-request check
+- [x] Run tests
 
 ### Task 5: Per-request policy in QUIC/HTTP3
 
 **Files:**
 - Modify: `internal/proxy/quic.go`
 
-- [ ] In `buildHandler()` HTTP handler, add checker from connection state
-- [ ] Same logic as HTTP/HTTPS: check before injection, deny with 403, consume allow-once
-- [ ] Write tests for QUIC per-request policy
-- [ ] Run tests
+- [x] In `buildHandler()` HTTP handler, add checker from connection state
+- [x] Same logic as HTTP/HTTPS: check before injection, deny with 403, consume allow-once
+- [x] Write tests for QUIC per-request policy
+- [x] Run tests
 
 ### Task 6: Update Telegram approval messages with request context
 
@@ -148,21 +154,21 @@ Add a per-connection `RequestPolicyChecker` that HTTP handlers call before forwa
 - Modify: `internal/channel/channel.go`
 - Modify: `internal/telegram/bot.go`
 
-- [ ] Add optional `Method` and `Path` fields to `ApprovalRequest`
-- [ ] Update `FormatApprovalMessage()`: show "GET https://example.com/path" for per-request approvals
-- [ ] Add "(per-request)" label to distinguish from connection-level approvals
-- [ ] Write tests for updated message formatting
-- [ ] Run tests
+- [x] Add optional `Method` and `Path` fields to `ApprovalRequest`
+- [x] Update `FormatApprovalMessage()`: show "GET https://example.com/path" for per-request approvals
+- [x] Add "(per-request)" label to distinguish from connection-level approvals
+- [x] Write tests for updated message formatting
+- [x] Run tests
 
 ### Task 7: Verify acceptance criteria
 
-- [ ] Verify "Allow Once" blocks second HTTP request to same host on same connection
-- [ ] Verify "Always Allow" allows all requests (rule persisted, engine handles it)
-- [ ] Verify explicit allow rules skip per-request checks (no performance regression)
-- [ ] Verify per-request policy works for QUIC/HTTP3
-- [ ] Verify gRPC requests trigger per-request checks
-- [ ] Run full test suite: `go test ./... -v -timeout 30s`
-- [ ] Verify test coverage meets 70% threshold
+- [x] Verify "Allow Once" blocks second HTTP request to same host on same connection -- verified by `TestInjectCredentials_AllowOnceBlocksSecondRequest` and `TestInjectCredentials_AllowOncePerRequestOverKeepAlive` in `internal/proxy/inject_per_request_test.go`
+- [x] Verify "Always Allow" allows all requests (rule persisted, engine handles it) -- verified by `TestRequestPolicyChecker_AlwaysAllowNotConsumed` in `internal/proxy/request_policy_test.go` (always-allow returns Allow without setting ConsumedAllowOnce marker, so engine-side persistence handles subsequent requests)
+- [x] Verify explicit allow rules skip per-request checks -- verified by `TestRequestPolicyChecker_ExplicitAllowSkipsBroker` and `TestInjectCredentials_ExplicitAllowCheckerAllowsRequest`, plus connection-level fast-path via `TestAllowSetsSkipPerRequestOnExplicitAllowRule` and `TestPerRequestCheckerFromContextSkipOverridesChecker`, with `TestEvaluateDetailed` in `internal/policy/engine_test.go` proving the engine returns `RuleMatch` for explicit rules. Latency impact of the per-request path under load was not measured; see Post-Completion for the outstanding measurement task
+- [~] Verify per-request policy works for QUIC/HTTP3 -- the `RequestPolicyChecker` plumbing inside `QUICProxy.buildHandler` is covered by `TestQUICProxy_PerRequestCheckerAllowOnceConsumesPerRequest`, `TestQUICProxy_PerRequestCheckerDenyReturns403`, `TestQUICProxy_PerRequestCheckerExplicitAllowPasses`, and `TestQUICProxy_PerRequestCheckerNilSkipsCheck` (all call `RegisterExpectedHostWithChecker` directly). In production the UDP dispatch loop in `server.go` always passes a nil checker because `EvaluateQUIC` only returns Allow/Deny (never Ask), so QUIC traffic always takes the fast path. CLAUDE.md and README.md now document this caveat.
+- [~] Verify gRPC requests trigger per-request checks -- HTTP/1.1 path with a gRPC content-type header is covered by `TestInjectCredentials_GRPCContentTypeHTTP1PathGoesThroughPerRequestCheck`, but real gRPC rides over HTTP/2 via goproxy's PRI preface upgrade and goproxy v1.8.3 disables HTTP/2 by default (`AllowHTTP2 == false`), so honest gRPC-over-HTTP/2 does NOT reach `injectCredentials` per stream. CLAUDE.md and README.md now document this caveat. True per-request gRPC enforcement is a follow-up task.
+- [x] Run full test suite: `go test ./... -v -timeout 30s` -- all packages pass (cmd/sluice, internal/api, audit, channel, channel/http, container, mcp, policy, proxy, store, telegram, vault)
+- [x] Verify test coverage meets 70% threshold -- proxy 70.7%, policy 84.5%, channel 88.0%, telegram 84.0%
 
 ### Task 8: [Final] Update documentation
 

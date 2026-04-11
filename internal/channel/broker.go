@@ -107,13 +107,43 @@ func (b *Broker) now() time.Time {
 	return time.Now()
 }
 
-// RequestOption configures optional fields on an ApprovalRequest.
-type RequestOption func(*ApprovalRequest)
+// RequestOption configures optional fields on an ApprovalRequest, or
+// toggles request-scoped broker behavior such as rate limit bypass.
+type RequestOption func(*requestConfig)
+
+// requestConfig carries both the approval request payload (which is copied
+// out to ApprovalRequest once finalized) and request-scoped broker flags
+// that do not belong on the wire.
+type requestConfig struct {
+	req             ApprovalRequest
+	bypassRateLimit bool
+}
 
 // WithToolArgs sets the truncated tool arguments on an MCP approval request.
 func WithToolArgs(args string) RequestOption {
-	return func(r *ApprovalRequest) {
-		r.ToolArgs = args
+	return func(c *requestConfig) {
+		c.req.ToolArgs = args
+	}
+}
+
+// WithMethodAndPath sets the HTTP method and path for a per-request approval.
+// Use this when triggering the approval broker for an individual HTTP/HTTPS
+// or QUIC/HTTP3 request so channels can render context like "GET https://example.com/users".
+func WithMethodAndPath(method, path string) RequestOption {
+	return func(c *requestConfig) {
+		c.req.Method = method
+		c.req.Path = path
+	}
+}
+
+// WithBypassRateLimit tells the broker to skip the per-destination rate
+// limiter for this request. Per-request policy callers use this so a
+// keep-alive connection hammering a single destination does not silently
+// 403 once the 5-per-minute cap is reached. Connection-level callers
+// should not use this option.
+func WithBypassRateLimit() RequestOption {
+	return func(c *requestConfig) {
+		c.bypassRateLimit = true
 	}
 }
 
@@ -122,6 +152,19 @@ func WithToolArgs(args string) RequestOption {
 func (b *Broker) Request(dest string, port int, protocol string, timeout time.Duration, opts ...RequestOption) (Response, error) {
 	id := fmt.Sprintf("req_%d", b.nextID.Add(1))
 	ch := make(chan Response, 1)
+
+	cfg := requestConfig{
+		req: ApprovalRequest{
+			ID:          id,
+			Destination: dest,
+			Port:        port,
+			Protocol:    protocol,
+			CreatedAt:   b.now(),
+		},
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 
 	b.mu.Lock()
 	if b.closed {
@@ -133,8 +176,11 @@ func (b *Broker) Request(dest string, port int, protocol string, timeout time.Du
 		b.mu.Unlock()
 		return ResponseDeny, ErrPendingLimitExceeded
 	}
-	// Check per-destination rate limit.
-	if b.destRateMax > 0 && b.destRateWindow > 0 {
+	// Check per-destination rate limit, unless the caller explicitly
+	// opted out (per-request policy). Even when bypassed the timestamp
+	// bookkeeping is skipped entirely so per-request traffic does not
+	// consume budget meant for connection-level approvals.
+	if !cfg.bypassRateLimit && b.destRateMax > 0 && b.destRateWindow > 0 {
 		now := b.now()
 		cutoff := now.Add(-b.destRateWindow)
 		timestamps := b.destTimestamps[dest]
@@ -164,16 +210,7 @@ func (b *Broker) Request(dest string, port int, protocol string, timeout time.Du
 		}
 	}
 
-	req := ApprovalRequest{
-		ID:          id,
-		Destination: dest,
-		Port:        port,
-		Protocol:    protocol,
-		CreatedAt:   b.now(),
-	}
-	for _, opt := range opts {
-		opt(&req)
-	}
+	req := cfg.req
 	b.waiters[id] = waiter{ch: ch, req: req}
 	b.mu.Unlock()
 

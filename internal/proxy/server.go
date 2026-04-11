@@ -86,11 +86,13 @@ type Server struct {
 type contextKey string
 
 const (
-	ctxKeyProtocol      contextKey = "protocol"
-	ctxKeyEngine        contextKey = "engine"
-	ctxKeyFallbackAddrs contextKey = "fallbackAddrs"
-	ctxKeyFQDN          contextKey = "fqdn"
-	ctxKeySNIDeferred   contextKey = "sniDeferred" // true when policy check deferred for SNI peeking
+	ctxKeyProtocol         contextKey = "protocol"
+	ctxKeyEngine           contextKey = "engine"
+	ctxKeyFallbackAddrs    contextKey = "fallbackAddrs"
+	ctxKeyFQDN             contextKey = "fqdn"
+	ctxKeySNIDeferred      contextKey = "sniDeferred"      // true when policy check deferred for SNI peeking
+	ctxKeyPerRequestPolicy contextKey = "perRequestPolicy" // *RequestPolicyChecker for per-HTTP-request policy checks
+	ctxKeySkipPerRequest   contextKey = "skipPerRequest"   // true when connection matched an explicit allow rule
 )
 
 // ProtocolFromContext retrieves the detected protocol from the request context.
@@ -277,7 +279,7 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 	if eng == nil {
 		eng = r.engine.Load()
 	}
-	verdict := eng.Evaluate(dest, port)
+	verdict, matchSource := eng.EvaluateDetailed(dest, port)
 
 	// SNI deferral: when the destination is an IP with no DNS reverse cache
 	// hit and the port is typically TLS, defer the policy check to the custom
@@ -297,6 +299,17 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 	allowed := false
 	effectiveVerdict := verdict
 	var reason string
+	// alwaysAllowPersisted is set to true only when an ask->ResponseAlwaysAllow
+	// both wrote the rule to the store AND swapped a recompiled engine in
+	// successfully. This gates the ctxKeySkipPerRequest flag below so a
+	// partial persistence failure does not silently allow all subsequent
+	// requests without re-triggering per-request policy.
+	var alwaysAllowPersisted bool
+	// askApprovedOnce is true when the connection-level ask resolved to
+	// ResponseAllowOnce. Used to seed the per-request checker with a single
+	// prepaid allow credit so the first HTTP request does not re-prompt the
+	// user (double-prompt fix).
+	var askApprovedOnce bool
 	switch verdict {
 	case policy.Allow:
 		allowed = true
@@ -320,54 +333,19 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 					allowed = true
 					effectiveVerdict = policy.Allow
 					reason = "user approved once"
+					askApprovedOnce = true
 					log.Printf("[ASK->ALLOW] %s:%d (user approved once)", dest, port)
 				case channel.ResponseAlwaysAllow:
 					allowed = true
 					effectiveVerdict = policy.Allow
 					reason = "user approved always"
 					log.Printf("[ASK->ALLOW+SAVE] %s:%d (user approved always)", dest, port)
-					// Hold reloadMu to prevent a concurrent SIGHUP from swapping
-					// the engine between the store write and recompile.
-					r.reloadMu.Lock()
-					func() {
-						defer r.reloadMu.Unlock()
-						if r.store != nil {
-							if _, storeErr := r.store.AddRule("allow", store.RuleOpts{Destination: dest, Ports: []int{port}, Source: "approval"}); storeErr != nil {
-								log.Printf("[WARN] failed to persist allow rule for %s:%d: %v", dest, port, storeErr)
-							}
-							if newEng, recompErr := policy.LoadFromStore(r.store); recompErr != nil {
-								log.Printf("[WARN] failed to recompile engine after always-allow: %v", recompErr)
-							} else if valErr := newEng.Validate(); valErr != nil {
-								log.Printf("[WARN] engine validation failed after always-allow: %v", valErr)
-							} else {
-								r.engine.Store(newEng)
-							}
-						} else {
-							if err := r.engine.Load().AddDynamicAllow(dest, port); err != nil { //nolint:staticcheck // backward compat fallback when no store
-								log.Printf("[WARN] failed to add dynamic allow rule for %s:%d: %v", dest, port, err)
-							}
-						}
-					}()
+					alwaysAllowPersisted = r.persistAlwaysAllow(dest, port)
 				case channel.ResponseAlwaysDeny:
 					effectiveVerdict = policy.Deny
 					reason = "user denied always"
 					log.Printf("[ASK->DENY+SAVE] %s:%d (user denied always)", dest, port)
-					r.reloadMu.Lock()
-					func() {
-						defer r.reloadMu.Unlock()
-						if r.store != nil {
-							if _, storeErr := r.store.AddRule("deny", store.RuleOpts{Destination: dest, Ports: []int{port}, Source: "approval"}); storeErr != nil {
-								log.Printf("[WARN] failed to persist deny rule for %s:%d: %v", dest, port, storeErr)
-							}
-							if newEng, recompErr := policy.LoadFromStore(r.store); recompErr != nil {
-								log.Printf("[WARN] failed to recompile engine after always-deny: %v", recompErr)
-							} else if valErr := newEng.Validate(); valErr != nil {
-								log.Printf("[WARN] engine validation failed after always-deny: %v", valErr)
-							} else {
-								r.engine.Store(newEng)
-							}
-						}
-					}()
+					r.persistAlwaysDeny(dest, port)
 				default:
 					effectiveVerdict = policy.Deny
 					reason = "user denied"
@@ -413,11 +391,14 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 		}
 	}
 
-	// Single audit entry reflecting the final outcome.
+	// Single audit entry reflecting the final outcome. Protocol is set
+	// so audit grep is consistent with per-request audit entries which
+	// also populate this field.
 	if r.audit != nil {
 		if err := r.audit.Log(audit.Event{
 			Destination: dest,
 			Port:        port,
+			Protocol:    DetectProtocol(port).String(),
 			Verdict:     effectiveVerdict.String(),
 			Reason:      reason,
 		}); err != nil {
@@ -429,8 +410,125 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 		proto := DetectProtocol(port)
 		ctx = context.WithValue(ctx, ctxKeyProtocol, proto)
 		ctx = context.WithValue(ctx, ctxKeyFQDN, dest)
+
+		// Per-request policy wiring. Skip per-request checks entirely when
+		// any of the following hold:
+		//   1. The connect-time verdict matched an explicit allow rule
+		//      (RuleMatch). Subsequent requests will keep matching the same
+		//      rule so paying the per-request cost is pure waste.
+		//   2. The ask flow resolved to ResponseAlwaysAllow and the rule was
+		//      successfully persisted (both store write and engine swap).
+		//      At that point the new rule is live in the engine and
+		//      functions exactly like case 1. A partial persistence failure
+		//      falls through to the checker path as a safety net.
+		//   3. There is no broker wired up. Without a broker, the checker
+		//      can only deny (ask -> deny) or allow (rule/default allow),
+		//      but since we already allowed this connection the only thing
+		//      the checker could do differently is start denying mid-stream
+		//      if the engine is reloaded. Skip it to avoid the overhead.
+		//
+		// Otherwise attach a checker so the HTTP MITM handler re-evaluates
+		// policy on every request. This is how "Allow Once" becomes
+		// per-request instead of per-connection. When the connection-level
+		// ask resolved to ResponseAllowOnce, the checker is seeded with one
+		// prepaid allow credit so the first HTTP request flows through
+		// without re-prompting the user (the CONNECT approval is reused for
+		// the first request on the new tunnel).
+		skipPerRequest := (verdict == policy.Allow && matchSource == policy.RuleMatch) ||
+			alwaysAllowPersisted ||
+			r.broker == nil
+		if skipPerRequest {
+			ctx = context.WithValue(ctx, ctxKeySkipPerRequest, true)
+		} else {
+			seed := 0
+			if askApprovedOnce {
+				seed = 1
+			}
+			checker := NewRequestPolicyChecker(r.engine, r.broker,
+				WithPersist(r.buildPersistFunc()),
+				WithSeedCredits(seed),
+			)
+			ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
+		}
 	}
 	return ctx, allowed
+}
+
+// persistApprovalRule writes an allow/deny rule for dest:port coming from an
+// ask->Always* approval and atomically swaps in a recompiled engine. Returns
+// true only when both the store write and engine swap succeed. A false return
+// means the in-memory engine may still evaluate dest:port as ask, so callers
+// should attach a per-request checker as a safety net.
+//
+// Callers:
+//   - persistAlwaysAllow / persistAlwaysDeny: connection-level approvals.
+//   - buildPersistFunc closure: per-request approvals via RequestPolicyChecker.
+//   - sniSaveRule: SNI-peek approvals in the custom connect handler.
+//
+// verdict must be "allow" or "deny".
+func (r *policyRuleSet) persistApprovalRule(verdict, dest string, port int) bool {
+	// Hold reloadMu to prevent a concurrent SIGHUP from swapping the
+	// engine between the store write and recompile.
+	r.reloadMu.Lock()
+	defer r.reloadMu.Unlock()
+	if r.store == nil {
+		log.Printf("[WARN] always-%s for %s:%d not persisted (no store)", verdict, dest, port)
+		return false
+	}
+	if _, storeErr := r.store.AddRule(verdict, store.RuleOpts{Destination: dest, Ports: []int{port}, Source: "approval"}); storeErr != nil {
+		log.Printf("[WARN] failed to persist %s rule for %s:%d: %v", verdict, dest, port, storeErr)
+		return false
+	}
+	newEng, recompErr := policy.LoadFromStore(r.store)
+	if recompErr != nil {
+		log.Printf("[WARN] failed to recompile engine after always-%s: %v", verdict, recompErr)
+		return false
+	}
+	if valErr := newEng.Validate(); valErr != nil {
+		log.Printf("[WARN] engine validation failed after always-%s: %v", verdict, valErr)
+		return false
+	}
+	r.engine.Store(newEng)
+	return true
+}
+
+// persistAlwaysAllow writes an allow rule for dest:port from an ask->Always
+// Allow approval and swaps in a recompiled engine. Thin wrapper around
+// persistApprovalRule for call-site readability.
+func (r *policyRuleSet) persistAlwaysAllow(dest string, port int) bool {
+	return r.persistApprovalRule("allow", dest, port)
+}
+
+// persistAlwaysDeny writes a deny rule for dest:port from an ask->Always
+// Deny approval and swaps in a recompiled engine. Thin wrapper around
+// persistApprovalRule for call-site readability.
+func (r *policyRuleSet) persistAlwaysDeny(dest string, port int) bool {
+	return r.persistApprovalRule("deny", dest, port)
+}
+
+// buildPersistFunc returns a closure that persists a new allow/deny rule
+// via the SOCKS5 rule set's store and swaps in a recompiled engine. It
+// mirrors the always-allow/always-deny handling in Allow() so per-request
+// approvals land in the same store/engine state as connection-level ones.
+// Returns nil when the rule set has no store wired up (tests, standalone),
+// in which case the checker logs a warning instead of persisting.
+func (r *policyRuleSet) buildPersistFunc() PersistRuleFunc {
+	if r.store == nil {
+		return nil
+	}
+	return func(v PersistVerdict, dest string, port int) {
+		verdictStr := "allow"
+		label := "[REQ-APPROVAL-SAVE:allow]"
+		if v == PersistDeny {
+			verdictStr = "deny"
+			label = "[REQ-APPROVAL-SAVE:deny]"
+		}
+		if ok := r.persistApprovalRule(verdictStr, dest, port); !ok {
+			log.Printf("%s %s:%d persistence failed", label, dest, port)
+			return
+		}
+		log.Printf("%s %s:%d persisted", label, dest, port)
+	}
 }
 
 // New creates a new SOCKS5 proxy server bound to the configured listen address.
@@ -544,6 +642,12 @@ func (s *Server) setupInjection(cfg Config, _ net.Listener) error {
 	}
 
 	s.injector = NewInjector(cfg.Provider, &s.resolver, caCert, authToken, wsProxy)
+	// Wire the audit logger so per-request policy denials in the HTTP/HTTPS
+	// MITM path land in the hash-chained audit log, matching the QUIC
+	// proxy which already audits per-request denies via logAudit.
+	if cfg.Audit != nil {
+		s.injector.SetAuditLogger(cfg.Audit)
+	}
 
 	// Populate the OAuth token URL index from credential metadata so
 	// the response handler can detect OAuth token endpoints from startup.
@@ -609,11 +713,25 @@ func bindingIsMetaOnly(b vault.Binding) bool {
 	return true
 }
 
+// perRequestCheckerFromContext extracts the per-request policy checker from
+// the SOCKS5 context. Returns nil when the connection matched an explicit
+// allow rule (ctxKeySkipPerRequest is set) or when no checker is attached.
+func perRequestCheckerFromContext(ctx context.Context) *RequestPolicyChecker {
+	if skip, _ := ctx.Value(ctxKeySkipPerRequest).(bool); skip {
+		return nil
+	}
+	if c, ok := ctx.Value(ctxKeyPerRequestPolicy).(*RequestPolicyChecker); ok {
+		return c
+	}
+	return nil
+}
+
 // dial is the custom dialer for go-socks5. When a credential binding matches
 // the destination, the connection is routed through the appropriate injection
 // handler (HTTPS MITM, SSH jump host, or mail proxy). Otherwise it falls
 // through to a direct TCP connection with DNS fallback support.
 func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	perReqChecker := perRequestCheckerFromContext(ctx)
 	if r := s.resolver.Load(); r != nil {
 		fqdn, _ := ctx.Value(ctxKeyFQDN).(string)
 		if fqdn != "" {
@@ -689,6 +807,7 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 						}
 						pinID := generatePinID()
 						s.injector.PinIPs(pinID, ips)
+						s.injector.PinChecker(pinID, perReqChecker)
 						conn, err := dialThroughInjector(s.injectorLn.Addr().String(), fqdn, port, s.injector.authToken, pinID)
 						if err != nil {
 							s.injector.UnpinIPs(pinID)
@@ -721,7 +840,7 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 				if proto == ProtoGeneric || proto == ProtoTCP {
 					bnd := binding // capture for closure
 					return dialWithHandler(func(agentConn net.Conn, ready chan<- error) {
-						s.handleWithDetection(agentConn, ready, &bnd, fqdn, port, hostAddr, dialAddrs)
+						s.handleWithDetection(agentConn, ready, &bnd, fqdn, port, hostAddr, dialAddrs, perReqChecker)
 					})
 				}
 			}
@@ -754,6 +873,7 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 			}
 			pinID := generatePinID()
 			s.injector.PinIPs(pinID, ips)
+			s.injector.PinChecker(pinID, perReqChecker)
 			conn, err := dialThroughInjector(s.injectorLn.Addr().String(), fqdn, port, s.injector.authToken, pinID)
 			if err != nil {
 				s.injector.UnpinIPs(pinID)
@@ -777,7 +897,7 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 			}
 			hostAddr := net.JoinHostPort(fqdn, portStr)
 			return dialWithHandler(func(agentConn net.Conn, ready chan<- error) {
-				s.handleWithDetection(agentConn, ready, nil, fqdn, port, hostAddr, unboundAddrs)
+				s.handleWithDetection(agentConn, ready, nil, fqdn, port, hostAddr, unboundAddrs, perReqChecker)
 			})
 		}
 	}
@@ -810,6 +930,9 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 // and routes through the appropriate injection handler. Used for connections
 // on non-standard ports where port-based detection returned ProtoGeneric.
 // The binding parameter is nil for unbound connections (phantom stripping only).
+// The checker parameter is the per-request policy checker carried from the
+// SOCKS5 context, used by the HTTP MITM path to enforce per-request policy.
+// It is nil when the connection matched an explicit allow rule.
 func (s *Server) handleWithDetection(
 	agentConn net.Conn,
 	ready chan<- error,
@@ -818,6 +941,7 @@ func (s *Server) handleWithDetection(
 	port int,
 	hostAddr string,
 	dialAddrs []string,
+	checker *RequestPolicyChecker,
 ) {
 	defer func() { _ = agentConn.Close() }()
 	// Signal ready immediately: byte detection requires reading client
@@ -871,6 +995,7 @@ func (s *Server) handleWithDetection(
 			}
 			pinID := generatePinID()
 			s.injector.PinIPs(pinID, ips)
+			s.injector.PinChecker(pinID, checker)
 			defer s.injector.UnpinIPs(pinID)
 			injConn, err := dialThroughInjector(s.injectorLn.Addr().String(), fqdn, port, s.injector.authToken, pinID)
 			if err != nil {
@@ -1249,12 +1374,23 @@ func (s *Server) sniPolicyCheckBeforeDial(ctx context.Context, request *socks5.R
 	if eng == nil {
 		eng = s.rules.engine.Load()
 	}
-	verdict := eng.Evaluate(sni, port)
+	verdict, matchSource := eng.EvaluateDetailed(sni, port)
 	reader := io.MultiReader(bytes.NewReader(buf), request.Reader)
 
 	switch verdict {
 	case policy.Allow:
 		log.Printf("[SNI->ALLOW] %s:%d (hostname %s matched allow rule)", ipStr, port, sni)
+		// Explicit allow rule: skip the per-request check entirely.
+		if matchSource == policy.RuleMatch {
+			ctx = context.WithValue(ctx, ctxKeySkipPerRequest, true)
+		} else if s.rules.broker == nil {
+			ctx = context.WithValue(ctx, ctxKeySkipPerRequest, true)
+		} else {
+			checker := NewRequestPolicyChecker(s.rules.engine, s.rules.broker,
+				WithPersist(s.rules.buildPersistFunc()),
+			)
+			ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
+		}
 		return reader, ctx, true
 	case policy.Deny:
 		log.Printf("[SNI->DENY] %s:%d (hostname %s matched deny rule)", ipStr, port, sni)
@@ -1275,10 +1411,36 @@ func (s *Server) sniPolicyCheckBeforeDial(ctx context.Context, request *socks5.R
 		switch resp {
 		case channel.ResponseAllowOnce:
 			log.Printf("[SNI->ALLOW] %s:%d (hostname %s: user approved once)", ipStr, port, sni)
+			// Ask-approved once: attach a checker seeded with one prepaid
+			// allow credit so the first HTTP request on the new tunnel does
+			// not re-prompt the user (the SNI-level approval is reused for
+			// the first request). Subsequent requests on the same keep-alive
+			// connection re-trigger the ask flow normally.
+			checker := NewRequestPolicyChecker(s.rules.engine, s.rules.broker,
+				WithPersist(s.rules.buildPersistFunc()),
+				WithSeedCredits(1),
+			)
+			ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
 			return reader, ctx, true
 		case channel.ResponseAlwaysAllow:
 			log.Printf("[SNI->ALLOW+SAVE] %s:%d (hostname %s: user approved always)", ipStr, port, sni)
-			s.sniSaveRule("allow", sni, port)
+			// Persist the new allow rule. If the persist path fails we
+			// fall back to attaching a checker as a safety net so the
+			// current keep-alive connection is still policy-checked on
+			// every request (the failure was only logged inside
+			// sniSaveRule, so the in-memory engine may still evaluate
+			// sni:port as ask). The checker is seeded with one credit
+			// because the user already approved this connection.
+			if ok := s.sniSaveRule("allow", sni, port); ok {
+				ctx = context.WithValue(ctx, ctxKeySkipPerRequest, true)
+			} else {
+				log.Printf("[SNI->ALLOW+SAVE] %s:%d persistence failed; attaching per-request checker as safety net", sni, port)
+				checker := NewRequestPolicyChecker(s.rules.engine, s.rules.broker,
+					WithPersist(s.rules.buildPersistFunc()),
+					WithSeedCredits(1),
+				)
+				ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
+			}
 			return reader, ctx, true
 		case channel.ResponseAlwaysDeny:
 			log.Printf("[SNI->DENY+SAVE] %s:%d (hostname %s: user denied always)", ipStr, port, sni)
@@ -1295,21 +1457,11 @@ func (s *Server) sniPolicyCheckBeforeDial(ctx context.Context, request *socks5.R
 }
 
 // sniSaveRule persists an allow or deny rule from an SNI-based approval.
-func (s *Server) sniSaveRule(verdict, dest string, port int) {
-	s.rules.reloadMu.Lock()
-	defer s.rules.reloadMu.Unlock()
-	if s.rules.store != nil {
-		if _, storeErr := s.rules.store.AddRule(verdict, store.RuleOpts{Destination: dest, Ports: []int{port}, Source: "approval"}); storeErr != nil {
-			log.Printf("[WARN] failed to persist %s rule for %s:%d: %v", verdict, dest, port, storeErr)
-		}
-		if newEng, recompErr := policy.LoadFromStore(s.rules.store); recompErr != nil {
-			log.Printf("[WARN] failed to recompile engine after SNI %s: %v", verdict, recompErr)
-		} else if valErr := newEng.Validate(); valErr != nil {
-			log.Printf("[WARN] engine validation failed after SNI %s: %v", verdict, valErr)
-		} else {
-			s.rules.engine.Store(newEng)
-		}
-	}
+// Returns true only when the rule was successfully written to the store AND
+// a recompiled engine was swapped in. Callers use the return value to
+// decide whether to attach a per-request checker as a safety net.
+func (s *Server) sniSaveRule(verdict, dest string, port int) bool {
+	return s.rules.persistApprovalRule(verdict, dest, port)
 }
 
 // then dispatches datagrams to the DNSInterceptor (port 53) or UDPRelay
@@ -1495,6 +1647,11 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 						}
 						// Register expected host so the QUIC proxy can verify
 						// that the TLS SNI matches the policy-checked destination.
+						// EvaluateQUIC above only returns Allow for explicit QUIC
+						// (or UDP) allow-rule matches, so QUIC traffic reaching
+						// this branch is always an explicit rule match and the
+						// HTTP/3 handler has no per-request policy gate (see
+						// QUICProxy.buildHandler).
 						s.quicProxy.RegisterExpectedHost(upstream.LocalAddr().String(), dest, port)
 						mu.Lock()
 						sess = &udpSession{upstream: upstream, lastSeen: time.Now()}

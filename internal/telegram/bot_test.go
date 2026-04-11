@@ -157,4 +157,84 @@ func TestFormatApprovalMessage(t *testing.T) {
 			t.Error("message should not contain Arguments section when ToolArgs is empty")
 		}
 	})
+
+	t.Run("per-request https approval", func(t *testing.T) {
+		req := channel.ApprovalRequest{
+			Destination: "api.example.com",
+			Port:        443,
+			Protocol:    "https",
+			Method:      "GET",
+			Path:        "/users/me",
+		}
+		msg := FormatApprovalMessage(req)
+		if !strings.Contains(msg, "GET https://api.example.com/users/me") {
+			t.Errorf("expected 'GET https://api.example.com/users/me' in message, got: %s", msg)
+		}
+		if !strings.Contains(msg, "per-request") {
+			t.Errorf("expected 'per-request' label in message, got: %s", msg)
+		}
+		if !strings.Contains(msg, "Allow this request?") {
+			t.Errorf("expected 'Allow this request?' wording, got: %s", msg)
+		}
+	})
+
+	t.Run("per-request http non-standard port", func(t *testing.T) {
+		req := channel.ApprovalRequest{
+			Destination: "localhost",
+			Port:        8080,
+			Protocol:    "http",
+			Method:      "POST",
+			Path:        "/api/submit",
+		}
+		msg := FormatApprovalMessage(req)
+		if !strings.Contains(msg, "POST http://localhost:8080/api/submit") {
+			t.Errorf("expected URL with explicit port, got: %s", msg)
+		}
+	})
+
+	t.Run("per-request approval with empty path defaults to slash", func(t *testing.T) {
+		req := channel.ApprovalRequest{
+			Destination: "example.com",
+			Port:        443,
+			Protocol:    "https",
+			Method:      "HEAD",
+			Path:        "",
+		}
+		msg := FormatApprovalMessage(req)
+		if !strings.Contains(msg, "HEAD https://example.com/") {
+			t.Errorf("expected URL with default path '/', got: %s", msg)
+		}
+	})
+
+	t.Run("per-request approval escapes html special chars", func(t *testing.T) {
+		req := channel.ApprovalRequest{
+			Destination: "evil.com",
+			Port:        443,
+			Protocol:    "https",
+			Method:      "GET",
+			Path:        "/<script>alert(1)</script>",
+		}
+		msg := FormatApprovalMessage(req)
+		if strings.Contains(msg, "<script>") {
+			t.Errorf("unescaped <script> tag in message: %s", msg)
+		}
+		if !strings.Contains(msg, "&lt;script&gt;") {
+			t.Errorf("expected escaped <script> tag in message, got: %s", msg)
+		}
+	})
+
+	t.Run("connection-level approval without method does not use per-request format", func(t *testing.T) {
+		req := channel.ApprovalRequest{
+			Destination: "example.com",
+			Port:        443,
+			Protocol:    "https",
+		}
+		msg := FormatApprovalMessage(req)
+		if strings.Contains(msg, "per-request") {
+			t.Errorf("connection-level approval should not include per-request label: %s", msg)
+		}
+		if !strings.Contains(msg, "Allow this connection?") {
+			t.Errorf("expected connection wording, got: %s", msg)
+		}
+	})
 }

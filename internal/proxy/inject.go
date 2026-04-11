@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/elazarl/goproxy"
+	"github.com/nemirovsky/sluice/internal/audit"
+	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
 	"golang.org/x/sync/singleflight"
@@ -47,6 +49,27 @@ func PhantomToken(credentialName string) string {
 type pinIDKeyType struct{}
 
 var pinIDCtxKey = pinIDKeyType{}
+
+// proxyConnState is the value stored in goproxy.ProxyCtx.UserData for a
+// single SOCKS5/MITM connection. It carries the per-connection pin ID (used
+// by the outbound transport to locate pinned IPs), an optional per-request
+// policy checker (used by the HTTP MITM handler to re-evaluate policy on
+// every HTTP request), and the authoritative CONNECT target host and port
+// captured when the tunnel was established. The checker is nil when the
+// SOCKS5 layer flagged the connection as an explicit rule match (no
+// per-request checks needed).
+//
+// The connectHost is the authoritative destination for all policy and
+// credential-binding decisions on MITM'd requests. It is captured from the
+// outer CONNECT target (or the recovered SNI hostname) before any inner
+// HTTP request is read, so a malicious client cannot spoof a different
+// destination via the Host header or an absolute-form request-URI.
+type proxyConnState struct {
+	pinID       string
+	checker     *RequestPolicyChecker
+	connectHost string
+	connectPort int
+}
 
 // sniAwareTLSConfig returns a TLS config function for goproxy that generates
 // MITM certificates using the SNI hostname from the TLS ClientHello instead
@@ -118,6 +141,12 @@ type Injector struct {
 	// injector so goproxy's outbound connections use the same addresses
 	// that passed policy checks.
 	pinnedIPs sync.Map
+	// pinnedCheckers maps pinID -> *RequestPolicyChecker. The SOCKS5 dial
+	// function registers the checker alongside the pinned IPs so the HTTP
+	// MITM HandleConnect callback can attach it to goproxy's UserData.
+	// A missing entry means the SOCKS5 layer decided no per-request check
+	// is needed (explicit rule match).
+	pinnedCheckers sync.Map
 	// wsProxy handles WebSocket frame-level inspection when non-nil.
 	// When a 101 Switching Protocols response with WebSocket upgrade
 	// headers is detected, the response body is replaced with a
@@ -142,6 +171,36 @@ type Injector struct {
 	// token persist goroutine completes. Used by tests to avoid
 	// time.Sleep-based synchronization. Nil in production.
 	persistDone chan struct{}
+	// auditLog, when non-nil, receives per-request deny events emitted by
+	// injectCredentials when the RequestPolicyChecker blocks a request.
+	// Parity with the QUIC/HTTP3 path which already audits per-request
+	// denies via QUICProxy.logAudit. Wired via SetAuditLogger.
+	auditLog *audit.FileLogger
+}
+
+// SetAuditLogger configures the audit logger used to record per-request
+// policy denials in the HTTP/HTTPS MITM path. Matches the QUIC proxy which
+// already writes per-request deny events. Safe to call once at startup.
+// A nil logger disables auditing for per-request denials.
+func (inj *Injector) SetAuditLogger(a *audit.FileLogger) {
+	inj.auditLog = a
+}
+
+// logPerRequestDeny writes a structured audit event for an HTTP/HTTPS
+// per-request deny. No-op when no audit logger is configured.
+func (inj *Injector) logPerRequestDeny(host string, port int, proto string, reason string) {
+	if inj.auditLog == nil {
+		return
+	}
+	if err := inj.auditLog.Log(audit.Event{
+		Destination: host,
+		Port:        port,
+		Protocol:    proto,
+		Verdict:     "deny",
+		Reason:      reason,
+	}); err != nil {
+		log.Printf("audit log write error: %v", err)
+	}
 }
 
 // PinIPs stores resolved IPs keyed by a unique per-connection pin ID so
@@ -153,10 +212,34 @@ func (inj *Injector) PinIPs(pinID string, resolvedIPs []string) {
 	inj.pinnedIPs.Store(pinID, resolvedIPs)
 }
 
-// UnpinIPs removes the pinned IP entry for the given pin ID. Call this when
-// the SOCKS5 connection closes to avoid leaking entries in the sync.Map.
+// UnpinIPs removes the pinned IP entry and any associated per-request
+// policy checker for the given pin ID. Call this when the SOCKS5 connection
+// closes to avoid leaking entries in the sync.Map.
 func (inj *Injector) UnpinIPs(pinID string) {
 	inj.pinnedIPs.Delete(pinID)
+	inj.pinnedCheckers.Delete(pinID)
+}
+
+// PinChecker associates a per-request policy checker with a pin ID so the
+// HTTP MITM HandleConnect callback can retrieve it and store it in goproxy's
+// UserData. A nil checker is ignored; the HandleConnect callback then leaves
+// the checker slot empty and per-request checking is skipped.
+func (inj *Injector) PinChecker(pinID string, checker *RequestPolicyChecker) {
+	if checker == nil {
+		return
+	}
+	inj.pinnedCheckers.Store(pinID, checker)
+}
+
+// lookupChecker returns the per-request policy checker registered for a pin
+// ID, or nil if none is registered.
+func (inj *Injector) lookupChecker(pinID string) *RequestPolicyChecker {
+	if v, ok := inj.pinnedCheckers.Load(pinID); ok {
+		if c, ok := v.(*RequestPolicyChecker); ok {
+			return c
+		}
+	}
+	return nil
 }
 
 // UpdateOAuthIndex rebuilds the OAuth token URL index from current credential
@@ -271,12 +354,29 @@ func NewInjector(provider vault.Provider, resolver *atomic.Pointer[vault.Binding
 					return goproxy.RejectConnect, host
 				}
 			}
-			// Store the per-connection pin ID in UserData. goproxy
+			// Store the per-connection state in UserData. goproxy
 			// propagates UserData to inner MITM request contexts,
-			// allowing injectCredentials to thread it into the
-			// request context for the outbound transport.
+			// allowing injectCredentials to thread the pin ID into
+			// the request context for the outbound transport AND to
+			// enforce per-HTTP-request policy via the checker.
+			//
+			// The CONNECT target (host:port) is captured here as the
+			// authoritative destination for per-request policy and
+			// credential-binding decisions. Inner HTTP requests cannot
+			// override this by sending a different Host header. This
+			// prevents a host-header spoofing bypass where a client
+			// opens a tunnel to an approved host then sends requests
+			// with a spoofed Host header to reach a blocked destination
+			// via a shared IP or CDN origin.
 			if ctx.Req != nil {
-				ctx.UserData = ctx.Req.Header.Get("X-Sluice-Pin")
+				pinID := ctx.Req.Header.Get("X-Sluice-Pin")
+				connectHost, connectPort := splitHostPortFallback(host)
+				ctx.UserData = proxyConnState{
+					pinID:       pinID,
+					checker:     inj.lookupChecker(pinID),
+					connectHost: connectHost,
+					connectPort: connectPort,
+				}
 			}
 			return mitmAction, host
 		},
@@ -574,36 +674,153 @@ func (fi *wsFrameInterceptor) Close() error {
 
 func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 	// Reject direct forward-proxy requests that bypassed CONNECT auth.
-	// For authenticated CONNECT tunnels, goproxy propagates the pin ID
-	// via UserData. Direct HTTP proxy requests have nil UserData because
-	// HandleConnect never ran. When authToken is empty (tests), skip the
-	// check to preserve test compatibility.
+	// For authenticated CONNECT tunnels, goproxy propagates the per-conn
+	// state via UserData. Direct HTTP proxy requests have nil UserData
+	// because HandleConnect never ran. When authToken is empty (tests),
+	// skip the check to preserve test compatibility.
 	if inj.authToken != "" && ctx.UserData == nil {
 		return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusForbidden, "Forbidden")
 	}
 
-	// Thread the per-connection pin ID into the request context so
-	// the custom DialContext can locate the correct pinned IPs.
-	if pinID, ok := ctx.UserData.(string); ok && pinID != "" {
+	// Thread the per-connection pin ID into the request context so the
+	// custom DialContext can locate the correct pinned IPs. UserData is
+	// set by our HandleConnect callback to a proxyConnState value. When
+	// UserData is not a proxyConnState (e.g. tests that do not go through
+	// HandleConnect, or goproxy's default zero value), pinID and checker
+	// remain zero and per-request checking is skipped.
+	var pinID string
+	var checker *RequestPolicyChecker
+	var connectHost string
+	var connectPort int
+	if state, ok := ctx.UserData.(proxyConnState); ok {
+		pinID = state.pinID
+		checker = state.checker
+		connectHost = state.connectHost
+		connectPort = state.connectPort
+	}
+	if pinID != "" {
 		r = r.WithContext(context.WithValue(r.Context(), pinIDCtxKey, pinID))
 	}
 
-	host := r.URL.Hostname()
-	if host == "" {
-		host = r.Host
-		if h, _, err := net.SplitHostPort(host); err == nil {
-			host = h
+	// The authoritative destination is the CONNECT target captured when
+	// the tunnel was established. When inner HTTP requests arrive, their
+	// Host header (or absolute-form URL) could be spoofed to point at a
+	// different origin. Using the CONNECT target instead of r.Host closes
+	// that bypass. When no CONNECT target is available (e.g. direct HTTP
+	// forward-proxy requests in tests), fall back to the request URL/Host.
+	var host string
+	var port int
+	if connectHost != "" {
+		host = connectHost
+		port = connectPort
+		if port == 0 {
+			port = portFromRequest(r)
+		}
+	} else {
+		host = r.URL.Hostname()
+		if host == "" {
+			host = r.Host
+			if h, _, err := net.SplitHostPort(host); err == nil {
+				host = h
+			}
+		}
+		port = portFromRequest(r)
+	}
+
+	// Detect cross-origin requests: the inner request targets a different
+	// host, port, or scheme than the CONNECT target. This happens when a
+	// client reuses an approved tunnel for requests to a different origin
+	// (e.g. via a spoofed Host header, an absolute-form request-URI with
+	// a different port like https://api.example.com:8443/..., or a scheme
+	// downgrade like http://api.example.com/...). We log the mismatch for
+	// auditability and normalize the full authority (host + port + scheme)
+	// to the CONNECT target. Policy evaluation uses the CONNECT target,
+	// NOT the inner request values.
+	if connectHost != "" {
+		innerHost := r.URL.Hostname()
+		if innerHost == "" {
+			innerHost = r.Host
+			if h, _, err := net.SplitHostPort(innerHost); err == nil {
+				innerHost = h
+			}
+		}
+
+		// Derive the inner port from the request URL or Host header.
+		innerPort := 0
+		if p := r.URL.Port(); p != "" {
+			if pv, err := strconv.Atoi(p); err == nil {
+				innerPort = pv
+			}
+		}
+		if innerPort == 0 {
+			if _, ps, err := net.SplitHostPort(r.Host); err == nil {
+				if pv, err := strconv.Atoi(ps); err == nil {
+					innerPort = pv
+				}
+			}
+		}
+		// Default port from scheme when not explicit.
+		if innerPort == 0 {
+			switch r.URL.Scheme {
+			case "https":
+				innerPort = 443
+			case "http":
+				innerPort = 80
+			}
+		}
+
+		// Determine expected scheme for well-known CONNECT ports.
+		// Non-standard ports rely on goproxy's own scheme detection:
+		// goproxy peeks the first byte after CONNECT to distinguish
+		// TLS (scheme="https") from plain HTTP (scheme="http") and
+		// normalizes r.URL before our handler runs. Setting an
+		// expectedScheme here would break the byte-detection path
+		// where plain HTTP connections on non-standard ports are
+		// legitimately routed through the MITM handler.
+		var expectedScheme string
+		switch connectPort {
+		case 443:
+			expectedScheme = "https"
+		case 80:
+			expectedScheme = "http"
+		}
+
+		hostMismatch := innerHost != "" && !strings.EqualFold(innerHost, connectHost)
+		portMismatch := innerPort != 0 && connectPort != 0 && innerPort != connectPort
+		schemeMismatch := expectedScheme != "" && r.URL.Scheme != "" && r.URL.Scheme != expectedScheme
+
+		if hostMismatch || portMismatch || schemeMismatch {
+			log.Printf("[INJECT-WARN] cross-origin request on tunnel: CONNECT=%s:%d inner=%s://%s:%d (normalizing to CONNECT target)",
+				connectHost, connectPort, r.URL.Scheme, innerHost, innerPort)
+		}
+
+		// Always normalize authority to the CONNECT target so goproxy
+		// forwards to the right destination regardless of inner headers.
+		// Use net.JoinHostPort for IPv6 safety (brackets bare ::1).
+		connectAuthority := net.JoinHostPort(connectHost, strconv.Itoa(connectPort))
+		if connectPort == 443 || connectPort == 80 {
+			// Suppress standard port from authority for cleaner URLs.
+			// IPv6 addresses still need brackets in r.URL.Host.
+			if strings.Contains(connectHost, ":") {
+				connectAuthority = "[" + connectHost + "]"
+			} else {
+				connectAuthority = connectHost
+			}
+		}
+		r.URL.Host = connectAuthority
+		r.Host = connectAuthority
+
+		// Normalize scheme for well-known ports. Non-standard ports
+		// keep whatever scheme goproxy assigned based on its TLS
+		// detection (peek of first client byte after CONNECT).
+		if expectedScheme != "" {
+			r.URL.Scheme = expectedScheme
 		}
 	}
 
-	port := portFromRequest(r)
-
-	// 1. Binding-specific header injection: set the configured header
-	// with the formatted credential value for hosts with a binding.
-	// Use the request scheme (not the port heuristic) since the injector
-	// only handles HTTP/HTTPS traffic and the scheme is known from the
-	// request. This ensures bindings with protocols=["http"] match on
-	// non-standard ports (e.g. 8000) where DetectProtocol returns "generic".
+	// Compute the refined protocol before the per-request policy check so
+	// protocol-scoped rules (protocols=["grpc"], ["ws"], ...) can match on
+	// a per-request basis. Falls back to port-based detection otherwise.
 	var proto Protocol
 	switch r.URL.Scheme {
 	case "https":
@@ -620,6 +837,47 @@ func (inj *Injector) injectCredentials(r *http.Request, ctx *goproxy.ProxyCtx) (
 		proto = refined
 	}
 	protoStr := proto.String()
+
+	// Per-request policy check. When the SOCKS5 layer flagged the
+	// connection as an explicit rule match, checker is nil and we skip
+	// the check (fast path). Otherwise, re-evaluate policy for every
+	// HTTP request so that "Allow Once" approvals truly allow one HTTP
+	// request, not an entire keep-alive TCP connection worth of
+	// requests. The bypass-rate-limit option keeps per-request traffic
+	// from burning through the broker's per-destination rate limiter
+	// (5/min), which was sized for connection-level approvals.
+	//
+	// Note on gRPC: gRPC rides on HTTP/2 via a PRI preface upgrade inside
+	// the MITM tunnel. goproxy defaults to AllowHTTP2 == false, so a real
+	// HTTP/2 preface is rejected at the goproxy layer and never reaches
+	// injectCredentials per stream. gRPC requests that DO reach this
+	// handler are HTTP/1.1-shaped with a gRPC content-type header, which
+	// does hit per-request policy. Honest gRPC-over-HTTP/2 is not
+	// exercised by this path.
+	if checker != nil {
+		verdict, err := checker.CheckAndConsume(host, port,
+			WithRequestInfo(r.Method, r.URL.Path),
+			WithProtocol(protoStr),
+			WithSkipBrokerRateLimit(),
+		)
+		if err != nil {
+			log.Printf("[INJECT-DENY] %s:%d per-request policy error: %v", host, port, err)
+			inj.logPerRequestDeny(host, port, protoStr, fmt.Sprintf("per-request policy error: %v", err))
+			return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusForbidden, "Forbidden")
+		}
+		if verdict != policy.Allow {
+			log.Printf("[INJECT-DENY] %s:%d blocked by per-request policy", host, port)
+			inj.logPerRequestDeny(host, port, protoStr, "blocked by per-request policy")
+			return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusForbidden, "Forbidden")
+		}
+	}
+
+	// 1. Binding-specific header injection: set the configured header
+	// with the formatted credential value for hosts with a binding.
+	// Use the request scheme (not the port heuristic) since the injector
+	// only handles HTTP/HTTPS traffic and the scheme is known from the
+	// request. This ensures bindings with protocols=["http"] match on
+	// non-standard ports (e.g. 8000) where DetectProtocol returns "generic".
 	if res := inj.resolver.Load(); res != nil {
 		if binding, ok := res.ResolveForProtocol(host, port, protoStr); ok {
 			secret, err := inj.provider.Get(binding.Credential)
@@ -791,4 +1049,20 @@ func portFromRequest(r *http.Request) int {
 		return 443
 	}
 	return 80
+}
+
+// splitHostPortFallback parses a host:port string captured at CONNECT time
+// into its host and port components. Bracketed IPv6 hosts (e.g. "[::1]:443")
+// are handled by net.SplitHostPort. If the string has no port, the whole
+// string is treated as the host and the port defaults to 443 (the only
+// protocol the MITM path handles is HTTP/HTTPS; CONNECT without a port is
+// invalid but we prefer a safe fallback over a panic).
+func splitHostPortFallback(hostPort string) (string, int) {
+	if h, p, err := net.SplitHostPort(hostPort); err == nil {
+		if port, err := strconv.Atoi(p); err == nil {
+			return h, port
+		}
+		return h, 443
+	}
+	return hostPort, 443
 }

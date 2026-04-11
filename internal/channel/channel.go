@@ -66,7 +66,13 @@ type ApprovalRequest struct {
 	Port        int
 	Protocol    string // detected protocol (e.g. "https", "ssh", "mcp")
 	ToolArgs    string // truncated tool arguments (MCP only)
-	CreatedAt   time.Time
+	// Method is the HTTP method for per-request approvals (e.g. "GET", "POST").
+	// Empty for connection-level approvals and non-HTTP protocols.
+	Method string
+	// Path is the request URL path for per-request approvals (e.g. "/users/me").
+	// Empty for connection-level approvals and non-HTTP protocols.
+	Path      string
+	CreatedAt time.Time
 }
 
 // Command represents an admin command received from a channel (e.g. Telegram

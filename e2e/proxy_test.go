@@ -2,6 +2,19 @@
 
 package e2e
 
+// TODO(per-request-policy-e2e): add an e2e test that makes two HTTP
+// requests to an ask-verdict destination on the same keep-alive
+// connection and verifies the second request triggers a new approval.
+// This was called out as a required acceptance criterion in
+// docs/plans/completed/20260408-per-request-policy.md but is currently
+// missing. The unit-level coverage in
+// internal/proxy/inject_per_request_test.go
+// (TestInjectCredentials_AllowOnceBlocksSecondRequest) drives
+// injectCredentials directly. A real e2e test must spin up sluice, send
+// two requests through the SOCKS5 proxy via an HTTP client with
+// DisableKeepAlives=false, and assert that both requests triggered
+// broker approval flows.
+
 import (
 	"fmt"
 	"net"

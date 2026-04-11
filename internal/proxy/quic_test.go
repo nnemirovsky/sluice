@@ -523,3 +523,105 @@ func TestQUICProxy_HTTP3ContentRedact(t *testing.T) {
 		t.Errorf("response body missing redaction marker: %s", body)
 	}
 }
+
+// quicTransportFixture wires a single local UDP socket to a QUICProxy via
+// http3.Transport. Multiple requests made through the returned transport
+// reuse the same underlying QUIC connection, which is what we need to
+// verify per-request policy consumes "Allow Once" on a keep-alive session.
+type quicTransportFixture struct {
+	localConn net.PacketConn
+	transport *http3.Transport
+	sni       string
+}
+
+func newQUICTransportFixture(t *testing.T, proxyAddr string, caX509 *x509.Certificate, sni string) *quicTransportFixture {
+	t.Helper()
+	pool := x509.NewCertPool()
+	pool.AddCert(caX509)
+	localConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen local UDP: %v", err)
+	}
+	proxyUDPAddr, err := net.ResolveUDPAddr("udp", proxyAddr)
+	if err != nil {
+		_ = localConn.Close()
+		t.Fatalf("resolve proxy addr: %v", err)
+	}
+	transport := &http3.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:    pool,
+			ServerName: sni,
+		},
+		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+			return quic.Dial(ctx, localConn, proxyUDPAddr, tlsCfg, cfg)
+		},
+	}
+	return &quicTransportFixture{
+		localConn: localConn,
+		transport: transport,
+		sni:       sni,
+	}
+}
+
+func (f *quicTransportFixture) Close() {
+	_ = f.transport.Close()
+	_ = f.localConn.Close()
+}
+
+func (f *quicTransportFixture) sourceAddr() string {
+	return f.localConn.LocalAddr().String()
+}
+
+func (f *quicTransportFixture) do(t *testing.T, method, path string, body []byte) (int, string) {
+	t.Helper()
+	reqURL := fmt.Sprintf("https://%s%s", f.sni, path)
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequest(method, reqURL, bodyReader)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	resp, err := f.transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("HTTP/3 request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	respBody, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(respBody)
+}
+
+// QUIC per-request policy tests were removed when the unreachable
+// RegisterExpectedHostWithChecker machinery was deleted. The production
+// UDP dispatch path always calls RegisterExpectedHost (no checker)
+// because EvaluateQUIC only returns Allow or Deny, not Ask. If that ever
+// changes, reintroduce the checker parameter and its tests.
+//
+// TestQUICProxy_FastPathStillServesRequests keeps a smoke test for the
+// no-checker path so regressions in handleConnection/buildHandler are
+// caught even without per-request coverage.
+func TestQUICProxy_FastPathStillServesRequests(t *testing.T) {
+	upstreamCACert, upstreamCAX509, err := GenerateCA()
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	upstreamAddr, cleanup := startH3Upstream(t, upstreamCACert)
+	defer cleanup()
+
+	provider := &mapQUICProvider{creds: map[string]string{}}
+	qp, proxyCAX509 := setupQUICProxyForH3(t, provider, nil, upstreamAddr, upstreamCAX509, nil, nil)
+	go func() { _ = qp.ListenAndServe("127.0.0.1:0") }()
+	proxyAddr := waitForQUICAddr(t, qp)
+	defer func() { _ = qp.Close() }()
+
+	fx := newQUICTransportFixture(t, proxyAddr, proxyCAX509, "api.example.com")
+	defer fx.Close()
+	qp.RegisterExpectedHost(fx.sourceAddr(), "api.example.com", 443)
+	defer qp.UnregisterExpectedHost(fx.sourceAddr())
+
+	status, _ := fx.do(t, "GET", "/v1/a", nil)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (QUIC fast path should serve requests)", status)
+	}
+}

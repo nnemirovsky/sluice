@@ -157,16 +157,24 @@ Extends phantom swap to handle OAuth credentials bidirectionally. Static credent
 
 ### Protocol-specific handling
 
-| Protocol | Credential injection | Content inspection |
-|----------|---------------------|-------------------|
-| HTTP/HTTPS | Built-in MITM, phantom swap | Full request/response |
-| gRPC | Header phantom swap (Content-Type detection) | Request/response metadata |
-| WebSocket | Handshake headers + text frame phantom swap | Text frame deny + redact rules |
-| SSH | Jump host, key from vault | N/A |
-| IMAP/SMTP | AUTH command proxy, phantom password swap | N/A |
-| DNS | N/A | Deny-only (NXDOMAIN). See DNS design note below. |
-| QUIC/HTTP3 | HTTP/3 MITM via quic-go | Full HTTP/3 request/response |
-| APNS | Connection-level allow/deny (port 5223) | N/A |
+| Protocol | Credential injection | Content inspection | Policy granularity |
+|----------|---------------------|-------------------|--------------------|
+| HTTP/HTTPS | Built-in MITM, phantom swap | Full request/response | Per-request (allow-once = one HTTP request) |
+| gRPC | Header phantom swap (Content-Type detection) | Request/response metadata | Per-connection in practice (see gRPC caveat below) |
+| WebSocket | Handshake headers + text frame phantom swap | Text frame deny + redact rules | Per-connection (one upgrade = one session) |
+| SSH | Jump host, key from vault | N/A | Per-connection (channels belong to one session) |
+| IMAP/SMTP | AUTH command proxy, phantom password swap | N/A | Per-connection (one mailbox session) |
+| DNS | N/A | Deny-only (NXDOMAIN). See DNS design note below. | Per-query deny, other verdicts resolved at SOCKS5 |
+| QUIC/HTTP3 | HTTP/3 MITM via quic-go | Full HTTP/3 request/response | Per-connection (see QUIC caveat below) |
+| APNS | Connection-level allow/deny (port 5223) | N/A | Per-connection |
+
+**Per-request policy evaluation** applies to HTTP/HTTPS. Policy is re-evaluated for every HTTP request, so "Allow Once" permits a single HTTP request and subsequent requests on the same keep-alive connection re-trigger the approval flow. When a per-request approval resolves to "Always Allow" or "Always Deny", the `RequestPolicyChecker` persists the new rule to the policy store via its `PersistRuleFunc` callback and swaps in a freshly compiled engine, so subsequent requests match via the fast path instead of re-entering the approval flow. A fast path skips per-request checks when the SOCKS5 CONNECT matched an explicit allow rule (`RuleMatch`, not default verdict) so normally allowed destinations incur no extra overhead. WebSocket, SSH, and IMAP/SMTP remain connection-level on purpose: per-message or per-command policy on those would blow past the broker's 5/min per-destination rate limit and break normal usage.
+
+**gRPC caveat**: honest gRPC rides over HTTP/2 and enters goproxy via the HTTP/2 PRI preface upgrade. goproxy v1.8.3 defaults to `AllowHTTP2 == false`, so real HTTP/2 streams are rejected at the goproxy layer and never reach `injectCredentials` per stream. Requests that do reach the handler are HTTP/1.1-shaped (possibly carrying a gRPC content-type header) and go through per-request policy normally. Treat gRPC-over-HTTP/2 as effectively per-connection until `AllowHTTP2` is enabled and the H2Transport is wired to call back into the per-request check.
+
+**QUIC caveat**: the per-request machinery in `QUICProxy.buildHandler` is in place but currently unreachable in production because `EvaluateQUIC` only returns Allow or Deny (never Ask), so the UDP dispatch loop in `server.go` always passes a nil checker. Unit tests exercise the mechanism directly via `RegisterExpectedHostWithChecker`.
+
+See `internal/proxy/request_policy.go`, `internal/policy/engine.go` (`EvaluateDetailed`), and `internal/proxy/inject.go` (`injectCredentials`).
 
 ## Implementation Details
 

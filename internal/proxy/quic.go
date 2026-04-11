@@ -213,6 +213,12 @@ func (q *QUICProxy) Addr() net.Addr {
 // used for policy evaluation and credential binding resolution.
 // Must be called before forwarding QUIC packets so handleConnection can
 // verify the SNI against the SOCKS5 destination that was policy-checked.
+//
+// There is no per-HTTP/3-request policy path because EvaluateQUIC only
+// returns Allow or Deny (never Ask) at the UDP dispatch layer, so any
+// QUIC session that reaches this function is already an explicit allow
+// rule match. If EvaluateQUIC ever grows an Ask return, reintroduce a
+// per-request checker parameter here.
 func (q *QUICProxy) RegisterExpectedHost(srcAddr string, host string, port int) {
 	q.expectedDests.Store(srcAddr, expectedDest{host: host, port: port})
 }
@@ -351,6 +357,11 @@ func (q *QUICProxy) handleConnection(conn *quic.Conn) {
 // to the response body before returning it to the agent. The destPort is
 // the SOCKS5 destination port that was policy-checked, used for credential
 // binding resolution instead of trusting the URL port from the request.
+//
+// There is no per-HTTP/3-request policy check here because EvaluateQUIC
+// only returns Allow or Deny (never Ask), so any session reaching this
+// handler is already an explicit allow rule match. See
+// RegisterExpectedHost for details.
 func (q *QUICProxy) buildHandler(upstreamHost string, destPort int) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := upstreamHost
