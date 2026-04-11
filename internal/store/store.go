@@ -578,7 +578,7 @@ func (s *Store) AddBinding(destination, credential string, opts BindingOpts) (in
 	// updateBindingTx so every store write path enforces the same
 	// validation contract.
 	if err := validateDestinationGlob(destination); err != nil {
-		return 0, fmt.Errorf("%w: %s", ErrBindingValidation, err)
+		return 0, fmt.Errorf("%w: %w", ErrBindingValidation, err)
 	}
 	// Port range validation (1-65535) matches AddRule and
 	// AddRuleAndBinding. Out-of-range ports would otherwise be persisted
@@ -593,11 +593,11 @@ func (s *Store) AddBinding(destination, credential string, opts BindingOpts) (in
 	// connection time, making the binding look broken for no apparent
 	// reason. Share the allow list with TOML import via validateProtocols.
 	if err := validateProtocols(opts.Protocols, fmt.Sprintf("binding %q->%q", destination, credential)); err != nil {
-		return 0, fmt.Errorf("%w: %s", ErrBindingValidation, err)
+		return 0, fmt.Errorf("%w: %w", ErrBindingValidation, err)
 	}
 	if opts.EnvVar != "" {
 		if err := container.ValidateEnvVarKey(opts.EnvVar); err != nil {
-			return 0, fmt.Errorf("%w: %s", ErrBindingValidation, err)
+			return 0, fmt.Errorf("%w: %w", ErrBindingValidation, err)
 		}
 	}
 
@@ -1247,12 +1247,12 @@ func (s *Store) UpdateBindingWithRuleSync(id int64, u BindingUpdateOpts) (ruleID
 	// surfaces as a less helpful "update binding" error).
 	if u.Destination != nil {
 		if err := validateDestinationGlob(*u.Destination); err != nil {
-			return 0, false, BindingRow{}, fmt.Errorf("%w: %s", ErrBindingValidation, err)
+			return 0, false, BindingRow{}, fmt.Errorf("%w: %w", ErrBindingValidation, err)
 		}
 	}
 	if u.Protocols != nil {
 		if err := validateProtocols(*u.Protocols, fmt.Sprintf("binding id %d", id)); err != nil {
-			return 0, false, BindingRow{}, fmt.Errorf("%w: %s", ErrBindingValidation, err)
+			return 0, false, BindingRow{}, fmt.Errorf("%w: %w", ErrBindingValidation, err)
 		}
 	}
 	tx, err := s.db.Begin()
@@ -1346,7 +1346,7 @@ func updateBindingTx(tx *sql.Tx, id int64, credential string, u BindingUpdateOpt
 	// with TOML import via validateProtocols.
 	if u.Protocols != nil {
 		if err := validateProtocols(*u.Protocols, fmt.Sprintf("binding id %d", id)); err != nil {
-			return fmt.Errorf("%w: %s", ErrBindingValidation, err)
+			return fmt.Errorf("%w: %w", ErrBindingValidation, err)
 		}
 	}
 	// Port range is validated before building the SET clause so a bad
@@ -1362,7 +1362,7 @@ func updateBindingTx(tx *sql.Tx, id int64, credential string, u BindingUpdateOpt
 	var args []any
 	if u.Destination != nil {
 		if err := validateDestinationGlob(*u.Destination); err != nil {
-			return fmt.Errorf("%w: %s", ErrBindingValidation, err)
+			return fmt.Errorf("%w: %w", ErrBindingValidation, err)
 		}
 		setClauses = append(setClauses, "destination = ?")
 		args = append(args, *u.Destination)
@@ -1386,13 +1386,13 @@ func updateBindingTx(tx *sql.Tx, id int64, credential string, u BindingUpdateOpt
 	if u.EnvVar != nil {
 		if *u.EnvVar != "" {
 			if err := container.ValidateEnvVarKey(*u.EnvVar); err != nil {
-				return fmt.Errorf("%w: %s", ErrBindingValidation, err)
+				return fmt.Errorf("%w: %w", ErrBindingValidation, err)
 			}
 			// The uniqueness check excludes this binding so other bindings
 			// of the same credential can share an env_var (they resolve to
 			// the same phantom value).
 			if err := checkEnvVarUniqueWithExcluding(tx, *u.EnvVar, credential, id); err != nil {
-				return fmt.Errorf("%w: %s", ErrBindingValidation, err)
+				return fmt.Errorf("%w: %w", ErrBindingValidation, err)
 			}
 		}
 		setClauses = append(setClauses, "env_var = ?")
@@ -1581,7 +1581,7 @@ func (s *Store) AddRuleAndBinding(
 		return 0, 0, fmt.Errorf("%w: destination is required for rule+binding", ErrBindingValidation)
 	}
 	if err := validateDestinationGlob(ruleOpts.Destination); err != nil {
-		return 0, 0, fmt.Errorf("%w: %s", ErrBindingValidation, err)
+		return 0, 0, fmt.Errorf("%w: %w", ErrBindingValidation, err)
 	}
 	if credential == "" {
 		return 0, 0, fmt.Errorf("%w: credential name is required", ErrBindingValidation)
@@ -1606,10 +1606,10 @@ func (s *Store) AddRuleAndBinding(
 	// connection time. Share the allow list with TOML import via
 	// validateProtocols.
 	if err := validateProtocols(ruleOpts.Protocols, fmt.Sprintf("rule %q", ruleOpts.Destination)); err != nil {
-		return 0, 0, fmt.Errorf("%w: %s", ErrBindingValidation, err)
+		return 0, 0, fmt.Errorf("%w: %w", ErrBindingValidation, err)
 	}
 	if err := validateProtocols(bindingOpts.Protocols, fmt.Sprintf("binding %q->%q", ruleOpts.Destination, credential)); err != nil {
-		return 0, 0, fmt.Errorf("%w: %s", ErrBindingValidation, err)
+		return 0, 0, fmt.Errorf("%w: %w", ErrBindingValidation, err)
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -1641,10 +1641,10 @@ func (s *Store) AddRuleAndBinding(
 	// avoid deadlock with the single-connection pool).
 	if bindingOpts.EnvVar != "" {
 		if valErr := container.ValidateEnvVarKey(bindingOpts.EnvVar); valErr != nil {
-			return 0, 0, fmt.Errorf("%w: %s", ErrBindingValidation, valErr)
+			return 0, 0, fmt.Errorf("%w: %w", ErrBindingValidation, valErr)
 		}
 		if uniqueErr := checkEnvVarUniqueWith(tx, bindingOpts.EnvVar, credential); uniqueErr != nil {
-			return 0, 0, fmt.Errorf("%w: %s", ErrBindingValidation, uniqueErr)
+			return 0, 0, fmt.Errorf("%w: %w", ErrBindingValidation, uniqueErr)
 		}
 	}
 
