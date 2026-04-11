@@ -317,18 +317,14 @@ sluice audit verify   # check hash chain integrity
 | Protocol | Credential Injection | Content Inspection | Policy Granularity |
 |----------|---------------------|--------------------|--------------------|
 | HTTP/HTTPS | MITM phantom swap | Full request/response | Per-request (allow-once = one HTTP request) |
-| gRPC | Header phantom swap | Metadata | Per-connection in practice (see gRPC note below) |
+| gRPC | Header phantom swap (per HTTP/2 stream) | Metadata | Per-request (each HTTP/2 stream checked independently) |
 | WebSocket | Handshake + text frames | Text frame content | Per-connection |
 | SSH | Jump host, key from vault | -- | Per-connection |
 | IMAP/SMTP | AUTH command proxy | -- | Per-connection |
 | DNS | -- | Deny-only (NXDOMAIN for denied domains). See note below. | Per-query deny |
-| QUIC/HTTP3 | HTTP/3 MITM | Full request/response | Per-connection (see QUIC note below) |
+| QUIC/HTTP3 | HTTP/3 MITM | Full request/response | Per-request (each HTTP/3 request checked independently) |
 
-**Per-request policy:** HTTP/HTTPS evaluates policy on every HTTP request. "Allow Once" permits exactly one request, so a second request on the same keep-alive connection re-triggers the approval flow. When a per-request approval resolves to "Always Allow" or "Always Deny", the new rule is persisted to the store and the engine is recompiled so subsequent requests match via the fast path. Destinations matched by an explicit allow rule take a fast path that skips per-request checks entirely. WebSocket, SSH, and IMAP/SMTP remain per-connection on purpose: per-message or per-command approvals would hit the broker's rate limit and break normal usage.
-
-**gRPC note:** real gRPC rides over HTTP/2 and enters goproxy via the HTTP/2 PRI preface. goproxy v1.8.3 defaults to `AllowHTTP2 == false`, so HTTP/2 streams are rejected at the goproxy layer and do not reach the per-request handler per stream. HTTP/1.1-shaped requests with a gRPC content-type header go through per-request policy normally. Treat honest gRPC-over-HTTP/2 as per-connection for now.
-
-**QUIC note:** the per-request infrastructure in `QUICProxy.buildHandler` is present but currently unreachable because the UDP dispatch loop only reaches the QUIC path for connections that matched an explicit allow rule, so it always passes a nil checker. Tests exercise the mechanism directly.
+**Per-request policy:** HTTP/HTTPS, gRPC-over-HTTP/2, and QUIC/HTTP3 all evaluate policy on every request. "Allow Once" permits exactly one request (or HTTP/2 stream, or HTTP/3 request), so subsequent requests on the same connection re-trigger the approval flow. When a per-request approval resolves to "Always Allow" or "Always Deny", the new rule is persisted to the store and the engine is recompiled so subsequent requests match via the fast path. Destinations matched by an explicit allow rule take a fast path that skips per-request checks entirely. WebSocket, SSH, and IMAP/SMTP remain per-connection on purpose: per-message or per-command approvals would hit the broker's rate limit and break normal usage.
 
 **DNS policy design**: The DNS interceptor only blocks explicitly denied domains (returns NXDOMAIN). All other verdicts (allow, ask, default) are forwarded to the upstream resolver. This is intentional. Policy enforcement for "ask" destinations happens at the SOCKS5 CONNECT layer, not DNS. Blocking DNS for "ask" destinations would prevent the TCP connection from ever reaching the approval flow. The DNS interceptor populates a reverse cache (IP -> hostname) so the SOCKS5 handler can recover hostnames from IP-only CONNECT requests sent by tun2proxy. For TLS connections, SNI from the ClientHello provides an additional hostname recovery path.
 

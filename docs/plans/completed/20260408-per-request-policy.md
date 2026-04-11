@@ -172,9 +172,9 @@ Add a per-connection `RequestPolicyChecker` that HTTP handlers call before forwa
 
 ### Task 8: [Final] Update documentation
 
-- [ ] Update CLAUDE.md: document per-request policy for HTTP/HTTPS/QUIC, note that WebSocket/SSH/IMAP stay connection-level
-- [ ] Update README.md protocol table
-- [ ] Move this plan to `docs/plans/completed/`
+- [x] Update CLAUDE.md: document per-request policy for HTTP/HTTPS/QUIC, note that WebSocket/SSH/IMAP stay connection-level
+- [x] Update README.md protocol table
+- [x] Move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

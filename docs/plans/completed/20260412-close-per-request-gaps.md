@@ -210,20 +210,20 @@ Three changes to close remaining per-request policy gaps on the `per-request-pol
 
 ### Task 12: Verify acceptance criteria
 
-- [ ] Verify HTTP/2 per-request policy works (real gRPC-over-HTTP/2 stream fires per-request check)
-- [ ] Verify QUIC/HTTP3 per-request Ask works
-- [ ] Verify all existing HTTP/1.1 per-request behavior is preserved
-- [ ] Verify credential injection works on HTTP/2 streams
-- [ ] Verify WebSocket upgrade still works
-- [ ] Run full test suite: `go test ./... -v -timeout 120s`
-- [ ] Run e2e tests: `go test -tags=e2e ./e2e/ -v -count=1 -timeout=300s`
+- [x] Verify HTTP/2 per-request policy works (real gRPC-over-HTTP/2 stream fires per-request check) -- `TestHTTP2PerRequestPolicyAndInjection` (broker called >=2 times for two HTTP/2 streams on same connection), `TestHTTP2PerRequestDenySecondStream` (first stream 200, second stream 403 with per-stream granularity)
+- [x] Verify QUIC/HTTP3 per-request Ask works -- `TestQUICProxy_PerRequestAllowOnceConsumed` (seed credit consumed, second request denied), `TestQUICProxy_PerRequestDenyReturns403` (explicit deny beats seed credit), `TestQUICProxy_ExplicitAllowSkipsChecker`
+- [x] Verify all existing HTTP/1.1 per-request behavior is preserved -- `TestFullSOCKS5MITMPipeline`, `TestFullSOCKS5MITMPipelineMultipleBindings`, `TestProxyAskWithBrokerAllowOnce`, `TestProxyAskWithBrokerDeny`, `TestProxyAskWithBrokerAlwaysAllow`, `TestProxyWithByteDetectionHTTPS`, `TestProxyNonStandardPortWithBinding`
+- [x] Verify credential injection works on HTTP/2 streams -- `TestHTTP2PerRequestPolicyAndInjection` (both HTTP/2 streams receive `Authorization: Bearer <real-secret>` via binding injection)
+- [x] Verify WebSocket upgrade still works -- `TestWSProxy_PhantomTokenReplacement`, `TestWSProxy_UnboundPhantomStripped`, `TestWSProxy_BinaryFramePassthrough`, `TestWSProxy_ControlFramePassthrough`, `TestWSProxy_ContentDenyClosesConnection`, `TestWSProxy_ContentRedactInResponse`
+- [x] Run full test suite: `go test ./... -v -timeout 120s` -- all 12 packages pass
+- [x] Run e2e tests: `go test -tags=e2e ./e2e/ -v -count=1 -timeout=300s` -- 41 pass, 2 skip (Apple Container requires root), 0 fail. Per-request e2e: `TestPerRequestAllowOnceBlocksSecondRequest`, `TestPerRequestAlwaysAllowPermitsBoth`, `TestPerRequestDenyBlocksFirst`, `TestPerRequestAllowOnceReAsks`
 
 ### Task 13: [Final] Update documentation
 
-- [ ] Update CLAUDE.md: remove gRPC and QUIC caveats, document go-mitmproxy as MITM library
-- [ ] Update README.md: update protocol table (gRPC and QUIC now per-request)
-- [ ] Remove `docs/superpowers/specs/2026-04-12-close-per-request-gaps-design.md`
-- [ ] Move this plan to `docs/plans/completed/`
+- [x] Update CLAUDE.md: remove gRPC and QUIC caveats, document go-mitmproxy as MITM library
+- [x] Update README.md: update protocol table (gRPC and QUIC now per-request)
+- [x] Remove `docs/superpowers/specs/2026-04-12-close-per-request-gaps-design.md`
+- [x] Move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 
