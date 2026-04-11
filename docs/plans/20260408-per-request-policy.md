@@ -90,16 +90,16 @@ Add a per-connection `RequestPolicyChecker` that HTTP handlers call before forwa
 - Create: `internal/proxy/request_policy.go`
 - Create: `internal/proxy/request_policy_test.go`
 
-- [ ] Create `RequestPolicyChecker` struct with `allowedOnce` map and mutex
-- [ ] Implement `CheckAndConsume(dest, port) (Verdict, error)` that checks engine, triggers broker if ask, tracks allow-once
-- [ ] On allow-once response: permit current request, mark `(dest, port)` as consumed
-- [ ] On subsequent check for consumed `(dest, port)`: re-trigger ask flow
-- [ ] On always-allow response: permit without tracking (engine handles persistence)
-- [ ] Write tests: allow-once consumed after one call
-- [ ] Write tests: second call to consumed dest re-triggers ask
-- [ ] Write tests: always-allow not consumed
-- [ ] Write tests: deny returns immediately
-- [ ] Run tests
+- [x] Create `RequestPolicyChecker` struct with `allowedOnce` map and mutex
+- [x] Implement `CheckAndConsume(dest, port) (Verdict, error)` that checks engine, triggers broker if ask, tracks allow-once
+- [x] On allow-once response: permit current request, mark `(dest, port)` as consumed
+- [x] On subsequent check for consumed `(dest, port)`: re-trigger ask flow
+- [x] On always-allow response: permit without tracking (engine handles persistence)
+- [x] Write tests: allow-once consumed after one call
+- [x] Write tests: second call to consumed dest re-triggers ask
+- [x] Write tests: always-allow not consumed
+- [x] Write tests: deny returns immediately
+- [x] Run tests
 
 ### Task 3: Wire RequestPolicyChecker into SOCKS5 context
 
