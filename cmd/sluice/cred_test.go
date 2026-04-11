@@ -275,6 +275,43 @@ func TestHandleCredRemove(t *testing.T) {
 	}
 }
 
+// TestHandleCredRemoveNameBeforeFlags is a regression for the v0.8.0 flag
+// ordering bug: handleCredRemove called fs.Parse(args) directly, so an
+// invocation like
+//
+//	sluice cred remove mycred --db /custom/path
+//
+// stopped flag parsing at "mycred" and silently fell through to the default
+// "data/sluice.db", removing the wrong credential. The fix wraps args with
+// reorderFlagsBeforePositional like every other CLI subcommand. This test
+// guards against the regression by passing the name BEFORE --db.
+func TestHandleCredRemoveNameBeforeFlags(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vs.Add("to_remove", "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := handleCredCommand([]string{"remove", "to_remove", "--db", dbPath}); err != nil {
+		t.Fatalf("cred remove with name-before-flags: %v", err)
+	}
+
+	names, err := vs.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range names {
+		if n == "to_remove" {
+			t.Error("credential should have been removed via name-before-flags ordering")
+		}
+	}
+}
+
 // TestHandleCredListEmpty tests listing when no credentials exist.
 func TestHandleCredListEmpty(t *testing.T) {
 	dir := t.TempDir()

@@ -414,6 +414,42 @@ func TestHandleMCPRemove(t *testing.T) {
 	}
 }
 
+// TestHandleMCPRemoveNameBeforeFlags is a regression for the v0.8.0 flag
+// ordering bug: handleMCPRemove called fs.Parse(args) directly, so the
+// positional name appearing before --db caused the parser to stop and
+// silently fall through to the default "data/sluice.db", removing the
+// wrong upstream.
+func TestHandleMCPRemoveNameBeforeFlags(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	if err := handleMCPAdd([]string{
+		"--db", dbPath,
+		"--command", "server",
+		"myserver",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := handleMCPRemove([]string{"myserver", "--db", dbPath}); err != nil {
+		t.Fatalf("mcp remove with name-before-flags: %v", err)
+	}
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	upstreams, err := db.ListMCPUpstreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upstreams) != 0 {
+		t.Errorf("expected 0 upstreams after name-before-flags removal, got %d", len(upstreams))
+	}
+}
+
 // TestHandleMCPList verifies the list subcommand output.
 func TestHandleMCPList(t *testing.T) {
 	dir := t.TempDir()

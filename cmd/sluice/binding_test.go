@@ -582,6 +582,53 @@ func TestHandleBindingRemoveMissingArg(t *testing.T) {
 	}
 }
 
+// TestHandleBindingRemoveIDBeforeFlags is a regression for v0.8.0: the
+// positional id is allowed to appear before flags. The original
+// handleBindingRemove called fs.Parse(args) without
+// reorderFlagsBeforePositional, so an invocation like
+//
+//	sluice binding remove 1 --db /custom/path
+//
+// stopped flag parsing at "1" and silently fell through to the default
+// "data/sluice.db", deleting the wrong row in production. The fix is the
+// same reorderFlagsBeforePositional wrapper used by every other binding
+// subcommand. This test guards against the regression by passing the id
+// BEFORE --db and asserting the correct DB was modified.
+func TestHandleBindingRemoveIDBeforeFlags(t *testing.T) {
+	dbPath := setupBindingDB(t)
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddBinding("api.example.com", "mycred", store.BindingOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	_ = captureStdout(t, func() {
+		if err := handleBindingCommand([]string{
+			"remove", "1", "--db", dbPath,
+		}); err != nil {
+			t.Fatalf("remove with id-before-flags: %v", err)
+		}
+	})
+
+	db, err = store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 bindings after remove with id-before-flags, got %d", len(bindings))
+	}
+}
+
 // TestHandleBindingAddWithEnvVar verifies that --env-var is stored on the
 // new binding when add is invoked.
 func TestHandleBindingAddWithEnvVar(t *testing.T) {

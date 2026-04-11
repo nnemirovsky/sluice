@@ -136,7 +136,7 @@ func handlePolicyAdd(args []string) error {
 func handlePolicyRemove(args []string) error {
 	fs := flag.NewFlagSet("policy remove", flag.ContinueOnError)
 	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFlagsBeforePositional(args, fs)); err != nil {
 		return err
 	}
 
@@ -169,7 +169,7 @@ func handlePolicyRemove(args []string) error {
 func handlePolicyImport(args []string) error {
 	fs := flag.NewFlagSet("policy import", flag.ContinueOnError)
 	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFlagsBeforePositional(args, fs)); err != nil {
 		return err
 	}
 
