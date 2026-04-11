@@ -1750,3 +1750,128 @@ default = "deny"
 		t.Errorf("Validate on valid engine: %v", err)
 	}
 }
+
+func TestEvaluateDetailed(t *testing.T) {
+	eng := loadFromTOMLFile(t, "../../testdata/policy_mixed.toml")
+
+	tests := []struct {
+		dest       string
+		port       int
+		wantV      Verdict
+		wantSource MatchSource
+	}{
+		// Explicit allow rule match.
+		{"api.anthropic.com", 443, Allow, RuleMatch},
+		{"api.github.com", 443, Allow, RuleMatch},
+		{"api.github.com", 80, Allow, RuleMatch},
+		// Explicit deny rule match.
+		{"169.254.169.254", 80, Deny, RuleMatch},
+		{"pool.crypto-mining.example", 443, Deny, RuleMatch},
+		// Explicit ask rule match.
+		{"api.openai.com", 443, Ask, RuleMatch},
+		// No rule matches: default verdict (deny) with DefaultVerdict source.
+		{"random.unknown.com", 443, Deny, DefaultVerdict},
+		{"api.openai.com", 80, Deny, DefaultVerdict},
+		// *.github.com at port 22 has no matching allow rule (port mismatch),
+		// so it falls through to the default deny verdict.
+		{"api.github.com", 22, Deny, DefaultVerdict},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s:%d", tt.dest, tt.port), func(t *testing.T) {
+			gotV, gotSource := eng.EvaluateDetailed(tt.dest, tt.port)
+			if gotV != tt.wantV {
+				t.Errorf("EvaluateDetailed(%q, %d) verdict = %v, want %v",
+					tt.dest, tt.port, gotV, tt.wantV)
+			}
+			if gotSource != tt.wantSource {
+				t.Errorf("EvaluateDetailed(%q, %d) source = %v, want %v",
+					tt.dest, tt.port, gotSource, tt.wantSource)
+			}
+		})
+	}
+}
+
+func TestEvaluateDetailedDefaultAllow(t *testing.T) {
+	// With default=allow, an unmatched destination should return Allow with
+	// DefaultVerdict source. This is the key distinction the fast-path uses
+	// to decide whether to skip per-request policy checks.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+
+[[deny]]
+destination = "evil.com"
+
+[[allow]]
+destination = "api.example.com"
+ports = [443]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// Explicit allow rule -> RuleMatch.
+	v, src := eng.EvaluateDetailed("api.example.com", 443)
+	if v != Allow || src != RuleMatch {
+		t.Errorf("EvaluateDetailed(api.example.com, 443) = (%v, %v), want (Allow, RuleMatch)", v, src)
+	}
+
+	// Explicit deny rule -> RuleMatch.
+	v, src = eng.EvaluateDetailed("evil.com", 443)
+	if v != Deny || src != RuleMatch {
+		t.Errorf("EvaluateDetailed(evil.com, 443) = (%v, %v), want (Deny, RuleMatch)", v, src)
+	}
+
+	// Unmatched host -> default (allow) with DefaultVerdict source.
+	v, src = eng.EvaluateDetailed("random.host", 443)
+	if v != Allow || src != DefaultVerdict {
+		t.Errorf("EvaluateDetailed(random.host, 443) = (%v, %v), want (Allow, DefaultVerdict)", v, src)
+	}
+}
+
+func TestEvaluateDetailedWithProtocol(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "api.example.com"
+protocols = ["https"]
+
+[[deny]]
+destination = "api.example.com"
+protocols = ["http"]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// Explicit protocol match via EvaluateDetailedWithProtocol.
+	v, src := eng.EvaluateDetailedWithProtocol("api.example.com", 443, "https")
+	if v != Allow || src != RuleMatch {
+		t.Errorf("EvaluateDetailedWithProtocol(https) = (%v, %v), want (Allow, RuleMatch)", v, src)
+	}
+
+	v, src = eng.EvaluateDetailedWithProtocol("api.example.com", 80, "http")
+	if v != Deny || src != RuleMatch {
+		t.Errorf("EvaluateDetailedWithProtocol(http) = (%v, %v), want (Deny, RuleMatch)", v, src)
+	}
+
+	// Unmatched protocol falls to default.
+	v, src = eng.EvaluateDetailedWithProtocol("unknown.host", 443, "https")
+	if v != Deny || src != DefaultVerdict {
+		t.Errorf("EvaluateDetailedWithProtocol(unknown) = (%v, %v), want (Deny, DefaultVerdict)", v, src)
+	}
+}
+
+func TestMatchSourceString(t *testing.T) {
+	if RuleMatch.String() != "rule" {
+		t.Errorf("RuleMatch.String() = %q, want %q", RuleMatch.String(), "rule")
+	}
+	if DefaultVerdict.String() != "default" {
+		t.Errorf("DefaultVerdict.String() = %q, want %q", DefaultVerdict.String(), "default")
+	}
+	if MatchSource(99).String() != "unknown" {
+		t.Errorf("MatchSource(99).String() = %q, want %q", MatchSource(99).String(), "unknown")
+	}
+}

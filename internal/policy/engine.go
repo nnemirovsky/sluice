@@ -629,10 +629,43 @@ func (e *Engine) Validate() error {
 	return nil
 }
 
+// MatchSource indicates whether a policy verdict came from an explicit rule
+// match or from falling back to the engine's default verdict. Used by
+// per-request policy fast-pathing to distinguish "explicitly allowed host" from
+// "default verdict is allow".
+type MatchSource int
+
+// MatchSource values.
+const (
+	// RuleMatch indicates the verdict came from a matching rule.
+	RuleMatch MatchSource = iota
+	// DefaultVerdict indicates the verdict came from the engine default.
+	DefaultVerdict
+)
+
+func (m MatchSource) String() string {
+	switch m {
+	case RuleMatch:
+		return "rule"
+	case DefaultVerdict:
+		return "default"
+	default:
+		return "unknown"
+	}
+}
+
 // Evaluate checks a destination and port against the compiled policy rules.
 // Deny rules are checked first, then allow, then ask. Falls back to default.
 func (e *Engine) Evaluate(dest string, port int) Verdict {
 	return e.EvaluateWithProtocol(dest, port, "")
+}
+
+// EvaluateDetailed returns the verdict and the source of the match. When
+// source is RuleMatch the verdict came from an explicit rule. When source is
+// DefaultVerdict the verdict came from the engine default. Callers use this to
+// distinguish "explicitly allowed" from "allowed by default verdict".
+func (e *Engine) EvaluateDetailed(dest string, port int) (Verdict, MatchSource) {
+	return e.EvaluateDetailedWithProtocol(dest, port, "")
 }
 
 // EvaluateWithProtocol checks a destination, port, and explicit protocol
@@ -641,22 +674,29 @@ func (e *Engine) Evaluate(dest string, port int) Verdict {
 // packet-detected protocols (dns, quic) to match protocol-scoped rules.
 // Pass "" to fall back to port-based detection (same as Evaluate).
 func (e *Engine) EvaluateWithProtocol(dest string, port int, proto string) Verdict {
+	v, _ := e.EvaluateDetailedWithProtocol(dest, port, proto)
+	return v
+}
+
+// EvaluateDetailedWithProtocol combines the protocol-aware evaluation of
+// EvaluateWithProtocol with the match-source reporting of EvaluateDetailed.
+func (e *Engine) EvaluateDetailedWithProtocol(dest string, port int, proto string) (Verdict, MatchSource) {
 	dest = normalizeDestination(dest)
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.compiled == nil {
-		return e.Default
+		return e.Default, DefaultVerdict
 	}
 	if matchRulesWithProto(e.compiled.denyRules, dest, port, proto) {
-		return Deny
+		return Deny, RuleMatch
 	}
 	if matchRulesWithProto(e.compiled.allowRules, dest, port, proto) {
-		return Allow
+		return Allow, RuleMatch
 	}
 	if matchRulesWithProto(e.compiled.askRules, dest, port, proto) {
-		return Ask
+		return Ask, RuleMatch
 	}
-	return e.Default
+	return e.Default, DefaultVerdict
 }
 
 // EvaluateUDP checks a destination and port with UDP-specific semantics.

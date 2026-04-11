@@ -77,12 +77,12 @@ Add a per-connection `RequestPolicyChecker` that HTTP handlers call before forwa
 - Modify: `internal/policy/engine.go`
 - Modify: `internal/policy/engine_test.go`
 
-- [ ] Add `MatchSource` type (`RuleMatch`, `DefaultVerdict`)
-- [ ] Add `EvaluateDetailed(dest, port) (Verdict, MatchSource)` method
-- [ ] Refactor existing `Evaluate()` to call `EvaluateDetailed()` internally
-- [ ] Write tests for EvaluateDetailed: explicit rule returns RuleMatch
-- [ ] Write tests for EvaluateDetailed: default verdict returns DefaultVerdict
-- [ ] Run tests
+- [x] Add `MatchSource` type (`RuleMatch`, `DefaultVerdict`)
+- [x] Add `EvaluateDetailed(dest, port) (Verdict, MatchSource)` method
+- [x] Refactor existing `Evaluate()` to call `EvaluateDetailed()` internally
+- [x] Write tests for EvaluateDetailed: explicit rule returns RuleMatch
+- [x] Write tests for EvaluateDetailed: default verdict returns DefaultVerdict
+- [x] Run tests
 
 ### Task 2: Add RequestPolicyChecker
 
