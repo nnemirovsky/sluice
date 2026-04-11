@@ -277,7 +277,7 @@ func handleBindingUpdate(args []string) error {
 func handleBindingRemove(args []string) error {
 	fs := flag.NewFlagSet("binding remove", flag.ContinueOnError)
 	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFlagsBeforePositional(args, fs)); err != nil {
 		return err
 	}
 

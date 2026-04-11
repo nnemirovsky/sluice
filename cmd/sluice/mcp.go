@@ -392,7 +392,7 @@ func handleMCPList(args []string) error {
 func handleMCPRemove(args []string) error {
 	fs := flag.NewFlagSet("mcp remove", flag.ContinueOnError)
 	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFlagsBeforePositional(args, fs)); err != nil {
 		return err
 	}
 

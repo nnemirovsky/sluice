@@ -413,6 +413,49 @@ func TestHandleChannelRemoveNonExistent(t *testing.T) {
 	}
 }
 
+// TestHandleChannelUpdateIDBeforeFlags is a regression for the v0.8.0
+// flag ordering bug: handleChannelUpdate called fs.Parse(args) directly,
+// so passing the channel id before --db caused the parser to stop and
+// silently fall through to the default "data/sluice.db", updating the
+// wrong channel. The fix wraps args with reorderFlagsBeforePositional.
+func TestHandleChannelUpdateIDBeforeFlags(t *testing.T) {
+	dbPath := setupChannelDB(t)
+
+	_ = captureChannelOutput(t, func() {
+		if err := handleChannelAdd([]string{
+			"--db", dbPath, "--type", "http", "--url", "https://example.com/hook",
+		}); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+	})
+
+	_ = captureChannelOutput(t, func() {
+		if err := handleChannelUpdate([]string{"2", "--db", dbPath, "--enabled", "false"}); err != nil {
+			t.Fatalf("channel update with id-before-flags: %v", err)
+		}
+	})
+}
+
+// TestHandleChannelRemoveIDBeforeFlags is a regression for the same v0.8.0
+// flag ordering bug, applied to channel remove.
+func TestHandleChannelRemoveIDBeforeFlags(t *testing.T) {
+	dbPath := setupChannelDB(t)
+
+	_ = captureChannelOutput(t, func() {
+		if err := handleChannelAdd([]string{
+			"--db", dbPath, "--type", "http", "--url", "https://example.com/hook",
+		}); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+	})
+
+	_ = captureChannelOutput(t, func() {
+		if err := handleChannelRemove([]string{"2", "--db", dbPath}); err != nil {
+			t.Fatalf("channel remove with id-before-flags: %v", err)
+		}
+	})
+}
+
 func TestChannelTypeName(t *testing.T) {
 	if got := channelTypeName(int(channel.ChannelTelegram)); got != "telegram" {
 		t.Errorf("telegram: got %q", got)

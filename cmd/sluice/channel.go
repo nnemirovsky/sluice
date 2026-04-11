@@ -121,7 +121,7 @@ func handleChannelUpdate(args []string) error {
 	enabled := fs.String("enabled", "", "set enabled state (true or false)")
 	url := fs.String("url", "", "update webhook URL")
 	secret := fs.String("secret", "", "update webhook HMAC secret")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFlagsBeforePositional(args, fs)); err != nil {
 		return err
 	}
 
@@ -174,7 +174,7 @@ func handleChannelUpdate(args []string) error {
 func handleChannelRemove(args []string) error {
 	fs := flag.NewFlagSet("channel remove", flag.ContinueOnError)
 	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFlagsBeforePositional(args, fs)); err != nil {
 		return err
 	}
 

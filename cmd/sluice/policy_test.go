@@ -374,6 +374,41 @@ func TestHandlePolicyRemoveNoArgs(t *testing.T) {
 	}
 }
 
+// TestHandlePolicyRemoveIDBeforeFlags is a regression for the v0.8.0 flag
+// ordering bug: handlePolicyRemove called fs.Parse(args) directly, so
+// passing the id before --db caused the parser to stop and silently fall
+// through to the default "data/sluice.db", removing the wrong rule. The fix
+// wraps args with reorderFlagsBeforePositional. This test guards against
+// the regression.
+func TestHandlePolicyRemoveIDBeforeFlags(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddRule("allow", store.RuleOpts{Destination: "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	if err := handlePolicyRemove([]string{"1", "--db", dbPath}); err != nil {
+		t.Fatalf("policy remove with id-before-flags: %v", err)
+	}
+
+	db, err = store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rules, _ := db.ListRules(store.RuleFilter{})
+	if len(rules) != 0 {
+		t.Errorf("expected 0 rules after id-before-flags removal, got %d", len(rules))
+	}
+}
+
 // --- handlePolicyImport tests ---
 
 func TestHandlePolicyImportValid(t *testing.T) {
@@ -451,6 +486,40 @@ func TestHandlePolicyImportNoArgs(t *testing.T) {
 	err := handlePolicyImport([]string{})
 	if err == nil {
 		t.Fatal("expected error for no args")
+	}
+}
+
+// TestHandlePolicyImportPathBeforeFlags is a regression for the v0.8.0 flag
+// ordering bug: handlePolicyImport called fs.Parse(args) directly, so
+// passing the TOML path before --db caused the import to silently fall
+// through to the default "data/sluice.db". The fix wraps args with
+// reorderFlagsBeforePositional.
+func TestHandlePolicyImportPathBeforeFlags(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	tomlPath := filepath.Join(dir, "config.toml")
+
+	tomlData := `[[allow]]
+destination = "api.example.com"
+ports = [443]
+`
+	if err := os.WriteFile(tomlPath, []byte(tomlData), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := handlePolicyImport([]string{tomlPath, "--db", dbPath}); err != nil {
+		t.Fatalf("policy import with path-before-flags: %v", err)
+	}
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rules, _ := db.ListRules(store.RuleFilter{})
+	if len(rules) != 1 {
+		t.Errorf("expected 1 rule imported into custom db, got %d", len(rules))
 	}
 }
 

@@ -19,7 +19,7 @@ import (
 
 func handleCredCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: sluice cred [add|list|remove]")
+		return fmt.Errorf("usage: sluice cred [add|list|update|remove]")
 	}
 
 	switch args[0] {
@@ -544,7 +544,7 @@ func handleCredList(args []string) error {
 func handleCredRemove(args []string) error {
 	fs := flag.NewFlagSet("cred remove", flag.ContinueOnError)
 	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFlagsBeforePositional(args, fs)); err != nil {
 		return err
 	}
 
