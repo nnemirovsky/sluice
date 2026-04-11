@@ -101,9 +101,9 @@ The vault's `Add()` already does atomic overwrite (temp file + rename). For OAut
 **Files:**
 - Modify: `internal/store/store.go`
 
-- [ ] Add `UpdateBinding(id int64, opts BindingUpdateOpts) error` method. `BindingUpdateOpts` has optional fields (Destination, Ports, Header, Template, Protocols) using pointer-nil-means-skip pattern (same as `ChannelUpdate`).
-- [ ] Write tests for UpdateBinding (update single field, update multiple fields, not found)
-- [ ] Run tests: `go test ./internal/store/ -timeout 30s`
+- [x] Add `UpdateBinding(id int64, opts BindingUpdateOpts) error` method. `BindingUpdateOpts` has optional fields (Destination, Ports, Header, Template, Protocols) using pointer-nil-means-skip pattern (same as `ChannelUpdate`).
+- [x] Write tests for UpdateBinding (update single field, update multiple fields, not found)
+- [x] Run tests: `go test ./internal/store/ -timeout 30s`
 
 ### Task 2: Add `sluice binding` CLI subcommand
 
@@ -111,43 +111,43 @@ The vault's `Add()` already does atomic overwrite (temp file + rename). For OAut
 - Create: `cmd/sluice/binding.go`
 - Modify: `cmd/sluice/main.go`
 
-- [ ] Add `case "binding"` dispatch in `cmd/sluice/main.go`
-- [ ] Create `cmd/sluice/binding.go` with subcommand registration
-- [ ] Implement `sluice binding add <credential> --destination <host> [--ports 443] [--header Authorization] [--template "Bearer {value}"]`: calls `store.AddBinding()`, also creates allow rule for the destination
-- [ ] Implement `sluice binding list [--credential <name>]`: calls `store.ListBindings()` or `store.ListBindingsByCredential()`, prints formatted output (ID, credential, destination, ports, header, template)
-- [ ] Implement `sluice binding update <id> [--destination <host>] [--ports 443] [--header Authorization] [--template "Bearer {value}"]`: calls `store.UpdateBinding()`, only updates provided flags
-- [ ] Implement `sluice binding remove <id>`: calls `store.RemoveBinding()`
-- [ ] Write tests for add (success, missing args)
-- [ ] Write tests for list (all, filtered by credential)
-- [ ] Write tests for update (single field, multiple fields, not found)
-- [ ] Write tests for remove (success, not found)
-- [ ] Run tests: `go test ./cmd/sluice/ -timeout 30s`
+- [x] Add `case "binding"` dispatch in `cmd/sluice/main.go`
+- [x] Create `cmd/sluice/binding.go` with subcommand registration
+- [x] Implement `sluice binding add <credential> --destination <host> [--ports 443] [--header Authorization] [--template "Bearer {value}"]`: calls `store.AddBinding()`, also creates allow rule for the destination
+- [x] Implement `sluice binding list [--credential <name>]`: calls `store.ListBindings()` or `store.ListBindingsByCredential()`, prints formatted output (ID, credential, destination, ports, header, template)
+- [x] Implement `sluice binding update <id> [--destination <host>] [--ports 443] [--header Authorization] [--template "Bearer {value}"]`: calls `store.UpdateBinding()`, only updates provided flags
+- [x] Implement `sluice binding remove <id>`: calls `store.RemoveBinding()`
+- [x] Write tests for add (success, missing args)
+- [x] Write tests for list (all, filtered by credential)
+- [x] Write tests for update (single field, multiple fields, not found)
+- [x] Write tests for remove (success, not found)
+- [x] Run tests: `go test ./cmd/sluice/ -timeout 30s`
 
 ### Task 3: Support multiple `--destination` on `cred add`
 
 **Files:**
 - Modify: `cmd/sluice/cred.go`
 
-- [ ] Change `--destination` from single string to repeatable string slice flag
-- [ ] When multiple destinations provided: create one credential in vault, then call `AddRuleAndBinding()` for each destination (each gets the same ports/header/template from shared flags)
-- [ ] Maintain backward compatibility: single `--destination` still works as before
-- [ ] Write tests for single destination (backward compat)
-- [ ] Write tests for multiple destinations
-- [ ] Write tests for error cases (no destination provided still works for credential-only add)
-- [ ] Run tests: `go test ./cmd/sluice/ -timeout 30s`
+- [x] Change `--destination` from single string to repeatable string slice flag
+- [x] When multiple destinations provided: create one credential in vault, then call `AddRuleAndBinding()` for each destination (each gets the same ports/header/template from shared flags)
+- [x] Maintain backward compatibility: single `--destination` still works as before
+- [x] Write tests for single destination (backward compat)
+- [x] Write tests for multiple destinations
+- [x] Write tests for error cases (no destination provided still works for credential-only add)
+- [x] Run tests: `go test ./cmd/sluice/ -timeout 30s`
 
 ### Task 4: Add `sluice cred update` for value replacement
 
 **Files:**
 - Modify: `cmd/sluice/cred.go`
 
-- [ ] Implement `sluice cred update <name>`: verify credential exists via `vault.List()`, prompt for new value via stdin/terminal (never show current value), call `vault.Add()` to overwrite
-- [ ] For OAuth credentials (detected via `IsOAuth()`): prompt for new access token and optionally refresh token, rebuild OAuth JSON blob, overwrite in vault, regenerate phantom files
-- [ ] Print confirmation message after successful update
-- [ ] Write tests for static credential update
-- [ ] Write tests for OAuth credential update (access only, access + refresh)
-- [ ] Write tests for update of nonexistent credential
-- [ ] Run tests: `go test ./cmd/sluice/ -timeout 30s`
+- [x] Implement `sluice cred update <name>`: verify credential exists via `vault.List()`, prompt for new value via stdin/terminal (never show current value), call `vault.Add()` to overwrite
+- [x] For OAuth credentials (detected via `IsOAuth()`): prompt for new access token and optionally refresh token, rebuild OAuth JSON blob, overwrite in vault, regenerate phantom files
+- [x] Print confirmation message after successful update
+- [x] Write tests for static credential update
+- [x] Write tests for OAuth credential update (access only, access + refresh)
+- [x] Write tests for update of nonexistent credential
+- [x] Run tests: `go test ./cmd/sluice/ -timeout 30s`
 
 ### Task 5: API endpoints for binding update and credential update
 
@@ -156,29 +156,29 @@ The vault's `Add()` already does atomic overwrite (temp file + rename). For OAut
 - Modify: `internal/api/server.go`
 - Modify: `internal/api/api.gen.go` (regenerated)
 
-- [ ] Add `PATCH /api/bindings/{id}` to OpenAPI spec (request: BindingUpdate with optional destination, ports, header, template; response: Binding)
-- [ ] Add `PATCH /api/credentials/{name}` to OpenAPI spec (request: new value; response: 204). For OAuth type, request body includes access_token and optional refresh_token.
-- [ ] Regenerate API code: `go generate ./internal/api/`
-- [ ] Implement `PatchApiBindingsId` handler: validate input, call `store.UpdateBinding()`
-- [ ] Implement `PatchApiCredentialsName` handler: validate credential exists, call `vault.Add()` to overwrite. For OAuth: rebuild JSON blob. Regenerate phantom files.
-- [ ] Write tests for PATCH /api/bindings/{id} (success, not found, partial update)
-- [ ] Write tests for PATCH /api/credentials/{name} (static, OAuth, not found)
-- [ ] Run tests: `go test ./internal/api/ -timeout 30s`
+- [x] Add `PATCH /api/bindings/{id}` to OpenAPI spec (request: BindingUpdate with optional destination, ports, header, template; response: Binding)
+- [x] Add `PATCH /api/credentials/{name}` to OpenAPI spec (request: new value; response: 204). For OAuth type, request body includes access_token and optional refresh_token.
+- [x] Regenerate API code: `go generate ./internal/api/`
+- [x] Implement `PatchApiBindingsId` handler: validate input, call `store.UpdateBinding()`
+- [x] Implement `PatchApiCredentialsName` handler: validate credential exists, call `vault.Add()` to overwrite. For OAuth: rebuild JSON blob. Regenerate phantom files.
+- [x] Write tests for PATCH /api/bindings/{id} (success, not found, partial update)
+- [x] Write tests for PATCH /api/credentials/{name} (static, OAuth, not found)
+- [x] Run tests: `go test ./internal/api/ -timeout 30s`
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] Verify all binding CRUD operations work via CLI
-- [ ] Verify all binding CRUD operations work via API
-- [ ] Verify `cred add` with multiple `--destination` flags creates multiple bindings
-- [ ] Verify `cred update` replaces value without affecting bindings
-- [ ] Verify `cred update` works for OAuth credentials
-- [ ] Verify existing single `--destination` behavior unchanged
-- [ ] Run full test suite: `go test ./... -v -timeout 30s`
+- [x] Verify all binding CRUD operations work via CLI
+- [x] Verify all binding CRUD operations work via API
+- [x] Verify `cred add` with multiple `--destination` flags creates multiple bindings
+- [x] Verify `cred update` replaces value without affecting bindings
+- [x] Verify `cred update` works for OAuth credentials
+- [x] Verify existing single `--destination` behavior unchanged
+- [x] Run full test suite: `go test ./... -v -timeout 30s`
 
 ### Task 7: [Final] Update documentation
 
-- [ ] Update CLAUDE.md CLI subcommands with `sluice binding` and `sluice cred update`
-- [ ] Move this plan to `docs/plans/completed/`
+- [x] Update CLAUDE.md CLI subcommands with `sluice binding` and `sluice cred update`
+- [x] Move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

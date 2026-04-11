@@ -221,6 +221,42 @@ func (s *Store) ReadRawCredential(name string) ([]byte, error) {
 	return data, nil
 }
 
+// RollbackAdd undoes a prior Add call using compare-and-swap semantics so a
+// concurrent writer that has since overwritten or recreated the credential is
+// not clobbered. prevCiphertext is the raw ciphertext that existed before the
+// Add (nil if the credential did not exist). ourCiphertext is the return value
+// from the Add call being rolled back.
+//
+// Semantics:
+//   - If the on-disk ciphertext still matches ourCiphertext, we own the entry
+//     and it is safe to restore (prevCiphertext non-nil) or delete
+//     (prevCiphertext nil) it.
+//   - If the on-disk ciphertext differs (or the read fails for any reason other
+//     than ENOENT), a concurrent writer has taken over. We leave their state
+//     alone and return noConcurrent=false. The caller should log a warning.
+//   - Returns an error only on a real I/O failure during restore or delete
+//     (not on CAS mismatch).
+func (s *Store) RollbackAdd(name string, prevCiphertext, ourCiphertext []byte) (noConcurrent bool, err error) {
+	currentCiphertext, casErr := s.ReadRawCredential(name)
+	if casErr != nil || !bytes.Equal(currentCiphertext, ourCiphertext) {
+		// Concurrent writer has overwritten or removed our entry. Do not
+		// touch their state. casErr is intentionally dropped: even if the
+		// read itself failed, we cannot safely assume ownership, so the
+		// correct behavior is to back off.
+		return false, nil
+	}
+	if prevCiphertext != nil {
+		if restoreErr := s.WriteRawCredential(name, prevCiphertext); restoreErr != nil {
+			return true, fmt.Errorf("restore previous credential %q: %w", name, restoreErr)
+		}
+		return true, nil
+	}
+	if rmErr := s.Remove(name); rmErr != nil && !os.IsNotExist(rmErr) {
+		return true, fmt.Errorf("remove credential %q: %w", name, rmErr)
+	}
+	return true, nil
+}
+
 // WriteRawCredential writes raw (already encrypted) bytes as the named credential,
 // using the same temp file + atomic rename pattern as Add.
 func (s *Store) WriteRawCredential(name string, data []byte) error {

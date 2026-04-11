@@ -114,19 +114,9 @@ func handlePolicyAdd(args []string) error {
 		return fmt.Errorf("invalid destination pattern %q: %w", destination, err)
 	}
 
-	var ports []int
-	if *portsStr != "" {
-		for _, ps := range strings.Split(*portsStr, ",") {
-			ps = strings.TrimSpace(ps)
-			p, err := strconv.Atoi(ps)
-			if err != nil {
-				return fmt.Errorf("invalid port %q: %w", ps, err)
-			}
-			if p < 1 || p > 65535 {
-				return fmt.Errorf("port %d out of range (1-65535)", p)
-			}
-			ports = append(ports, p)
-		}
+	ports, err := parsePortsList(*portsStr)
+	if err != nil {
+		return err
 	}
 
 	db, err := store.New(*dbPath)

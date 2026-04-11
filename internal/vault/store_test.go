@@ -171,6 +171,193 @@ func TestWriteRawCredentialPathTraversal(t *testing.T) {
 	}
 }
 
+// TestRollbackAddRestoresPrevious covers the happy path when nothing else has
+// touched the credential: a prior ciphertext is restored.
+func TestRollbackAddRestoresPrevious(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed the credential so there is a "previous" ciphertext to restore.
+	prev, err := store.Add("cas_restore", "first")
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Overwrite as if we were the add path that now needs to roll back.
+	ours, err := store.Add("cas_restore", "second")
+	if err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+
+	owned, rbErr := store.RollbackAdd("cas_restore", prev, ours)
+	if rbErr != nil {
+		t.Fatalf("RollbackAdd: %v", rbErr)
+	}
+	if !owned {
+		t.Fatalf("expected owned=true when no concurrent writer")
+	}
+
+	val, err := store.Get("cas_restore")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer val.Release()
+	if val.String() != "first" {
+		t.Errorf("expected restored value 'first', got %q", val.String())
+	}
+}
+
+// TestRollbackAddDeletesNew covers the fresh-create case: prev is nil so the
+// rollback should delete the entry we just added.
+func TestRollbackAddDeletesNew(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ours, err := store.Add("cas_delete", "fresh")
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	owned, rbErr := store.RollbackAdd("cas_delete", nil, ours)
+	if rbErr != nil {
+		t.Fatalf("RollbackAdd: %v", rbErr)
+	}
+	if !owned {
+		t.Fatalf("expected owned=true when no concurrent writer")
+	}
+
+	if _, err := store.Get("cas_delete"); err == nil {
+		t.Error("expected credential to be deleted after rollback")
+	}
+}
+
+// TestRollbackAddCASMismatchSkipsRestore verifies that a concurrent writer
+// that overwrote our ciphertext wins: RollbackAdd leaves their state alone
+// and returns owned=false.
+func TestRollbackAddCASMismatchSkipsRestore(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prev, err := store.Add("cas_mismatch", "original")
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	ours, err := store.Add("cas_mismatch", "ours")
+	if err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	// Simulate a concurrent writer overwriting our ciphertext after we
+	// added it but before rollback.
+	if _, err := store.Add("cas_mismatch", "winner"); err != nil {
+		t.Fatalf("concurrent overwrite: %v", err)
+	}
+
+	owned, rbErr := store.RollbackAdd("cas_mismatch", prev, ours)
+	if rbErr != nil {
+		t.Fatalf("RollbackAdd: %v", rbErr)
+	}
+	if owned {
+		t.Fatalf("expected owned=false when ciphertext was overwritten")
+	}
+
+	// Winner's value must still be there.
+	val, err := store.Get("cas_mismatch")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer val.Release()
+	if val.String() != "winner" {
+		t.Errorf("expected winner's value preserved, got %q", val.String())
+	}
+}
+
+// TestRollbackAddCASMismatchWhenDeleted verifies the case where a concurrent
+// writer deleted the credential entirely: RollbackAdd should not recreate it.
+func TestRollbackAddCASMismatchWhenDeleted(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ours, err := store.Add("cas_deleted", "ours")
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	// Simulate a concurrent delete.
+	if err := store.Remove("cas_deleted"); err != nil {
+		t.Fatalf("concurrent remove: %v", err)
+	}
+
+	// With prev=nil (fresh create), the CAS mismatch path should leave
+	// the vault empty (not re-delete, not restore).
+	owned, rbErr := store.RollbackAdd("cas_deleted", nil, ours)
+	if rbErr != nil {
+		t.Fatalf("RollbackAdd: %v", rbErr)
+	}
+	if owned {
+		t.Fatalf("expected owned=false after concurrent delete")
+	}
+
+	if _, err := store.Get("cas_deleted"); err == nil {
+		t.Error("expected credential to remain deleted")
+	}
+}
+
+// TestRollbackAddIdempotent verifies RollbackAdd can be safely called twice
+// in a row (e.g. defensive retries). After the first call the CAS will no
+// longer match, so the second call must be a no-op instead of clobbering.
+func TestRollbackAddIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prev, err := store.Add("cas_idem", "first")
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	ours, err := store.Add("cas_idem", "second")
+	if err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+
+	// First rollback restores "first".
+	owned, rbErr := store.RollbackAdd("cas_idem", prev, ours)
+	if rbErr != nil || !owned {
+		t.Fatalf("first RollbackAdd: owned=%v err=%v", owned, rbErr)
+	}
+
+	// Second rollback should notice the CAS mismatch (ciphertext is now
+	// prev, not ours) and skip.
+	owned, rbErr = store.RollbackAdd("cas_idem", prev, ours)
+	if rbErr != nil {
+		t.Fatalf("second RollbackAdd: %v", rbErr)
+	}
+	if owned {
+		t.Fatalf("expected second rollback to be no-op")
+	}
+
+	val, err := store.Get("cas_idem")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer val.Release()
+	if val.String() != "first" {
+		t.Errorf("expected preserved value 'first', got %q", val.String())
+	}
+}
+
 func TestPathTraversalPrevented(t *testing.T) {
 	dir := t.TempDir()
 	store, err := NewStore(dir)

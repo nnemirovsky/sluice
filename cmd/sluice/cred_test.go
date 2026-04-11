@@ -1437,7 +1437,7 @@ func TestHandleCredAddEnvVarFlagParsing(t *testing.T) {
 			// Ensure --db is added and a credential name is present.
 			fullArgs = append(fullArgs, "--db", dbPath)
 			// If args don't end with a non-flag, the positional is already in
-			// the args via reorderPositionalLast.
+			// the args via reorderFlagsBeforePositional.
 			hasName := false
 			for _, a := range tt.args {
 				if a == "test_cred" {
@@ -1549,5 +1549,936 @@ func TestHandleCredListHidesEnvVarWhenEmpty(t *testing.T) {
 
 	if strings.Contains(output, "env=") {
 		t.Errorf("unexpected 'env=' in list output when env_var is empty: %s", output)
+	}
+}
+
+// TestHandleCredAddMultipleDestinations tests that passing --destination
+// multiple times creates one credential in the vault and one allow rule plus
+// one binding per destination. All bindings share the same ports/header/
+// template supplied via the shared flags.
+func TestHandleCredAddMultipleDestinations(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	if _, err := w.Write([]byte("ghp_multi\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	defer func() { os.Stdin = oldStdin }()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--destination", "api.github.com",
+			"--destination", "uploads.github.com",
+			"--ports", "443",
+			"--header", "Authorization",
+			"--template", "Bearer {value}",
+			"github_pat",
+		}); err != nil {
+			t.Fatalf("handleCredCommand add with multiple destinations: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, `credential "github_pat" added`) {
+		t.Errorf("expected credential added message, got: %s", output)
+	}
+	if !strings.Contains(output, "api.github.com") {
+		t.Errorf("expected api.github.com in output, got: %s", output)
+	}
+	if !strings.Contains(output, "uploads.github.com") {
+		t.Errorf("expected uploads.github.com in output, got: %s", output)
+	}
+
+	// Verify only one credential was stored in the vault.
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("open vault: %v", err)
+	}
+	names, err := vs.List()
+	if err != nil {
+		t.Fatalf("list vault: %v", err)
+	}
+	if len(names) != 1 {
+		t.Fatalf("expected 1 credential in vault, got %d: %v", len(names), names)
+	}
+	if names[0] != "github_pat" {
+		t.Errorf("vault credential name = %q, want %q", names[0], "github_pat")
+	}
+
+	sb, err := vs.Get("github_pat")
+	if err != nil {
+		t.Fatalf("get credential: %v", err)
+	}
+	defer sb.Release()
+	if sb.String() != "ghp_multi" {
+		t.Errorf("vault value = %q, want %q", sb.String(), "ghp_multi")
+	}
+
+	// Verify two allow rules were created, one per destination.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rules, err := db.ListRules(store.RuleFilter{Verdict: "allow"})
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 allow rules, got %d", len(rules))
+	}
+	ruleDests := map[string]bool{}
+	for _, r := range rules {
+		ruleDests[r.Destination] = true
+		if r.Source != credAddSourcePrefix+"github_pat" {
+			t.Errorf("rule source = %q, want %q", r.Source, credAddSourcePrefix+"github_pat")
+		}
+	}
+	if !ruleDests["api.github.com"] || !ruleDests["uploads.github.com"] {
+		t.Errorf("missing expected destinations in rules, got: %v", ruleDests)
+	}
+
+	// Verify two bindings, one per destination, both pointing at github_pat
+	// and sharing the same header/template/ports.
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 2 {
+		t.Fatalf("expected 2 bindings, got %d", len(bindings))
+	}
+	bindDests := map[string]bool{}
+	for _, b := range bindings {
+		bindDests[b.Destination] = true
+		if b.Credential != "github_pat" {
+			t.Errorf("binding credential = %q, want %q", b.Credential, "github_pat")
+		}
+		if b.Header != "Authorization" {
+			t.Errorf("binding header = %q, want %q", b.Header, "Authorization")
+		}
+		if b.Template != "Bearer {value}" {
+			t.Errorf("binding template = %q, want %q", b.Template, "Bearer {value}")
+		}
+		if len(b.Ports) != 1 || b.Ports[0] != 443 {
+			t.Errorf("binding ports = %v, want [443]", b.Ports)
+		}
+	}
+	if !bindDests["api.github.com"] || !bindDests["uploads.github.com"] {
+		t.Errorf("missing expected destinations in bindings, got: %v", bindDests)
+	}
+}
+
+// TestHandleCredAddMultipleDestinationsWithEnvVar verifies that combining
+// --env-var with multiple --destination flags succeeds. Bindings belonging
+// to the same credential are allowed to share a single env_var because they
+// all resolve to the same phantom value, so the uniqueness check must not
+// reject the second iteration of the cred-add loop.
+func TestHandleCredAddMultipleDestinationsWithEnvVar(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	cleanup := pipeStdin(t, "sk-multi-envvar\n")
+	defer cleanup()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--destination", "api.openai.com",
+			"--destination", "api.openai-beta.com",
+			"--ports", "443",
+			"--header", "Authorization",
+			"--template", "Bearer {value}",
+			"--env-var", "OPENAI_API_KEY",
+			"openai_key",
+		}); err != nil {
+			t.Fatalf("handleCredCommand add with multi-dest and env-var: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, `credential "openai_key" added`) {
+		t.Errorf("expected credential added message, got: %s", output)
+	}
+	if !strings.Contains(output, "env var: OPENAI_API_KEY") {
+		t.Errorf("expected env var report in output, got: %s", output)
+	}
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 2 {
+		t.Fatalf("expected 2 bindings, got %d", len(bindings))
+	}
+	seen := map[string]bool{}
+	for _, b := range bindings {
+		if b.Credential != "openai_key" {
+			t.Errorf("binding credential = %q, want openai_key", b.Credential)
+		}
+		if b.EnvVar != "OPENAI_API_KEY" {
+			t.Errorf("binding %s env_var = %q, want OPENAI_API_KEY", b.Destination, b.EnvVar)
+		}
+		seen[b.Destination] = true
+	}
+	if !seen["api.openai.com"] || !seen["api.openai-beta.com"] {
+		t.Errorf("missing expected destinations, got: %v", seen)
+	}
+
+	// Verify vault contains the secret and no rollback happened.
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("open vault: %v", err)
+	}
+	names, err := vs.List()
+	if err != nil {
+		t.Fatalf("list vault: %v", err)
+	}
+	if len(names) != 1 || names[0] != "openai_key" {
+		t.Errorf("vault names = %v, want [openai_key]", names)
+	}
+}
+
+// TestHandleCredAddSingleDestinationBackwardCompat ensures that the single
+// --destination form still works identically after the flag was made
+// repeatable.
+func TestHandleCredAddSingleDestinationBackwardCompat(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	if _, err := w.Write([]byte("single-secret\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	defer func() { os.Stdin = oldStdin }()
+
+	_ = captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--destination", "api.single.com",
+			"--ports", "443",
+			"--header", "Authorization",
+			"single_key",
+		}); err != nil {
+			t.Fatalf("handleCredCommand add single destination: %v", err)
+		}
+	})
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rules, err := db.ListRules(store.RuleFilter{Verdict: "allow"})
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rules))
+	}
+	if rules[0].Destination != "api.single.com" {
+		t.Errorf("rule destination = %q, want %q", rules[0].Destination, "api.single.com")
+	}
+
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if bindings[0].Destination != "api.single.com" {
+		t.Errorf("binding destination = %q, want %q", bindings[0].Destination, "api.single.com")
+	}
+}
+
+// TestHandleCredAddNoDestinationStillWorks verifies that omitting --destination
+// still allows creating a credential in the vault without any rules or bindings.
+func TestHandleCredAddNoDestinationStillWorks(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	if _, err := w.Write([]byte("bare-secret\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	defer func() { os.Stdin = oldStdin }()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"bare_key",
+		}); err != nil {
+			t.Fatalf("handleCredCommand add without destination: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, `credential "bare_key" added`) {
+		t.Errorf("expected credential added message, got: %s", output)
+	}
+	if strings.Contains(output, "added allow rule") {
+		t.Errorf("did not expect rule creation message, got: %s", output)
+	}
+	if strings.Contains(output, "added binding") {
+		t.Errorf("did not expect binding creation message, got: %s", output)
+	}
+
+	// Verify no rules or bindings were created.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rules, err := db.ListRules(store.RuleFilter{})
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("expected 0 rules, got %d", len(rules))
+	}
+
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 bindings, got %d", len(bindings))
+	}
+
+	// Verify the credential is in the vault.
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("open vault: %v", err)
+	}
+	sb, err := vs.Get("bare_key")
+	if err != nil {
+		t.Fatalf("get credential: %v", err)
+	}
+	defer sb.Release()
+	if sb.String() != "bare-secret" {
+		t.Errorf("vault value = %q, want %q", sb.String(), "bare-secret")
+	}
+}
+
+// TestHandleCredAddMultipleDestinationsBadPortRollback verifies that when
+// a port is invalid, nothing is written to the vault or the DB. This tests
+// the upfront-validation path: failures before any DB or vault writes should
+// leave the system in a clean state when multiple destinations are supplied.
+func TestHandleCredAddMultipleDestinationsBadPortRollback(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	if _, err := w.Write([]byte("rollback-secret\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	defer func() { os.Stdin = oldStdin }()
+
+	// Invalid port triggers a validation error after destination validation
+	// but before any vault or DB writes.
+	err = handleCredCommand([]string{
+		"add",
+		"--db", dbPath,
+		"--destination", "api.first.com",
+		"--destination", "api.second.com",
+		"--ports", "70000",
+		"rollback_key",
+	})
+	if err == nil {
+		t.Fatal("expected error for out-of-range port")
+	}
+	if !strings.Contains(err.Error(), "out of range") {
+		t.Errorf("expected out-of-range error, got: %v", err)
+	}
+
+	// Verify no rules or bindings were created (validation fails before DB writes).
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rules, err := db.ListRules(store.RuleFilter{})
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("expected 0 rules after rollback, got %d", len(rules))
+	}
+
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 bindings after rollback, got %d", len(bindings))
+	}
+
+	// Verify no credential was stored in the vault (validation ran before vault write).
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("open vault: %v", err)
+	}
+	names, err := vs.List()
+	if err != nil {
+		t.Fatalf("list vault: %v", err)
+	}
+	for _, n := range names {
+		if n == "rollback_key" {
+			t.Error("credential should not have been added to vault after validation failure")
+		}
+	}
+}
+
+// TestHandleCredRemoveCleansUpBindingAddRules verifies that "sluice cred
+// remove" cleans up rules tagged with binding-add:<name> in addition to
+// cred-add:<name>. Rules created by "sluice binding add" against the
+// credential would otherwise linger after the credential is removed.
+func TestHandleCredRemoveCleansUpBindingAddRules(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	// Seed the credential in the vault.
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vs.Add("bind_cleanup_key", "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed a rule+binding tagged with binding-add:<name> (the tag
+	// "sluice binding add" uses).
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := db.AddRuleAndBinding(
+		"allow",
+		store.RuleOpts{
+			Destination: "api.binding-add.com",
+			Ports:       []int{443},
+			Source:      bindingAddSourcePrefix + "bind_cleanup_key",
+			Name:        "auto-created for binding on credential \"bind_cleanup_key\"",
+		},
+		"bind_cleanup_key",
+		store.BindingOpts{Ports: []int{443}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	_ = captureStdout(t, func() {
+		if err := handleCredCommand([]string{"remove", "--db", dbPath, "bind_cleanup_key"}); err != nil {
+			t.Fatalf("cred remove: %v", err)
+		}
+	})
+
+	db, err = store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rules, err := db.ListRules(store.RuleFilter{Verdict: "allow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("expected 0 allow rules after cred remove, got %d: %+v", len(rules), rules)
+	}
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 bindings after cred remove, got %d", len(bindings))
+	}
+}
+
+// TestHandleCredAddDeduplicatesDestinations verifies that passing the same
+// --destination twice produces only one allow rule and one binding.
+// Without de-duplication the second occurrence would trip the UNIQUE
+// constraint on bindings(credential, destination) and fail the whole add.
+func TestHandleCredAddDeduplicatesDestinations(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	cleanup := pipeStdin(t, "dedup-secret\n")
+	defer cleanup()
+
+	_ = captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--destination", "api.dedup.com",
+			"--destination", "api.dedup.com",
+			"--ports", "443",
+			"dedup_key",
+		}); err != nil {
+			t.Fatalf("cred add with duplicated destinations: %v", err)
+		}
+	})
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rules, err := db.ListRules(store.RuleFilter{Verdict: "allow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 {
+		t.Errorf("expected 1 allow rule after dedup, got %d", len(rules))
+	}
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 1 {
+		t.Errorf("expected 1 binding after dedup, got %d", len(bindings))
+	}
+}
+
+// TestHandleCredAddMultipleDestinationsMidLoopRollback verifies that when a
+// later --destination in the loop fails (here: because a pre-existing binding
+// on the same (credential, destination) pair trips the UNIQUE index), the
+// rules and bindings inserted on earlier iterations are rolled back so the
+// operator does not end up with a half-applied credential. This complements
+// TestHandleCredAddMultipleDestinationsBadPortRollback which exercises the
+// pre-loop validation path.
+func TestHandleCredAddMultipleDestinationsMidLoopRollback(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	// Pre-seed a binding on the second destination with the same credential
+	// name so the second loop iteration hits the UNIQUE constraint.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, err := db.AddBinding("api.second.com", "mid_rollback_key", store.BindingOpts{}); err != nil {
+		t.Fatalf("pre-seed blocking binding: %v", err)
+	}
+	_ = db.Close()
+
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	if _, err := w.Write([]byte("mid-rollback-secret\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	defer func() { os.Stdin = oldStdin }()
+
+	err = handleCredCommand([]string{
+		"add",
+		"--db", dbPath,
+		"--destination", "api.first.com",
+		"--destination", "api.second.com",
+		"--ports", "443",
+		"mid_rollback_key",
+	})
+	if err == nil {
+		t.Fatal("expected error on second destination")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("expected already-exists error, got: %v", err)
+	}
+
+	// Rollback should have removed everything the handler added during the
+	// first iteration. The pre-seeded binding must remain.
+	db, err = store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rules, err := db.ListRules(store.RuleFilter{})
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("expected 0 rules after mid-loop rollback, got %d: %+v", len(rules), rules)
+	}
+	bindings, err := db.ListBindings()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	// Only the pre-seeded binding should remain.
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding (the pre-seeded one) after rollback, got %d: %+v", len(bindings), bindings)
+	}
+	if bindings[0].Destination != "api.second.com" {
+		t.Errorf("expected pre-seeded binding on api.second.com to remain, got %q", bindings[0].Destination)
+	}
+
+	// Credential meta should be cleaned up too.
+	meta, _ := db.GetCredentialMeta("mid_rollback_key")
+	if meta != nil {
+		t.Errorf("expected credential meta to be rolled back, got %+v", meta)
+	}
+}
+
+// TestHandleCredUpdateStatic verifies that a static credential value can be
+// replaced via "sluice cred update". Bindings and rules must be preserved.
+func TestHandleCredUpdateStatic(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	// Seed a credential with an allow rule and a binding so the update
+	// path exercises preservation of metadata.
+	cleanup := pipeStdin(t, "old-value\n")
+	_ = captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--destination", "api.example.com",
+			"--ports", "443",
+			"--header", "Authorization",
+			"update_static",
+		}); err != nil {
+			t.Fatalf("seed credential: %v", err)
+		}
+	})
+	cleanup()
+
+	// Replace the value via update.
+	cleanup = pipeStdin(t, "new-value\n")
+	defer cleanup()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"update",
+			"--db", dbPath,
+			"update_static",
+		}); err != nil {
+			t.Fatalf("handleCredCommand update: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, `credential "update_static" updated (type: static)`) {
+		t.Errorf("expected update confirmation, got: %s", output)
+	}
+
+	// Vault should now hold the new value.
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("open vault: %v", err)
+	}
+	sb, err := vs.Get("update_static")
+	if err != nil {
+		t.Fatalf("get credential: %v", err)
+	}
+	defer sb.Release()
+	if sb.String() != "new-value" {
+		t.Errorf("vault value = %q, want %q", sb.String(), "new-value")
+	}
+
+	// Bindings and rules must be preserved.
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	bindings, err := db.ListBindingsByCredential("update_static")
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding after update, got %d", len(bindings))
+	}
+	if bindings[0].Destination != "api.example.com" {
+		t.Errorf("binding destination = %q, want api.example.com", bindings[0].Destination)
+	}
+	if bindings[0].Header != "Authorization" {
+		t.Errorf("binding header = %q, want Authorization", bindings[0].Header)
+	}
+
+	rules, err := db.ListRules(store.RuleFilter{Verdict: "allow"})
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 allow rule after update, got %d", len(rules))
+	}
+}
+
+// TestHandleCredUpdateOAuthBoth verifies that an OAuth credential can be
+// updated with both a new access token and a new refresh token. The token
+// URL must be preserved from the existing blob (not re-prompted).
+func TestHandleCredUpdateOAuthBoth(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	// Seed an OAuth credential.
+	cleanup := pipeStdin(t, "old-access\nold-refresh\n")
+	_ = captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--type", "oauth",
+			"--token-url", "https://auth.example.com/token",
+			"update_oauth_both",
+		}); err != nil {
+			t.Fatalf("seed oauth credential: %v", err)
+		}
+	})
+	cleanup()
+
+	// Replace access + refresh via update.
+	cleanup = pipeStdin(t, "new-access\nnew-refresh\n")
+	defer cleanup()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"update",
+			"--db", dbPath,
+			"update_oauth_both",
+		}); err != nil {
+			t.Fatalf("handleCredCommand update oauth: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, `credential "update_oauth_both" updated (type: oauth)`) {
+		t.Errorf("expected oauth update confirmation, got: %s", output)
+	}
+
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("open vault: %v", err)
+	}
+	sb, err := vs.Get("update_oauth_both")
+	if err != nil {
+		t.Fatalf("get credential: %v", err)
+	}
+	defer sb.Release()
+
+	if !vault.IsOAuth(sb.Bytes()) {
+		t.Fatal("expected updated credential to still be OAuth JSON")
+	}
+	cred, err := vault.ParseOAuth(sb.Bytes())
+	if err != nil {
+		t.Fatalf("parse oauth: %v", err)
+	}
+	if cred.AccessToken != "new-access" {
+		t.Errorf("access token = %q, want new-access", cred.AccessToken)
+	}
+	if cred.RefreshToken != "new-refresh" {
+		t.Errorf("refresh token = %q, want new-refresh", cred.RefreshToken)
+	}
+	if cred.TokenURL != "https://auth.example.com/token" {
+		t.Errorf("token url = %q, want preserved from seed", cred.TokenURL)
+	}
+}
+
+// TestHandleCredUpdateOAuthAccessOnly verifies that updating an OAuth
+// credential with only an access token (single line on stdin, no second
+// line) PRESERVES the existing refresh token. This matches the "press
+// Enter to keep current" terminal prompt and prevents an access-token
+// rotation from silently destroying the stored refresh token.
+func TestHandleCredUpdateOAuthAccessOnly(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	// Seed an OAuth credential with both tokens.
+	cleanup := pipeStdin(t, "seed-access\nseed-refresh\n")
+	_ = captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"add",
+			"--db", dbPath,
+			"--type", "oauth",
+			"--token-url", "https://auth.example.com/token",
+			"update_oauth_access",
+		}); err != nil {
+			t.Fatalf("seed oauth credential: %v", err)
+		}
+	})
+	cleanup()
+
+	// Update with only an access token (single line, no refresh). The
+	// existing refresh token must be preserved.
+	cleanup = pipeStdin(t, "fresh-access\n")
+	defer cleanup()
+
+	_ = captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"update",
+			"--db", dbPath,
+			"update_oauth_access",
+		}); err != nil {
+			t.Fatalf("handleCredCommand update oauth access-only: %v", err)
+		}
+	})
+
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("open vault: %v", err)
+	}
+	sb, err := vs.Get("update_oauth_access")
+	if err != nil {
+		t.Fatalf("get credential: %v", err)
+	}
+	defer sb.Release()
+
+	cred, err := vault.ParseOAuth(sb.Bytes())
+	if err != nil {
+		t.Fatalf("parse oauth: %v", err)
+	}
+	if cred.AccessToken != "fresh-access" {
+		t.Errorf("access token = %q, want fresh-access", cred.AccessToken)
+	}
+	if cred.RefreshToken != "seed-refresh" {
+		t.Errorf("refresh token = %q, want preserved seed-refresh when stdin omits second line", cred.RefreshToken)
+	}
+	if cred.TokenURL != "https://auth.example.com/token" {
+		t.Errorf("token url = %q, want preserved from seed", cred.TokenURL)
+	}
+}
+
+// TestHandleCredUpdateStaticWithOAuthShapedValue verifies that a static
+// credential whose stored value happens to be JSON matching the OAuth
+// shape (access_token + token_url) is still treated as static on update.
+// The authoritative type comes from credential_meta, not payload shape.
+// Without this check, the update path would fall into the OAuth branch
+// and prompt for "new access token / refresh token" instead of replacing
+// the blob verbatim.
+func TestHandleCredUpdateStaticWithOAuthShapedValue(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	// Seed a static credential whose value is OAuth-shaped JSON. Use the
+	// vault + store directly so we can control the payload shape and the
+	// credential_meta row without going through "cred add" prompts.
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("new vault: %v", err)
+	}
+	oauthShaped := `{"access_token":"seeded","token_url":"https://example.com/token"}`
+	if _, err := vs.Add("json_static", oauthShaped); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := db.AddCredentialMeta("json_static", "static", ""); err != nil {
+		t.Fatalf("add meta: %v", err)
+	}
+	_ = db.Close()
+
+	// Run update with a single line on stdin (static secret path). If the
+	// handler misclassifies the credential as OAuth, it will try to read a
+	// second line for the refresh token. Our input has no newline after
+	// the value, so the OAuth branch would see an empty access token and
+	// fail, or it would consume the single line as access and then fail
+	// on the missing refresh token.
+	cleanup := pipeStdin(t, "replacement-static-value\n")
+	defer cleanup()
+
+	output := captureStdout(t, func() {
+		if err := handleCredCommand([]string{
+			"update",
+			"--db", dbPath,
+			"json_static",
+		}); err != nil {
+			t.Fatalf("handleCredCommand update: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, `credential "json_static" updated (type: static)`) {
+		t.Errorf("expected static update confirmation, got: %s", output)
+	}
+
+	// Vault should now hold the new verbatim value (no OAuth rebuild).
+	vs2, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatalf("open vault: %v", err)
+	}
+	sb, err := vs2.Get("json_static")
+	if err != nil {
+		t.Fatalf("get credential: %v", err)
+	}
+	defer sb.Release()
+	if sb.String() != "replacement-static-value" {
+		t.Errorf("vault value = %q, want replacement-static-value", sb.String())
+	}
+}
+
+// TestHandleCredUpdateNotFound verifies that updating a credential that does
+// not exist returns a clear error and never prompts for input.
+func TestHandleCredUpdateNotFound(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	// Initialize the vault so the credentials dir exists.
+	if _, err := vault.NewStore(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	err := handleCredCommand([]string{
+		"update",
+		"--db", dbPath,
+		"missing_cred",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing credential")
+	}
+	if !strings.Contains(err.Error(), `credential "missing_cred" not found`) {
+		t.Errorf("expected not-found error, got: %v", err)
+	}
+}
+
+// TestHandleCredUpdateNoName verifies that running update without a name
+// returns a usage error.
+func TestHandleCredUpdateNoName(t *testing.T) {
+	err := handleCredCommand([]string{"update"})
+	if err == nil {
+		t.Fatal("expected error for update without name")
+	}
+	if !strings.Contains(err.Error(), "usage:") {
+		t.Errorf("expected usage error, got: %v", err)
 	}
 }

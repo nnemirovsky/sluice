@@ -375,6 +375,81 @@ name = "Block SSNs"
 	}
 }
 
+// TestImportTOMLBindingCaseInsensitiveDedup verifies that binding import
+// treats destinations differing only in case as duplicates, matching the
+// case-insensitive unique index added in migration 000005. A case-sensitive
+// dedup would hit the unique index and abort the whole import.
+func TestImportTOMLBindingCaseInsensitiveDedup(t *testing.T) {
+	s := newTestStore(t)
+
+	// Seed lowercase binding.
+	seed := []byte(`
+[policy]
+default = "ask"
+
+[[binding]]
+destination = "api.example.com"
+ports = [443]
+credential = "example_key"
+header = "x-api-key"
+`)
+	res1, err := s.ImportTOML(seed)
+	if err != nil {
+		t.Fatalf("seed ImportTOML: %v", err)
+	}
+	if res1.BindingsInserted != 1 {
+		t.Fatalf("seed: expected 1 binding inserted, got %d", res1.BindingsInserted)
+	}
+
+	// Import case-variant duplicate alongside a genuinely new binding.
+	// The case-variant row must be skipped cleanly, the new row inserted,
+	// and the import must not abort on a unique-index violation.
+	dup := []byte(`
+[policy]
+default = "ask"
+
+[[binding]]
+destination = "API.example.com"
+ports = [443]
+credential = "example_key"
+header = "x-api-key"
+
+[[binding]]
+destination = "api.other.com"
+ports = [443]
+credential = "other_key"
+header = "x-api-key"
+`)
+	res2, err := s.ImportTOML(dup)
+	if err != nil {
+		t.Fatalf("second ImportTOML: %v", err)
+	}
+	if res2.BindingsInserted != 1 {
+		t.Errorf("expected 1 binding inserted (api.other.com), got %d", res2.BindingsInserted)
+	}
+	if res2.BindingsSkipped != 1 {
+		t.Errorf("expected 1 binding skipped (API.example.com case variant), got %d", res2.BindingsSkipped)
+	}
+
+	// Verify the DB has exactly 2 bindings and the original case is preserved.
+	bindings, err := s.ListBindings()
+	if err != nil {
+		t.Fatalf("ListBindings: %v", err)
+	}
+	if len(bindings) != 2 {
+		t.Fatalf("expected 2 bindings total, got %d", len(bindings))
+	}
+	var foundLower bool
+	for _, b := range bindings {
+		if b.Destination == "api.example.com" {
+			foundLower = true
+		}
+	}
+	if !foundLower {
+		t.Errorf("original lowercase binding was replaced or removed: %+v", bindings)
+	}
+}
+
 func TestImportTOMLMalformedReturnsError(t *testing.T) {
 	s := newTestStore(t)
 
@@ -989,5 +1064,65 @@ protocols = ["ssh"]
 	}
 	if len(bindings[0].Protocols) != 1 || bindings[0].Protocols[0] != "ssh" {
 		t.Errorf("expected protocols [ssh], got %v", bindings[0].Protocols)
+	}
+}
+
+// TestImportTOMLBindingDedupeByCredDestination verifies that when a second
+// import provides a binding with the same (credential, destination) pair as
+// an existing row but a different header/template/ports, the importer skips
+// the new entry instead of hitting the UNIQUE constraint from migration
+// 000005 and aborting the whole import. The existing row is preserved to
+// match the "merge/skip duplicates" semantics used for rule imports.
+func TestImportTOMLBindingDedupeByCredDestination(t *testing.T) {
+	s := newTestStore(t)
+
+	first := []byte(`
+[[binding]]
+destination = "api.example.com"
+ports = [443]
+credential = "my_key"
+header = "x-api-key"
+`)
+	if _, err := s.ImportTOML(first); err != nil {
+		t.Fatalf("first import: %v", err)
+	}
+
+	// Second import uses the same (credential, destination) but different
+	// header, template, and ports. Before the fix, the dedupe check keyed
+	// on the full tuple and missed this row, then the INSERT hit the
+	// UNIQUE(credential, destination) constraint and aborted the whole
+	// import. After the fix, the row is skipped cleanly.
+	second := []byte(`
+[[binding]]
+destination = "api.example.com"
+ports = [8443]
+credential = "my_key"
+header = "Authorization"
+template = "Bearer {value}"
+`)
+	res, err := s.ImportTOML(second)
+	if err != nil {
+		t.Fatalf("second import (should not error): %v", err)
+	}
+	if res.BindingsInserted != 0 {
+		t.Errorf("expected 0 inserted, got %d", res.BindingsInserted)
+	}
+	if res.BindingsSkipped != 1 {
+		t.Errorf("expected 1 skipped, got %d", res.BindingsSkipped)
+	}
+
+	// The original row must be preserved unchanged.
+	bindings, _ := s.ListBindings()
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if bindings[0].Header != "x-api-key" {
+		t.Errorf("expected header x-api-key (preserved), got %q", bindings[0].Header)
+	}
+	if len(bindings[0].Ports) != 1 || bindings[0].Ports[0] != 443 {
+		t.Errorf("expected ports [443] (preserved), got %v", bindings[0].Ports)
+	}
+	if bindings[0].Template != "" {
+		t.Errorf("expected empty template (preserved), got %q", bindings[0].Template)
 	}
 }

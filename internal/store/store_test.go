@@ -1,11 +1,18 @@
 package store
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/golang-migrate/migrate/v4"
+	migsqlite "github.com/golang-migrate/migrate/v4/database/sqlite"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -837,6 +844,276 @@ func TestBindingValidation(t *testing.T) {
 	}
 }
 
+func TestUpdateBindingSingleField(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{
+		Ports:    []int{443},
+		Header:   "Authorization",
+		Template: "Bearer {value}",
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	newHeader := "X-Api-Key"
+	if _, _, _, err := s.UpdateBindingWithRuleSync(id, BindingUpdateOpts{Header: &newHeader}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	bindings, _ := s.ListBindings()
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	b := bindings[0]
+	if b.Header != "X-Api-Key" {
+		t.Errorf("header = %q, want %q", b.Header, "X-Api-Key")
+	}
+	// Other fields unchanged.
+	if b.Destination != "api.example.com" {
+		t.Errorf("destination changed unexpectedly: %q", b.Destination)
+	}
+	if b.Template != "Bearer {value}" {
+		t.Errorf("template changed unexpectedly: %q", b.Template)
+	}
+	if len(b.Ports) != 1 || b.Ports[0] != 443 {
+		t.Errorf("ports changed unexpectedly: %v", b.Ports)
+	}
+}
+
+func TestUpdateBindingMultipleFields(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{
+		Ports:     []int{443},
+		Header:    "Authorization",
+		Template:  "Bearer {value}",
+		Protocols: []string{"https"},
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	newDest := "api.other.com"
+	newPorts := []int{8080, 8443}
+	newHeader := "X-Token"
+	newTemplate := "Token {value}"
+	newProtocols := []string{"http", "https"}
+	if _, _, _, err := s.UpdateBindingWithRuleSync(id, BindingUpdateOpts{
+		Destination: &newDest,
+		Ports:       &newPorts,
+		Header:      &newHeader,
+		Template:    &newTemplate,
+		Protocols:   &newProtocols,
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	bindings, _ := s.ListBindings()
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	b := bindings[0]
+	if b.Destination != newDest {
+		t.Errorf("destination = %q, want %q", b.Destination, newDest)
+	}
+	if len(b.Ports) != 2 || b.Ports[0] != 8080 || b.Ports[1] != 8443 {
+		t.Errorf("ports = %v, want %v", b.Ports, newPorts)
+	}
+	if b.Header != newHeader {
+		t.Errorf("header = %q, want %q", b.Header, newHeader)
+	}
+	if b.Template != newTemplate {
+		t.Errorf("template = %q, want %q", b.Template, newTemplate)
+	}
+	if len(b.Protocols) != 2 || b.Protocols[0] != "http" || b.Protocols[1] != "https" {
+		t.Errorf("protocols = %v, want %v", b.Protocols, newProtocols)
+	}
+	// Credential unchanged.
+	if b.Credential != "my_key" {
+		t.Errorf("credential changed unexpectedly: %q", b.Credential)
+	}
+}
+
+func TestUpdateBindingClearFields(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{
+		Ports:    []int{443},
+		Header:   "Authorization",
+		Template: "Bearer {value}",
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	// Clearing string fields with empty string should set them to NULL.
+	empty := ""
+	if _, _, _, err := s.UpdateBindingWithRuleSync(id, BindingUpdateOpts{
+		Header:   &empty,
+		Template: &empty,
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	bindings, _ := s.ListBindings()
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding")
+	}
+	if bindings[0].Header != "" {
+		t.Errorf("header should be empty, got %q", bindings[0].Header)
+	}
+	if bindings[0].Template != "" {
+		t.Errorf("template should be empty, got %q", bindings[0].Template)
+	}
+}
+
+func TestUpdateBindingNotFound(t *testing.T) {
+	s := newTestStore(t)
+	newDest := "api.example.com"
+	_, _, _, err := s.UpdateBindingWithRuleSync(9999, BindingUpdateOpts{Destination: &newDest})
+	if err == nil {
+		t.Fatal("expected error for nonexistent binding")
+	}
+	if !errors.Is(err, ErrBindingNotFound) {
+		t.Errorf("expected ErrBindingNotFound, got %v", err)
+	}
+}
+
+func TestUpdateBindingEmptyOpts(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{Ports: []int{443}})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	// Empty update should succeed (no-op) when the row exists.
+	if _, _, _, err := s.UpdateBindingWithRuleSync(id, BindingUpdateOpts{}); err != nil {
+		t.Errorf("empty update on existing row should succeed, got %v", err)
+	}
+	// Empty update on nonexistent row should still fail.
+	if _, _, _, err := s.UpdateBindingWithRuleSync(9999, BindingUpdateOpts{}); err == nil {
+		t.Error("empty update on nonexistent row should fail")
+	}
+}
+
+func TestUpdateBindingEmptyDestination(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	empty := ""
+	if _, _, _, err := s.UpdateBindingWithRuleSync(id, BindingUpdateOpts{Destination: &empty}); err == nil {
+		t.Error("empty destination should be rejected")
+	}
+}
+
+// TestUpdateBindingClearPortsAndProtocols verifies that passing a non-nil
+// empty slice pointer clears the stored ports and protocols respectively.
+// This is distinct from passing nil (which means "no change").
+func TestUpdateBindingClearPortsAndProtocols(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{
+		Ports:     []int{443, 8080},
+		Protocols: []string{"http", "grpc"},
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	emptyPorts := []int{}
+	emptyProtocols := []string{}
+	if _, _, _, err := s.UpdateBindingWithRuleSync(id, BindingUpdateOpts{
+		Ports:     &emptyPorts,
+		Protocols: &emptyProtocols,
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	bindings, _ := s.ListBindings()
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if len(bindings[0].Ports) != 0 {
+		t.Errorf("ports should be cleared, got %v", bindings[0].Ports)
+	}
+	if len(bindings[0].Protocols) != 0 {
+		t.Errorf("protocols should be cleared, got %v", bindings[0].Protocols)
+	}
+}
+
+// TestUpdateBindingEnvVar verifies that the EnvVar field of
+// BindingUpdateOpts can set, change, and clear env_var on a binding.
+// Also covers the uniqueness check: updating a binding to an env_var
+// that is already in use by a binding on a different credential should
+// fail, keeping the same env_var on the same binding should succeed,
+// and sharing an env_var across bindings of the same credential is
+// allowed because they resolve to the same phantom value.
+func TestUpdateBindingEnvVar(t *testing.T) {
+	s := newTestStore(t)
+	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	// Set env_var.
+	set := "MY_KEY"
+	if _, _, _, err := s.UpdateBindingWithRuleSync(id, BindingUpdateOpts{EnvVar: &set}); err != nil {
+		t.Fatalf("set env_var: %v", err)
+	}
+	bindings, _ := s.ListBindings()
+	if bindings[0].EnvVar != "MY_KEY" {
+		t.Errorf("env_var = %q, want MY_KEY", bindings[0].EnvVar)
+	}
+
+	// Update the same binding keeping the same env_var; should succeed
+	// because the uniqueness check excludes the binding being updated.
+	if _, _, _, err := s.UpdateBindingWithRuleSync(id, BindingUpdateOpts{EnvVar: &set}); err != nil {
+		t.Errorf("keeping same env_var should succeed, got %v", err)
+	}
+
+	// Add a second binding for the SAME credential using a different
+	// env_var, then try to make it match MY_KEY; must succeed because
+	// both bindings resolve to the same phantom.
+	sharedID, err := s.AddBinding("api.shared.com", "my_key", BindingOpts{})
+	if err != nil {
+		t.Fatalf("add shared binding: %v", err)
+	}
+	if _, _, _, err := s.UpdateBindingWithRuleSync(sharedID, BindingUpdateOpts{EnvVar: &set}); err != nil {
+		t.Errorf("sharing env_var across bindings of the same credential should succeed, got %v", err)
+	}
+
+	// Add a binding for a DIFFERENT credential with a different env_var.
+	id2, err := s.AddBinding("api.other.com", "other_cred", BindingOpts{
+		EnvVar: "OTHER_KEY",
+	})
+	if err != nil {
+		t.Fatalf("add other-credential binding: %v", err)
+	}
+
+	// Attempt to reuse the other credential's env_var on the first binding;
+	// must fail because the env_var belongs to a different credential.
+	other := "OTHER_KEY"
+	if _, _, _, err := s.UpdateBindingWithRuleSync(id, BindingUpdateOpts{EnvVar: &other}); err == nil {
+		t.Error("reusing another credential's env_var should fail")
+	}
+
+	// Clear env_var on the other credential's binding.
+	cleared := ""
+	if _, _, _, err := s.UpdateBindingWithRuleSync(id2, BindingUpdateOpts{EnvVar: &cleared}); err != nil {
+		t.Fatalf("clear env_var: %v", err)
+	}
+	bindings, _ = s.ListBindings()
+	for _, b := range bindings {
+		if b.ID == id2 && b.EnvVar != "" {
+			t.Errorf("env_var should be cleared, got %q", b.EnvVar)
+		}
+	}
+
+	// With the other credential's env_var cleared, reusing OTHER_KEY on
+	// the first binding should now succeed.
+	if _, _, _, err := s.UpdateBindingWithRuleSync(id, BindingUpdateOpts{EnvVar: &other}); err != nil {
+		t.Errorf("reusing freed env_var should succeed, got %v", err)
+	}
+}
+
 // --- MCP Upstream CRUD ---
 
 func TestMCPUpstreamCRUD(t *testing.T) {
@@ -1593,6 +1870,691 @@ func TestNewStoreFilePathExisting(t *testing.T) {
 	}
 }
 
+// TestMigrationBindingUniqueDedup verifies that migration 5 (the
+// (credential, destination) UNIQUE index) collapses pre-existing
+// duplicate rows into the oldest entry instead of failing the upgrade.
+// The test manually applies migrations 1-4, seeds two duplicate
+// bindings via raw SQL, then applies migration 5 and asserts only one
+// row remains.
+// openMigrationTestDB opens a fresh SQLite file under a temp directory with
+// the same PRAGMAs the Store uses, plus a golang-migrate migrator wired to
+// the embedded migrations FS. It returns the db handle and the migrator so
+// each test can step migrations up to an arbitrary version before seeding.
+func openMigrationTestDB(t *testing.T, name string) (*sql.DB, *migrate.Migrate) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, name)
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		t.Fatalf("set WAL: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		t.Fatalf("set busy timeout: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
+
+	source, err := iofs.New(migrationsFS, "migrations")
+	if err != nil {
+		t.Fatalf("new iofs source: %v", err)
+	}
+	driver, err := migsqlite.WithInstance(db, &migsqlite.Config{NoTxWrap: false})
+	if err != nil {
+		t.Fatalf("new migrate driver: %v", err)
+	}
+	m, err := migrate.NewWithInstance("iofs", source, "sqlite", driver)
+	if err != nil {
+		t.Fatalf("new migrator: %v", err)
+	}
+	return db, m
+}
+
+// TestMigrationBindingUniqueDedupIdentical verifies that migration 5 collapses
+// byte-identical duplicate bindings to the lowest-id row. Rows that compare
+// equal on every behavioral column are safe to drop because the surviving
+// row produces identical resolver behavior.
+func TestMigrationBindingUniqueDedupIdentical(t *testing.T) {
+	db, m := openMigrationTestDB(t, "dedup_identical.db")
+
+	if err := m.Steps(4); err != nil {
+		t.Fatalf("apply migrations 1-4: %v", err)
+	}
+	v, dirty, err := m.Version()
+	if err != nil {
+		t.Fatalf("version after step 4: %v", err)
+	}
+	if v != 4 || dirty {
+		t.Fatalf("expected version 4, got version=%d dirty=%v", v, dirty)
+	}
+
+	// Seed two byte-identical rows. Only the auto-increment id differs.
+	// These mirror the "retried AddBinding" case where a writer repeated
+	// the same call before the UNIQUE index existed.
+	for i := 0; i < 2; i++ {
+		if _, err := db.Exec(
+			`INSERT INTO bindings (destination, ports, credential, header, template, protocols, env_var)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			"api.example.com", nil, "my_key", "Authorization", "Bearer {value}", nil, nil,
+		); err != nil {
+			t.Fatalf("seed binding %d: %v", i, err)
+		}
+	}
+	var before int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM bindings WHERE credential = ? AND destination = ?",
+		"my_key", "api.example.com",
+	).Scan(&before); err != nil {
+		t.Fatalf("count before: %v", err)
+	}
+	if before != 2 {
+		t.Fatalf("expected 2 identical rows before migration, got %d", before)
+	}
+
+	if err := m.Steps(1); err != nil {
+		t.Fatalf("apply migration 5: %v", err)
+	}
+	v, dirty, err = m.Version()
+	if err != nil {
+		t.Fatalf("version after step 5: %v", err)
+	}
+	if v != 5 || dirty {
+		t.Fatalf("expected version 5 clean, got version=%d dirty=%v", v, dirty)
+	}
+
+	var after int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM bindings WHERE credential = ? AND destination = ?",
+		"my_key", "api.example.com",
+	).Scan(&after); err != nil {
+		t.Fatalf("count after: %v", err)
+	}
+	if after != 1 {
+		t.Errorf("expected 1 row after dedup, got %d", after)
+	}
+
+	// The surviving row must be the oldest (lowest id). Since both inputs
+	// were identical, the surviving row must still have the seeded values.
+	var header sql.NullString
+	if err := db.QueryRow(
+		"SELECT header FROM bindings WHERE credential = ? AND destination = ? ORDER BY id LIMIT 1",
+		"my_key", "api.example.com",
+	).Scan(&header); err != nil {
+		t.Fatalf("scan survivor: %v", err)
+	}
+	if header.String != "Authorization" {
+		t.Errorf("surviving header = %q, want Authorization", header.String)
+	}
+
+	// A further insert of the same pair must now fail due to the
+	// UNIQUE index established by migration 5.
+	if _, err := db.Exec(
+		`INSERT INTO bindings (destination, credential) VALUES (?, ?)`,
+		"api.example.com", "my_key",
+	); err == nil {
+		t.Error("expected UNIQUE violation on duplicate insert after migration 5")
+	}
+}
+
+// TestMigrationBindingUniqueDedupNoDuplicates verifies migration 5 succeeds
+// on a database with no duplicates at all. This is the common upgrade path
+// where the operator never hit a race and every (credential, destination)
+// group already has exactly one row.
+func TestMigrationBindingUniqueDedupNoDuplicates(t *testing.T) {
+	db, m := openMigrationTestDB(t, "dedup_none.db")
+
+	if err := m.Steps(4); err != nil {
+		t.Fatalf("apply migrations 1-4: %v", err)
+	}
+
+	// Seed three distinct bindings. No duplicates. Migration must succeed
+	// and every row must survive.
+	seeds := []struct {
+		destination string
+		credential  string
+	}{
+		{"api.example.com", "key_a"},
+		{"api.example.com", "key_b"},
+		{"other.example.com", "key_a"},
+	}
+	for _, s := range seeds {
+		if _, err := db.Exec(
+			`INSERT INTO bindings (destination, credential) VALUES (?, ?)`,
+			s.destination, s.credential,
+		); err != nil {
+			t.Fatalf("seed %+v: %v", s, err)
+		}
+	}
+
+	if err := m.Steps(1); err != nil {
+		t.Fatalf("apply migration 5: %v", err)
+	}
+
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM bindings").Scan(&count); err != nil {
+		t.Fatalf("count bindings: %v", err)
+	}
+	if count != len(seeds) {
+		t.Errorf("expected %d bindings to survive, got %d", len(seeds), count)
+	}
+}
+
+// TestMigrationBindingUniqueDedupRejectsConflicts verifies that migration 5
+// refuses to silently drop bindings that share (credential, destination) but
+// differ on behavioral columns. Each sub-test seeds two rows that share the
+// primary key but differ on exactly one column and confirms the migration
+// aborts with an operator-facing error that mentions manual resolution.
+func TestMigrationBindingUniqueDedupRejectsConflicts(t *testing.T) {
+	type conflictCase struct {
+		name        string
+		destination string
+		firstValues []any
+		secondCols  string
+		secondArgs  []any
+	}
+	cases := []conflictCase{
+		{
+			name:        "different ports",
+			destination: "api.example.com",
+			firstValues: []any{"api.example.com", `[443]`, "my_key", nil, nil, nil, nil},
+			secondCols:  "destination, ports, credential, header, template, protocols, env_var",
+			secondArgs:  []any{"api.example.com", `[8080]`, "my_key", nil, nil, nil, nil},
+		},
+		{
+			name:        "different protocols",
+			destination: "api.example.com",
+			firstValues: []any{"api.example.com", nil, "my_key", nil, nil, `["tcp"]`, nil},
+			secondCols:  "destination, ports, credential, header, template, protocols, env_var",
+			secondArgs:  []any{"api.example.com", nil, "my_key", nil, nil, `["udp"]`, nil},
+		},
+		{
+			name:        "different header",
+			destination: "api.example.com",
+			firstValues: []any{"api.example.com", nil, "my_key", "Authorization", "Bearer {value}", nil, nil},
+			secondCols:  "destination, ports, credential, header, template, protocols, env_var",
+			secondArgs:  []any{"api.example.com", nil, "my_key", "X-Api-Key", "Bearer {value}", nil, nil},
+		},
+		{
+			name:        "different template",
+			destination: "api.example.com",
+			firstValues: []any{"api.example.com", nil, "my_key", "Authorization", "Bearer {value}", nil, nil},
+			secondCols:  "destination, ports, credential, header, template, protocols, env_var",
+			secondArgs:  []any{"api.example.com", nil, "my_key", "Authorization", "Token {value}", nil, nil},
+		},
+		{
+			name:        "different env_var",
+			destination: "api.example.com",
+			firstValues: []any{"api.example.com", nil, "my_key", nil, nil, nil, "KEY_A"},
+			secondCols:  "destination, ports, credential, header, template, protocols, env_var",
+			secondArgs:  []any{"api.example.com", nil, "my_key", nil, nil, nil, "KEY_B"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, m := openMigrationTestDB(t, "dedup_conflict_"+strings.ReplaceAll(tc.name, " ", "_")+".db")
+			if err := m.Steps(4); err != nil {
+				t.Fatalf("apply migrations 1-4: %v", err)
+			}
+			if _, err := db.Exec(
+				`INSERT INTO bindings (destination, ports, credential, header, template, protocols, env_var)
+				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				tc.firstValues...,
+			); err != nil {
+				t.Fatalf("seed first row: %v", err)
+			}
+			if _, err := db.Exec(
+				`INSERT INTO bindings (`+tc.secondCols+`) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				tc.secondArgs...,
+			); err != nil {
+				t.Fatalf("seed second row: %v", err)
+			}
+
+			err := m.Steps(1)
+			if err == nil {
+				t.Fatalf("expected migration 5 to fail on %s conflict, got nil", tc.name)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "sluice binding list") {
+				t.Errorf("migration error missing operator guidance: %q", msg)
+			}
+			if !strings.Contains(msg, "upgrade blocked") {
+				t.Errorf("migration error missing upgrade-blocked marker: %q", msg)
+			}
+			// Both rows must still exist after the aborted migration so
+			// the operator can resolve them on the old binary.
+			var count int
+			if err := db.QueryRow(
+				"SELECT COUNT(*) FROM bindings WHERE credential = ? AND destination = ?",
+				"my_key", tc.destination,
+			).Scan(&count); err != nil {
+				t.Fatalf("count bindings after failed migration: %v", err)
+			}
+			if count != 2 {
+				t.Errorf("expected both bindings to survive aborted migration, got %d", count)
+			}
+		})
+	}
+}
+
+// TestMigrationBindingUniqueDedupCleansPairedRules verifies that migration
+// 5 also removes duplicate auto-created allow rules that were paired with
+// the bindings being collapsed. AddRuleAndBinding inserts the rule and the
+// binding in one transaction, so concurrent pre-migration writers racing
+// on the same (credential, destination) pair each produce their own paired
+// rule. Dedup keeps the lowest-id binding but leaves the extra rules
+// orphaned. The fix deduplicates rules by (source, destination) the same
+// way: keep the lowest-id row per group and drop the rest. This test
+// seeds three bindings and three paired rules on the same destination,
+// plus an unrelated manual rule and an unrelated destination, and asserts
+// the end state.
+func TestMigrationBindingUniqueDedupCleansPairedRules(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dedup_rules.db")
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		t.Fatalf("set WAL: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		t.Fatalf("set busy timeout: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
+
+	source, err := iofs.New(migrationsFS, "migrations")
+	if err != nil {
+		t.Fatalf("new iofs source: %v", err)
+	}
+	driver, err := migsqlite.WithInstance(db, &migsqlite.Config{NoTxWrap: false})
+	if err != nil {
+		t.Fatalf("new migrate driver: %v", err)
+	}
+	m, err := migrate.NewWithInstance("iofs", source, "sqlite", driver)
+	if err != nil {
+		t.Fatalf("new migrator: %v", err)
+	}
+
+	// Stop at version 4 (pre-unique index) so we can seed duplicates.
+	if err := m.Steps(4); err != nil {
+		t.Fatalf("apply migrations 1-4: %v", err)
+	}
+
+	// Seed three bindings that share (credential, destination). The
+	// lowest-id row survives dedup, the other two get dropped.
+	for i := 0; i < 3; i++ {
+		if _, err := db.Exec(
+			`INSERT INTO bindings (destination, credential) VALUES (?, ?)`,
+			"api.example.com", "my_key",
+		); err != nil {
+			t.Fatalf("seed binding: %v", err)
+		}
+	}
+
+	// Seed three paired rules at the same destination. Each simulates a
+	// pre-migration AddRuleAndBinding insert from a racing writer. One
+	// must survive (lowest id), the others must be cleaned up.
+	for i := 0; i < 3; i++ {
+		if _, err := db.Exec(
+			`INSERT INTO rules (verdict, destination, source, name) VALUES (?, ?, ?, ?)`,
+			"allow", "api.example.com", "binding-add:my_key", "auto",
+		); err != nil {
+			t.Fatalf("seed paired rule: %v", err)
+		}
+	}
+
+	// Seed a rule tagged with the cred-add prefix at the same destination.
+	// It has a distinct (source, destination) group, so it must survive.
+	if _, err := db.Exec(
+		`INSERT INTO rules (verdict, destination, source, name) VALUES (?, ?, ?, ?)`,
+		"allow", "api.example.com", "cred-add:my_key", "auto",
+	); err != nil {
+		t.Fatalf("seed cred-add rule: %v", err)
+	}
+
+	// Seed a second binding on a different destination plus its paired
+	// rule. Both must survive because they are unique.
+	if _, err := db.Exec(
+		`INSERT INTO bindings (destination, credential) VALUES (?, ?)`,
+		"other.example.com", "my_key",
+	); err != nil {
+		t.Fatalf("seed other binding: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO rules (verdict, destination, source, name) VALUES (?, ?, ?, ?)`,
+		"allow", "other.example.com", "binding-add:my_key", "auto",
+	); err != nil {
+		t.Fatalf("seed other rule: %v", err)
+	}
+
+	// Seed an unrelated manual rule to confirm the migration ignores
+	// rules with other source tags.
+	if _, err := db.Exec(
+		`INSERT INTO rules (verdict, destination, source, name) VALUES (?, ?, ?, ?)`,
+		"allow", "api.example.com", "manual", "hand-written",
+	); err != nil {
+		t.Fatalf("seed manual rule: %v", err)
+	}
+
+	// Apply migration 5.
+	if err := m.Steps(1); err != nil {
+		t.Fatalf("apply migration 5: %v", err)
+	}
+
+	// Bindings: one row per (credential, destination). Three at api +
+	// one at other collapse to two.
+	var bcount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM bindings").Scan(&bcount); err != nil {
+		t.Fatalf("count bindings: %v", err)
+	}
+	if bcount != 2 {
+		t.Errorf("expected 2 bindings after dedup, got %d", bcount)
+	}
+
+	// Paired "binding-add:my_key" rules at api.example.com must collapse
+	// to one (lowest id). The cred-add:my_key rule at api is a different
+	// (source, destination) group and must survive.
+	var bindingAddAtAPI int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM rules WHERE destination = ? AND source = ?`,
+		"api.example.com", "binding-add:my_key",
+	).Scan(&bindingAddAtAPI); err != nil {
+		t.Fatalf("count binding-add rules at api: %v", err)
+	}
+	if bindingAddAtAPI != 1 {
+		t.Errorf("expected 1 binding-add:my_key rule at api.example.com after dedup, got %d", bindingAddAtAPI)
+	}
+
+	var credAddAtAPI int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM rules WHERE destination = ? AND source = ?`,
+		"api.example.com", "cred-add:my_key",
+	).Scan(&credAddAtAPI); err != nil {
+		t.Fatalf("count cred-add rules at api: %v", err)
+	}
+	if credAddAtAPI != 1 {
+		t.Errorf("expected 1 cred-add:my_key rule at api.example.com to survive, got %d", credAddAtAPI)
+	}
+
+	// The unique rule at other.example.com must still exist.
+	var otherCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM rules WHERE destination = ? AND source = ?`,
+		"other.example.com", "binding-add:my_key",
+	).Scan(&otherCount); err != nil {
+		t.Fatalf("count other rule: %v", err)
+	}
+	if otherCount != 1 {
+		t.Errorf("expected binding-add:my_key rule at other.example.com to remain, got %d", otherCount)
+	}
+
+	// The unrelated manual rule must survive.
+	var manualCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM rules WHERE source = 'manual'`,
+	).Scan(&manualCount); err != nil {
+		t.Fatalf("count manual rules: %v", err)
+	}
+	if manualCount != 1 {
+		t.Errorf("expected 1 manual rule to survive, got %d", manualCount)
+	}
+}
+
+// TestMigrationBindingUniqueDedupPreservesSingletonRules verifies that
+// migration 5 does not delete paired rules that have no duplicates. In
+// particular, a rule that was deliberately kept after a "binding remove"
+// (source like binding-add:X but no matching binding) must still be
+// present after the upgrade. The rule is the only row in its
+// (source, destination) group, so MIN(id) is the identity and the DELETE
+// statement leaves it alone.
+func TestMigrationBindingUniqueDedupPreservesSingletonRules(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dedup_keep.db")
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		t.Fatalf("set WAL: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		t.Fatalf("set busy timeout: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
+
+	source, err := iofs.New(migrationsFS, "migrations")
+	if err != nil {
+		t.Fatalf("new iofs source: %v", err)
+	}
+	driver, err := migsqlite.WithInstance(db, &migsqlite.Config{NoTxWrap: false})
+	if err != nil {
+		t.Fatalf("new migrate driver: %v", err)
+	}
+	m, err := migrate.NewWithInstance("iofs", source, "sqlite", driver)
+	if err != nil {
+		t.Fatalf("new migrator: %v", err)
+	}
+
+	if err := m.Steps(4); err != nil {
+		t.Fatalf("apply migrations 1-4: %v", err)
+	}
+
+	// Seed a standalone rule with no matching binding. This mirrors the
+	// "binding remove but kept the rule" case.
+	if _, err := db.Exec(
+		`INSERT INTO rules (verdict, destination, source) VALUES (?, ?, ?)`,
+		"allow", "keep.example.com", "binding-add:k",
+	); err != nil {
+		t.Fatalf("seed standalone rule: %v", err)
+	}
+
+	if err := m.Steps(1); err != nil {
+		t.Fatalf("apply migration 5: %v", err)
+	}
+
+	var kept int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM rules WHERE destination = ? AND source = ?`,
+		"keep.example.com", "binding-add:k",
+	).Scan(&kept); err != nil {
+		t.Fatalf("count kept rule: %v", err)
+	}
+	if kept != 1 {
+		t.Errorf("expected singleton rule to survive migration, got %d", kept)
+	}
+}
+
+// TestMigrationBindingUniqueDedupCaseInsensitive verifies that migration 5
+// collapses pre-existing rows that differ only in destination case and
+// then installs a case-insensitive unique index. Policy matching is
+// case-insensitive, so "api.example.com" and "API.EXAMPLE.COM" target the
+// exact same set of connections and must be treated as duplicates.
+// Regression for codex iteration 6 finding 1.
+func TestMigrationBindingUniqueDedupCaseInsensitive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dedup_nocase.db")
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		t.Fatalf("set WAL: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		t.Fatalf("set busy timeout: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
+
+	source, err := iofs.New(migrationsFS, "migrations")
+	if err != nil {
+		t.Fatalf("new iofs source: %v", err)
+	}
+	driver, err := migsqlite.WithInstance(db, &migsqlite.Config{NoTxWrap: false})
+	if err != nil {
+		t.Fatalf("new migrate driver: %v", err)
+	}
+	m, err := migrate.NewWithInstance("iofs", source, "sqlite", driver)
+	if err != nil {
+		t.Fatalf("new migrator: %v", err)
+	}
+
+	// Apply migrations 1-4 to reach the schema right before migration 5.
+	// No unique index exists on bindings(credential, destination) yet, so
+	// case-variant duplicates can be seeded directly.
+	if err := m.Steps(4); err != nil {
+		t.Fatalf("apply migrations 1-4: %v", err)
+	}
+
+	// Seed two bindings that share (credential, LOWER(destination)) but
+	// differ in the stored case.
+	if _, err := db.Exec(
+		`INSERT INTO bindings (destination, credential) VALUES (?, ?)`,
+		"api.example.com", "my_key",
+	); err != nil {
+		t.Fatalf("seed first binding: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO bindings (destination, credential) VALUES (?, ?)`,
+		"API.EXAMPLE.COM", "my_key",
+	); err != nil {
+		t.Fatalf("seed second binding: %v", err)
+	}
+
+	// Pair them with matching auto-created allow rules so the rule dedup
+	// path is exercised too.
+	if _, err := db.Exec(
+		`INSERT INTO rules (verdict, destination, source, name) VALUES (?, ?, ?, ?)`,
+		"allow", "api.example.com", "binding-add:my_key", "auto",
+	); err != nil {
+		t.Fatalf("seed first rule: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO rules (verdict, destination, source, name) VALUES (?, ?, ?, ?)`,
+		"allow", "API.EXAMPLE.COM", "binding-add:my_key", "auto",
+	); err != nil {
+		t.Fatalf("seed second rule: %v", err)
+	}
+
+	// Apply migration 5. The seeded duplicates must be collapsed and the
+	// unique index must be created as case-insensitive.
+	if err := m.Steps(1); err != nil {
+		t.Fatalf("apply migration 5: %v", err)
+	}
+	v, dirty, err := m.Version()
+	if err != nil {
+		t.Fatalf("version after step 5: %v", err)
+	}
+	if v != 5 || dirty {
+		t.Fatalf("expected version 5 clean, got version=%d dirty=%v", v, dirty)
+	}
+
+	var after int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM bindings WHERE credential = ?`,
+		"my_key",
+	).Scan(&after); err != nil {
+		t.Fatalf("count after: %v", err)
+	}
+	if after != 1 {
+		t.Errorf("expected 1 binding after case-insensitive dedup, got %d", after)
+	}
+
+	var rulesAfter int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM rules WHERE source = ?`,
+		"binding-add:my_key",
+	).Scan(&rulesAfter); err != nil {
+		t.Fatalf("count rules after: %v", err)
+	}
+	if rulesAfter != 1 {
+		t.Errorf("expected 1 paired rule after case-insensitive dedup, got %d", rulesAfter)
+	}
+
+	// A further insert of a case variant must now fail due to the new
+	// case-insensitive unique index.
+	if _, err := db.Exec(
+		`INSERT INTO bindings (destination, credential) VALUES (?, ?)`,
+		"Api.Example.Com", "my_key",
+	); err == nil {
+		t.Error("expected UNIQUE violation on case-variant insert after migration 5")
+	}
+}
+
+// TestMigrationBindingUniqueDedupCaseInsensitiveRejectsConflicts verifies
+// that migration 5 refuses to silently drop case-variant duplicates that
+// also differ on behavioral columns. The operator must resolve the conflict
+// on the old binary before upgrading.
+func TestMigrationBindingUniqueDedupCaseInsensitiveRejectsConflicts(t *testing.T) {
+	db, m := openMigrationTestDB(t, "dedup_nocase_conflict.db")
+
+	// Apply migrations 1-4 to reach the schema right before migration 5.
+	// No unique index exists on bindings(credential, destination) yet, so
+	// case-variant rows can be seeded directly.
+	if err := m.Steps(4); err != nil {
+		t.Fatalf("apply migrations 1-4: %v", err)
+	}
+
+	// Two rows that share (credential, LOWER(destination)) but differ in
+	// both case and the behavioral column env_var.
+	if _, err := db.Exec(
+		`INSERT INTO bindings (destination, credential, env_var) VALUES (?, ?, ?)`,
+		"api.example.com", "my_key", "KEY_A",
+	); err != nil {
+		t.Fatalf("seed first: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO bindings (destination, credential, env_var) VALUES (?, ?, ?)`,
+		"API.EXAMPLE.COM", "my_key", "KEY_B",
+	); err != nil {
+		t.Fatalf("seed second: %v", err)
+	}
+
+	err := m.Steps(1)
+	if err == nil {
+		t.Fatalf("expected migration 5 to fail on case-insensitive conflict")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "sluice binding list") {
+		t.Errorf("migration error missing operator guidance: %q", msg)
+	}
+	if !strings.Contains(msg, "upgrade blocked") {
+		t.Errorf("migration error missing upgrade-blocked marker: %q", msg)
+	}
+
+	// Both rows must still exist so the operator can resolve them.
+	var count int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM bindings WHERE credential = ?`,
+		"my_key",
+	).Scan(&count); err != nil {
+		t.Fatalf("count bindings after failed migration: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected both bindings to survive aborted migration, got %d", count)
+	}
+}
+
 func TestMigrationCorruptedDB(t *testing.T) {
 	// Write garbage to a file and try to open as a SQLite DB.
 	dir := t.TempDir()
@@ -2245,6 +3207,117 @@ func TestRemoveCredentialMetaNonExistent(t *testing.T) {
 	}
 }
 
+// TestRemoveCredentialMetaCASHappyPath verifies that a matching row is
+// deleted when no concurrent writer has touched it.
+func TestRemoveCredentialMetaCASHappyPath(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.AddCredentialMeta("cas_happy", "static", ""); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	removed, noConcurrent, err := s.RemoveCredentialMetaCAS("cas_happy", "static", "")
+	if err != nil {
+		t.Fatalf("RemoveCredentialMetaCAS: %v", err)
+	}
+	if !removed {
+		t.Error("expected removed=true")
+	}
+	if !noConcurrent {
+		t.Error("expected noConcurrent=true")
+	}
+
+	meta, err := s.GetCredentialMeta("cas_happy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta != nil {
+		t.Errorf("expected row deleted, got %+v", meta)
+	}
+}
+
+// TestRemoveCredentialMetaCASTypeMismatch verifies that a row whose cred_type
+// has been overwritten by a concurrent writer is left alone.
+func TestRemoveCredentialMetaCASTypeMismatch(t *testing.T) {
+	s := newTestStore(t)
+
+	// We "inserted" static but a concurrent writer upserted the row as
+	// oauth. Our rollback must not delete their state.
+	if err := s.AddCredentialMeta("cas_type", "oauth", "https://auth.example.com/token"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	removed, noConcurrent, err := s.RemoveCredentialMetaCAS("cas_type", "static", "")
+	if err != nil {
+		t.Fatalf("RemoveCredentialMetaCAS: %v", err)
+	}
+	if removed {
+		t.Error("expected removed=false on type mismatch")
+	}
+	if noConcurrent {
+		t.Error("expected noConcurrent=false on type mismatch")
+	}
+
+	// Row must still be there with the winner's values.
+	meta, err := s.GetCredentialMeta("cas_type")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta == nil {
+		t.Fatal("expected winner's meta row to be preserved")
+	}
+	if meta.CredType != "oauth" || meta.TokenURL != "https://auth.example.com/token" {
+		t.Errorf("preserved row has wrong values: %+v", meta)
+	}
+}
+
+// TestRemoveCredentialMetaCASTokenURLMismatch verifies that a row whose
+// token_url has been overwritten is left alone.
+func TestRemoveCredentialMetaCASTokenURLMismatch(t *testing.T) {
+	s := newTestStore(t)
+
+	// We "inserted" with one token URL but a concurrent writer upserted a
+	// different one.
+	if err := s.AddCredentialMeta("cas_url", "oauth", "https://winner.example.com/token"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	removed, noConcurrent, err := s.RemoveCredentialMetaCAS("cas_url", "oauth", "https://ours.example.com/token")
+	if err != nil {
+		t.Fatalf("RemoveCredentialMetaCAS: %v", err)
+	}
+	if removed {
+		t.Error("expected removed=false on token_url mismatch")
+	}
+	if noConcurrent {
+		t.Error("expected noConcurrent=false on token_url mismatch")
+	}
+
+	meta, err := s.GetCredentialMeta("cas_url")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta == nil || meta.TokenURL != "https://winner.example.com/token" {
+		t.Errorf("expected winner's token URL preserved, got %+v", meta)
+	}
+}
+
+// TestRemoveCredentialMetaCASMissingRow verifies that a missing row is a
+// benign no-op: removed=false, noConcurrent=true, no error.
+func TestRemoveCredentialMetaCASMissingRow(t *testing.T) {
+	s := newTestStore(t)
+
+	removed, noConcurrent, err := s.RemoveCredentialMetaCAS("never_existed", "static", "")
+	if err != nil {
+		t.Fatalf("RemoveCredentialMetaCAS missing row: %v", err)
+	}
+	if removed {
+		t.Error("expected removed=false on missing row")
+	}
+	if !noConcurrent {
+		t.Error("expected noConcurrent=true on missing row")
+	}
+}
+
 func TestCredentialMetaCRUDRoundTrip(t *testing.T) {
 	s := newTestStore(t)
 
@@ -2395,6 +3468,74 @@ func TestAddBindingEnvVarUniqueness(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("add with different env_var should succeed: %v", err)
+	}
+}
+
+// TestAddBindingEnvVarUniquenessConcurrent is a regression test for the
+// check-then-insert race that existed before AddBinding wrapped the
+// env_var uniqueness check and INSERT in a single transaction. Migration
+// 000005 dropped the DB-level env_var unique index, so this invariant is
+// now enforced purely in Go. Concurrent callers trying to register the
+// same env_var against different credentials must have exactly one
+// succeed; the rest must fail with the "already used" error.
+func TestAddBindingEnvVarUniquenessConcurrent(t *testing.T) {
+	s := newTestStore(t)
+
+	const workers = 20
+	var (
+		wg       sync.WaitGroup
+		successM sync.Mutex
+		success  int
+		failures int
+	)
+	start := make(chan struct{})
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			dest := fmt.Sprintf("api.svc%d.example.com", i)
+			cred := fmt.Sprintf("cred-%d", i)
+			_, err := s.AddBinding(dest, cred, BindingOpts{
+				Ports:  []int{443},
+				EnvVar: "SHARED_KEY",
+			})
+			successM.Lock()
+			defer successM.Unlock()
+			if err == nil {
+				success++
+				return
+			}
+			if !strings.Contains(err.Error(), "already used") {
+				t.Errorf("worker %d: unexpected error: %v", i, err)
+				return
+			}
+			failures++
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	if success != 1 {
+		t.Errorf("expected exactly 1 successful AddBinding, got %d", success)
+	}
+	if failures != workers-1 {
+		t.Errorf("expected %d rejected AddBinding calls, got %d", workers-1, failures)
+	}
+
+	// Only one row should have env_var SHARED_KEY after the dust settles.
+	bindings, err := s.ListBindingsWithEnvVar()
+	if err != nil {
+		t.Fatalf("ListBindingsWithEnvVar: %v", err)
+	}
+	count := 0
+	for _, b := range bindings {
+		if b.EnvVar == "SHARED_KEY" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected 1 binding with SHARED_KEY env_var, got %d", count)
 	}
 }
 
@@ -2617,5 +3758,832 @@ func TestAddBindingEnvVarFormatValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestAddBindingDuplicateRejected verifies the partial UNIQUE index on
+// bindings(credential, destination). Two inserts with the same pair must
+// return ErrBindingDuplicate.
+func TestAddBindingDuplicateRejected(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.AddBinding("api.example.com", "my_key", BindingOpts{}); err != nil {
+		t.Fatalf("first add: %v", err)
+	}
+	_, err := s.AddBinding("api.example.com", "my_key", BindingOpts{})
+	if err == nil {
+		t.Fatal("expected duplicate error")
+	}
+	if !errors.Is(err, ErrBindingDuplicate) {
+		t.Errorf("expected ErrBindingDuplicate, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("expected descriptive error, got: %v", err)
+	}
+}
+
+// TestAddRuleAndBindingDuplicateRejected ensures the rule+binding transaction
+// also translates UNIQUE violations into ErrBindingDuplicate rather than
+// leaving a partially-applied rule behind.
+func TestAddRuleAndBindingDuplicateRejected(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.AddBinding("api.example.com", "my_key", BindingOpts{}); err != nil {
+		t.Fatalf("seed binding: %v", err)
+	}
+	_, _, err := s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{Destination: "api.example.com", Source: "binding-add:my_key"},
+		"my_key",
+		BindingOpts{},
+	)
+	if err == nil {
+		t.Fatal("expected duplicate error")
+	}
+	if !errors.Is(err, ErrBindingDuplicate) {
+		t.Errorf("expected ErrBindingDuplicate, got %v", err)
+	}
+
+	// The rule insert should have been rolled back with the failed binding
+	// insert so no orphan rule remains.
+	rules, err := s.ListRules(RuleFilter{Verdict: "allow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("expected 0 rules after rollback, got %d", len(rules))
+	}
+}
+
+// TestRemoveRuleByBindingPair verifies that the helper removes auto-created
+// rules tagged with either binding-add:<cred> or cred-add:<cred> on the
+// given destination, while leaving manually-tagged rules alone.
+func TestRemoveRuleByBindingPair(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.AddRule("allow", RuleOpts{
+		Destination: "api.example.com",
+		Source:      BindingAddSourcePrefix + "cred1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddRule("allow", RuleOpts{
+		Destination: "api.example.com",
+		Source:      CredAddSourcePrefix + "cred1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddRule("allow", RuleOpts{
+		Destination: "api.example.com",
+		Source:      "manual",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := s.RemoveRuleByBindingPair("cred1", "api.example.com")
+	if err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("expected 2 rules removed, got %d", n)
+	}
+
+	rules, err := s.ListRules(RuleFilter{Verdict: "allow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule remaining (manual), got %d", len(rules))
+	}
+	if rules[0].Source != "manual" {
+		t.Errorf("expected manual rule to remain, got source %q", rules[0].Source)
+	}
+}
+
+// TestUpdateBindingWithRuleSync verifies the transactional update path:
+// binding destination change + paired rule update + returned ruleFound flag.
+func TestUpdateBindingWithRuleSync(t *testing.T) {
+	s := newTestStore(t)
+	ruleID, bindingID, err := s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{
+			Destination: "api.old.com",
+			Source:      BindingAddSourcePrefix + "my_key",
+		},
+		"my_key",
+		BindingOpts{},
+	)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	newDest := "api.new.com"
+	retRuleID, ruleFound, current, err := s.UpdateBindingWithRuleSync(bindingID, BindingUpdateOpts{
+		Destination: &newDest,
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !ruleFound {
+		t.Error("expected ruleFound=true")
+	}
+	if retRuleID != ruleID {
+		t.Errorf("ruleID = %d, want %d", retRuleID, ruleID)
+	}
+	if current.Destination != "api.old.com" {
+		t.Errorf("current.Destination = %q, want api.old.com", current.Destination)
+	}
+
+	// Verify the row is updated.
+	bindings, _ := s.ListBindings()
+	if len(bindings) != 1 || bindings[0].Destination != "api.new.com" {
+		t.Errorf("binding destination not updated: %+v", bindings)
+	}
+
+	// Run again with no paired rule remaining.
+	_, _ = s.RemoveRule(ruleID)
+	newerDest := "api.newer.com"
+	_, ruleFound2, _, err := s.UpdateBindingWithRuleSync(bindingID, BindingUpdateOpts{
+		Destination: &newerDest,
+	})
+	if err != nil {
+		t.Fatalf("update without paired rule: %v", err)
+	}
+	if ruleFound2 {
+		t.Error("expected ruleFound=false when no paired rule exists")
+	}
+}
+
+// TestUpdateBindingWithRuleSyncPropagatesPortsAndProtocols verifies that
+// changing a binding's ports or protocols also rewrites the paired allow
+// rule's ports/protocols in the same transaction. Without this propagation
+// the binding would match the new port but the paired rule would still
+// authorize the old one, breaking the new port and leaking the old.
+func TestUpdateBindingWithRuleSyncPropagatesPortsAndProtocols(t *testing.T) {
+	s := newTestStore(t)
+	ruleID, bindingID, err := s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{
+			Destination: "api.example.com",
+			Ports:       []int{443},
+			Protocols:   []string{"tcp"},
+			Source:      BindingAddSourcePrefix + "cred",
+		},
+		"cred",
+		BindingOpts{
+			Ports:     []int{443},
+			Protocols: []string{"tcp"},
+		},
+	)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Change ports and protocols only. Destination stays the same.
+	newPorts := []int{8443}
+	newProtocols := []string{"tcp", "udp"}
+	retRuleID, ruleFound, _, err := s.UpdateBindingWithRuleSync(bindingID, BindingUpdateOpts{
+		Ports:     &newPorts,
+		Protocols: &newProtocols,
+	})
+	if err != nil {
+		t.Fatalf("update ports/protocols: %v", err)
+	}
+	if !ruleFound {
+		t.Fatal("expected ruleFound=true")
+	}
+	if retRuleID != ruleID {
+		t.Errorf("ruleID mismatch: got %d want %d", retRuleID, ruleID)
+	}
+
+	// Verify binding row reflects the new values.
+	bindings, _ := s.ListBindings()
+	if len(bindings) != 1 {
+		t.Fatalf("expected 1 binding, got %d", len(bindings))
+	}
+	if len(bindings[0].Ports) != 1 || bindings[0].Ports[0] != 8443 {
+		t.Errorf("binding ports = %v, want [8443]", bindings[0].Ports)
+	}
+	if len(bindings[0].Protocols) != 2 {
+		t.Errorf("binding protocols = %v, want [tcp udp]", bindings[0].Protocols)
+	}
+
+	// Verify the paired allow rule also reflects the new values.
+	rules, _ := s.ListRules(RuleFilter{Type: "network"})
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rules))
+	}
+	if len(rules[0].Ports) != 1 || rules[0].Ports[0] != 8443 {
+		t.Errorf("rule ports = %v, want [8443]", rules[0].Ports)
+	}
+	if len(rules[0].Protocols) != 2 {
+		t.Errorf("rule protocols = %v, want [tcp udp]", rules[0].Protocols)
+	}
+
+	// Clearing ports and protocols on the binding should also clear them
+	// on the paired rule. An empty slice ([]int{}) is the "no ports" state
+	// which the store stores as NULL.
+	emptyPorts := []int{}
+	emptyProtocols := []string{}
+	if _, _, _, err := s.UpdateBindingWithRuleSync(bindingID, BindingUpdateOpts{
+		Ports:     &emptyPorts,
+		Protocols: &emptyProtocols,
+	}); err != nil {
+		t.Fatalf("clear ports/protocols: %v", err)
+	}
+
+	bindings, _ = s.ListBindings()
+	if len(bindings[0].Ports) != 0 {
+		t.Errorf("binding ports not cleared: %v", bindings[0].Ports)
+	}
+	if len(bindings[0].Protocols) != 0 {
+		t.Errorf("binding protocols not cleared: %v", bindings[0].Protocols)
+	}
+	rules, _ = s.ListRules(RuleFilter{Type: "network"})
+	if len(rules[0].Ports) != 0 {
+		t.Errorf("rule ports not cleared: %v", rules[0].Ports)
+	}
+	if len(rules[0].Protocols) != 0 {
+		t.Errorf("rule protocols not cleared: %v", rules[0].Protocols)
+	}
+}
+
+// TestUpdateBindingWithRuleSyncRejectsInvalidPorts verifies that the
+// paired-rule sync path validates port ranges before touching the rule.
+func TestUpdateBindingWithRuleSyncRejectsInvalidPorts(t *testing.T) {
+	s := newTestStore(t)
+	_, bindingID, err := s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{
+			Destination: "api.example.com",
+			Ports:       []int{443},
+			Source:      BindingAddSourcePrefix + "cred",
+		},
+		"cred",
+		BindingOpts{Ports: []int{443}},
+	)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	badPorts := []int{70000}
+	_, _, _, err = s.UpdateBindingWithRuleSync(bindingID, BindingUpdateOpts{Ports: &badPorts})
+	if err == nil {
+		t.Fatal("expected error for out-of-range port")
+	}
+}
+
+// TestAddRuleAndBindingRejectsInvalidPorts ensures port-range validation
+// runs inside AddRuleAndBinding instead of deferring it to engine recompile.
+// Recompile errors are logged but not surfaced to API callers, so out-of-
+// range ports would otherwise silently create bad rules.
+func TestAddRuleAndBindingRejectsInvalidPorts(t *testing.T) {
+	s := newTestStore(t)
+
+	// Rule port out of range.
+	_, _, err := s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{Destination: "api.example.com", Ports: []int{0}},
+		"cred",
+		BindingOpts{},
+	)
+	if err == nil {
+		t.Fatal("expected error for rule port 0")
+	}
+
+	// Binding port out of range.
+	_, _, err = s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{Destination: "api.example.com"},
+		"cred",
+		BindingOpts{Ports: []int{70000}},
+	)
+	if err == nil {
+		t.Fatal("expected error for binding port 70000")
+	}
+
+	// Verify nothing was persisted.
+	rules, _ := s.ListRules(RuleFilter{Type: "network"})
+	if len(rules) != 0 {
+		t.Errorf("expected 0 rules after rejected inserts, got %d", len(rules))
+	}
+	bindings, _ := s.ListBindings()
+	if len(bindings) != 0 {
+		t.Errorf("expected 0 bindings after rejected inserts, got %d", len(bindings))
+	}
+}
+
+// TestAddRuleAndBindingRejectsUnknownProtocol verifies that a typo in the
+// binding or rule protocols list (e.g. "htp") is caught up front instead
+// of being stored silently and surfacing later as a protocol mismatch at
+// connection time. Mirrors the TOML import validator.
+func TestAddRuleAndBindingRejectsUnknownProtocol(t *testing.T) {
+	s := newTestStore(t)
+
+	// Rule-level typo.
+	_, _, err := s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{Destination: "api.example.com", Protocols: []string{"htp"}},
+		"cred",
+		BindingOpts{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "unknown protocol") {
+		t.Fatalf("expected unknown protocol error for rule, got %v", err)
+	}
+
+	// Binding-level typo.
+	_, _, err = s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{Destination: "api.example.com"},
+		"cred",
+		BindingOpts{Protocols: []string{"htps"}},
+	)
+	if err == nil || !strings.Contains(err.Error(), "unknown protocol") {
+		t.Fatalf("expected unknown protocol error for binding, got %v", err)
+	}
+
+	// Valid protocols must still succeed.
+	if _, _, err := s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{Destination: "api.example.com", Protocols: []string{"https"}},
+		"cred",
+		BindingOpts{Protocols: []string{"https"}},
+	); err != nil {
+		t.Fatalf("unexpected error for valid protocols: %v", err)
+	}
+
+	// Verify nothing was persisted from the rejected inserts. Only the
+	// valid call above should have stored a rule/binding.
+	rules, _ := s.ListRules(RuleFilter{Type: "network"})
+	if len(rules) != 1 {
+		t.Errorf("expected 1 rule after valid insert, got %d", len(rules))
+	}
+}
+
+// TestAddBindingRejectsUnknownProtocol mirrors the AddRuleAndBinding test
+// for the standalone AddBinding path.
+func TestAddBindingRejectsUnknownProtocol(t *testing.T) {
+	s := newTestStore(t)
+
+	_, err := s.AddBinding("api.example.com", "cred", BindingOpts{Protocols: []string{"htp"}})
+	if err == nil || !strings.Contains(err.Error(), "unknown protocol") {
+		t.Fatalf("expected unknown protocol error, got %v", err)
+	}
+
+	// Valid protocol succeeds.
+	if _, err := s.AddBinding("api.example.com", "cred", BindingOpts{Protocols: []string{"https"}}); err != nil {
+		t.Fatalf("unexpected error for valid protocol: %v", err)
+	}
+}
+
+// TestUpdateBindingWithRuleSyncRejectsUnknownProtocol verifies the update
+// path rejects unknown protocols before any transaction runs.
+func TestUpdateBindingWithRuleSyncRejectsUnknownProtocol(t *testing.T) {
+	s := newTestStore(t)
+	_, bindingID, err := s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{
+			Destination: "api.example.com",
+			Source:      BindingAddSourcePrefix + "cred",
+		},
+		"cred",
+		BindingOpts{},
+	)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	badProtos := []string{"htp"}
+	_, _, _, err = s.UpdateBindingWithRuleSync(bindingID, BindingUpdateOpts{Protocols: &badProtos})
+	if err == nil || !strings.Contains(err.Error(), "unknown protocol") {
+		t.Fatalf("expected unknown protocol error, got %v", err)
+	}
+
+	// Valid update succeeds.
+	goodProtos := []string{"https"}
+	if _, _, _, err := s.UpdateBindingWithRuleSync(bindingID, BindingUpdateOpts{Protocols: &goodProtos}); err != nil {
+		t.Fatalf("unexpected error for valid update: %v", err)
+	}
+}
+
+// TestUpdateBindingWithRuleSyncUpdatesBothSourcePrefixes verifies that
+// when a credential owns auto-created allow rules tagged with both
+// "cred-add:<cred>" and "binding-add:<cred>" at the same destination,
+// updating the binding propagates the change to every matching rule,
+// not just the first one the store finds. Before the fix, the loop
+// returned after updating a single source prefix and left any other
+// paired rule at the old values, which meant the binding's network
+// scope drifted from what the remaining rule authorized.
+func TestUpdateBindingWithRuleSyncUpdatesBothSourcePrefixes(t *testing.T) {
+	s := newTestStore(t)
+
+	// Seed the first rule via AddRuleAndBinding with the cred-add prefix.
+	// This mirrors "sluice cred add --destination" creating the initial
+	// rule+binding pair.
+	credAddRuleID, bindingID, err := s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{
+			Destination: "api.example.com",
+			Source:      CredAddSourcePrefix + "cred",
+		},
+		"cred",
+		BindingOpts{},
+	)
+	if err != nil {
+		t.Fatalf("seed cred-add rule+binding: %v", err)
+	}
+
+	// Manually insert a second rule at the same destination tagged with
+	// the binding-add prefix. This simulates a later "sluice binding add"
+	// that reuses the same credential+destination and produces its own
+	// paired allow rule. Migration 5 normally collapses duplicates but
+	// only within the same (source, destination) group, so a cred-add
+	// rule and a binding-add rule at the same destination both survive.
+	res, err := s.db.Exec(
+		`INSERT INTO rules (verdict, destination, source, name) VALUES (?, ?, ?, ?)`,
+		"allow", "api.example.com", BindingAddSourcePrefix+"cred", "auto-binding",
+	)
+	if err != nil {
+		t.Fatalf("seed binding-add rule: %v", err)
+	}
+	bindingAddRuleID, _ := res.LastInsertId()
+
+	// Change the destination via the rule-sync path. Both paired rules
+	// must be rewritten to the new destination.
+	newDest := "api.new.com"
+	if _, _, _, err := s.UpdateBindingWithRuleSync(bindingID, BindingUpdateOpts{
+		Destination: &newDest,
+	}); err != nil {
+		t.Fatalf("update binding destination: %v", err)
+	}
+
+	// Both rules must have moved to the new destination. Query each
+	// explicitly so a bug that updates only one is caught.
+	var credAddDest, bindingAddDest string
+	if err := s.db.QueryRow(
+		"SELECT destination FROM rules WHERE id = ?", credAddRuleID,
+	).Scan(&credAddDest); err != nil {
+		t.Fatalf("load cred-add rule: %v", err)
+	}
+	if credAddDest != newDest {
+		t.Errorf("cred-add rule destination = %q, want %q", credAddDest, newDest)
+	}
+	if err := s.db.QueryRow(
+		"SELECT destination FROM rules WHERE id = ?", bindingAddRuleID,
+	).Scan(&bindingAddDest); err != nil {
+		t.Fatalf("load binding-add rule: %v", err)
+	}
+	if bindingAddDest != newDest {
+		t.Errorf("binding-add rule destination = %q, want %q", bindingAddDest, newDest)
+	}
+}
+
+// TestRemoveBindingWithRuleCleanupCaseInsensitive verifies that
+// RemoveBindingWithRuleCleanup deletes the paired allow rule even when the
+// rule's destination differs in case from the binding's destination. Policy
+// matching and the bindings UNIQUE index both treat destinations as
+// case-insensitive, so an upgraded database may legitimately hold a binding
+// at "api.example.com" whose paired rule is stored at "API.EXAMPLE.COM".
+// A case-sensitive delete would leave the rule orphaned at the old case and
+// keep allowing traffic after the binding is gone. Regression for codex
+// iteration 9 finding 2.
+func TestRemoveBindingWithRuleCleanupCaseInsensitive(t *testing.T) {
+	s := newTestStore(t)
+
+	// Add a binding via AddBinding (no paired rule) so we can seed the
+	// paired rule at a different case without fighting the atomic
+	// AddRuleAndBinding path.
+	bindingID, err := s.AddBinding("api.example.com", "my_key", BindingOpts{})
+	if err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+
+	// Seed the paired rule manually with the destination in upper case.
+	if _, err := s.db.Exec(
+		`INSERT INTO rules (verdict, destination, source, name) VALUES (?, ?, ?, ?)`,
+		"allow", "API.EXAMPLE.COM", BindingAddSourcePrefix+"my_key", "auto",
+	); err != nil {
+		t.Fatalf("seed paired rule: %v", err)
+	}
+
+	_, dest, removed, _, found, err := s.RemoveBindingWithRuleCleanup(bindingID)
+	if err != nil {
+		t.Fatalf("remove binding: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected binding to be found")
+	}
+	if dest != "api.example.com" {
+		t.Errorf("expected dest %q, got %q", "api.example.com", dest)
+	}
+	if removed != 1 {
+		t.Errorf("expected 1 paired rule removed, got %d", removed)
+	}
+
+	var ruleCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM rules WHERE source = ?`,
+		BindingAddSourcePrefix+"my_key",
+	).Scan(&ruleCount); err != nil {
+		t.Fatalf("count rules after cleanup: %v", err)
+	}
+	if ruleCount != 0 {
+		t.Errorf("expected paired rule to be deleted, got %d rules remaining", ruleCount)
+	}
+}
+
+// TestUpdateBindingWithRuleSyncCaseInsensitive verifies that
+// UpdateBindingWithRuleSync finds and rewrites the paired allow rule even
+// when the rule's destination is stored in a different case than the
+// binding's destination. Matches the case-sensitivity fix applied to
+// RemoveBindingWithRuleCleanup. Regression for codex iteration 9 finding 2.
+func TestUpdateBindingWithRuleSyncCaseInsensitive(t *testing.T) {
+	s := newTestStore(t)
+
+	bindingID, err := s.AddBinding("api.example.com", "my_key", BindingOpts{})
+	if err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+
+	// Seed the paired rule at a differently-cased destination.
+	res, err := s.db.Exec(
+		`INSERT INTO rules (verdict, destination, source, name) VALUES (?, ?, ?, ?)`,
+		"allow", "API.EXAMPLE.COM", BindingAddSourcePrefix+"my_key", "auto",
+	)
+	if err != nil {
+		t.Fatalf("seed paired rule: %v", err)
+	}
+	pairedID, _ := res.LastInsertId()
+
+	newDest := "api.new.example.com"
+	retID, ruleFound, _, err := s.UpdateBindingWithRuleSync(bindingID, BindingUpdateOpts{
+		Destination: &newDest,
+	})
+	if err != nil {
+		t.Fatalf("update binding: %v", err)
+	}
+	if !ruleFound {
+		t.Errorf("expected paired rule to be found via case-insensitive match")
+	}
+	if retID != pairedID {
+		t.Errorf("expected paired rule id %d, got %d", pairedID, retID)
+	}
+
+	var storedDest string
+	if err := s.db.QueryRow(
+		`SELECT destination FROM rules WHERE id = ?`,
+		pairedID,
+	).Scan(&storedDest); err != nil {
+		t.Fatalf("load paired rule: %v", err)
+	}
+	if storedDest != newDest {
+		t.Errorf("expected paired rule destination %q, got %q", newDest, storedDest)
+	}
+}
+
+// TestImportTOMLValidatesDestinationGlob verifies that TOML import runs
+// destination patterns through validateDestinationGlob before committing.
+// Today validateDestinationGlob only rejects empty strings (every other
+// input compiles cleanly because regexp.QuoteMeta escapes meta characters
+// byte-by-byte), but wiring the call through the import path keeps
+// validation centralized so tightening CompileGlob later fails at import
+// time with row context instead of much later inside a recompile. The
+// test asserts that valid patterns still import and that empty-destination
+// rows are rejected from both the rule and binding import paths.
+func TestImportTOMLValidatesDestinationGlob(t *testing.T) {
+	s := newTestStore(t)
+
+	// Empty destination on a rule fails before the INSERT runs.
+	emptyRuleTOML := []byte(`
+[[allow]]
+destination = ""
+`)
+	if _, err := s.ImportTOML(emptyRuleTOML); err == nil {
+		t.Error("expected error for empty rule destination")
+	}
+
+	// Empty destination on a binding fails before the INSERT runs.
+	emptyBindingTOML := []byte(`
+[[binding]]
+destination = ""
+credential = "cred"
+`)
+	if _, err := s.ImportTOML(emptyBindingTOML); err == nil {
+		t.Error("expected error for empty binding destination")
+	}
+
+	// Valid patterns still import cleanly.
+	goodTOML := []byte(`
+[[allow]]
+destination = "*.example.com"
+
+[[binding]]
+destination = "api.example.com"
+credential = "cred"
+`)
+	if _, err := s.ImportTOML(goodTOML); err != nil {
+		t.Fatalf("unexpected error for valid import: %v", err)
+	}
+	rules, _ := s.ListRules(RuleFilter{})
+	if len(rules) != 1 {
+		t.Errorf("expected 1 rule, got %d", len(rules))
+	}
+	bindings, _ := s.ListBindings()
+	if len(bindings) != 1 {
+		t.Errorf("expected 1 binding, got %d", len(bindings))
+	}
+}
+
+// TestAddRuleAndBindingValidationErrorsAreTagged verifies that every
+// client-facing validation failure from AddRuleAndBinding wraps
+// ErrBindingValidation. The API layer uses errors.Is on this sentinel to
+// decide 400 vs 500, so any validation path that forgets to wrap would
+// silently masquerade as a 500.
+func TestAddRuleAndBindingValidationErrorsAreTagged(t *testing.T) {
+	s := newTestStore(t)
+
+	cases := []struct {
+		name     string
+		verdict  string
+		ruleOpts RuleOpts
+		cred     string
+		binding  BindingOpts
+	}{
+		{"empty verdict", "", RuleOpts{Destination: "x.com"}, "cred", BindingOpts{}},
+		{"invalid verdict", "bogus", RuleOpts{Destination: "x.com"}, "cred", BindingOpts{}},
+		{"empty destination", "allow", RuleOpts{}, "cred", BindingOpts{}},
+		{"empty credential", "allow", RuleOpts{Destination: "x.com"}, "", BindingOpts{}},
+		{"bad rule port", "allow", RuleOpts{Destination: "x.com", Ports: []int{70000}}, "cred", BindingOpts{}},
+		{"bad binding port", "allow", RuleOpts{Destination: "x.com"}, "cred", BindingOpts{Ports: []int{0}}},
+		{"bad rule protocol", "allow", RuleOpts{Destination: "x.com", Protocols: []string{"htp"}}, "cred", BindingOpts{}},
+		{"bad binding protocol", "allow", RuleOpts{Destination: "x.com"}, "cred", BindingOpts{Protocols: []string{"htp"}}},
+		{"bad env var", "allow", RuleOpts{Destination: "x.com"}, "cred", BindingOpts{EnvVar: "1INVALID"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := s.AddRuleAndBinding(tc.verdict, tc.ruleOpts, tc.cred, tc.binding)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !errors.Is(err, ErrBindingValidation) {
+				t.Errorf("expected ErrBindingValidation, got %v", err)
+			}
+		})
+	}
+}
+
+// TestUpdateBindingWithRuleSyncValidationErrorsAreTagged mirrors the
+// AddRuleAndBinding test for the update path.
+func TestUpdateBindingWithRuleSyncValidationErrorsAreTagged(t *testing.T) {
+	s := newTestStore(t)
+	_, bindingID, err := s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{
+			Destination: "api.example.com",
+			Source:      BindingAddSourcePrefix + "cred",
+		},
+		"cred",
+		BindingOpts{},
+	)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	emptyDest := ""
+	badProtos := []string{"htp"}
+	badPorts := []int{0}
+	badEnv := "1INVALID"
+
+	cases := []struct {
+		name string
+		opts BindingUpdateOpts
+	}{
+		{"empty destination", BindingUpdateOpts{Destination: &emptyDest}},
+		{"invalid protocol", BindingUpdateOpts{Protocols: &badProtos}},
+		{"invalid port", BindingUpdateOpts{Ports: &badPorts}},
+		{"invalid env var", BindingUpdateOpts{EnvVar: &badEnv}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, err := s.UpdateBindingWithRuleSync(bindingID, tc.opts)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !errors.Is(err, ErrBindingValidation) {
+				t.Errorf("expected ErrBindingValidation, got %v", err)
+			}
+		})
+	}
+}
+
+// TestAddBindingCaseInsensitiveDuplicate verifies that the unique index on
+// (credential, LOWER(destination)) established by migration 000005 rejects
+// duplicate bindings whose destinations differ only in case. Policy
+// matching is case-insensitive, so these bindings target the exact same
+// set of connections and must not coexist. Regression for codex iteration
+// 6 finding 1.
+func TestAddBindingCaseInsensitiveDuplicate(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.AddBinding("api.example.com", "my_key", BindingOpts{}); err != nil {
+		t.Fatalf("first add: %v", err)
+	}
+
+	_, err := s.AddBinding("API.EXAMPLE.COM", "my_key", BindingOpts{})
+	if err == nil {
+		t.Fatal("expected duplicate error for case-variant destination")
+	}
+	if !errors.Is(err, ErrBindingDuplicate) {
+		t.Errorf("expected ErrBindingDuplicate, got %v", err)
+	}
+
+	// Still exactly one binding row for this pair.
+	bindings, err := s.ListBindings()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	count := 0
+	for _, b := range bindings {
+		if b.Credential == "my_key" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected 1 binding after case-variant insert, got %d", count)
+	}
+}
+
+// TestAddRuleAndBindingCaseInsensitiveDuplicate is the AddRuleAndBinding
+// counterpart of TestAddBindingCaseInsensitiveDuplicate. The combined
+// rule+binding transaction must also roll back when the case-variant
+// duplicate is detected so no orphan rule remains.
+func TestAddRuleAndBindingCaseInsensitiveDuplicate(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, _, err := s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{Destination: "api.example.com", Source: "binding-add:my_key"},
+		"my_key",
+		BindingOpts{},
+	); err != nil {
+		t.Fatalf("first add: %v", err)
+	}
+
+	_, _, err := s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{Destination: "API.EXAMPLE.COM", Source: "binding-add:my_key"},
+		"my_key",
+		BindingOpts{},
+	)
+	if err == nil {
+		t.Fatal("expected duplicate error for case-variant destination")
+	}
+	if !errors.Is(err, ErrBindingDuplicate) {
+		t.Errorf("expected ErrBindingDuplicate, got %v", err)
+	}
+
+	// The rolled-back second call must not leave an orphan rule behind,
+	// so there is still exactly one rule (from the first successful add).
+	rules, err := s.ListRules(RuleFilter{Verdict: "allow"})
+	if err != nil {
+		t.Fatalf("list rules: %v", err)
+	}
+	if len(rules) != 1 {
+		t.Errorf("expected 1 allow rule, got %d", len(rules))
+	}
+}
+
+// TestAddBindingValidation verifies that AddBinding rejects invalid
+// destination globs, out-of-range ports, and unknown protocols before
+// inserting anything, and wraps failures with ErrBindingValidation so API
+// callers can map them to 400. Regression for codex iteration 6 finding 3.
+func TestAddBindingValidation(t *testing.T) {
+	s := newTestStore(t)
+
+	cases := []struct {
+		name string
+		dest string
+		cred string
+		opts BindingOpts
+	}{
+		{"empty destination", "", "cred", BindingOpts{}},
+		{"empty credential", "api.example.com", "", BindingOpts{}},
+		{"port zero", "api.example.com", "cred", BindingOpts{Ports: []int{0}}},
+		{"port too high", "api.example.com", "cred", BindingOpts{Ports: []int{70000}}},
+		{"unknown protocol", "api.example.com", "cred", BindingOpts{Protocols: []string{"htp"}}},
+		{"invalid env var", "api.example.com", "cred", BindingOpts{EnvVar: "1BAD"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := s.AddBinding(tc.dest, tc.cred, tc.opts)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !errors.Is(err, ErrBindingValidation) {
+				t.Errorf("expected ErrBindingValidation, got %v", err)
+			}
+		})
+	}
+
+	// Valid input still succeeds on the same store.
+	if _, err := s.AddBinding("api.example.com", "cred", BindingOpts{Ports: []int{443}}); err != nil {
+		t.Errorf("unexpected error for valid input: %v", err)
 	}
 }

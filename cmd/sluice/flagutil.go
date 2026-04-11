@@ -2,8 +2,36 @@ package main
 
 import (
 	"flag"
+	"fmt"
+	"strconv"
 	"strings"
 )
+
+// parsePortsList parses a comma-separated string of port numbers into a
+// []int, validating that each port is in the legal 1-65535 range. An empty
+// input returns (nil, nil) so callers can pass through "no port filter"
+// without a special case. Whitespace around each entry is trimmed.
+//
+// Used by the binding/policy/cred CLI subcommands which all share the
+// same --ports flag shape.
+func parsePortsList(s string) ([]int, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var ports []int
+	for _, ps := range strings.Split(s, ",") {
+		ps = strings.TrimSpace(ps)
+		p, err := strconv.Atoi(ps)
+		if err != nil {
+			return nil, fmt.Errorf("invalid port %q: %w", ps, err)
+		}
+		if p < 1 || p > 65535 {
+			return nil, fmt.Errorf("port %d out of range (1-65535)", p)
+		}
+		ports = append(ports, p)
+	}
+	return ports, nil
+}
 
 // reorderFlagsBeforePositional returns a copy of args with all flag
 // arguments moved before any positional arguments, so that Go's stdlib
