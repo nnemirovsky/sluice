@@ -101,12 +101,12 @@ Client -> tun2proxy -> SOCKS5 UDP ASSOCIATE -> bindLn
 - Modify: `internal/proxy/server.go`
 - Modify: `internal/proxy/server_test.go`
 
-- [ ] Add `pendingQUICSessions` map (mutex-protected) to track in-flight approvals
-- [ ] Before calling `resolveQUICPolicy`, check if sessionKey is pending. If so, buffer the payload (max 32 packets, drop beyond). Skip broker call.
-- [ ] When approval resolves: if allowed, create session, flush buffered payloads through it, start relay goroutine. If denied, discard buffer.
-- [ ] Remove pending entry after resolution (both allow and deny paths)
-- [ ] Write tests: concurrent packets to same dest trigger one broker request, buffer overflow drops packets, denied approval discards buffer
-- [ ] Run tests
+- [x] Add `pendingQUICSessions` map (mutex-protected) to track in-flight approvals
+- [x] Before calling `resolveQUICPolicy`, check if sessionKey is pending. If so, buffer the payload (max 32 packets, drop beyond). Skip broker call.
+- [x] When approval resolves: if allowed, create session, flush buffered payloads through it, start relay goroutine. If denied, discard buffer.
+- [x] Remove pending entry after resolution (both allow and deny paths)
+- [x] Write tests: concurrent packets to same dest trigger one broker request, buffer overflow drops packets, denied approval discards buffer
+- [x] Run tests
 
 ### Task 3: Fix response relay path
 
@@ -120,7 +120,38 @@ Client -> tun2proxy -> SOCKS5 UDP ASSOCIATE -> bindLn
 - [ ] Write test: forward a QUIC-like packet to a UDP echo server through the relay, verify response returns via relayQUICResponses
 - [ ] Run tests
 
-### Task 4: Verify acceptance criteria
+### Task 4: Fix httptest IPv6 listener failures
+
+**Files:**
+- Modify: `internal/proxy/addon_h2_test.go` (`startH2Backend` function)
+- Modify: `internal/vault/provider_hashicorp_test.go` (`newMockVaultServer` function)
+
+- [ ] Fix `startH2Backend` in `addon_h2_test.go`: use `httptest.NewUnstartedServer()`, override `Listener` with `net.Listen("tcp4", "127.0.0.1:0")`, then `StartTLS()`
+- [ ] Fix `newMockVaultServer` in `provider_hashicorp_test.go`: same pattern, use IPv4-only listener
+- [ ] Run `go test ./internal/proxy/ ./internal/vault/ -count=1 -timeout 60s` to verify both pass
+- [ ] Run tests
+
+### Task 5: Comprehensive e2e tests for all supported protocols
+
+**Files:**
+- Create: `e2e/websocket_test.go`
+- Create: `e2e/grpc_test.go`
+- Create: `e2e/quic_test.go`
+- Create: `e2e/dns_test.go`
+- Create: `e2e/mail_test.go`
+- Modify: `e2e/helpers_test.go` (add helpers for new protocol test servers)
+
+Current e2e coverage: HTTP/HTTPS, SSH, MCP only. Missing: WebSocket, gRPC, QUIC/HTTP3, DNS, IMAP/SMTP.
+
+- [ ] **WebSocket e2e** (`e2e/websocket_test.go`): start a WebSocket echo server behind sluice SOCKS5. Test allow rule permits WS upgrade and message exchange. Test deny rule blocks WS handshake. Test phantom token in WS handshake headers is replaced. Test text frame phantom swap works.
+- [ ] **gRPC e2e** (`e2e/grpc_test.go`): start a gRPC server behind sluice. Test allow rule permits unary RPC. Test deny rule blocks connection. Test per-stream policy (HTTP/2 streams). Test credential injection in gRPC metadata headers.
+- [ ] **QUIC/HTTP3 e2e** (`e2e/quic_test.go`): start an HTTP/3 server behind sluice. Test QUIC SNI extraction shows hostname in audit. Test allow rule permits HTTP/3 request. Test deny rule blocks QUIC connection. Test per-request policy on HTTP/3.
+- [ ] **DNS e2e** (`e2e/dns_test.go`): test DNS query interception. Test deny rule returns NXDOMAIN. Test allowed domain forwarded to upstream. Test reverse cache populated after DNS query.
+- [ ] **IMAP/SMTP e2e** (`e2e/mail_test.go`): start mock IMAP/SMTP servers behind sluice. Test allow rule permits connection. Test deny rule blocks. Test AUTH command phantom password swap.
+- [ ] Run all e2e tests: `go test -tags=e2e ./e2e/ -v -count=1 -timeout=300s`
+- [ ] Run tests
+
+### Task 6: Verify acceptance criteria
 
 - [ ] QUIC approval shows hostname (not IP) in Telegram message
 - [ ] Single broker request per destination during approval wait
@@ -129,7 +160,7 @@ Client -> tun2proxy -> SOCKS5 UDP ASSOCIATE -> bindLn
 - [ ] Deploy to knuth and test with quictest binary
 - [ ] Run tests - must pass before next task
 
-### Task 5: [Final] Update documentation
+### Task 7: [Final] Update documentation
 
 - [ ] Update CLAUDE.md if QUIC handling details changed
 - [ ] Move this plan to `docs/plans/completed/`

@@ -1483,6 +1483,8 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 	// Track upstream UDP sessions for non-DNS traffic.
 	var mu sync.Mutex
 	sessions := make(map[string]*udpSession)
+	// Track in-flight QUIC broker approvals. Protected by mu.
+	pendingQUICSessions := make(map[string]*pendingQUICSession)
 
 	// Ensure bindLn is closed exactly once regardless of which goroutine
 	// exits first (dispatch loop vs TCP control connection reader).
@@ -1498,6 +1500,15 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 					s.quicProxy.UnregisterExpectedHost(sess.upstream.LocalAddr().String())
 				}
 				_ = sess.upstream.Close()
+			}
+			// Cancel any pending QUIC approvals so their goroutines exit.
+			for key, pending := range pendingQUICSessions {
+				select {
+				case <-pending.done:
+				default:
+					close(pending.done)
+				}
+				delete(pendingQUICSessions, key)
 			}
 			mu.Unlock()
 			closeBind()
@@ -1625,48 +1636,96 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 
 					quicAddr := s.quicProxy.Addr()
 					if quicAddr != nil {
-						checker, drop := s.resolveQUICPolicy(policyDest, port)
-						if drop {
-							continue
-						}
-
-						upstream, listenErr := net.ListenPacket("udp", "127.0.0.1:0")
-						if listenErr != nil {
-							log.Printf("[QUIC] create upstream for %s: %v", sessionKey, listenErr)
-							continue
-						}
-						// Register expected host so the QUIC proxy can verify
-						// that the TLS SNI matches the policy-checked destination.
-						// A non-nil checker enables per-HTTP/3-request approval
-						// for ask-rule matches. Allow with RuleMatch passes nil
-						// (fast path, no per-request check).
-						if checker != nil {
-							s.quicProxy.RegisterExpectedHostWithChecker(upstream.LocalAddr().String(), policyDest, port, checker)
-						} else {
-							s.quicProxy.RegisterExpectedHost(upstream.LocalAddr().String(), policyDest, port)
-						}
+						// Deduplicate broker requests: if there is already
+						// a pending approval for this session key, buffer
+						// the packet instead of triggering another call.
 						mu.Lock()
-						sess = &udpSession{upstream: upstream, lastSeen: time.Now()}
-						sessions[sessionKey] = sess
-						mu.Unlock()
-						// Use the original destination for SOCKS5 response headers
-						// since the QUIC proxy is local and its address would be
-						// meaningless to the client.
-						origDst := &net.UDPAddr{IP: net.ParseIP(dest), Port: port}
-						if origDst.IP == nil {
-							// Domain destination: resolve for response header.
-							addrs, resolveErr := net.LookupIP(dest)
-							if resolveErr == nil && len(addrs) > 0 {
-								origDst.IP = addrs[0]
+						if pending, ok := pendingQUICSessions[sessionKey]; ok {
+							pending.mu.Lock()
+							if len(pending.packets) < maxPendingQUICPackets {
+								pkt := make([]byte, len(payload))
+								copy(pkt, payload)
+								pending.packets = append(pending.packets, pkt)
 							} else {
-								origDst.IP = net.IPv4zero
+								log.Printf("[QUIC] pending buffer full for %s, dropping packet", sessionKey)
 							}
+							pending.mu.Unlock()
+							mu.Unlock()
+							continue
 						}
-						go s.relayQUICResponses(upstream, bindLn, srcAddr, origDst)
 
-						if _, writeErr := sess.upstream.WriteTo(payload, quicAddr); writeErr != nil {
-							log.Printf("[QUIC] write to proxy: %v", writeErr)
+						// First Initial for this session key: create a
+						// pending entry and launch the approval goroutine.
+						pkt := make([]byte, len(payload))
+						copy(pkt, payload)
+						pending := &pendingQUICSession{
+							packets: [][]byte{pkt},
+							done:    make(chan struct{}),
 						}
+						pendingQUICSessions[sessionKey] = pending
+						mu.Unlock()
+
+						// Capture loop variables for the goroutine.
+						capturedKey := sessionKey
+						capturedDest := dest
+						capturedPolicyDest := policyDest
+						capturedPort := port
+						capturedSrcAddr := srcAddr
+						capturedQuicAddr := quicAddr
+						go func() {
+							checker, drop := s.resolveQUICPolicy(capturedPolicyDest, capturedPort)
+
+							pending.mu.Lock()
+							pending.allowed = !drop
+							pending.checker = checker
+							buffered := pending.packets
+							pending.packets = nil
+							pending.mu.Unlock()
+							close(pending.done)
+
+							mu.Lock()
+							delete(pendingQUICSessions, capturedKey)
+							if drop {
+								mu.Unlock()
+								log.Printf("[QUIC] denied %s, discarding %d buffered packets", capturedKey, len(buffered))
+								return
+							}
+
+							// Create the session and flush buffered packets.
+							upstream, listenErr := net.ListenPacket("udp", "127.0.0.1:0")
+							if listenErr != nil {
+								mu.Unlock()
+								log.Printf("[QUIC] create upstream for %s: %v", capturedKey, listenErr)
+								return
+							}
+							if checker != nil {
+								s.quicProxy.RegisterExpectedHostWithChecker(upstream.LocalAddr().String(), capturedPolicyDest, capturedPort, checker)
+							} else {
+								s.quicProxy.RegisterExpectedHost(upstream.LocalAddr().String(), capturedPolicyDest, capturedPort)
+							}
+							sess := &udpSession{upstream: upstream, lastSeen: time.Now()}
+							sessions[capturedKey] = sess
+							mu.Unlock()
+
+							origDst := &net.UDPAddr{IP: net.ParseIP(capturedDest), Port: capturedPort}
+							if origDst.IP == nil {
+								addrs, resolveErr := net.LookupIP(capturedDest)
+								if resolveErr == nil && len(addrs) > 0 {
+									origDst.IP = addrs[0]
+								} else {
+									origDst.IP = net.IPv4zero
+								}
+							}
+							go s.relayQUICResponses(upstream, bindLn, capturedSrcAddr, origDst)
+
+							for _, pkt := range buffered {
+								if _, writeErr := sess.upstream.WriteTo(pkt, capturedQuicAddr); writeErr != nil {
+									log.Printf("[QUIC] flush buffered to proxy: %v", writeErr)
+								}
+							}
+							log.Printf("[QUIC] approved %s, flushed %d buffered packets", capturedKey, len(buffered))
+						}()
+
 						continue
 					}
 					// QUICProxy not yet listening, fall through to normal UDP handling.
@@ -1768,6 +1827,22 @@ func (s *Server) relayUDPResponses(upstream net.PacketConn, relay *net.UDPConn, 
 			log.Printf("[UDP] write response to client: %v", writeErr)
 		}
 	}
+}
+
+// maxPendingQUICPackets is the maximum number of QUIC packets buffered per
+// session while waiting for broker approval. Packets beyond this are dropped.
+const maxPendingQUICPackets = 32
+
+// pendingQUICSession tracks an in-flight QUIC approval request. While the
+// broker call blocks, subsequent QUIC Initial packets for the same session
+// key are buffered instead of triggering duplicate broker requests.
+type pendingQUICSession struct {
+	mu      sync.Mutex
+	packets [][]byte // buffered payloads (max maxPendingQUICPackets)
+	done    chan struct{}
+	allowed bool // true if approved, false if denied
+	// Fields needed to create the session after approval resolves.
+	checker *RequestPolicyChecker
 }
 
 // relayQUICResponses reads response datagrams from a QUIC proxy upstream and
