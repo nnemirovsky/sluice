@@ -122,8 +122,15 @@ func startH2Backend(t *testing.T) (
 		_, _ = fmt.Fprintf(w, "proto=%s auth=%s", r.Proto, auth)
 	})
 
-	server = httptest.NewUnstartedServer(handler)
-	server.EnableHTTP2 = true
+	ln, listenErr := net.Listen("tcp4", "127.0.0.1:0")
+	if listenErr != nil {
+		t.Fatal(listenErr)
+	}
+	server = &httptest.Server{
+		Listener:    ln,
+		EnableHTTP2: true,
+		Config:      &http.Server{Handler: handler},
+	}
 	server.StartTLS()
 
 	h, portStr, err := net.SplitHostPort(server.Listener.Addr().String())

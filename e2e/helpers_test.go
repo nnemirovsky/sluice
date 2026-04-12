@@ -23,6 +23,22 @@ import (
 	"golang.org/x/net/proxy"
 )
 
+// newIPv4Server creates an httptest.Server that listens on IPv4 only. This
+// avoids failures in environments where IPv6 is not available.
+func newIPv4Server(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &httptest.Server{
+		Listener: ln,
+		Config:   &http.Server{Handler: handler},
+	}
+	srv.Start()
+	return srv
+}
+
 // buildOnce ensures the sluice binary is built exactly once per test run.
 var (
 	buildOnce   sync.Once
@@ -230,7 +246,7 @@ func importConfig(t *testing.T, proc *SluiceProcess, toml string) {
 // Returns an httptest.Server; the caller should defer s.Close().
 func startEchoServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprintf(w, "Method: %s\n", r.Method)
 		fmt.Fprintf(w, "URL: %s\n", r.URL.String())
@@ -255,23 +271,31 @@ func startEchoServer(t *testing.T) *httptest.Server {
 // address (host:port). The server uses a self-signed certificate.
 func startTLSEchoServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(w, "Method: %s\n", r.Method)
-		fmt.Fprintf(w, "URL: %s\n", r.URL.String())
-		fmt.Fprintf(w, "Host: %s\n", r.Host)
-		for name, vals := range r.Header {
-			for _, v := range vals {
-				fmt.Fprintf(w, "Header: %s: %s\n", name, v)
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &httptest.Server{
+		Listener: ln,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprintf(w, "Method: %s\n", r.Method)
+			fmt.Fprintf(w, "URL: %s\n", r.URL.String())
+			fmt.Fprintf(w, "Host: %s\n", r.Host)
+			for name, vals := range r.Header {
+				for _, v := range vals {
+					fmt.Fprintf(w, "Header: %s: %s\n", name, v)
+				}
 			}
-		}
-		if r.Body != nil {
-			body, _ := io.ReadAll(r.Body)
-			if len(body) > 0 {
-				fmt.Fprintf(w, "Body: %s\n", string(body))
+			if r.Body != nil {
+				body, _ := io.ReadAll(r.Body)
+				if len(body) > 0 {
+					fmt.Fprintf(w, "Body: %s\n", string(body))
+				}
 			}
-		}
-	}))
+		})},
+	}
+	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -491,7 +515,7 @@ func (v *verdictServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func startVerdictServer(t *testing.T, verdicts ...string) (*httptest.Server, *verdictServer) {
 	t.Helper()
 	vs := &verdictServer{verdicts: verdicts}
-	srv := httptest.NewServer(vs)
+	srv := newIPv4Server(t, vs)
 	t.Cleanup(srv.Close)
 	return srv, vs
 }

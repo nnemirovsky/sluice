@@ -2307,12 +2307,19 @@ func TestFullSOCKS5MITMPipeline(t *testing.T) {
 	// Start an HTTPS backend that echoes the Authorization header.
 	var mu sync.Mutex
 	var receivedAuth string
-	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		receivedAuth = r.Header.Get("Authorization")
-		mu.Unlock()
-		_, _ = w.Write([]byte("auth=" + receivedAuth))
-	}))
+	backendLn, backendLnErr := net.Listen("tcp4", "127.0.0.1:0")
+	if backendLnErr != nil {
+		t.Fatal(backendLnErr)
+	}
+	backend := &httptest.Server{
+		Listener: backendLn,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			receivedAuth = r.Header.Get("Authorization")
+			mu.Unlock()
+			_, _ = w.Write([]byte("auth=" + receivedAuth))
+		})},
+	}
 	backend.StartTLS()
 	defer backend.Close()
 
@@ -2679,21 +2686,35 @@ func TestFullSOCKS5MITMPipelineMultipleBindings(t *testing.T) {
 	var mu1, mu2 sync.Mutex
 	var received1, received2 string
 
-	backend1 := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu1.Lock()
-		received1 = r.Header.Get("Authorization")
-		mu1.Unlock()
-		_, _ = w.Write([]byte("ok1"))
-	}))
+	ln1, ln1Err := net.Listen("tcp4", "127.0.0.1:0")
+	if ln1Err != nil {
+		t.Fatal(ln1Err)
+	}
+	backend1 := &httptest.Server{
+		Listener: ln1,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu1.Lock()
+			received1 = r.Header.Get("Authorization")
+			mu1.Unlock()
+			_, _ = w.Write([]byte("ok1"))
+		})},
+	}
 	backend1.StartTLS()
 	defer backend1.Close()
 
-	backend2 := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu2.Lock()
-		received2 = r.Header.Get("X-Api-Key")
-		mu2.Unlock()
-		_, _ = w.Write([]byte("ok2"))
-	}))
+	ln2, ln2Err := net.Listen("tcp4", "127.0.0.1:0")
+	if ln2Err != nil {
+		t.Fatal(ln2Err)
+	}
+	backend2 := &httptest.Server{
+		Listener: ln2,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu2.Lock()
+			received2 = r.Header.Get("X-Api-Key")
+			mu2.Unlock()
+			_, _ = w.Write([]byte("ok2"))
+		})},
+	}
 	backend2.StartTLS()
 	defer backend2.Close()
 
@@ -2860,12 +2881,19 @@ func TestProxyUnboundHTTPSStripsPhantoms(t *testing.T) {
 
 	var mu sync.Mutex
 	var receivedCustom string
-	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		receivedCustom = r.Header.Get("X-Custom")
-		mu.Unlock()
-		w.WriteHeader(200)
-	}))
+	backendLn2, backendLn2Err := net.Listen("tcp4", "127.0.0.1:0")
+	if backendLn2Err != nil {
+		t.Fatal(backendLn2Err)
+	}
+	backend := &httptest.Server{
+		Listener: backendLn2,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			receivedCustom = r.Header.Get("X-Custom")
+			mu.Unlock()
+			w.WriteHeader(200)
+		})},
+	}
 	backend.StartTLS()
 	defer backend.Close()
 
@@ -3080,12 +3108,19 @@ func TestProxyWithByteDetectionHTTPS(t *testing.T) {
 
 	var mu sync.Mutex
 	var receivedAuth string
-	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		receivedAuth = r.Header.Get("Authorization")
-		mu.Unlock()
-		_, _ = w.Write([]byte("detected"))
-	}))
+	detLn, detLnErr := net.Listen("tcp4", "127.0.0.1:0")
+	if detLnErr != nil {
+		t.Fatal(detLnErr)
+	}
+	backend := &httptest.Server{
+		Listener: detLn,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			receivedAuth = r.Header.Get("Authorization")
+			mu.Unlock()
+			_, _ = w.Write([]byte("detected"))
+		})},
+	}
 	backend.StartTLS()
 	defer backend.Close()
 
@@ -3187,12 +3222,19 @@ func TestProxyGenericPortNoBindingByteDetection(t *testing.T) {
 
 	var mu sync.Mutex
 	var receivedHeader string
-	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		receivedHeader = r.Header.Get("X-Phantom")
-		mu.Unlock()
-		_, _ = w.Write([]byte("ok"))
-	}))
+	phantomLn, phantomLnErr := net.Listen("tcp4", "127.0.0.1:0")
+	if phantomLnErr != nil {
+		t.Fatal(phantomLnErr)
+	}
+	backend := &httptest.Server{
+		Listener: phantomLn,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			receivedHeader = r.Header.Get("X-Phantom")
+			mu.Unlock()
+			_, _ = w.Write([]byte("ok"))
+		})},
+	}
 	backend.StartTLS()
 	defer backend.Close()
 
@@ -3419,12 +3461,19 @@ func TestProxyNonStandardPortWithBinding(t *testing.T) {
 
 	var mu sync.Mutex
 	var receivedAuth string
-	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		receivedAuth = r.Header.Get("Authorization")
-		mu.Unlock()
-		_, _ = w.Write([]byte("nonstandard-ok"))
-	}))
+	nsLn, nsLnErr := net.Listen("tcp4", "127.0.0.1:0")
+	if nsLnErr != nil {
+		t.Fatal(nsLnErr)
+	}
+	backend := &httptest.Server{
+		Listener: nsLn,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			receivedAuth = r.Header.Get("Authorization")
+			mu.Unlock()
+			_, _ = w.Write([]byte("nonstandard-ok"))
+		})},
+	}
 	backend.StartTLS()
 	defer backend.Close()
 

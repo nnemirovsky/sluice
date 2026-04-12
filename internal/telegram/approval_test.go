@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +20,22 @@ import (
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
 )
+
+// newIPv4Server creates an httptest.Server that listens on IPv4 only. This
+// avoids failures in environments where IPv6 is not available.
+func newIPv4Server(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &httptest.Server{
+		Listener: ln,
+		Config:   &http.Server{Handler: handler},
+	}
+	srv.Start()
+	return srv
+}
 
 // tgResponse wraps the Telegram Bot API response format.
 type tgResponse struct {
@@ -47,7 +64,7 @@ func newMockTelegramAPI(t *testing.T) *mockTelegramAPI {
 		nextMsgID: 100,
 		updates:   make(chan []tgbotapi.Update, 10),
 	}
-	m.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	m.server = newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// URL format: /bot<token>/<method>
 		parts := strings.Split(r.URL.Path, "/")
 		if len(parts) < 3 {
@@ -238,7 +255,7 @@ func TestNewTelegramChannel(t *testing.T) {
 
 func TestNewTelegramChannelInvalidToken(t *testing.T) {
 	// Use a server that returns an error for getMe.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(tgResponse{
 			OK:     false,
@@ -398,7 +415,7 @@ func TestRequestApproval(t *testing.T) {
 
 func TestRequestApprovalSendFailureSingleChannel(t *testing.T) {
 	// Use a server that always fails sendMessage.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(r.URL.Path, "/")
 		method := parts[len(parts)-1]
 		w.Header().Set("Content-Type", "application/json")
