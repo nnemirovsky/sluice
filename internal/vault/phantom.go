@@ -9,7 +9,7 @@ import (
 // GeneratePhantomToken creates a phantom token value matching the expected
 // format for the given credential name. SDKs validate token prefixes, so
 // phantom tokens must pass basic format checks. This is used by the MITM
-// injector to generate phantom values for credential bindings.
+// addon to generate phantom values for credential bindings.
 func GeneratePhantomToken(credName string) string {
 	rnd := randomHex(20)
 	switch {

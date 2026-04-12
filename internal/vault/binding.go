@@ -178,8 +178,8 @@ func (r *BindingResolver) ResolveProtocolHint(dest string, port int) (string, bo
 }
 
 // CredentialsForDestination returns all unique credential names from bindings
-// matching the given destination, port, and protocol. Used by the injector to
-// scope phantom token replacement to bound credentials only, preventing
+// matching the given destination, port, and protocol. Used by the MITM addon
+// to scope phantom token replacement to bound credentials only, preventing
 // cross-credential exfiltration to unintended destinations.
 func (r *BindingResolver) CredentialsForDestination(dest string, port int, proto string) []string {
 	var creds []string

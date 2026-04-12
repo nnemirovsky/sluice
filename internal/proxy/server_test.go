@@ -1338,8 +1338,8 @@ func splitDomainLabels(domain string) []string {
 }
 
 // TestQUICProxyWiredIntoServer verifies that when credential injection is
-// enabled, the QUIC proxy is created alongside the HTTPS MITM injector and
-// listens on a local UDP port. This is the wiring test for Task 11.
+// enabled, the QUIC proxy is created alongside the HTTPS MITM proxy and
+// listens on a local UDP port.
 func TestQUICProxyWiredIntoServer(t *testing.T) {
 	eng, err := policy.LoadFromBytes([]byte(`
 [policy]
@@ -2174,7 +2174,7 @@ default = "allow"
 	}
 	defer func() { _ = srv.Close() }()
 
-	// UpdateInspectRules with no injector/QUIC should not panic.
+	// UpdateInspectRules with no MITM addon/QUIC should not panic.
 	eng.InspectBlockRules = []policy.InspectBlockRule{{Pattern: "secret", Name: "block secrets"}}
 	eng.InspectRedactRules = []policy.InspectRedactRule{{Pattern: "password", Replacement: "[REDACTED]", Name: "redact passwords"}}
 	srv.UpdateInspectRules(eng)
@@ -2300,34 +2300,20 @@ default = "allow"
 }
 
 func TestFullSOCKS5MITMPipeline(t *testing.T) {
-	// TODO(task7): update to use HTTPS backend. go-mitmproxy only fires
-	// addon hooks for TLS-intercepted traffic, not plain HTTP through
-	// CONNECT tunnels. These tests used goproxy which parsed both.
-	t.Skip("requires HTTPS backend for go-mitmproxy (Task 7)")
+	// Uses an HTTPS backend so go-mitmproxy fires addon hooks for TLS
+	// interception and performs phantom token swap via the SluiceAddon.
 	dir := t.TempDir()
 
-	// Generate a CA for the proxy. LoadOrCreateCA writes to disk.
-	caCert, x509CA, err := LoadOrCreateCA(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Build a cert pool trusting the generated CA.
-	certPool := x509.NewCertPool()
-	certPool.AddCert(x509CA)
-	_ = caCert // used by the proxy via VaultDir
-
-	// Start a plain HTTP backend that echoes the Authorization header.
-	// Using plain HTTP avoids TLS cert chain issues between the test
-	// backend and the MITM proxy's outbound connection.
+	// Start an HTTPS backend that echoes the Authorization header.
 	var mu sync.Mutex
 	var receivedAuth string
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		receivedAuth = r.Header.Get("Authorization")
 		mu.Unlock()
 		_, _ = w.Write([]byte("auth=" + receivedAuth))
 	}))
+	backend.StartTLS()
 	defer backend.Close()
 
 	backendHost, backendPortStr, _ := net.SplitHostPort(backend.Listener.Addr().String())
@@ -2378,18 +2364,28 @@ default = "allow"
 	go func() { _ = srv.ListenAndServe() }()
 	defer func() { _ = srv.Close() }()
 
-	// Connect through the SOCKS5 proxy and make an HTTP request.
-	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	time.Sleep(100 * time.Millisecond)
+
+	// Connect through the SOCKS5 proxy with TLS (InsecureSkipVerify
+	// because go-mitmproxy generates MITM certs on the fly).
+	socksDialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
 		t.Fatal(err)
 	}
+	contextDialer, ok := socksDialer.(proxy.ContextDialer)
+	if !ok {
+		t.Fatal("SOCKS5 dialer does not implement ContextDialer")
+	}
 
 	transport := &http.Transport{
-		Dial: dialer.Dial,
+		DialContext: contextDialer.DialContext,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
 	}
 	client := &http.Client{Transport: transport}
 
-	reqURL := fmt.Sprintf("http://%s:%d/test", backendHost, backendPort)
+	reqURL := fmt.Sprintf("https://%s:%d/test", backendHost, backendPort)
 	req, err := http.NewRequest("GET", reqURL, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -2399,7 +2395,7 @@ default = "allow"
 
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("HTTP request through proxy: %v", err)
+		t.Fatalf("HTTPS request through proxy: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -2676,27 +2672,29 @@ func TestBidirectionalRelay(t *testing.T) {
 }
 
 func TestFullSOCKS5MITMPipelineMultipleBindings(t *testing.T) {
-	t.Skip("requires HTTPS backend for go-mitmproxy (Task 7)")
-	// Test that multiple credentials for different destinations are injected correctly.
+	// Test that multiple credentials for different HTTPS destinations are
+	// injected correctly through the MITM addon.
 	dir := t.TempDir()
 
 	var mu1, mu2 sync.Mutex
 	var received1, received2 string
 
-	backend1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend1 := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu1.Lock()
 		received1 = r.Header.Get("Authorization")
 		mu1.Unlock()
 		_, _ = w.Write([]byte("ok1"))
 	}))
+	backend1.StartTLS()
 	defer backend1.Close()
 
-	backend2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend2 := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu2.Lock()
 		received2 = r.Header.Get("X-Api-Key")
 		mu2.Unlock()
 		_, _ = w.Write([]byte("ok2"))
 	}))
+	backend2.StartTLS()
 	defer backend2.Close()
 
 	host1, port1Str, _ := net.SplitHostPort(backend1.Listener.Addr().String())
@@ -2747,15 +2745,26 @@ default = "allow"
 	go func() { _ = srv.ListenAndServe() }()
 	defer func() { _ = srv.Close() }()
 
-	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	time.Sleep(100 * time.Millisecond)
+
+	socksDialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
 		t.Fatal(err)
 	}
-	transport := &http.Transport{Dial: dialer.Dial}
+	contextDialer, ok := socksDialer.(proxy.ContextDialer)
+	if !ok {
+		t.Fatal("SOCKS5 dialer does not implement ContextDialer")
+	}
+	transport := &http.Transport{
+		DialContext: contextDialer.DialContext,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	}
 	client := &http.Client{Transport: transport}
 
 	// Request to backend1 with phantom for cred1.
-	req1, _ := http.NewRequest("GET", fmt.Sprintf("http://%s:%d/", host1, port1), nil)
+	req1, _ := http.NewRequest("GET", fmt.Sprintf("https://%s:%d/", host1, port1), nil)
 	req1.Header.Set("Authorization", PhantomToken("cred1"))
 	resp1, err := client.Do(req1)
 	if err != nil {
@@ -2770,7 +2779,7 @@ default = "allow"
 	mu1.Unlock()
 
 	// Request to backend2 with phantom for cred2.
-	req2, _ := http.NewRequest("GET", fmt.Sprintf("http://%s:%d/", host2, port2), nil)
+	req2, _ := http.NewRequest("GET", fmt.Sprintf("https://%s:%d/", host2, port2), nil)
 	req2.Header.Set("X-Api-Key", PhantomToken("cred2"))
 	resp2, err := client.Do(req2)
 	if err != nil {
@@ -2843,20 +2852,21 @@ default = "allow"
 	}
 }
 
-func TestProxyUnboundHTTPRoutesThroughInjector(t *testing.T) {
-	t.Skip("requires HTTPS backend for go-mitmproxy (Task 7)")
-	// Test that unbound HTTP connections on non-standard ports still route
-	// through the injector for phantom token stripping via byte detection.
+func TestProxyUnboundHTTPSStripsPhantoms(t *testing.T) {
+	// Test that unbound HTTPS connections still strip phantom tokens via
+	// the MITM addon. go-mitmproxy intercepts TLS traffic and the addon
+	// performs pass-3 phantom stripping even without bindings.
 	dir := t.TempDir()
 
 	var mu sync.Mutex
 	var receivedCustom string
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		receivedCustom = r.Header.Get("X-Custom")
 		mu.Unlock()
 		w.WriteHeader(200)
 	}))
+	backend.StartTLS()
 	defer backend.Close()
 
 	backendHost, backendPortStr, _ := net.SplitHostPort(backend.Listener.Addr().String())
@@ -2871,7 +2881,7 @@ func TestProxyUnboundHTTPRoutesThroughInjector(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// No bindings. Unbound HTTP should still strip phantoms.
+	// No bindings. Unbound HTTPS should still strip phantoms.
 	resolver, err := vault.NewBindingResolver(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -2898,16 +2908,27 @@ default = "allow"
 	go func() { _ = srv.ListenAndServe() }()
 	defer func() { _ = srv.Close() }()
 
-	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	time.Sleep(100 * time.Millisecond)
+
+	socksDialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
 		t.Fatal(err)
 	}
+	contextDialer, ok := socksDialer.(proxy.ContextDialer)
+	if !ok {
+		t.Fatal("SOCKS5 dialer does not implement ContextDialer")
+	}
 
-	transport := &http.Transport{Dial: dialer.Dial}
+	transport := &http.Transport{
+		DialContext: contextDialer.DialContext,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	}
 	client := &http.Client{Transport: transport}
 
 	phantom := PhantomToken("some_cred")
-	reqURL := fmt.Sprintf("http://%s:%d/", backendHost, backendPort)
+	reqURL := fmt.Sprintf("https://%s:%d/", backendHost, backendPort)
 	req, err := http.NewRequest("GET", reqURL, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -2916,7 +2937,7 @@ default = "allow"
 
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("HTTP request through proxy: %v", err)
+		t.Fatalf("HTTPS request through proxy: %v", err)
 	}
 	_ = resp.Body.Close()
 
@@ -2926,11 +2947,11 @@ default = "allow"
 
 	// The phantom should have been stripped (replaced with empty).
 	if got == phantom {
-		t.Error("phantom token was not stripped from unbound HTTP request")
+		t.Error("phantom token was not stripped from unbound HTTPS request")
 	}
 }
 
-func TestUpdateInspectRulesWithInjector(t *testing.T) {
+func TestUpdateInspectRulesWithWSConfig(t *testing.T) {
 	dir := t.TempDir()
 	vs, err := vault.NewStore(dir)
 	if err != nil {
@@ -3052,19 +3073,20 @@ func TestRelayDirectFailedDial(t *testing.T) {
 	}
 }
 
-func TestProxyWithByteDetectionHTTP(t *testing.T) {
-	t.Skip("requires HTTPS backend for go-mitmproxy (Task 7)")
-	// Test that HTTP on a non-standard port is detected via byte detection.
+func TestProxyWithByteDetectionHTTPS(t *testing.T) {
+	// Test that HTTPS on a non-standard port is detected via byte detection
+	// and routes through the MITM addon for credential injection.
 	dir := t.TempDir()
 
 	var mu sync.Mutex
 	var receivedAuth string
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		receivedAuth = r.Header.Get("Authorization")
 		mu.Unlock()
 		_, _ = w.Write([]byte("detected"))
 	}))
+	backend.StartTLS()
 	defer backend.Close()
 
 	host, portStr, _ := net.SplitHostPort(backend.Listener.Addr().String())
@@ -3113,15 +3135,26 @@ default = "allow"
 	go func() { _ = srv.ListenAndServe() }()
 	defer func() { _ = srv.Close() }()
 
-	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	time.Sleep(100 * time.Millisecond)
+
+	socksDialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
 		t.Fatal(err)
 	}
+	contextDialer, ok := socksDialer.(proxy.ContextDialer)
+	if !ok {
+		t.Fatal("SOCKS5 dialer does not implement ContextDialer")
+	}
 
-	transport := &http.Transport{Dial: dialer.Dial}
+	transport := &http.Transport{
+		DialContext: contextDialer.DialContext,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	}
 	client := &http.Client{Transport: transport}
 
-	reqURL := fmt.Sprintf("http://%s:%d/", host, port)
+	reqURL := fmt.Sprintf("https://%s:%d/", host, port)
 	req, err := http.NewRequest("GET", reqURL, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -3130,7 +3163,7 @@ default = "allow"
 
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("HTTP request with byte detection: %v", err)
+		t.Fatalf("HTTPS request with byte detection: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -3147,24 +3180,25 @@ default = "allow"
 }
 
 func TestProxyGenericPortNoBindingByteDetection(t *testing.T) {
-	t.Skip("requires HTTPS backend for go-mitmproxy (Task 7)")
-	// Test a connection on a non-standard port without bindings, with an
-	// injector present. The byte detection path for unbound connections
-	// should still route HTTP traffic through the injector for phantom stripping.
+	// Test a connection on a non-standard port without bindings. The byte
+	// detection path for unbound connections should still route HTTPS
+	// traffic through the MITM addon for phantom stripping.
 	dir := t.TempDir()
 
 	var mu sync.Mutex
 	var receivedHeader string
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		receivedHeader = r.Header.Get("X-Phantom")
 		mu.Unlock()
 		_, _ = w.Write([]byte("ok"))
 	}))
+	backend.StartTLS()
 	defer backend.Close()
 
-	host, portStr, _ := net.SplitHostPort(backend.Listener.Addr().String())
-	_ = host
+	backendHost, backendPortStr, _ := net.SplitHostPort(backend.Listener.Addr().String())
+	backendPort := 0
+	_, _ = fmt.Sscanf(backendPortStr, "%d", &backendPort)
 
 	vs, err := vault.NewStore(dir)
 	if err != nil {
@@ -3201,15 +3235,26 @@ default = "allow"
 	go func() { _ = srv.ListenAndServe() }()
 	defer func() { _ = srv.Close() }()
 
-	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	time.Sleep(100 * time.Millisecond)
+
+	socksDialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
 		t.Fatal(err)
 	}
+	contextDialer, ok := socksDialer.(proxy.ContextDialer)
+	if !ok {
+		t.Fatal("SOCKS5 dialer does not implement ContextDialer")
+	}
 
-	transport := &http.Transport{Dial: dialer.Dial}
+	transport := &http.Transport{
+		DialContext: contextDialer.DialContext,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	}
 	client := &http.Client{Transport: transport}
 
-	reqURL := fmt.Sprintf("http://%s/", backend.Listener.Addr().String())
+	reqURL := fmt.Sprintf("https://%s:%d/", backendHost, backendPort)
 	req, err := http.NewRequest("GET", reqURL, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -3218,9 +3263,9 @@ default = "allow"
 
 	resp, err := client.Do(req)
 	if err != nil {
-		// Non-standard port byte detection might route through injector or direct.
-		// Either way, this tests that the code path doesn't crash.
-		t.Logf("HTTP request returned error (acceptable): %v", err)
+		// Non-standard port byte detection might route through the MITM
+		// addon or direct. Either way, this tests that the path does not crash.
+		t.Logf("HTTPS request returned error (acceptable): %v", err)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -3229,11 +3274,10 @@ default = "allow"
 	got := receivedHeader
 	mu.Unlock()
 
-	// The phantom should have been stripped if it went through the injector.
+	// The phantom should have been stripped if it went through the MITM addon.
 	if got == PhantomToken("phantom_cred") {
-		t.Error("phantom token was not stripped for unbound non-standard port HTTP")
+		t.Error("phantom token was not stripped for unbound non-standard port HTTPS")
 	}
-	_ = portStr
 }
 
 func TestDialThroughMITMBufferedResponse(t *testing.T) {
@@ -3368,19 +3412,20 @@ default = "allow"
 }
 
 func TestProxyNonStandardPortWithBinding(t *testing.T) {
-	t.Skip("requires HTTPS backend for go-mitmproxy (Task 7)")
 	// Test connection on a non-standard port with a binding that has no
 	// specific protocol, exercising the byte-detection code path in dial().
+	// Uses HTTPS so go-mitmproxy intercepts and fires addon hooks.
 	dir := t.TempDir()
 
 	var mu sync.Mutex
 	var receivedAuth string
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		receivedAuth = r.Header.Get("Authorization")
 		mu.Unlock()
 		_, _ = w.Write([]byte("nonstandard-ok"))
 	}))
+	backend.StartTLS()
 	defer backend.Close()
 
 	host, portStr, _ := net.SplitHostPort(backend.Listener.Addr().String())
@@ -3429,15 +3474,26 @@ default = "allow"
 	go func() { _ = srv.ListenAndServe() }()
 	defer func() { _ = srv.Close() }()
 
-	dialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
+	time.Sleep(100 * time.Millisecond)
+
+	socksDialer, err := proxy.SOCKS5("tcp", srv.Addr(), nil, proxy.Direct)
 	if err != nil {
 		t.Fatal(err)
 	}
+	contextDialer, ok := socksDialer.(proxy.ContextDialer)
+	if !ok {
+		t.Fatal("SOCKS5 dialer does not implement ContextDialer")
+	}
 
-	transport := &http.Transport{Dial: dialer.Dial}
+	transport := &http.Transport{
+		DialContext: contextDialer.DialContext,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	}
 	client := &http.Client{Transport: transport}
 
-	reqURL := fmt.Sprintf("http://%s:%d/", host, port)
+	reqURL := fmt.Sprintf("https://%s:%d/", host, port)
 	req, err := http.NewRequest("GET", reqURL, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -3446,7 +3502,7 @@ default = "allow"
 
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("HTTP request on non-standard port: %v", err)
+		t.Fatalf("HTTPS request on non-standard port: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 

@@ -9,7 +9,7 @@ import (
 )
 
 // OAuthIndex maps token endpoint URLs to credential names for fast lookup
-// during response interception. The injector checks every HTTPS response
+// during response interception. The MITM addon checks every HTTPS response
 // against this index to detect OAuth token responses that need phantom
 // token replacement.
 type OAuthIndex struct {

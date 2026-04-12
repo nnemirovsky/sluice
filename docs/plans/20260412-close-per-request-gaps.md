@@ -139,12 +139,12 @@ Three changes to close remaining per-request policy gaps on the `per-request-pol
 **Files:**
 - Create: `internal/proxy/addon_h2_test.go`
 
-- [ ] Create test with real HTTP/2 backend (using `httptest.NewUnstartedServer` + `http2.ConfigureServer`)
-- [ ] Configure go-mitmproxy proxy with SluiceAddon
-- [ ] Send two HTTP/2 requests on the same connection via SOCKS5
-- [ ] Verify per-request policy fires for each HTTP/2 stream (broker called twice for allow-once)
-- [ ] Verify credential injection works on HTTP/2 streams
-- [ ] Run tests
+- [x] Create test with real HTTP/2 backend (using `httptest.NewUnstartedServer` + `http2.ConfigureServer`)
+- [x] Configure go-mitmproxy proxy with SluiceAddon
+- [x] Send two HTTP/2 requests on the same connection via SOCKS5
+- [x] Verify per-request policy fires for each HTTP/2 stream (broker called twice for allow-once)
+- [x] Verify credential injection works on HTTP/2 streams
+- [x] Run tests
 
 ### Task 7: Update existing tests to use go-mitmproxy types
 
@@ -153,11 +153,11 @@ Three changes to close remaining per-request policy gaps on the `per-request-pol
 - Remove: `internal/proxy/inject_per_request_test.go` (logic moved to addon tests)
 - Modify: `internal/proxy/server_test.go`
 
-- [ ] Update server_test.go tests that reference goproxy types to use go-mitmproxy
-- [ ] Port relevant inject_per_request_test.go test cases to addon test file
-- [ ] Update request_policy_context_test.go if it references goproxy/inject types
-- [ ] Run full test suite
-- [ ] Verify no remaining references to goproxy package
+- [x] Update server_test.go tests that reference goproxy types to use go-mitmproxy
+- [x] Port relevant inject_per_request_test.go test cases to addon test file
+- [x] Update request_policy_context_test.go if it references goproxy/inject types
+- [x] Run full test suite
+- [x] Verify no remaining references to goproxy package
 
 ### Task 8: Enable QUIC per-request Ask in policy engine
 

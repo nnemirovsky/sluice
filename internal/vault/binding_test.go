@@ -181,7 +181,7 @@ func TestResolveForProtocolGenericWithMixedBindings(t *testing.T) {
 	// a protocol-specific binding on non-standard ports. Without the
 	// ResolveProtocolHint check in server.go, the agnostic binding
 	// would be returned and the protocol would remain "generic",
-	// causing the connection to bypass the injector.
+	// causing the connection to bypass the MITM addon.
 	bindings := []Binding{
 		{Destination: "service.example.com", Ports: []int{8000}, Credential: "generic_key"},
 		{Destination: "service.example.com", Ports: []int{8000}, Credential: "http_key", Header: "Authorization", Protocols: []string{"http"}},
