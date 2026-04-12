@@ -66,6 +66,15 @@ type ApprovalRequest struct {
 	Port        int
 	Protocol    string // detected protocol (e.g. "https", "ssh", "mcp")
 	ToolArgs    string // truncated tool arguments (MCP only)
+	// Method is the HTTP method for per-request approvals (e.g. "GET", "POST").
+	// Empty for connection-level approvals and non-HTTP protocols.
+	Method string
+	// Path is the request URL path for per-request approvals (e.g. "/users/me").
+	// Empty for connection-level approvals and non-HTTP protocols.
+	Path string
+	// HTTPVersion is the negotiated HTTP version (e.g. "HTTP/1.1", "HTTP/2").
+	// Empty for non-HTTP protocols.
+	HTTPVersion string
 	CreatedAt   time.Time
 }
 

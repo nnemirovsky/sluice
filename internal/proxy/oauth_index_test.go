@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/nemirovsky/sluice/internal/store"
-	"github.com/nemirovsky/sluice/internal/vault"
 )
 
 func TestNewOAuthIndexFiltersOAuthEntries(t *testing.T) {
@@ -224,28 +223,11 @@ func TestOAuthIndexMultipleEntries(t *testing.T) {
 }
 
 func TestUpdateOAuthIndexHotReload(t *testing.T) {
-	dir := t.TempDir()
-	vaultStore, err := vault.NewStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resolver, err := vault.NewBindingResolver(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	caCert, _, err := GenerateCA()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var resolverPtr atomic.Pointer[vault.BindingResolver]
-	resolverPtr.Store(resolver)
-
-	wsProxy, _ := NewWSProxy(vaultStore, &resolverPtr, nil, nil)
-	inj := NewInjector(vaultStore, &resolverPtr, caCert, "", wsProxy)
+	addon := NewSluiceAddon()
 
 	// Initially empty.
-	idx := inj.oauthIndex.Load()
-	if idx.Len() != 0 {
+	idx := addon.oauthIndex.Load()
+	if idx != nil && idx.Len() != 0 {
 		t.Fatalf("expected 0 initial entries, got %d", idx.Len())
 	}
 
@@ -254,9 +236,9 @@ func TestUpdateOAuthIndexHotReload(t *testing.T) {
 		{Name: "openai", CredType: "oauth", TokenURL: "https://auth0.openai.com/oauth/token"},
 		{Name: "google", CredType: "oauth", TokenURL: "https://oauth2.googleapis.com/token"},
 	}
-	inj.UpdateOAuthIndex(metas)
+	addon.UpdateOAuthIndex(metas)
 
-	idx = inj.oauthIndex.Load()
+	idx = addon.oauthIndex.Load()
 	if idx.Len() != 2 {
 		t.Fatalf("expected 2 entries after reload, got %d", idx.Len())
 	}
@@ -271,9 +253,9 @@ func TestUpdateOAuthIndexHotReload(t *testing.T) {
 	metas2 := []store.CredentialMeta{
 		{Name: "google", CredType: "oauth", TokenURL: "https://oauth2.googleapis.com/token"},
 	}
-	inj.UpdateOAuthIndex(metas2)
+	addon.UpdateOAuthIndex(metas2)
 
-	idx = inj.oauthIndex.Load()
+	idx = addon.oauthIndex.Load()
 	if idx.Len() != 1 {
 		t.Fatalf("expected 1 entry after second reload, got %d", idx.Len())
 	}

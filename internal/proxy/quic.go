@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 
 	"github.com/nemirovsky/sluice/internal/audit"
+	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/vault"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
@@ -54,9 +55,13 @@ type quicInspectRules struct {
 
 // expectedDest holds the SOCKS5 destination that was policy-checked so the
 // QUIC proxy can verify SNI and use the correct port for credential resolution.
+// When checker is non-nil, each HTTP/3 request is evaluated via
+// CheckAndConsume before forwarding (ask-rule path). A nil checker means the
+// session was explicitly allowed at the UDP dispatch layer (fast path).
 type expectedDest struct {
-	host string
-	port int
+	host    string
+	port    int
+	checker *RequestPolicyChecker
 }
 
 // QUICProxy terminates QUIC connections from the agent using sluice's CA
@@ -213,8 +218,20 @@ func (q *QUICProxy) Addr() net.Addr {
 // used for policy evaluation and credential binding resolution.
 // Must be called before forwarding QUIC packets so handleConnection can
 // verify the SNI against the SOCKS5 destination that was policy-checked.
+//
+// This is the fast path for explicit allow rule matches (no per-request
+// policy check). Use RegisterExpectedHostWithChecker for ask-rule matches
+// that require per-HTTP/3-request approval.
 func (q *QUICProxy) RegisterExpectedHost(srcAddr string, host string, port int) {
 	q.expectedDests.Store(srcAddr, expectedDest{host: host, port: port})
+}
+
+// RegisterExpectedHostWithChecker is like RegisterExpectedHost but attaches
+// a RequestPolicyChecker that buildHandler calls before forwarding each
+// HTTP/3 request. Used when EvaluateQUICDetailed returns Ask so each
+// request on the QUIC session goes through per-request approval.
+func (q *QUICProxy) RegisterExpectedHostWithChecker(srcAddr string, host string, port int, checker *RequestPolicyChecker) {
+	q.expectedDests.Store(srcAddr, expectedDest{host: host, port: port, checker: checker})
 }
 
 // UnregisterExpectedHost removes the expected host mapping for srcAddr.
@@ -336,7 +353,7 @@ func (q *QUICProxy) handleConnection(conn *quic.Conn) {
 		return
 	}
 
-	handler := q.buildHandler(sni, dest.port)
+	handler := q.buildHandler(sni, dest.port, dest.checker)
 	srv := &http3.Server{
 		Handler: handler,
 	}
@@ -351,13 +368,32 @@ func (q *QUICProxy) handleConnection(conn *quic.Conn) {
 // to the response body before returning it to the agent. The destPort is
 // the SOCKS5 destination port that was policy-checked, used for credential
 // binding resolution instead of trusting the URL port from the request.
-func (q *QUICProxy) buildHandler(upstreamHost string, destPort int) http.Handler {
+//
+// When checker is non-nil (ask-rule path), each HTTP/3 request is evaluated
+// via CheckAndConsume before forwarding. Denied requests return 403. A nil
+// checker means the session was explicitly allowed and no per-request check
+// is needed.
+func (q *QUICProxy) buildHandler(upstreamHost string, destPort int, checker *RequestPolicyChecker) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := upstreamHost
 		if host == "" {
 			host = r.Host
 		}
 		port := destPort
+
+		// Per-request policy check for ask-rule sessions.
+		if checker != nil {
+			verdict, err := checker.CheckAndConsume(host, port,
+				WithRequestInfo(r.Method, r.URL.RequestURI()),
+				WithProtocol(ProtoQUIC.String()),
+				WithSkipBrokerRateLimit(),
+			)
+			if err != nil || verdict != policy.Allow {
+				q.logAudit(host, port, "deny", fmt.Sprintf("per-request policy denied (%s %s)", r.Method, r.URL.RequestURI()))
+				http.Error(w, "blocked by per-request policy", http.StatusForbidden)
+				return
+			}
+		}
 
 		// Build phantom token pairs for credentials bound to this destination.
 		pairs := q.buildPhantomPairs(host, port)
@@ -494,6 +530,12 @@ func (q *QUICProxy) buildHandler(upstreamHost string, destPort int) http.Handler
 
 // buildPhantomPairs resolves credentials bound to the destination and returns
 // phantom/secret pairs sorted by phantom length descending.
+//
+// TODO: this duplicates SluiceAddon.buildPhantomPairs in addon.go. The two
+// implementations use different receiver types (QUICProxy uses vault.BindingResolver
+// directly, SluiceAddon uses atomic.Pointer). Consolidating requires a shared
+// abstraction which is premature while the two code paths diverge on
+// protocol-specific details (HTTP/1-2 streaming vs HTTP/3 buffered).
 func (q *QUICProxy) buildPhantomPairs(host string, port int) []phantomPair {
 	var pairs []phantomPair
 	if res := q.resolver.Load(); res != nil {

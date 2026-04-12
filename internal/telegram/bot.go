@@ -46,7 +46,9 @@ var protoDisplayName = map[string]string{
 
 // FormatApprovalMessage builds the Telegram message text for an approval
 // request. MCP tool calls (protocol == "mcp") show the tool name and
-// arguments. Network connections show the protocol, destination, and port.
+// arguments. Per-request HTTP approvals (Method and Path set) show the
+// method and full URL. Network connections show the protocol, destination,
+// and port.
 //
 // The returned string uses Telegram HTML parse mode: the tool name is
 // escaped plain text and arguments are rendered inside a <pre><code>
@@ -67,10 +69,67 @@ func FormatApprovalMessage(req channel.ApprovalRequest) string {
 	if display == "" {
 		display = req.Protocol
 	}
+	if req.Method != "" {
+		ver := ""
+		if req.HTTPVersion != "" {
+			ver = " (" + htmlEscape(req.HTTPVersion) + ")"
+		}
+		return fmt.Sprintf(
+			"OpenClaw wants to connect to:\n\n%s %s:%d\n%s %s%s\n\nAllow this request?",
+			htmlEscape(display), htmlEscape(req.Destination), req.Port,
+			htmlEscape(req.Method), htmlEscape(buildRequestURL(req)), ver,
+		)
+	}
 	return fmt.Sprintf(
 		"OpenClaw wants to connect to:\n\n%s %s:%d\n\nAllow this connection?",
 		htmlEscape(display), htmlEscape(req.Destination), req.Port,
 	)
+}
+
+// schemeForApproval returns the URL scheme that best matches the approval
+// protocol/port hint. Unknown protocols with port 443 are shown as https
+// for convenience; everything else defaults to http.
+func schemeForApproval(req channel.ApprovalRequest) string {
+	switch req.Protocol {
+	case "wss":
+		return "wss"
+	case "ws":
+		return "ws"
+	case "https", "grpc", "quic":
+		return "https"
+	case "http":
+		return "http"
+	}
+	if req.Port == 443 {
+		return "https"
+	}
+	return "http"
+}
+
+// isStandardPort returns true when port matches the default for scheme.
+// Used so we omit the port from the rendered URL (e.g. example.com/foo
+// instead of example.com:443/foo) for cleaner Telegram messages.
+func isStandardPort(scheme string, port int) bool {
+	if port == 0 {
+		return true
+	}
+	return (scheme == "https" && port == 443) || (scheme == "http" && port == 80)
+}
+
+// buildRequestURL constructs a human-readable URL for a per-request
+// approval by choosing the scheme from the protocol/port and joining host,
+// port, and path. Standard ports (80/443) are omitted.
+func buildRequestURL(req channel.ApprovalRequest) string {
+	scheme := schemeForApproval(req)
+	host := req.Destination
+	if !isStandardPort(scheme, req.Port) {
+		host = fmt.Sprintf("%s:%d", req.Destination, req.Port)
+	}
+	path := req.Path
+	if path == "" {
+		path = "/"
+	}
+	return fmt.Sprintf("%s://%s%s", scheme, host, path)
 }
 
 // htmlEscape escapes the minimum set of characters required by Telegram

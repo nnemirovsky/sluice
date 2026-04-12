@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nemirovsky/sluice/internal/channel"
+	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/vault"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
@@ -521,5 +523,251 @@ func TestQUICProxy_HTTP3ContentRedact(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(body), []byte("[REDACTED]")) {
 		t.Errorf("response body missing redaction marker: %s", body)
+	}
+}
+
+// quicTransportFixture wires a single local UDP socket to a QUICProxy via
+// http3.Transport. Multiple requests made through the returned transport
+// reuse the same underlying QUIC connection, which is what we need to
+// verify per-request policy consumes "Allow Once" on a keep-alive session.
+type quicTransportFixture struct {
+	localConn net.PacketConn
+	transport *http3.Transport
+	sni       string
+}
+
+func newQUICTransportFixture(t *testing.T, proxyAddr string, caX509 *x509.Certificate) *quicTransportFixture {
+	t.Helper()
+
+	const sni = "api.example.com"
+
+	pool := x509.NewCertPool()
+	pool.AddCert(caX509)
+	localConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen local UDP: %v", err)
+	}
+	proxyUDPAddr, err := net.ResolveUDPAddr("udp", proxyAddr)
+	if err != nil {
+		_ = localConn.Close()
+		t.Fatalf("resolve proxy addr: %v", err)
+	}
+	transport := &http3.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:    pool,
+			ServerName: sni,
+		},
+		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+			return quic.Dial(ctx, localConn, proxyUDPAddr, tlsCfg, cfg)
+		},
+	}
+	return &quicTransportFixture{
+		localConn: localConn,
+		transport: transport,
+		sni:       sni,
+	}
+}
+
+func (f *quicTransportFixture) Close() {
+	_ = f.transport.Close()
+	_ = f.localConn.Close()
+}
+
+func (f *quicTransportFixture) sourceAddr() string {
+	return f.localConn.LocalAddr().String()
+}
+
+func (f *quicTransportFixture) do(t *testing.T, path string) int {
+	t.Helper()
+	reqURL := fmt.Sprintf("https://%s%s", f.sni, path)
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	resp, err := f.transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("HTTP/3 request: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.ReadAll(resp.Body)
+	return resp.StatusCode
+}
+
+// TestQUICProxy_FastPathStillServesRequests verifies that nil checker
+// (explicit allow fast path) serves HTTP/3 requests without per-request
+// policy evaluation.
+func TestQUICProxy_FastPathStillServesRequests(t *testing.T) {
+	upstreamCACert, upstreamCAX509, err := GenerateCA()
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	upstreamAddr, cleanup := startH3Upstream(t, upstreamCACert)
+	defer cleanup()
+
+	provider := &mapQUICProvider{creds: map[string]string{}}
+	qp, proxyCAX509 := setupQUICProxyForH3(t, provider, nil, upstreamAddr, upstreamCAX509, nil, nil)
+	go func() { _ = qp.ListenAndServe("127.0.0.1:0") }()
+	proxyAddr := waitForQUICAddr(t, qp)
+	defer func() { _ = qp.Close() }()
+
+	fx := newQUICTransportFixture(t, proxyAddr, proxyCAX509)
+	defer fx.Close()
+	qp.RegisterExpectedHost(fx.sourceAddr(), "api.example.com", 443)
+	defer qp.UnregisterExpectedHost(fx.sourceAddr())
+
+	status := fx.do(t, "/v1/a")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (QUIC fast path should serve requests)", status)
+	}
+}
+
+// newQUICTestChecker builds a RequestPolicyChecker wired to a fakeChannel
+// and broker for QUIC per-request policy tests. The TOML must define an
+// ask rule for the destination under test.
+func newQUICTestChecker(t *testing.T, toml string, resp channel.Response) (*RequestPolicyChecker, *fakeChannel) {
+	t.Helper()
+	eng, err := policy.LoadFromBytes([]byte(toml))
+	if err != nil {
+		t.Fatalf("LoadFromBytes: %v", err)
+	}
+	eng.TimeoutSec = 2
+	ptr := new(atomic.Pointer[policy.Engine])
+	ptr.Store(eng)
+	fc := newFakeChannel(resp)
+	broker := channel.NewBroker([]channel.Channel{fc})
+	fc.broker = broker
+	return NewRequestPolicyChecker(ptr, broker, WithSeedCredits(1)), fc
+}
+
+func TestQUICProxy_PerRequestAllowOnceConsumed(t *testing.T) {
+	// An ask-rule session with AllowOnce: the first request uses the seeded
+	// credit. The second request re-enters the broker. When the broker
+	// denies, the second request returns 403.
+	upstreamCACert, upstreamCAX509, err := GenerateCA()
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	upstreamAddr, cleanup := startH3Upstream(t, upstreamCACert)
+	defer cleanup()
+
+	provider := &mapQUICProvider{creds: map[string]string{}}
+	qp, proxyCAX509 := setupQUICProxyForH3(t, provider, nil, upstreamAddr, upstreamCAX509, nil, nil)
+	go func() { _ = qp.ListenAndServe("127.0.0.1:0") }()
+	proxyAddr := waitForQUICAddr(t, qp)
+	defer func() { _ = qp.Close() }()
+
+	toml := `
+[policy]
+default = "deny"
+
+[[ask]]
+destination = "api.example.com"
+ports = [443]
+protocols = ["quic"]
+`
+	// Broker returns AllowOnce on the first ask. After the seed credit is
+	// consumed, the second ask will also get AllowOnce, letting the second
+	// request through as well. To test consumption of the seed, we set the
+	// broker to Deny so the second request is blocked.
+	checker, fc := newQUICTestChecker(t, toml, channel.ResponseDeny)
+
+	fx := newQUICTransportFixture(t, proxyAddr, proxyCAX509)
+	defer fx.Close()
+	qp.RegisterExpectedHostWithChecker(fx.sourceAddr(), "api.example.com", 443, checker)
+	defer qp.UnregisterExpectedHost(fx.sourceAddr())
+
+	// First request: uses seeded allow credit, no broker call.
+	status1 := fx.do(t, "/v1/first")
+	if status1 != http.StatusOK {
+		t.Fatalf("first request status = %d, want 200 (seeded credit)", status1)
+	}
+	if fc.requestCount() != 0 {
+		t.Fatalf("broker called %d times after first request, want 0 (seed consumed)", fc.requestCount())
+	}
+
+	// Second request: seed exhausted, broker returns Deny.
+	status2 := fx.do(t, "/v1/second")
+	if status2 != http.StatusForbidden {
+		t.Fatalf("second request status = %d, want 403 (broker denied)", status2)
+	}
+	if fc.requestCount() != 1 {
+		t.Fatalf("broker called %d times after second request, want 1", fc.requestCount())
+	}
+}
+
+func TestQUICProxy_PerRequestDenyReturns403(t *testing.T) {
+	// When the checker immediately denies (explicit deny rule), the HTTP/3
+	// request returns 403.
+	upstreamCACert, upstreamCAX509, err := GenerateCA()
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	upstreamAddr, cleanup := startH3Upstream(t, upstreamCACert)
+	defer cleanup()
+
+	provider := &mapQUICProvider{creds: map[string]string{}}
+	qp, proxyCAX509 := setupQUICProxyForH3(t, provider, nil, upstreamAddr, upstreamCAX509, nil, nil)
+	go func() { _ = qp.ListenAndServe("127.0.0.1:0") }()
+	proxyAddr := waitForQUICAddr(t, qp)
+	defer func() { _ = qp.Close() }()
+
+	// Use an explicit deny rule. The checker evaluates deny before checking
+	// seeds, so the request is blocked even with a seed credit.
+	toml := `
+[policy]
+default = "deny"
+
+[[deny]]
+destination = "api.example.com"
+ports = [443]
+`
+	eng, loadErr := policy.LoadFromBytes([]byte(toml))
+	if loadErr != nil {
+		t.Fatalf("LoadFromBytes: %v", loadErr)
+	}
+	eng.TimeoutSec = 2
+	ptr := new(atomic.Pointer[policy.Engine])
+	ptr.Store(eng)
+	checker := NewRequestPolicyChecker(ptr, nil, WithSeedCredits(1))
+
+	fx := newQUICTransportFixture(t, proxyAddr, proxyCAX509)
+	defer fx.Close()
+	qp.RegisterExpectedHostWithChecker(fx.sourceAddr(), "api.example.com", 443, checker)
+	defer qp.UnregisterExpectedHost(fx.sourceAddr())
+
+	status := fx.do(t, "/v1/data")
+	if status != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (explicit deny beats seed credit)", status)
+	}
+}
+
+func TestQUICProxy_ExplicitAllowSkipsChecker(t *testing.T) {
+	// When RegisterExpectedHost is used (nil checker), requests flow through
+	// without per-request policy checks, regardless of how many requests
+	// are made on the same QUIC session.
+	upstreamCACert, upstreamCAX509, err := GenerateCA()
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	upstreamAddr, cleanup := startH3Upstream(t, upstreamCACert)
+	defer cleanup()
+
+	provider := &mapQUICProvider{creds: map[string]string{}}
+	qp, proxyCAX509 := setupQUICProxyForH3(t, provider, nil, upstreamAddr, upstreamCAX509, nil, nil)
+	go func() { _ = qp.ListenAndServe("127.0.0.1:0") }()
+	proxyAddr := waitForQUICAddr(t, qp)
+	defer func() { _ = qp.Close() }()
+
+	fx := newQUICTransportFixture(t, proxyAddr, proxyCAX509)
+	defer fx.Close()
+	qp.RegisterExpectedHost(fx.sourceAddr(), "api.example.com", 443)
+	defer qp.UnregisterExpectedHost(fx.sourceAddr())
+
+	// Multiple requests on the same session all succeed.
+	for i := 0; i < 3; i++ {
+		status := fx.do(t, fmt.Sprintf("/v1/req%d", i))
+		if status != http.StatusOK {
+			t.Fatalf("request %d status = %d, want 200 (explicit allow, no checker)", i, status)
+		}
 	}
 }

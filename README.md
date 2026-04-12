@@ -314,15 +314,17 @@ sluice audit verify   # check hash chain integrity
 
 ## Protocol Support
 
-| Protocol | Credential Injection | Content Inspection |
-|----------|---------------------|--------------------|
-| HTTP/HTTPS | MITM phantom swap | Full request/response |
-| gRPC | Header phantom swap | Metadata |
-| WebSocket | Handshake + text frames | Text frame content |
-| SSH | Jump host, key from vault | -- |
-| IMAP/SMTP | AUTH command proxy | -- |
-| DNS | -- | Deny-only (NXDOMAIN for denied domains). See note below. |
-| QUIC/HTTP3 | HTTP/3 MITM | Full request/response |
+| Protocol | Credential Injection | Content Inspection | Policy Granularity |
+|----------|---------------------|--------------------|--------------------|
+| HTTP/HTTPS | MITM phantom swap | Full request/response | Per-request (allow-once = one HTTP request) |
+| gRPC | Header phantom swap (per HTTP/2 stream) | Metadata | Per-request (each HTTP/2 stream checked independently) |
+| WebSocket | Handshake + text frames | Text frame content | Per-connection |
+| SSH | Jump host, key from vault | -- | Per-connection |
+| IMAP/SMTP | AUTH command proxy | -- | Per-connection |
+| DNS | -- | Deny-only (NXDOMAIN for denied domains). See note below. | Per-query deny |
+| QUIC/HTTP3 | HTTP/3 MITM | Full request/response | Per-request (each HTTP/3 request checked independently) |
+
+**Per-request policy:** HTTP/HTTPS, gRPC-over-HTTP/2, and QUIC/HTTP3 all evaluate policy on every request. "Allow Once" permits exactly one request (or HTTP/2 stream, or HTTP/3 request), so subsequent requests on the same connection re-trigger the approval flow. When a per-request approval resolves to "Always Allow" or "Always Deny", the new rule is persisted to the store and the engine is recompiled so subsequent requests match via the fast path. Destinations matched by an explicit allow rule take a fast path that skips per-request checks entirely. WebSocket, SSH, and IMAP/SMTP remain per-connection on purpose: per-message or per-command approvals would hit the broker's rate limit and break normal usage.
 
 **DNS policy design**: The DNS interceptor only blocks explicitly denied domains (returns NXDOMAIN). All other verdicts (allow, ask, default) are forwarded to the upstream resolver. This is intentional. Policy enforcement for "ask" destinations happens at the SOCKS5 CONNECT layer, not DNS. Blocking DNS for "ask" destinations would prevent the TCP connection from ever reaching the approval flow. The DNS interceptor populates a reverse cache (IP -> hostname) so the SOCKS5 handler can recover hostnames from IP-only CONNECT requests sent by tun2proxy. For TLS connections, SNI from the ClientHello provides an additional hostname recovery path.
 

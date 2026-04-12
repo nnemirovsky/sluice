@@ -629,10 +629,43 @@ func (e *Engine) Validate() error {
 	return nil
 }
 
+// MatchSource indicates whether a policy verdict came from an explicit rule
+// match or from falling back to the engine's default verdict. Used by
+// per-request policy fast-pathing to distinguish "explicitly allowed host" from
+// "default verdict is allow".
+type MatchSource int
+
+// MatchSource values.
+const (
+	// RuleMatch indicates the verdict came from a matching rule.
+	RuleMatch MatchSource = iota
+	// DefaultVerdict indicates the verdict came from the engine default.
+	DefaultVerdict
+)
+
+func (m MatchSource) String() string {
+	switch m {
+	case RuleMatch:
+		return "rule"
+	case DefaultVerdict:
+		return "default"
+	default:
+		return "unknown"
+	}
+}
+
 // Evaluate checks a destination and port against the compiled policy rules.
 // Deny rules are checked first, then allow, then ask. Falls back to default.
 func (e *Engine) Evaluate(dest string, port int) Verdict {
 	return e.EvaluateWithProtocol(dest, port, "")
+}
+
+// EvaluateDetailed returns the verdict and the source of the match. When
+// source is RuleMatch the verdict came from an explicit rule. When source is
+// DefaultVerdict the verdict came from the engine default. Callers use this to
+// distinguish "explicitly allowed" from "allowed by default verdict".
+func (e *Engine) EvaluateDetailed(dest string, port int) (Verdict, MatchSource) {
+	return e.EvaluateDetailedWithProtocol(dest, port, "")
 }
 
 // EvaluateWithProtocol checks a destination, port, and explicit protocol
@@ -641,22 +674,29 @@ func (e *Engine) Evaluate(dest string, port int) Verdict {
 // packet-detected protocols (dns, quic) to match protocol-scoped rules.
 // Pass "" to fall back to port-based detection (same as Evaluate).
 func (e *Engine) EvaluateWithProtocol(dest string, port int, proto string) Verdict {
+	v, _ := e.EvaluateDetailedWithProtocol(dest, port, proto)
+	return v
+}
+
+// EvaluateDetailedWithProtocol combines the protocol-aware evaluation of
+// EvaluateWithProtocol with the match-source reporting of EvaluateDetailed.
+func (e *Engine) EvaluateDetailedWithProtocol(dest string, port int, proto string) (Verdict, MatchSource) {
 	dest = normalizeDestination(dest)
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.compiled == nil {
-		return e.Default
+		return e.Default, DefaultVerdict
 	}
 	if matchRulesWithProto(e.compiled.denyRules, dest, port, proto) {
-		return Deny
+		return Deny, RuleMatch
 	}
 	if matchRulesWithProto(e.compiled.allowRules, dest, port, proto) {
-		return Allow
+		return Allow, RuleMatch
 	}
 	if matchRulesWithProto(e.compiled.askRules, dest, port, proto) {
-		return Ask
+		return Ask, RuleMatch
 	}
-	return e.Default
+	return e.Default, DefaultVerdict
 }
 
 // EvaluateUDP checks a destination and port with UDP-specific semantics.
@@ -681,31 +721,51 @@ func (e *Engine) EvaluateUDP(dest string, port int) Verdict {
 }
 
 // EvaluateQUIC checks a destination and port with QUIC-specific semantics.
-// Uses the same default-deny strategy as EvaluateUDP (ask is treated as deny).
+// Uses the same default-deny strategy as EvaluateUDP (ask is treated as deny
+// unless the caller uses EvaluateQUICDetailed to handle Ask explicitly).
 // QUIC-specific rules are evaluated first (deny then allow). If no QUIC rule
-// matches, falls back to EvaluateUDP. This ensures a QUIC allow rule can
+// matches, falls back to generic rules. This ensures a QUIC allow rule can
 // override a blanket UDP deny (e.g. deny * protocols=["udp"]).
 func (e *Engine) EvaluateQUIC(dest string, port int) Verdict {
+	v, _ := e.EvaluateQUICDetailed(dest, port)
+	// Collapse Ask to Deny for callers that do not handle Ask.
+	if v == Ask {
+		return Deny
+	}
+	return v
+}
+
+// EvaluateQUICDetailed returns the verdict and match source for QUIC traffic.
+// Unlike EvaluateQUIC, it preserves Ask verdicts so callers can trigger the
+// approval flow for per-request policy. Evaluation order: QUIC-specific deny,
+// QUIC-specific allow, QUIC-specific ask, then generic deny, allow, ask,
+// then default (Deny).
+func (e *Engine) EvaluateQUICDetailed(dest string, port int) (Verdict, MatchSource) {
 	dest = normalizeDestination(dest)
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.compiled == nil {
-		return Deny
+		return Deny, DefaultVerdict
 	}
-	// Check QUIC-specific deny rules first.
+	// QUIC-specific rules first.
 	if matchRulesStrictProto(e.compiled.denyRules, dest, port, protoNameQUIC) {
-		return Deny
+		return Deny, RuleMatch
 	}
-	// Check QUIC-specific allow rules.
 	if matchRulesStrictProto(e.compiled.allowRules, dest, port, protoNameQUIC) {
-		return Allow
+		return Allow, RuleMatch
 	}
-	// No QUIC-specific rule matched. Fall back to UDP evaluation.
+	if matchRulesStrictProto(e.compiled.askRules, dest, port, protoNameQUIC) {
+		return Ask, RuleMatch
+	}
+	// Fall back to generic UDP-scoped rules.
 	if matchRulesStrictProto(e.compiled.denyRules, dest, port, protoNameUDP) {
-		return Deny
+		return Deny, RuleMatch
 	}
 	if matchRulesStrictProto(e.compiled.allowRules, dest, port, protoNameUDP) {
-		return Allow
+		return Allow, RuleMatch
 	}
-	return Deny
+	if matchRulesStrictProto(e.compiled.askRules, dest, port, protoNameUDP) {
+		return Ask, RuleMatch
+	}
+	return Deny, DefaultVerdict
 }

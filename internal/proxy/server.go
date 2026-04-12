@@ -20,6 +20,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	mitmcert "github.com/lqqyt2423/go-mitmproxy/cert"
+	mitmproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/policy"
@@ -70,8 +72,10 @@ type Server struct {
 	socks          *socks5.Server
 	rules          *policyRuleSet
 	dnsResolver    *policyResolver
-	injector       *Injector
-	injectorLn     net.Listener
+	mitmProxy      *mitmproxy.Proxy
+	mitmAddr       string // go-mitmproxy listener address for SOCKS5 dial
+	mitmAuthSecret string // shared secret for MITM proxy auth (X-Sluice-Auth header)
+	addon          *SluiceAddon
 	sshJump        *SSHJumpHost
 	mailProxy      *MailProxy
 	udpRelay       *UDPRelay
@@ -86,11 +90,13 @@ type Server struct {
 type contextKey string
 
 const (
-	ctxKeyProtocol      contextKey = "protocol"
-	ctxKeyEngine        contextKey = "engine"
-	ctxKeyFallbackAddrs contextKey = "fallbackAddrs"
-	ctxKeyFQDN          contextKey = "fqdn"
-	ctxKeySNIDeferred   contextKey = "sniDeferred" // true when policy check deferred for SNI peeking
+	ctxKeyProtocol         contextKey = "protocol"
+	ctxKeyEngine           contextKey = "engine"
+	ctxKeyFallbackAddrs    contextKey = "fallbackAddrs"
+	ctxKeyFQDN             contextKey = "fqdn"
+	ctxKeySNIDeferred      contextKey = "sniDeferred"      // true when policy check deferred for SNI peeking
+	ctxKeyPerRequestPolicy contextKey = "perRequestPolicy" // *RequestPolicyChecker for per-HTTP-request policy checks
+	ctxKeySkipPerRequest   contextKey = "skipPerRequest"   // true when connection matched an explicit allow rule
 )
 
 // ProtocolFromContext retrieves the detected protocol from the request context.
@@ -277,7 +283,7 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 	if eng == nil {
 		eng = r.engine.Load()
 	}
-	verdict := eng.Evaluate(dest, port)
+	verdict, matchSource := eng.EvaluateDetailed(dest, port)
 
 	// SNI deferral: when the destination is an IP with no DNS reverse cache
 	// hit and the port is typically TLS, defer the policy check to the custom
@@ -297,6 +303,12 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 	allowed := false
 	effectiveVerdict := verdict
 	var reason string
+	// alwaysAllowPersisted is set to true only when an ask->ResponseAlwaysAllow
+	// both wrote the rule to the store AND swapped a recompiled engine in
+	// successfully. This gates the ctxKeySkipPerRequest flag below so a
+	// partial persistence failure does not silently allow all subsequent
+	// requests without re-triggering per-request policy.
+	var alwaysAllowPersisted bool
 	switch verdict {
 	case policy.Allow:
 		allowed = true
@@ -306,74 +318,17 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 			reason = "ask treated as deny (no approval broker)"
 			log.Printf("[ASK->DENY] %s:%d (no approval broker)", dest, port)
 		} else {
-			log.Printf("[ASK] %s:%d (waiting for Telegram approval)", dest, port)
-			timeout := time.Duration(eng.TimeoutSec) * time.Second
-			proto := DetectProtocol(port)
-			resp, err := r.broker.Request(dest, port, proto.String(), timeout)
-			if err != nil {
-				effectiveVerdict = policy.Deny
-				reason = fmt.Sprintf("approval timeout: %v", err)
-				log.Printf("[ASK->DENY] %s:%d (timeout: %v)", dest, port, err)
-			} else {
-				switch resp {
-				case channel.ResponseAllowOnce:
-					allowed = true
-					effectiveVerdict = policy.Allow
-					reason = "user approved once"
-					log.Printf("[ASK->ALLOW] %s:%d (user approved once)", dest, port)
-				case channel.ResponseAlwaysAllow:
-					allowed = true
-					effectiveVerdict = policy.Allow
-					reason = "user approved always"
-					log.Printf("[ASK->ALLOW+SAVE] %s:%d (user approved always)", dest, port)
-					// Hold reloadMu to prevent a concurrent SIGHUP from swapping
-					// the engine between the store write and recompile.
-					r.reloadMu.Lock()
-					func() {
-						defer r.reloadMu.Unlock()
-						if r.store != nil {
-							if _, storeErr := r.store.AddRule("allow", store.RuleOpts{Destination: dest, Ports: []int{port}, Source: "approval"}); storeErr != nil {
-								log.Printf("[WARN] failed to persist allow rule for %s:%d: %v", dest, port, storeErr)
-							}
-							if newEng, recompErr := policy.LoadFromStore(r.store); recompErr != nil {
-								log.Printf("[WARN] failed to recompile engine after always-allow: %v", recompErr)
-							} else if valErr := newEng.Validate(); valErr != nil {
-								log.Printf("[WARN] engine validation failed after always-allow: %v", valErr)
-							} else {
-								r.engine.Store(newEng)
-							}
-						} else {
-							if err := r.engine.Load().AddDynamicAllow(dest, port); err != nil { //nolint:staticcheck // backward compat fallback when no store
-								log.Printf("[WARN] failed to add dynamic allow rule for %s:%d: %v", dest, port, err)
-							}
-						}
-					}()
-				case channel.ResponseAlwaysDeny:
-					effectiveVerdict = policy.Deny
-					reason = "user denied always"
-					log.Printf("[ASK->DENY+SAVE] %s:%d (user denied always)", dest, port)
-					r.reloadMu.Lock()
-					func() {
-						defer r.reloadMu.Unlock()
-						if r.store != nil {
-							if _, storeErr := r.store.AddRule("deny", store.RuleOpts{Destination: dest, Ports: []int{port}, Source: "approval"}); storeErr != nil {
-								log.Printf("[WARN] failed to persist deny rule for %s:%d: %v", dest, port, storeErr)
-							}
-							if newEng, recompErr := policy.LoadFromStore(r.store); recompErr != nil {
-								log.Printf("[WARN] failed to recompile engine after always-deny: %v", recompErr)
-							} else if valErr := newEng.Validate(); valErr != nil {
-								log.Printf("[WARN] engine validation failed after always-deny: %v", valErr)
-							} else {
-								r.engine.Store(newEng)
-							}
-						}
-					}()
-				default:
-					effectiveVerdict = policy.Deny
-					reason = "user denied"
-					log.Printf("[ASK->DENY] %s:%d (user denied)", dest, port)
-				}
-			}
+			// Auto-allow the SOCKS5 CONNECT without prompting the user.
+			// For TLS connections: approval happens per-request inside the
+			// MITM handler where the HTTP method and path are known.
+			// For non-TLS connections (SSH, plain TCP): the checker is
+			// attached but the direct-relay path in handleWithDetection
+			// calls CheckAndConsume once before relaying, providing a
+			// connection-level approval prompt.
+			allowed = true
+			effectiveVerdict = policy.Allow
+			reason = "ask deferred to per-request"
+			log.Printf("[ASK->DEFER] %s:%d (approval deferred to handler)", dest, port)
 		}
 	}
 
@@ -413,11 +368,14 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 		}
 	}
 
-	// Single audit entry reflecting the final outcome.
+	// Single audit entry reflecting the final outcome. Protocol is set
+	// so audit grep is consistent with per-request audit entries which
+	// also populate this field.
 	if r.audit != nil {
 		if err := r.audit.Log(audit.Event{
 			Destination: dest,
 			Port:        port,
+			Protocol:    DetectProtocol(port).String(),
 			Verdict:     effectiveVerdict.String(),
 			Reason:      reason,
 		}); err != nil {
@@ -429,8 +387,109 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 		proto := DetectProtocol(port)
 		ctx = context.WithValue(ctx, ctxKeyProtocol, proto)
 		ctx = context.WithValue(ctx, ctxKeyFQDN, dest)
+
+		// Per-request policy wiring. Skip per-request checks entirely when
+		// any of the following hold:
+		//   1. The connect-time verdict matched an explicit allow rule
+		//      (RuleMatch). Subsequent requests will keep matching the same
+		//      rule so paying the per-request cost is pure waste.
+		//   2. The ask flow resolved to ResponseAlwaysAllow and the rule was
+		//      successfully persisted (both store write and engine swap).
+		//      At that point the new rule is live in the engine and
+		//      functions exactly like case 1. A partial persistence failure
+		//      falls through to the checker path as a safety net.
+		//   3. There is no broker wired up. Without a broker, the checker
+		//      can only deny (ask -> deny) or allow (rule/default allow),
+		//      but since we already allowed this connection the only thing
+		//      the checker could do differently is start denying mid-stream
+		//      if the engine is reloaded. Skip it to avoid the overhead.
+		//
+		// Otherwise attach a checker so the HTTP MITM handler re-evaluates
+		// policy on every request. This is how "Allow Once" becomes
+		// per-request instead of per-connection. When the connection-level
+		// ask resolved to ResponseAllowOnce, the checker is seeded with one
+		// prepaid allow credit so the first HTTP request flows through
+		// without re-prompting the user (the CONNECT approval is reused for
+		// the first request on the new tunnel).
+		skipPerRequest := (verdict == policy.Allow && matchSource == policy.RuleMatch) ||
+			alwaysAllowPersisted ||
+			r.broker == nil
+		if skipPerRequest {
+			ctx = context.WithValue(ctx, ctxKeySkipPerRequest, true)
+		} else {
+			// No seed credit: every HTTP request triggers its own
+			// per-request approval with method and path visible in
+			// the Telegram message.
+			checker := NewRequestPolicyChecker(r.engine, r.broker,
+				WithPersist(r.buildPersistFunc()),
+			)
+			ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
+		}
 	}
 	return ctx, allowed
+}
+
+// persistApprovalRule writes an allow/deny rule for dest:port coming from an
+// ask->Always* approval and atomically swaps in a recompiled engine. Returns
+// true only when both the store write and engine swap succeed. A false return
+// means the in-memory engine may still evaluate dest:port as ask, so callers
+// should attach a per-request checker as a safety net.
+//
+// Callers:
+//   - persistAlwaysAllow / persistAlwaysDeny: connection-level approvals.
+//   - buildPersistFunc closure: per-request approvals via RequestPolicyChecker.
+//   - sniSaveRule: SNI-peek approvals in the custom connect handler.
+//
+// verdict must be "allow" or "deny".
+func (r *policyRuleSet) persistApprovalRule(verdict, dest string, port int) bool {
+	// Hold reloadMu to prevent a concurrent SIGHUP from swapping the
+	// engine between the store write and recompile.
+	r.reloadMu.Lock()
+	defer r.reloadMu.Unlock()
+	if r.store == nil {
+		log.Printf("[WARN] always-%s for %s:%d not persisted (no store)", verdict, dest, port)
+		return false
+	}
+	if _, storeErr := r.store.AddRule(verdict, store.RuleOpts{Destination: dest, Ports: []int{port}, Source: "approval"}); storeErr != nil {
+		log.Printf("[WARN] failed to persist %s rule for %s:%d: %v", verdict, dest, port, storeErr)
+		return false
+	}
+	newEng, recompErr := policy.LoadFromStore(r.store)
+	if recompErr != nil {
+		log.Printf("[WARN] failed to recompile engine after always-%s: %v", verdict, recompErr)
+		return false
+	}
+	if valErr := newEng.Validate(); valErr != nil {
+		log.Printf("[WARN] engine validation failed after always-%s: %v", verdict, valErr)
+		return false
+	}
+	r.engine.Store(newEng)
+	return true
+}
+
+// buildPersistFunc returns a closure that persists a new allow/deny rule
+// via the SOCKS5 rule set's store and swaps in a recompiled engine. It
+// mirrors the always-allow/always-deny handling in Allow() so per-request
+// approvals land in the same store/engine state as connection-level ones.
+// Returns nil when the rule set has no store wired up (tests, standalone),
+// in which case the checker logs a warning instead of persisting.
+func (r *policyRuleSet) buildPersistFunc() PersistRuleFunc {
+	if r.store == nil {
+		return nil
+	}
+	return func(v PersistVerdict, dest string, port int) {
+		verdictStr := "allow"
+		label := "[REQ-APPROVAL-SAVE:allow]"
+		if v == PersistDeny {
+			verdictStr = "deny"
+			label = "[REQ-APPROVAL-SAVE:deny]"
+		}
+		if ok := r.persistApprovalRule(verdictStr, dest, port); !ok {
+			log.Printf("%s %s:%d persistence failed", label, dest, port)
+			return
+		}
+		log.Printf("%s %s:%d persisted", label, dest, port)
+	}
 }
 
 // New creates a new SOCKS5 proxy server bound to the configured listen address.
@@ -500,8 +559,9 @@ func New(cfg Config) (*Server, error) {
 }
 
 // setupInjection initializes the credential injection infrastructure (HTTPS
-// MITM, SSH jump host, mail proxy). Returns an error if any component fails.
-// The caller decides whether the error is fatal based on whether bindings exist.
+// MITM via go-mitmproxy, SSH jump host, mail proxy). Returns an error if
+// any component fails. The caller decides whether the error is fatal based
+// on whether bindings exist.
 func (s *Server) setupInjection(cfg Config, _ net.Listener) error {
 	vaultDir := cfg.VaultDir
 	if vaultDir == "" {
@@ -521,15 +581,6 @@ func (s *Server) setupInjection(cfg Config, _ net.Listener) error {
 		log.Printf("WARNING: CA certificate at %s expires within 30 days. Delete and restart to regenerate.", certPath)
 	}
 
-	// Generate a random auth token so only our SOCKS5 dial function
-	// can use the injector listener. Without this, any local process
-	// that discovers the port could bypass policy and audit logging.
-	tokenBytes := make([]byte, 16)
-	if _, tokenErr := rand.Read(tokenBytes); tokenErr != nil {
-		return fmt.Errorf("generate injector auth token: %w", tokenErr)
-	}
-	authToken := hex.EncodeToString(tokenBytes)
-
 	// Create WebSocket proxy for frame-level inspection when configured.
 	var wsProxy *WSProxy
 	if len(cfg.WSBlockRules) > 0 || len(cfg.WSRedactRules) > 0 {
@@ -543,31 +594,92 @@ func (s *Server) setupInjection(cfg Config, _ net.Listener) error {
 		wsProxy, _ = NewWSProxy(cfg.Provider, &s.resolver, nil, nil)
 	}
 
-	s.injector = NewInjector(cfg.Provider, &s.resolver, caCert, authToken, wsProxy)
+	// Create the SluiceAddon for go-mitmproxy.
+	addonOpts := []SluiceAddonOption{
+		WithResolver(&s.resolver),
+		WithProvider(cfg.Provider),
+		WithWSProxy(wsProxy),
+	}
+	if cfg.Audit != nil {
+		addonOpts = append(addonOpts, WithAuditLogger(cfg.Audit))
+	}
+	s.addon = NewSluiceAddon(addonOpts...)
 
 	// Populate the OAuth token URL index from credential metadata so
 	// the response handler can detect OAuth token endpoints from startup.
 	if cfg.Store != nil {
 		if metas, metaErr := cfg.Store.ListCredentialMeta(); metaErr == nil {
-			s.injector.UpdateOAuthIndex(metas)
+			s.addon.UpdateOAuthIndex(metas)
 		} else {
-			log.Printf("[INJECT-OAUTH] failed to load credential meta for index: %v", metaErr)
+			log.Printf("[MITM-OAUTH] failed to load credential meta for index: %v", metaErr)
 		}
 	}
 
-	injLn, injErr := net.Listen("tcp", "127.0.0.1:0")
-	if injErr != nil {
-		return fmt.Errorf("injector listener: %w", injErr)
+	// Create a cert.CA adapter so go-mitmproxy uses our existing CA.
+	ca, caAdaptErr := newSluiceCA(caCert)
+	if caAdaptErr != nil {
+		return fmt.Errorf("adapt CA for mitmproxy: %w", caAdaptErr)
 	}
-	s.injectorLn = injLn
-	go http.Serve(injLn, s.injector.Proxy) //nolint:errcheck // best-effort
+
+	// Pre-allocate a listener to discover the port, then release it so
+	// go-mitmproxy's Start() can bind. There is a small TOCTOU window
+	// between Close() and Start() where another process could grab the
+	// port. go-mitmproxy does not expose a custom net.Listener option,
+	// so this is the only way to discover the address. The risk is
+	// negligible on localhost (only sluice binds ephemeral ports here).
+	tmpLn, lnErr := net.Listen("tcp", "127.0.0.1:0")
+	if lnErr != nil {
+		return fmt.Errorf("mitmproxy listener: %w", lnErr)
+	}
+	mitmAddr := tmpLn.Addr().String()
+	_ = tmpLn.Close()
+
+	mp, mpErr := mitmproxy.NewProxy(&mitmproxy.Options{
+		Addr: mitmAddr,
+		// SslInsecure skips certificate verification on upstream connections.
+		// Required because go-mitmproxy connects to the real upstream server
+		// from the MITM proxy, and we need to accept whatever cert the upstream
+		// presents (sluice's CA is only for the agent-facing side).
+		SslInsecure: true,
+		NewCaFunc:   func() (mitmcert.CA, error) { return ca, nil },
+	})
+	if mpErr != nil {
+		return fmt.Errorf("create mitmproxy: %w", mpErr)
+	}
+
+	// Always intercept HTTPS connections so phantom tokens can be
+	// replaced in any traffic (MITM-all policy).
+	mp.SetShouldInterceptRule(func(_ *http.Request) bool { return true })
+
+	// Authenticate CONNECT requests with a shared secret so only sluice's
+	// own SOCKS5 dial path can use the MITM listener. Without this, any
+	// process on localhost could connect directly and bypass policy checks.
+	// In Docker deployments the listener is network-isolated, but --runtime
+	// none exposes it on the host.
+	var secretBytes [16]byte
+	if _, randErr := rand.Read(secretBytes[:]); randErr != nil {
+		return fmt.Errorf("generate mitm auth secret: %w", randErr)
+	}
+	mitmSecret := hex.EncodeToString(secretBytes[:])
+	mp.SetAuthProxy(func(_ http.ResponseWriter, req *http.Request) (bool, error) {
+		return req.Header.Get("X-Sluice-Auth") == mitmSecret, nil
+	})
+
+	mp.AddAddon(s.addon)
+	s.mitmProxy = mp
+	s.mitmAddr = mitmAddr
+	s.mitmAuthSecret = mitmSecret
+
+	go func() {
+		if startErr := mp.Start(); startErr != nil {
+			log.Printf("[MITM] proxy stopped: %v", startErr)
+		}
+	}()
 
 	// SSH jump host for credential-injected SSH connections.
 	hostKey, hkErr := GenerateSSHHostKey()
 	if hkErr != nil {
-		_ = injLn.Close()
-		s.injectorLn = nil
-		s.injector = nil
+		_ = mp.Close()
 		return fmt.Errorf("generate SSH host key: %w", hkErr)
 	}
 	s.sshJump = NewSSHJumpHost(cfg.Provider, hostKey)
@@ -609,11 +721,99 @@ func bindingIsMetaOnly(b vault.Binding) bool {
 	return true
 }
 
+// skipPerRequestFromContext returns true when the SOCKS5 context flags
+// the connection as exempt from per-request policy checks.
+func skipPerRequestFromContext(ctx context.Context) bool {
+	skip, _ := ctx.Value(ctxKeySkipPerRequest).(bool)
+	return skip
+}
+
+// perRequestCheckerFromContext extracts the per-request policy checker from
+// the SOCKS5 context. Returns nil when the connection matched an explicit
+// allow rule (ctxKeySkipPerRequest is set) or when no checker is attached.
+func perRequestCheckerFromContext(ctx context.Context) *RequestPolicyChecker {
+	if skipPerRequestFromContext(ctx) {
+		return nil
+	}
+	if c, ok := ctx.Value(ctxKeyPerRequestPolicy).(*RequestPolicyChecker); ok {
+		return c
+	}
+	return nil
+}
+
+// storePendingChecker transfers the per-request policy state from the
+// SOCKS5 context into the SluiceAddon's pending checkers map so that
+// ServerConnected can attach it to the connection state. The dest
+// argument is "host:port" matching the CONNECT target.
+func (s *Server) storePendingChecker(ctx context.Context, dest string) {
+	if s.addon == nil {
+		return
+	}
+	skip := skipPerRequestFromContext(ctx)
+	checker := perRequestCheckerFromContext(ctx)
+	if skip || checker != nil {
+		s.addon.PendingChecker(dest, checker, skip)
+	}
+}
+
+// cancelPendingChecker removes the most recent pending checker for dest
+// when dialThroughMITM fails after storePendingChecker was called.
+// Without this cleanup a stale checker would leak and attach to the next
+// connection to the same host:port.
+func (s *Server) cancelPendingChecker(dest string) {
+	if s.addon == nil {
+		return
+	}
+	s.addon.CancelPendingChecker(dest)
+}
+
+// dialThroughMITM connects to the local go-mitmproxy listener and
+// establishes an HTTP CONNECT tunnel for the target host. go-mitmproxy
+// intercepts the CONNECT request and sets up MITM for the inner
+// HTTP/HTTPS traffic. The per-request checker is passed through the
+// addon's pendingCheckers map (keyed by host:port) before calling this.
+// The authSecret is sent as X-Sluice-Auth to pass go-mitmproxy's
+// SetAuthProxy check.
+func dialThroughMITM(mitmAddr, host string, port int, authSecret string) (net.Conn, error) {
+	conn, err := net.DialTimeout("tcp", mitmAddr, connectTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("connect to mitmproxy: %w", err)
+	}
+
+	target := net.JoinHostPort(host, strconv.Itoa(port))
+	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\nX-Sluice-Auth: %s\r\n\r\n", target, target, authSecret)
+	if _, wErr := io.WriteString(conn, req); wErr != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("send CONNECT: %w", wErr)
+	}
+
+	br := bufio.NewReader(conn)
+	resp, rErr := http.ReadResponse(br, &http.Request{Method: "CONNECT"})
+	if rErr != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("read CONNECT response: %w", rErr)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_ = conn.Close()
+		return nil, fmt.Errorf("CONNECT rejected: %s", resp.Status)
+	}
+
+	// If the buffered reader consumed bytes past the HTTP response headers,
+	// wrap the connection so those bytes are read first.
+	if br.Buffered() > 0 {
+		return &bufferedConn{Reader: br, Conn: conn}, nil
+	}
+	return conn, nil
+}
+
 // dial is the custom dialer for go-socks5. When a credential binding matches
 // the destination, the connection is routed through the appropriate injection
-// handler (HTTPS MITM, SSH jump host, or mail proxy). Otherwise it falls
-// through to a direct TCP connection with DNS fallback support.
+// handler (HTTPS MITM via go-mitmproxy, SSH jump host, or mail proxy).
+// Otherwise it falls through to a direct TCP connection with DNS fallback
+// support.
 func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	perReqChecker := perRequestCheckerFromContext(ctx)
 	if r := s.resolver.Load(); r != nil {
 		fqdn, _ := ctx.Value(ctxKeyFQDN).(string)
 		if fqdn != "" {
@@ -626,12 +826,6 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 			// with different protocols (e.g. one for SSH, one for HTTPS).
 			binding, ok := r.ResolveForProtocol(fqdn, port, proto.String())
 			if !ok {
-				// No protocol-specific or protocol-agnostic binding
-				// matched. Fall back to any dest+port binding and adopt
-				// its protocol when unambiguous. ResolveProtocolHint
-				// scans ALL bindings for this dest+port and returns false
-				// when multiple single-protocol bindings disagree,
-				// preventing order-dependent protocol selection.
 				binding, ok = r.Resolve(fqdn, port)
 				if ok && len(binding.Protocols) == 1 {
 					if hint, hok := r.ResolveProtocolHint(fqdn, port); hok {
@@ -641,13 +835,6 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 					}
 				}
 			}
-			// When protocol is still generic (non-standard port) and
-			// resolution returned a protocol-agnostic or meta-protocol
-			// binding, check if a specific-protocol binding exists for
-			// this dest+port. Without this, the agnostic/meta fallback
-			// from ResolveForProtocol masks protocol-specific bindings
-			// and the connection falls through to the timeout-sensitive
-			// byte-detection path instead of using the fast hint path.
 			if ok && proto == ProtoGeneric && (len(binding.Protocols) == 0 || bindingIsMetaOnly(binding)) {
 				if hint, hok := r.ResolveProtocolHint(fqdn, port); hok {
 					if parsed, perr := ParseProtocol(hint); perr == nil {
@@ -659,15 +846,7 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 				}
 			}
 			if ok {
-				// hostAddr uses the FQDN for TLS SNI and SSH known_hosts
-				// verification. addr (the go-socks5 dial target) uses the
-				// policy-approved resolved IP for the actual TCP connection,
-				// preventing DNS rebinding between policy evaluation and dial.
 				hostAddr := net.JoinHostPort(fqdn, portStr)
-
-				// Build address list from primary + policy-approved fallbacks
-				// so injection handlers have the same dual-stack resilience
-				// as the non-injected direct connection path.
 				dialAddrs := []string{addr}
 				if fallbacks, ok := ctx.Value(ctxKeyFallbackAddrs).([]net.IP); ok {
 					for _, ip := range fallbacks {
@@ -676,26 +855,21 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 				}
 
 				switch proto {
-				case ProtoHTTP, ProtoHTTPS:
-					if s.injector != nil {
-						// Pin the policy-approved IPs so goproxy's
-						// transport dials them instead of re-resolving.
-						// Each connection gets a unique pin ID to avoid
-						// races between concurrent same-host connections.
-						ips := make([]string, len(dialAddrs))
-						for i, a := range dialAddrs {
-							ip, _, _ := net.SplitHostPort(a)
-							ips[i] = ip
-						}
-						pinID := generatePinID()
-						s.injector.PinIPs(pinID, ips)
-						conn, err := dialThroughInjector(s.injectorLn.Addr().String(), fqdn, port, s.injector.authToken, pinID)
+				case ProtoHTTPS:
+					if s.mitmProxy != nil {
+						dest := net.JoinHostPort(fqdn, strconv.Itoa(port))
+						s.storePendingChecker(ctx, dest)
+						conn, err := dialThroughMITM(s.mitmAddr, fqdn, port, s.mitmAuthSecret)
 						if err != nil {
-							s.injector.UnpinIPs(pinID)
+							s.cancelPendingChecker(dest)
 							return nil, err
 						}
-						return &pinnedConn{Conn: conn, injector: s.injector, pinID: pinID}, nil
+						return conn, nil
 					}
+				case ProtoHTTP:
+					// Plain HTTP: go-mitmproxy only parses TLS-intercepted traffic.
+					// Fall through to direct connection. Phantom replacement for
+					// plain HTTP bindings is not yet supported via go-mitmproxy.
 				case ProtoSSH:
 					if s.sshJump != nil {
 						return dialWithHandler(func(agentConn net.Conn, ready chan<- error) {
@@ -714,52 +888,39 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 					}
 				}
 				// Non-standard port with binding: use byte-level detection
-				// to determine the correct injection handler. Port-based
-				// detection returned ProtoGeneric (or ProtoTCP from a
-				// binding hint), so peek the client's first bytes to
-				// identify the actual protocol.
+				// to determine the correct injection handler.
 				if proto == ProtoGeneric || proto == ProtoTCP {
-					bnd := binding // capture for closure
+					bnd := binding
 					return dialWithHandler(func(agentConn net.Conn, ready chan<- error) {
-						s.handleWithDetection(agentConn, ready, &bnd, fqdn, port, hostAddr, dialAddrs)
+						s.handleWithDetection(agentConn, ready, &bnd, fqdn, port, hostAddr, dialAddrs, perReqChecker)
 					})
 				}
 			}
 		}
 	}
 
-	// Route unbound HTTP/HTTPS through the injector when available so
+	// Route unbound HTTP/HTTPS through go-mitmproxy when available so
 	// phantom tokens are stripped from requests to hosts without bindings.
-	// Without this, requests bypassing the binding-match block above
-	// would go direct and leak SLUICE_PHANTOM:* tokens upstream.
-	if s.injector != nil {
+	if s.mitmProxy != nil {
 		_, portStr, _ := net.SplitHostPort(addr)
 		port, _ := strconv.Atoi(portStr)
 		proto := DetectProtocol(port)
 		switch proto {
-		case ProtoHTTP, ProtoHTTPS:
+		case ProtoHTTPS:
 			fqdn, _ := ctx.Value(ctxKeyFQDN).(string)
 			if fqdn == "" {
 				host, _, _ := net.SplitHostPort(addr)
 				fqdn = host
 			}
-			ips := []string{}
-			if ip, _, err := net.SplitHostPort(addr); err == nil {
-				ips = append(ips, ip)
-			}
-			if fallbacks, ok := ctx.Value(ctxKeyFallbackAddrs).([]net.IP); ok {
-				for _, ip := range fallbacks {
-					ips = append(ips, ip.String())
-				}
-			}
-			pinID := generatePinID()
-			s.injector.PinIPs(pinID, ips)
-			conn, err := dialThroughInjector(s.injectorLn.Addr().String(), fqdn, port, s.injector.authToken, pinID)
+			dest := net.JoinHostPort(fqdn, strconv.Itoa(port))
+			s.storePendingChecker(ctx, dest)
+			conn, err := dialThroughMITM(s.mitmAddr, fqdn, port, s.mitmAuthSecret)
 			if err != nil {
-				s.injector.UnpinIPs(pinID)
+				s.cancelPendingChecker(dest)
 				// Fall through to direct connection below.
+				log.Printf("[MITM] dial through mitmproxy failed for %s: %v", dest, err)
 			} else {
-				return &pinnedConn{Conn: conn, injector: s.injector, pinID: pinID}, nil
+				return conn, nil
 			}
 		case ProtoGeneric:
 			// Non-standard port without binding: use byte-level
@@ -777,12 +938,29 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 			}
 			hostAddr := net.JoinHostPort(fqdn, portStr)
 			return dialWithHandler(func(agentConn net.Conn, ready chan<- error) {
-				s.handleWithDetection(agentConn, ready, nil, fqdn, port, hostAddr, unboundAddrs)
+				s.handleWithDetection(agentConn, ready, nil, fqdn, port, hostAddr, unboundAddrs, perReqChecker)
 			})
 		}
 	}
 
 	// No credential binding or unsupported protocol: direct connection.
+	// Check deferred ask policy before connecting. For TLS ports this is
+	// handled by the MITM addon per-request, but for non-TLS (SSH, plain
+	// TCP) this is the only checkpoint.
+	if perReqChecker != nil {
+		_, portStr, _ := net.SplitHostPort(addr)
+		port, _ := strconv.Atoi(portStr)
+		fqdn, _ := ctx.Value(ctxKeyFQDN).(string)
+		if fqdn == "" {
+			host, _, _ := net.SplitHostPort(addr)
+			fqdn = host
+		}
+		proto := DetectProtocol(port)
+		if v, _ := perReqChecker.CheckAndConsume(fqdn, port, WithProtocol(proto.String())); v != policy.Allow {
+			log.Printf("[DIAL-DENY] %s deferred ask denied", addr)
+			return nil, fmt.Errorf("connection denied by policy")
+		}
+	}
 	d := &net.Dialer{Timeout: connectTimeout}
 	conn, err := d.DialContext(ctx, network, addr)
 	if err == nil {
@@ -810,6 +988,9 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 // and routes through the appropriate injection handler. Used for connections
 // on non-standard ports where port-based detection returned ProtoGeneric.
 // The binding parameter is nil for unbound connections (phantom stripping only).
+// The checker parameter is the per-request policy checker carried from the
+// SOCKS5 context, used by the HTTP MITM path to enforce per-request policy.
+// It is nil when the connection matched an explicit allow rule.
 func (s *Server) handleWithDetection(
 	agentConn net.Conn,
 	ready chan<- error,
@@ -818,6 +999,7 @@ func (s *Server) handleWithDetection(
 	port int,
 	hostAddr string,
 	dialAddrs []string,
+	checker *RequestPolicyChecker,
 ) {
 	defer func() { _ = agentConn.Close() }()
 	// Signal ready immediately: byte detection requires reading client
@@ -861,47 +1043,54 @@ func (s *Server) handleWithDetection(
 	}
 
 	switch proto {
-	case ProtoHTTPS, ProtoHTTP:
-		if s.injector != nil {
-			ips := make([]string, 0, len(dialAddrs))
-			for _, a := range dialAddrs {
-				if ip, _, err := net.SplitHostPort(a); err == nil {
-					ips = append(ips, ip)
-				}
-			}
-			pinID := generatePinID()
-			s.injector.PinIPs(pinID, ips)
-			defer s.injector.UnpinIPs(pinID)
-			injConn, err := dialThroughInjector(s.injectorLn.Addr().String(), fqdn, port, s.injector.authToken, pinID)
+	case ProtoHTTPS:
+		if s.mitmProxy != nil {
+			dest := net.JoinHostPort(fqdn, strconv.Itoa(port))
+			s.addon.PendingChecker(dest, checker, checker == nil)
+			mitmConn, err := dialThroughMITM(s.mitmAddr, fqdn, port, s.mitmAuthSecret)
 			if err != nil {
-				log.Printf("[DETECT] injector failed for %s: %v", hostAddr, err)
+				s.addon.CancelPendingChecker(dest)
+				log.Printf("[DETECT] mitmproxy failed for %s: %v", hostAddr, err)
 				if binding != nil {
-					// Fail closed for bound connections: credential
-					// injection is required and phantom tokens must not
-					// leak upstream. Unlike the standard bound path
-					// (which returns an error before CONNECT succeeds),
-					// the detection path has already signaled ready, so
-					// this drops the connection at the application layer.
 					return
 				}
 				relayDirect(peekConn, dialAddrs)
 				return
 			}
-			bidirectionalRelay(peekConn, injConn)
+			bidirectionalRelay(peekConn, mitmConn)
 			return
 		}
+	case ProtoHTTP:
+		// Plain HTTP: no MITM handler. Check connection-level policy
+		// before relaying if a checker was deferred from Allow().
+		if checker != nil {
+			if v, _ := checker.CheckAndConsume(fqdn, port, WithProtocol(proto.String())); v != policy.Allow {
+				log.Printf("[DETECT-DENY] %s:%d plain HTTP blocked by deferred policy", fqdn, port)
+				return
+			}
+		}
+		relayDirect(peekConn, dialAddrs)
+		return
 	case ProtoSSH:
+		if checker != nil {
+			if v, _ := checker.CheckAndConsume(fqdn, port, WithProtocol(proto.String())); v != policy.Allow {
+				log.Printf("[DETECT-DENY] %s:%d SSH blocked by deferred policy", fqdn, port)
+				return
+			}
+		}
 		if s.sshJump != nil && binding != nil {
-			// Pass nil for ready: SOCKS5 CONNECT already succeeded (see
-			// comment above), so the handler's readiness signal is unused.
-			// Both HandleConnection implementations guard with
-			// "if ready != nil" before sending.
 			if err := s.sshJump.HandleConnection(peekConn, dialAddrs, hostAddr, *binding, nil); err != nil {
 				log.Printf("[SSH] handler error for %s: %v", hostAddr, err)
 			}
 			return
 		}
 	case ProtoIMAP, ProtoSMTP:
+		if checker != nil {
+			if v, _ := checker.CheckAndConsume(fqdn, port, WithProtocol(proto.String())); v != policy.Allow {
+				log.Printf("[DETECT-DENY] %s:%d %s blocked by deferred policy", fqdn, port, proto)
+				return
+			}
+		}
 		if s.mailProxy != nil && binding != nil {
 			if err := s.mailProxy.HandleConnection(peekConn, dialAddrs, hostAddr, *binding, proto, nil); err != nil {
 				log.Printf("[MAIL] handler error for %s: %v", hostAddr, err)
@@ -917,10 +1106,23 @@ func (s *Server) handleWithDetection(
 	// can only route through the mail proxy and the upstream probe is wasted
 	// without a binding to inject.
 	if n == 0 && binding != nil && s.mailProxy != nil {
+		if checker != nil {
+			if v, _ := checker.CheckAndConsume(fqdn, port, WithProtocol(proto.String())); v != policy.Allow {
+				log.Printf("[DETECT-DENY] %s:%d server-first blocked by deferred policy", fqdn, port)
+				return
+			}
+		}
 		s.handleServerFirstDetection(peekConn, binding, hostAddr, dialAddrs)
 		return
 	}
 
+	// Generic fallback: direct relay. Check deferred policy first.
+	if checker != nil {
+		if v, _ := checker.CheckAndConsume(fqdn, port, WithProtocol(proto.String())); v != policy.Allow {
+			log.Printf("[DETECT-DENY] %s:%d blocked by deferred policy", fqdn, port)
+			return
+		}
+	}
 	relayDirect(peekConn, dialAddrs)
 }
 
@@ -1039,44 +1241,6 @@ func bidirectionalRelay(a, b io.ReadWriter) {
 	<-errc
 }
 
-// dialThroughInjector connects to the local goproxy MITM listener and
-// establishes an HTTP CONNECT tunnel for the target host. The authToken
-// is included as a header so the injector can verify the request
-// originated from the SOCKS5 proxy rather than an unauthorized local process.
-// The pinID identifies the per-connection pinned IPs for DNS rebinding protection.
-func dialThroughInjector(injectorAddr, host string, port int, authToken, pinID string) (net.Conn, error) {
-	conn, err := net.DialTimeout("tcp", injectorAddr, connectTimeout)
-	if err != nil {
-		return nil, fmt.Errorf("connect to injector: %w", err)
-	}
-
-	target := net.JoinHostPort(host, strconv.Itoa(port))
-	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\nX-Sluice-Auth: %s\r\nX-Sluice-Pin: %s\r\n\r\n", target, target, authToken, pinID)
-	if _, wErr := io.WriteString(conn, req); wErr != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("send CONNECT: %w", wErr)
-	}
-
-	br := bufio.NewReader(conn)
-	resp, rErr := http.ReadResponse(br, &http.Request{Method: "CONNECT"})
-	if rErr != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("read CONNECT response: %w", rErr)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		_ = conn.Close()
-		return nil, fmt.Errorf("CONNECT rejected: %s", resp.Status)
-	}
-
-	// If the buffered reader consumed bytes past the HTTP response headers,
-	// wrap the connection so those bytes are read first.
-	if br.Buffered() > 0 {
-		return &bufferedConn{Reader: br, Conn: conn}, nil
-	}
-	return conn, nil
-}
-
 // handleAssociate is the custom SOCKS5 UDP ASSOCIATE handler registered via
 // WithAssociateHandle. It creates a UDP listener, replies with its address,
 // handleConnect is a custom SOCKS5 CONNECT handler that supports SNI-based
@@ -1166,9 +1330,9 @@ func (s *Server) handleConnect(ctx context.Context, writer io.Writer, request *s
 // When the first direction finishes (either client or target closes), the
 // writer (SOCKS5 connection) is closed to unblock the second goroutine.
 // target is NOT closed here to avoid triggering broken pipe warnings in
-// goproxy. The caller's deferred target.Close() handles final cleanup.
-// If the second goroutine is blocked reading from target (e.g. pending
-// long-poll), a short deadline forces it to return instead of blocking
+// the MITM proxy. The caller's deferred target.Close() handles final
+// cleanup. If the second goroutine is blocked reading from target (e.g.
+// pending long-poll), a short deadline forces it to return instead of blocking
 // indefinitely and leaking the SOCKS5 connection in CLOSE_WAIT state.
 func (s *Server) relayData(clientReader io.Reader, writer io.Writer, target net.Conn) error {
 	errCh := make(chan error, 2)
@@ -1192,8 +1356,8 @@ func (s *Server) relayData(clientReader io.Reader, writer io.Writer, target net.
 
 	// Close writer to unblock goroutine 2 if it's stuck writing. Set a
 	// read deadline on target to unblock goroutine 2 if it's stuck reading
-	// (e.g. goproxy waiting for a long-poll response). This avoids closing
-	// target directly, which would trigger broken pipe warnings in goproxy.
+	// (e.g. the MITM proxy waiting for a long-poll response). This avoids
+	// closing target directly, which would trigger broken pipe warnings.
 	if cl, ok := writer.(io.Closer); ok {
 		cl.Close() //nolint:errcheck
 	}
@@ -1249,12 +1413,23 @@ func (s *Server) sniPolicyCheckBeforeDial(ctx context.Context, request *socks5.R
 	if eng == nil {
 		eng = s.rules.engine.Load()
 	}
-	verdict := eng.Evaluate(sni, port)
+	verdict, matchSource := eng.EvaluateDetailed(sni, port)
 	reader := io.MultiReader(bytes.NewReader(buf), request.Reader)
 
 	switch verdict {
 	case policy.Allow:
 		log.Printf("[SNI->ALLOW] %s:%d (hostname %s matched allow rule)", ipStr, port, sni)
+		// Explicit allow rule: skip the per-request check entirely.
+		if matchSource == policy.RuleMatch {
+			ctx = context.WithValue(ctx, ctxKeySkipPerRequest, true)
+		} else if s.rules.broker == nil {
+			ctx = context.WithValue(ctx, ctxKeySkipPerRequest, true)
+		} else {
+			checker := NewRequestPolicyChecker(s.rules.engine, s.rules.broker,
+				WithPersist(s.rules.buildPersistFunc()),
+			)
+			ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
+		}
 		return reader, ctx, true
 	case policy.Deny:
 		log.Printf("[SNI->DENY] %s:%d (hostname %s matched deny rule)", ipStr, port, sni)
@@ -1264,51 +1439,17 @@ func (s *Server) sniPolicyCheckBeforeDial(ctx context.Context, request *socks5.R
 			log.Printf("[SNI->DENY] %s:%d (hostname %s: ask treated as deny, no broker)", ipStr, port, sni)
 			return nil, ctx, false
 		}
-		log.Printf("[SNI->ASK] %s:%d (hostname %s: waiting for approval)", ipStr, port, sni)
-		timeout := time.Duration(eng.TimeoutSec) * time.Second
-		proto := DetectProtocol(port)
-		resp, reqErr := s.rules.broker.Request(sni, port, proto.String(), timeout)
-		if reqErr != nil {
-			log.Printf("[SNI->DENY] %s:%d (hostname %s: approval timeout: %v)", ipStr, port, sni, reqErr)
-			return nil, ctx, false
-		}
-		switch resp {
-		case channel.ResponseAllowOnce:
-			log.Printf("[SNI->ALLOW] %s:%d (hostname %s: user approved once)", ipStr, port, sni)
-			return reader, ctx, true
-		case channel.ResponseAlwaysAllow:
-			log.Printf("[SNI->ALLOW+SAVE] %s:%d (hostname %s: user approved always)", ipStr, port, sni)
-			s.sniSaveRule("allow", sni, port)
-			return reader, ctx, true
-		case channel.ResponseAlwaysDeny:
-			log.Printf("[SNI->DENY+SAVE] %s:%d (hostname %s: user denied always)", ipStr, port, sni)
-			s.sniSaveRule("deny", sni, port)
-			return nil, ctx, false
-		default:
-			log.Printf("[SNI->DENY] %s:%d (hostname %s: user denied)", ipStr, port, sni)
-			return nil, ctx, false
-		}
+		// Auto-allow the connection and defer approval to per-request
+		// checks where the HTTP method and path are visible.
+		log.Printf("[SNI->DEFER] %s:%d (hostname %s: approval deferred to per-request)", ipStr, port, sni)
+		checker := NewRequestPolicyChecker(s.rules.engine, s.rules.broker,
+			WithPersist(s.rules.buildPersistFunc()),
+		)
+		ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
+		return reader, ctx, true
 	default:
 		log.Printf("[SNI->DENY] %s:%d (hostname %s: default deny)", ipStr, port, sni)
 		return nil, ctx, false
-	}
-}
-
-// sniSaveRule persists an allow or deny rule from an SNI-based approval.
-func (s *Server) sniSaveRule(verdict, dest string, port int) {
-	s.rules.reloadMu.Lock()
-	defer s.rules.reloadMu.Unlock()
-	if s.rules.store != nil {
-		if _, storeErr := s.rules.store.AddRule(verdict, store.RuleOpts{Destination: dest, Ports: []int{port}, Source: "approval"}); storeErr != nil {
-			log.Printf("[WARN] failed to persist %s rule for %s:%d: %v", verdict, dest, port, storeErr)
-		}
-		if newEng, recompErr := policy.LoadFromStore(s.rules.store); recompErr != nil {
-			log.Printf("[WARN] failed to recompile engine after SNI %s: %v", verdict, recompErr)
-		} else if valErr := newEng.Validate(); valErr != nil {
-			log.Printf("[WARN] engine validation failed after SNI %s: %v", verdict, valErr)
-		} else {
-			s.rules.engine.Store(newEng)
-		}
 	}
 }
 
@@ -1470,21 +1611,8 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 				if IsQUICPacket(payload) {
 					quicAddr := s.quicProxy.Addr()
 					if quicAddr != nil {
-						// Evaluate policy using QUIC-specific matching so rules
-						// with protocols = ["quic"] are honored.
-						verdict := s.udpRelay.engine.Load().EvaluateQUIC(dest, port)
-						if verdict != policy.Allow {
-							if s.udpRelay.audit != nil {
-								if logErr := s.udpRelay.audit.Log(audit.Event{
-									Destination: dest,
-									Port:        port,
-									Protocol:    ProtoQUIC.String(),
-									Verdict:     "deny",
-									Reason:      "quic denied by policy",
-								}); logErr != nil {
-									log.Printf("audit log write error: %v", logErr)
-								}
-							}
+						checker, drop := s.resolveQUICPolicy(dest, port)
+						if drop {
 							continue
 						}
 
@@ -1495,7 +1623,14 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 						}
 						// Register expected host so the QUIC proxy can verify
 						// that the TLS SNI matches the policy-checked destination.
-						s.quicProxy.RegisterExpectedHost(upstream.LocalAddr().String(), dest, port)
+						// A non-nil checker enables per-HTTP/3-request approval
+						// for ask-rule matches. Allow with RuleMatch passes nil
+						// (fast path, no per-request check).
+						if checker != nil {
+							s.quicProxy.RegisterExpectedHostWithChecker(upstream.LocalAddr().String(), dest, port, checker)
+						} else {
+							s.quicProxy.RegisterExpectedHost(upstream.LocalAddr().String(), dest, port)
+						}
 						mu.Lock()
 						sess = &udpSession{upstream: upstream, lastSeen: time.Now()}
 						sessions[sessionKey] = sess
@@ -1624,6 +1759,92 @@ func (s *Server) relayUDPResponses(upstream net.PacketConn, relay *net.UDPConn, 
 // relayQUICResponses reads response datagrams from a QUIC proxy upstream and
 // wraps them in SOCKS5 UDP headers using the original destination address
 // (not the local QUIC proxy address) before sending to the client.
+// resolveQUICPolicy evaluates QUIC-specific policy for a destination and
+// handles the Ask approval flow. Returns a per-request checker (nil for
+// explicit allow fast path) and a drop flag. When drop is true the caller
+// should discard the packet without creating a session.
+func (s *Server) resolveQUICPolicy(dest string, port int) (checker *RequestPolicyChecker, drop bool) {
+	verdict, matchSource := s.udpRelay.engine.Load().EvaluateQUICDetailed(dest, port)
+
+	if verdict == policy.Deny {
+		if s.udpRelay.audit != nil {
+			if logErr := s.udpRelay.audit.Log(audit.Event{
+				Destination: dest,
+				Port:        port,
+				Protocol:    ProtoQUIC.String(),
+				Verdict:     "deny",
+				Reason:      "quic denied by policy",
+			}); logErr != nil {
+				log.Printf("audit log write error: %v", logErr)
+			}
+		}
+		return nil, true
+	}
+
+	if verdict == policy.Ask {
+		if s.rules.broker == nil {
+			log.Printf("[QUIC->DENY] %s:%d (ask treated as deny, no broker)", dest, port)
+			if s.udpRelay.audit != nil {
+				if logErr := s.udpRelay.audit.Log(audit.Event{
+					Destination: dest,
+					Port:        port,
+					Protocol:    ProtoQUIC.String(),
+					Verdict:     "deny",
+					Reason:      "ask treated as deny (no approval broker)",
+				}); logErr != nil {
+					log.Printf("audit log write error: %v", logErr)
+				}
+			}
+			return nil, true
+		}
+
+		eng := s.udpRelay.engine.Load()
+		timeout := time.Duration(eng.TimeoutSec) * time.Second
+		log.Printf("[QUIC->ASK] %s:%d (waiting for approval)", dest, port)
+		resp, reqErr := s.rules.broker.Request(dest, port, ProtoQUIC.String(), timeout)
+		if reqErr != nil {
+			log.Printf("[QUIC->DENY] %s:%d (approval timeout: %v)", dest, port, reqErr)
+			return nil, true
+		}
+
+		switch resp {
+		case channel.ResponseAllowOnce:
+			log.Printf("[QUIC->ALLOW] %s:%d (user approved once)", dest, port)
+			return NewRequestPolicyChecker(s.rules.engine, s.rules.broker,
+				WithPersist(s.rules.buildPersistFunc()),
+				WithSeedCredits(1),
+			), false
+		case channel.ResponseAlwaysAllow:
+			log.Printf("[QUIC->ALLOW+SAVE] %s:%d (user approved always)", dest, port)
+			if persist := s.rules.buildPersistFunc(); persist != nil {
+				persist(PersistAllow, dest, port)
+			}
+			return nil, false
+		case channel.ResponseAlwaysDeny:
+			log.Printf("[QUIC->DENY+SAVE] %s:%d (user denied always)", dest, port)
+			if persist := s.rules.buildPersistFunc(); persist != nil {
+				persist(PersistDeny, dest, port)
+			}
+			return nil, true
+		default:
+			log.Printf("[QUIC->DENY] %s:%d (user denied)", dest, port)
+			return nil, true
+		}
+	}
+
+	// Allow with default verdict: attach a checker so per-request
+	// evaluation picks up policy changes.
+	if verdict == policy.Allow && matchSource == policy.DefaultVerdict {
+		return NewRequestPolicyChecker(s.rules.engine, s.rules.broker,
+			WithPersist(s.rules.buildPersistFunc()),
+			WithSeedCredits(1),
+		), false
+	}
+
+	// Explicit allow: fast path, no per-request check needed.
+	return nil, false
+}
+
 func (s *Server) relayQUICResponses(upstream net.PacketConn, relay *net.UDPConn, clientAddr net.Addr, originalDst *net.UDPAddr) {
 	buf := make([]byte, 65535)
 	for {
@@ -1646,32 +1867,6 @@ func (s *Server) relayQUICResponses(upstream net.PacketConn, relay *net.UDPConn,
 // isHTTPSPort returns true for ports commonly used by HTTPS/HTTP3.
 func isHTTPSPort(port int) bool {
 	return port == 443 || port == 8443
-}
-
-// generatePinID returns a random hex string used to key per-connection
-// pinned IPs in the injector. Each SOCKS5 connection gets its own pin ID
-// so concurrent connections to the same host do not interfere.
-func generatePinID() string {
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-// pinnedConn wraps a net.Conn and removes the associated pin entry from the
-// injector's sync.Map when the connection is closed. This prevents pin entries
-// from leaking when clients disconnect without making any outbound requests
-// and ensures the pins persist for the full tunnel lifetime (not just the
-// first transport dial).
-type pinnedConn struct {
-	net.Conn
-	injector *Injector
-	pinID    string
-	once     sync.Once
-}
-
-func (c *pinnedConn) Close() error {
-	c.once.Do(func() { c.injector.UnpinIPs(c.pinID) })
-	return c.Conn.Close()
 }
 
 // bufferedConn wraps a net.Conn with a buffered reader to drain bytes read
@@ -1765,8 +1960,8 @@ func (s *Server) UpdateInspectRules(eng *policy.Engine) {
 	for _, r := range eng.InspectRedactRules {
 		wsRedact = append(wsRedact, WSRedactRuleConfig{Pattern: r.Pattern, Replacement: r.Replacement, Name: r.Name})
 	}
-	if s.injector != nil && s.injector.wsProxy != nil {
-		if err := s.injector.wsProxy.UpdateRules(wsBlock, wsRedact); err != nil {
+	if s.addon != nil && s.addon.wsProxy != nil {
+		if err := s.addon.wsProxy.UpdateRules(wsBlock, wsRedact); err != nil {
 			log.Printf("update ws inspect rules: %v", err)
 		}
 	}
@@ -1786,7 +1981,7 @@ func (s *Server) UpdateInspectRules(eng *policy.Engine) {
 }
 
 // StoreResolver atomically stores a new binding resolver. The caller must
-// hold ReloadMu() when concurrent mutations are possible. The injector
+// hold ReloadMu() when concurrent mutations are possible. The MITM addon
 // shares the same atomic pointer so both the dial function and MITM proxy
 // see the updated bindings.
 func (s *Server) StoreResolver(r *vault.BindingResolver) {
@@ -1798,18 +1993,18 @@ func (s *Server) StoreResolver(r *vault.BindingResolver) {
 // after Telegram credential mutations so the response handler detects
 // new or removed OAuth token endpoints.
 func (s *Server) UpdateOAuthIndex(metas []store.CredentialMeta) {
-	if s.injector != nil {
-		s.injector.UpdateOAuthIndex(metas)
+	if s.addon != nil {
+		s.addon.UpdateOAuthIndex(metas)
 	}
 }
 
-// SetOnOAuthRefresh configures a callback on the injector that is invoked
+// SetOnOAuthRefresh configures a callback on the addon that is invoked
 // after an OAuth token refresh is persisted to the vault. The callback
 // receives the credential name so the caller can re-inject updated phantom
 // env vars into the agent container.
 func (s *Server) SetOnOAuthRefresh(fn func(credName string)) {
-	if s.injector != nil {
-		s.injector.SetOnOAuthRefresh(fn)
+	if s.addon != nil {
+		s.addon.SetOnOAuthRefresh(fn)
 	}
 }
 
@@ -1855,8 +2050,8 @@ func (s *Server) IsListening() bool {
 // Close stops the server by closing the listener and any internal resources.
 func (s *Server) Close() error {
 	s.closed.Store(true)
-	if s.injectorLn != nil {
-		_ = s.injectorLn.Close()
+	if s.mitmProxy != nil {
+		_ = s.mitmProxy.Close()
 	}
 	if s.quicProxy != nil {
 		_ = s.quicProxy.Close()
@@ -1872,8 +2067,8 @@ func (s *Server) GracefulShutdown(timeout time.Duration) error {
 	s.closed.Store(true)
 	// Stop accepting new connections.
 	_ = s.listener.Close()
-	if s.injectorLn != nil {
-		_ = s.injectorLn.Close()
+	if s.mitmProxy != nil {
+		_ = s.mitmProxy.Close()
 	}
 	if s.quicProxy != nil {
 		_ = s.quicProxy.Close()

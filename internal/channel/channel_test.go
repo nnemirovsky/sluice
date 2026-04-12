@@ -128,6 +128,59 @@ func TestResponseString(t *testing.T) {
 	}
 }
 
+// --- Request options tests ---
+
+func TestWithMethodAndPath(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	var broker *Broker
+	ch.onRequest = func(req ApprovalRequest) {
+		go func() {
+			broker.Resolve(req.ID, ResponseAllowOnce)
+		}()
+	}
+	broker = NewBroker([]Channel{ch})
+
+	_, err := broker.Request("api.example.com", 443, "https", 5*time.Second,
+		WithMethodAndPath("POST", "/v1/users"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	reqs := ch.getRequests()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(reqs))
+	}
+	if reqs[0].Method != "POST" {
+		t.Errorf("method: got %q, want %q", reqs[0].Method, "POST")
+	}
+	if reqs[0].Path != "/v1/users" {
+		t.Errorf("path: got %q, want %q", reqs[0].Path, "/v1/users")
+	}
+}
+
+func TestWithMethodAndPathEmpty(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	var broker *Broker
+	ch.onRequest = func(req ApprovalRequest) {
+		go func() {
+			broker.Resolve(req.ID, ResponseAllowOnce)
+		}()
+	}
+	broker = NewBroker([]Channel{ch})
+
+	// Connection-level approval without the option -> method/path should remain empty.
+	_, err := broker.Request("api.example.com", 443, "https", 5*time.Second)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	reqs := ch.getRequests()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(reqs))
+	}
+	if reqs[0].Method != "" || reqs[0].Path != "" {
+		t.Errorf("expected empty method/path, got method=%q path=%q", reqs[0].Method, reqs[0].Path)
+	}
+}
+
 // --- Broker broadcast tests ---
 
 func TestBrokerBroadcastToAllChannels(t *testing.T) {
