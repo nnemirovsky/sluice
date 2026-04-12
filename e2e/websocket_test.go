@@ -15,18 +15,10 @@ import (
 	"github.com/coder/websocket"
 )
 
-// startWSEchoServer starts a WebSocket echo server on a free port. It accepts
-// WebSocket upgrade requests, reads text messages, and echoes them back
-// prefixed with "echo: ". The server also copies incoming request headers into
-// the first echo response so credential injection can be verified.
-func startWSEchoServer(t *testing.T) (addr string) {
-	t.Helper()
-
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-
+// wsEchoHandler returns an http.Handler that accepts WebSocket upgrades on
+// /ws, sends a greeting containing the request headers, then echoes text
+// messages back prefixed with "echo: ".
+func wsEchoHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		conn, acceptErr := websocket.Accept(w, r, &websocket.AcceptOptions{
@@ -62,8 +54,22 @@ func startWSEchoServer(t *testing.T) (addr string) {
 			}
 		}
 	})
+	return mux
+}
 
-	srv := &http.Server{Handler: mux}
+// startWSEchoServer starts a WebSocket echo server on a free port. It accepts
+// WebSocket upgrade requests, reads text messages, and echoes them back
+// prefixed with "echo: ". The server also copies incoming request headers into
+// the first echo response so credential injection can be verified.
+func startWSEchoServer(t *testing.T) (addr string) {
+	t.Helper()
+
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &http.Server{Handler: wsEchoHandler()}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
@@ -89,41 +95,7 @@ func startTLSWSEchoServer(t *testing.T, ca *testCA) (addr string) {
 		Certificates: []tls.Certificate{serverKey},
 	})
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		conn, acceptErr := websocket.Accept(w, r, &websocket.AcceptOptions{
-			InsecureSkipVerify: true,
-		})
-		if acceptErr != nil {
-			http.Error(w, acceptErr.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer conn.CloseNow()
-
-		var hdrs []string
-		for name, vals := range r.Header {
-			for _, v := range vals {
-				hdrs = append(hdrs, name+": "+v)
-			}
-		}
-		greeting := "headers: " + strings.Join(hdrs, "; ")
-		_ = conn.Write(r.Context(), websocket.MessageText, []byte(greeting))
-
-		for {
-			typ, msg, readErr := conn.Read(r.Context())
-			if readErr != nil {
-				return
-			}
-			if typ == websocket.MessageText {
-				reply := "echo: " + string(msg)
-				if writeErr := conn.Write(r.Context(), websocket.MessageText, []byte(reply)); writeErr != nil {
-					return
-				}
-			}
-		}
-	})
-
-	srv := &http.Server{Handler: mux}
+	srv := &http.Server{Handler: wsEchoHandler()}
 	go func() { _ = srv.Serve(tlsLn) }()
 	t.Cleanup(func() { _ = srv.Close() })
 

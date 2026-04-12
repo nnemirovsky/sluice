@@ -1491,9 +1491,15 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 	var closeBindOnce sync.Once
 	closeBind := func() { closeBindOnce.Do(func() { _ = bindLn.Close() }) }
 
+	// loopDone is closed when the dispatch loop exits. Approval goroutines
+	// check this after resolveQUICPolicy returns to avoid creating orphaned
+	// sessions after the cleanup defer has already run.
+	loopDone := make(chan struct{})
+
 	// Start the datagram dispatch loop in a goroutine.
 	go func() {
 		defer func() {
+			close(loopDone)
 			mu.Lock()
 			for _, sess := range sessions {
 				if s.quicProxy != nil {
@@ -1501,16 +1507,18 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 				}
 				_ = sess.upstream.Close()
 			}
-			// Cancel any pending QUIC approvals so their goroutines exit.
-			for key, pending := range pendingQUICSessions {
-				select {
-				case <-pending.done:
-				default:
-					close(pending.done)
-				}
-				delete(pendingQUICSessions, key)
+			// Snapshot pending sessions before releasing the lock. Each
+			// goroutine closes pending.done when it completes, so we
+			// wait instead of force-closing (which could double-close
+			// if the goroutine is mid-flight).
+			pending := make([]*pendingQUICSession, 0, len(pendingQUICSessions))
+			for _, p := range pendingQUICSessions {
+				pending = append(pending, p)
 			}
 			mu.Unlock()
+			for _, p := range pending {
+				<-p.done
+			}
 			closeBind()
 		}()
 
@@ -1621,15 +1629,17 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 				if IsQUICPacket(payload) {
 					// Recover hostname from the QUIC Initial packet. Try SNI
 					// extraction first, then DNS reverse cache, then raw IP.
+					// The session key stays IP-based so that post-handshake
+					// short-header packets (which only carry the raw IP from
+					// the SOCKS5 UDP header) find the session. The hostname
+					// is used only for policy evaluation and broker display.
 					policyDest := dest
 					if sni := ExtractQUICSNI(payload); sni != "" {
 						policyDest = sni
-						sessionKey = "quic:" + sni + ":" + strconv.Itoa(port)
 						log.Printf("[QUIC] SNI extracted: %s (IP: %s)", sni, dest)
 					} else if s.dnsInterceptor != nil {
 						if hostname := s.dnsInterceptor.ReverseLookup(dest); hostname != "" {
 							policyDest = hostname
-							sessionKey = "quic:" + hostname + ":" + strconv.Itoa(port)
 							log.Printf("[QUIC] hostname from DNS cache: %s (IP: %s)", hostname, dest)
 						}
 					}
@@ -1689,6 +1699,17 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 								mu.Unlock()
 								log.Printf("[QUIC] denied %s, discarding %d buffered packets", capturedKey, len(buffered))
 								return
+							}
+
+							// If the dispatch loop already exited, don't create
+							// an orphaned session. The cleanup defer has run and
+							// won't know about sessions created after it.
+							select {
+							case <-loopDone:
+								mu.Unlock()
+								log.Printf("[QUIC] dispatch loop exited, discarding approved session %s", capturedKey)
+								return
+							default:
 							}
 
 							// Create the session and flush buffered packets.
@@ -1918,8 +1939,13 @@ func (s *Server) resolveQUICPolicy(dest string, port int) (checker *RequestPolic
 		}
 	}
 
-	// Allow with default verdict: attach a checker so per-request
-	// evaluation picks up policy changes.
+	// Allow with default verdict: attach a per-request checker even though
+	// the current default is "allow". Unlike TCP (where connections are
+	// short-lived), QUIC sessions persist across many requests. If the
+	// operator changes the default verdict or adds a deny rule mid-session,
+	// the checker ensures subsequent HTTP/3 requests on the same session
+	// re-evaluate policy. SeedCredits(1) means the first request passes
+	// without a broker call, then the checker kicks in.
 	if verdict == policy.Allow && matchSource == policy.DefaultVerdict {
 		return NewRequestPolicyChecker(s.rules.engine, s.rules.broker,
 			WithPersist(s.rules.buildPersistFunc()),

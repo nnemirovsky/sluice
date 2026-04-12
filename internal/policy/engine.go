@@ -739,7 +739,7 @@ func (e *Engine) EvaluateQUIC(dest string, port int) Verdict {
 // Unlike EvaluateQUIC, it preserves Ask verdicts so callers can trigger the
 // approval flow for per-request policy. Evaluation order: QUIC-specific deny,
 // QUIC-specific allow, QUIC-specific ask, then generic deny, allow, ask,
-// then default (Deny).
+// then engine default verdict.
 func (e *Engine) EvaluateQUICDetailed(dest string, port int) (Verdict, MatchSource) {
 	dest = normalizeDestination(dest)
 	e.mu.RLock()

@@ -388,24 +388,15 @@ func deriveQUICClientSecret(dcid, salt []byte, version uint32) ([]byte, error) {
 	h := hkdf.Extract(sha256.New, dcid, salt)
 
 	// Step 2: client_in = HKDF-Expand-Label(initial_secret, "client in", "", 32)
-	label := "client in"
-	if version == quicVersionV2 {
-		// v2 uses the same label for initial secret derivation.
-		label = "client in"
-	}
-	return hkdfExpandLabelRaw(h, label, 32)
+	// Both QUIC v1 and v2 use the same label for initial secret derivation.
+	return hkdfExpandLabel(h, "client in", 32)
 }
 
 // hkdfExpandLabel performs HKDF-Expand-Label as defined in TLS 1.3 (RFC 8446
 // Section 7.1), using the given secret and label to produce length bytes.
 // The context (hash) is empty for QUIC key derivation.
-func hkdfExpandLabel(secret []byte, label string, length int) ([]byte, error) {
-	return hkdfExpandLabelRaw(secret, label, length)
-}
-
-// hkdfExpandLabelRaw performs the actual HKDF-Expand-Label computation.
 // Label format: "tls13 " + label (RFC 8446).
-func hkdfExpandLabelRaw(secret []byte, label string, length int) ([]byte, error) {
+func hkdfExpandLabel(secret []byte, label string, length int) ([]byte, error) {
 	fullLabel := "tls13 " + label
 
 	// HkdfLabel struct:

@@ -248,12 +248,13 @@ func importConfig(t *testing.T, proc *SluiceProcess, toml string) {
 	}
 }
 
-// startEchoServer starts an HTTP server that echoes request details back.
-// Returns an httptest.Server; the caller should defer s.Close().
-func startEchoServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// httpEchoHandler returns an http.HandlerFunc that echoes request details
+// (Proto, Method, URL, Host, headers, body) as plain text. Used by all
+// protocol-specific echo servers so the response format is consistent.
+func httpEchoHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprintf(w, "Proto: %s\n", r.Proto)
 		fmt.Fprintf(w, "Method: %s\n", r.Method)
 		fmt.Fprintf(w, "URL: %s\n", r.URL.String())
 		fmt.Fprintf(w, "Host: %s\n", r.Host)
@@ -268,7 +269,14 @@ func startEchoServer(t *testing.T) *httptest.Server {
 				fmt.Fprintf(w, "Body: %s\n", string(body))
 			}
 		}
-	}))
+	}
+}
+
+// startEchoServer starts an HTTP server that echoes request details back.
+// Returns an httptest.Server; the caller should defer s.Close().
+func startEchoServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := newIPv4Server(t, httpEchoHandler())
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -283,23 +291,7 @@ func startTLSEchoServer(t *testing.T) *httptest.Server {
 	}
 	srv := &httptest.Server{
 		Listener: ln,
-		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "text/plain")
-			fmt.Fprintf(w, "Method: %s\n", r.Method)
-			fmt.Fprintf(w, "URL: %s\n", r.URL.String())
-			fmt.Fprintf(w, "Host: %s\n", r.Host)
-			for name, vals := range r.Header {
-				for _, v := range vals {
-					fmt.Fprintf(w, "Header: %s: %s\n", name, v)
-				}
-			}
-			if r.Body != nil {
-				body, _ := io.ReadAll(r.Body)
-				if len(body) > 0 {
-					fmt.Fprintf(w, "Body: %s\n", string(body))
-				}
-			}
-		})},
+		Config:   &http.Server{Handler: httpEchoHandler()},
 	}
 	srv.StartTLS()
 	t.Cleanup(srv.Close)

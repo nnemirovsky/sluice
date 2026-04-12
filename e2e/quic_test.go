@@ -31,24 +31,7 @@ func startHTTP3EchoServer(t *testing.T, ca *testCA) (addr string) {
 	udpPort := freeUDPPort(t)
 	udpAddr := fmt.Sprintf("127.0.0.1:%d", udpPort)
 
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(w, "Proto: %s\n", r.Proto)
-		fmt.Fprintf(w, "Method: %s\n", r.Method)
-		fmt.Fprintf(w, "URL: %s\n", r.URL.String())
-		fmt.Fprintf(w, "Host: %s\n", r.Host)
-		for name, vals := range r.Header {
-			for _, v := range vals {
-				fmt.Fprintf(w, "Header: %s: %s\n", name, v)
-			}
-		}
-		if r.Body != nil {
-			body, _ := io.ReadAll(r.Body)
-			if len(body) > 0 {
-				fmt.Fprintf(w, "Body: %s\n", string(body))
-			}
-		}
-	})
+	handler := httpEchoHandler()
 
 	srv := &http3.Server{
 		Addr:    udpAddr,

@@ -1196,6 +1196,51 @@ func TestEvaluateQUICDetailed_NilCompiled(t *testing.T) {
 	}
 }
 
+func TestEvaluateQUICDetailed_DefaultAllow(t *testing.T) {
+	// When default = "allow", unknown destinations should return Allow
+	// with DefaultVerdict, not hardcoded Deny.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+
+[[deny]]
+destination = "blocked.example.com"
+protocols = ["quic"]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// Unknown destination falls back to default "allow".
+	v, src := eng.EvaluateQUICDetailed("unknown.example.com", 443)
+	if v != Allow || src != DefaultVerdict {
+		t.Errorf("EvaluateQUICDetailed(default=allow, unknown) = (%v, %v), want (Allow, DefaultVerdict)", v, src)
+	}
+
+	// Explicit deny still takes priority.
+	v, src = eng.EvaluateQUICDetailed("blocked.example.com", 443)
+	if v != Deny || src != RuleMatch {
+		t.Errorf("EvaluateQUICDetailed(default=allow, denied) = (%v, %v), want (Deny, RuleMatch)", v, src)
+	}
+}
+
+func TestEvaluateQUICDetailed_DefaultAsk(t *testing.T) {
+	// When default = "ask", unknown destinations should return Ask
+	// with DefaultVerdict so the caller can trigger the approval flow.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "ask"
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	v, src := eng.EvaluateQUICDetailed("anything.example.com", 443)
+	if v != Ask || src != DefaultVerdict {
+		t.Errorf("EvaluateQUICDetailed(default=ask) = (%v, %v), want (Ask, DefaultVerdict)", v, src)
+	}
+}
+
 func TestEvaluateUDP_UnscopedRulesIgnored(t *testing.T) {
 	// Rules without explicit protocols must NOT match EvaluateUDP or
 	// EvaluateQUIC. This prevents TCP-intended allow rules from

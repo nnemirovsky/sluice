@@ -173,7 +173,7 @@ Extends phantom swap to handle OAuth credentials bidirectionally. Static credent
 
 **MITM library:** HTTPS interception uses go-mitmproxy (`github.com/lqqyt2423/go-mitmproxy`). The `SluiceAddon` struct in `internal/proxy/addon.go` implements go-mitmproxy's `Addon` interface. `Requestheaders` fires per HTTP/2 stream, giving true per-request policy for gRPC and other HTTP/2 traffic. `Request` handles credential injection (three-pass phantom swap). `Response` handles OAuth token interception.
 
-**QUIC per-request:** `EvaluateQUICDetailed` returns Ask when an ask rule matches. The UDP dispatch loop creates a `RequestPolicyChecker` and passes it to `buildHandler`, which calls `CheckAndConsume` per HTTP/3 request.
+**QUIC per-request:** `EvaluateQUICDetailed` returns Ask when an ask rule matches and falls back to the engine's configured default verdict (not hardcoded Deny). The UDP dispatch loop creates a `RequestPolicyChecker` and passes it to `buildHandler`, which calls `CheckAndConsume` per HTTP/3 request. When the default verdict is "allow", a per-request checker is still attached (with seed credits of 1) so long-lived QUIC sessions re-evaluate policy on subsequent requests.
 
 **QUIC SNI extraction:** Hostname recovery uses `ExtractQUICSNI()` to decrypt the QUIC Initial packet and extract SNI from the embedded TLS ClientHello. QUIC Initial packets encrypt the ClientHello, but the encryption keys are derived from the Destination Connection ID (DCID) visible in the packet header (RFC 9001 Section 5). Supports both QUIC v1 and v2 salts. Falls back to DNS reverse cache lookup, then raw IP if extraction fails.
 
