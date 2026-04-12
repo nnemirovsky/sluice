@@ -167,11 +167,11 @@ func TestFormatApprovalMessage(t *testing.T) {
 			Path:        "/users/me",
 		}
 		msg := FormatApprovalMessage(req)
-		if !strings.Contains(msg, "GET https://api.example.com/users/me") {
-			t.Errorf("expected 'GET https://api.example.com/users/me' in message, got: %s", msg)
+		if !strings.Contains(msg, "HTTPS api.example.com:443") {
+			t.Errorf("expected destination line in message, got: %s", msg)
 		}
-		if !strings.Contains(msg, "per-request") {
-			t.Errorf("expected 'per-request' label in message, got: %s", msg)
+		if !strings.Contains(msg, "GET https://api.example.com/users/me") {
+			t.Errorf("expected request line in message, got: %s", msg)
 		}
 		if !strings.Contains(msg, "Allow this request?") {
 			t.Errorf("expected 'Allow this request?' wording, got: %s", msg)

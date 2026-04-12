@@ -137,6 +137,7 @@ func (tc *TelegramChannel) sendApprovalMessage(req channel.ApprovalRequest) {
 
 	msg := tgbotapi.NewMessage(tc.chatID, FormatApprovalMessage(req))
 	msg.ParseMode = tgbotapi.ModeHTML
+	msg.DisableWebPagePreview = true
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("Allow", req.ID+"|allow_once"),

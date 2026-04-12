@@ -65,15 +65,16 @@ func FormatApprovalMessage(req channel.ApprovalRequest) string {
 		msg += "\n\nAllow this tool call?"
 		return msg
 	}
-	if req.Method != "" {
-		return fmt.Sprintf(
-			"OpenClaw wants to send request (per-request):\n\n%s %s\n\nAllow this request?",
-			htmlEscape(req.Method), htmlEscape(buildRequestURL(req)),
-		)
-	}
 	display := protoDisplayName[req.Protocol]
 	if display == "" {
 		display = req.Protocol
+	}
+	if req.Method != "" {
+		return fmt.Sprintf(
+			"OpenClaw wants to connect to:\n\n%s %s:%d\n%s %s\n\nAllow this request?",
+			htmlEscape(display), htmlEscape(req.Destination), req.Port,
+			htmlEscape(req.Method), htmlEscape(buildRequestURL(req)),
+		)
 	}
 	return fmt.Sprintf(
 		"OpenClaw wants to connect to:\n\n%s %s:%d\n\nAllow this connection?",

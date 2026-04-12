@@ -117,7 +117,11 @@ default = "allow"
 	}
 }
 
-func TestAllowAttachesCheckerOnAskApproval(t *testing.T) {
+func TestAllowDefersAskToPerRequest(t *testing.T) {
+	// When a broker is configured and the destination matches an ask rule,
+	// Allow() auto-allows the SOCKS5 CONNECT without consulting the broker.
+	// A checker with no seed credit is attached so every HTTP request
+	// triggers its own per-request approval with method/path visible.
 	fc := newFakeChannel(channel.ResponseAllowOnce)
 	broker := channel.NewBroker([]channel.Channel{fc})
 	fc.broker = broker
@@ -132,40 +136,34 @@ destination = "api.example.com"
 
 	ctx, ok := rules.Allow(context.Background(), mkConnectRequest("api.example.com"))
 	if !ok {
-		t.Fatal("Allow returned false after ask->allow-once approval")
+		t.Fatal("Allow returned false for ask destination with broker")
 	}
 	if skip, _ := ctx.Value(ctxKeySkipPerRequest).(bool); skip {
-		t.Fatal("ctxKeySkipPerRequest should NOT be set for ask-approved connection")
+		t.Fatal("ctxKeySkipPerRequest should NOT be set for ask-deferred connection")
 	}
 	checker, _ := ctx.Value(ctxKeyPerRequestPolicy).(*RequestPolicyChecker)
 	if checker == nil {
-		t.Fatal("ask-approved connection must attach a RequestPolicyChecker so subsequent HTTP requests re-trigger the ask flow")
+		t.Fatal("ask-deferred connection must attach a RequestPolicyChecker")
 	}
 
-	// Sanity check: Allow() must have consulted the broker exactly once for
-	// the CONNECT-level ask.
-	if got := fc.requestCount(); got != 1 {
-		t.Fatalf("broker count after Allow = %d, want 1 (CONNECT ask)", got)
+	// Allow() must NOT have consulted the broker (deferred to per-request).
+	if got := fc.requestCount(); got != 0 {
+		t.Fatalf("broker count after Allow = %d, want 0 (deferred)", got)
 	}
 
-	// The first HTTP request must NOT re-ask the broker (double-prompt
-	// regression guard). The checker was seeded with one prepaid allow
-	// credit from the CONNECT approval, so CheckAndConsume on the first
-	// request is satisfied from the seed without contacting the broker.
+	// First HTTP request asks the broker (no seed credit).
 	verdict, err := checker.CheckAndConsume("api.example.com", 443)
 	if err != nil {
 		t.Fatalf("first CheckAndConsume: %v", err)
 	}
 	if verdict != policy.Allow {
-		t.Fatalf("first HTTP request verdict = %v, want Allow (seeded credit)", verdict)
+		t.Fatalf("first HTTP request verdict = %v, want Allow", verdict)
 	}
 	if got := fc.requestCount(); got != 1 {
-		t.Fatalf("broker count after first HTTP request = %d, want 1 (seed must consume without re-asking broker)", got)
+		t.Fatalf("broker count after first request = %d, want 1", got)
 	}
 
-	// The second HTTP request must re-ask the broker (seed is exhausted).
-	// Flip the response so the second verdict differs from the first,
-	// proving the broker was actually consulted again.
+	// Second HTTP request also asks the broker.
 	fc.setResponse(channel.ResponseDeny)
 	verdict, err = checker.CheckAndConsume("api.example.com", 443)
 	if err != nil {
@@ -175,17 +173,15 @@ destination = "api.example.com"
 		t.Fatalf("second HTTP request verdict = %v, want Deny", verdict)
 	}
 	if got := fc.requestCount(); got != 2 {
-		t.Fatalf("broker count after second HTTP request = %d, want 2 (each subsequent request re-asks)", got)
+		t.Fatalf("broker count after second request = %d, want 2", got)
 	}
 }
 
-func TestAllowSetsSkipAfterAlwaysAllow(t *testing.T) {
-	// When a connection-level ask resolves to Always Allow and the rule
-	// is persisted, the connection should take the fast path because the
-	// new rule will match every subsequent HTTP request via the engine.
-	// This mirrors the SNI path which sets ctxKeySkipPerRequest after
-	// sniSaveRule succeeds. Uses a store-backed rule set because the
-	// persist path now requires a store (there is no in-memory fallback).
+func TestAllowDefersAskWithBrokerDoesNotPrompt(t *testing.T) {
+	// With a broker, ask destinations are auto-allowed at CONNECT time.
+	// The broker is NOT consulted. The checker has no seed credit.
+	// Verify that Always Allow responses are handled per-request (the
+	// checker's persist callback handles rule persistence).
 	fc := newFakeChannel(channel.ResponseAlwaysAllow)
 	broker := channel.NewBroker([]channel.Channel{fc})
 	fc.broker = broker
@@ -200,14 +196,16 @@ destination = "api.example.com"
 
 	ctx, ok := rules.Allow(context.Background(), mkConnectRequest("api.example.com"))
 	if !ok {
-		t.Fatal("Allow returned false after ask->always-allow approval")
+		t.Fatal("Allow returned false for ask destination with broker")
 	}
-	skip, _ := ctx.Value(ctxKeySkipPerRequest).(bool)
-	if !skip {
-		t.Fatal("ctxKeySkipPerRequest should be true after always-allow so per-request checks are skipped")
+	// Broker was NOT consulted at connection level.
+	if got := fc.requestCount(); got != 0 {
+		t.Fatalf("broker count = %d, want 0 (deferred)", got)
 	}
-	if _, present := ctx.Value(ctxKeyPerRequestPolicy).(*RequestPolicyChecker); present {
-		t.Fatal("ctxKeyPerRequestPolicy should NOT be set when skip flag is true")
+	// Checker is attached (not skip).
+	checker, _ := ctx.Value(ctxKeyPerRequestPolicy).(*RequestPolicyChecker)
+	if checker == nil {
+		t.Fatal("checker should be attached for ask-deferred connection")
 	}
 }
 

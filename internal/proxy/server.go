@@ -309,11 +309,6 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 	// partial persistence failure does not silently allow all subsequent
 	// requests without re-triggering per-request policy.
 	var alwaysAllowPersisted bool
-	// askApprovedOnce is true when the connection-level ask resolved to
-	// ResponseAllowOnce. Used to seed the per-request checker with a single
-	// prepaid allow credit so the first HTTP request does not re-prompt the
-	// user (double-prompt fix).
-	var askApprovedOnce bool
 	switch verdict {
 	case policy.Allow:
 		allowed = true
@@ -323,39 +318,15 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 			reason = "ask treated as deny (no approval broker)"
 			log.Printf("[ASK->DENY] %s:%d (no approval broker)", dest, port)
 		} else {
-			log.Printf("[ASK] %s:%d (waiting for Telegram approval)", dest, port)
-			timeout := time.Duration(eng.TimeoutSec) * time.Second
-			proto := DetectProtocol(port)
-			resp, err := r.broker.Request(dest, port, proto.String(), timeout)
-			if err != nil {
-				effectiveVerdict = policy.Deny
-				reason = fmt.Sprintf("approval timeout: %v", err)
-				log.Printf("[ASK->DENY] %s:%d (timeout: %v)", dest, port, err)
-			} else {
-				switch resp {
-				case channel.ResponseAllowOnce:
-					allowed = true
-					effectiveVerdict = policy.Allow
-					reason = "user approved once"
-					askApprovedOnce = true
-					log.Printf("[ASK->ALLOW] %s:%d (user approved once)", dest, port)
-				case channel.ResponseAlwaysAllow:
-					allowed = true
-					effectiveVerdict = policy.Allow
-					reason = "user approved always"
-					log.Printf("[ASK->ALLOW+SAVE] %s:%d (user approved always)", dest, port)
-					alwaysAllowPersisted = r.persistAlwaysAllow(dest, port)
-				case channel.ResponseAlwaysDeny:
-					effectiveVerdict = policy.Deny
-					reason = "user denied always"
-					log.Printf("[ASK->DENY+SAVE] %s:%d (user denied always)", dest, port)
-					r.persistAlwaysDeny(dest, port)
-				default:
-					effectiveVerdict = policy.Deny
-					reason = "user denied"
-					log.Printf("[ASK->DENY] %s:%d (user denied)", dest, port)
-				}
-			}
+			// Auto-allow the SOCKS5 CONNECT without prompting the user.
+			// Approval happens per-request inside the MITM handler where
+			// the HTTP method and path are known, producing a single
+			// combined Telegram message per request instead of two
+			// separate messages (connection + request).
+			allowed = true
+			effectiveVerdict = policy.Allow
+			reason = "ask deferred to per-request"
+			log.Printf("[ASK->DEFER] %s:%d (approval deferred to per-request)", dest, port)
 		}
 	}
 
@@ -444,13 +415,11 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 		if skipPerRequest {
 			ctx = context.WithValue(ctx, ctxKeySkipPerRequest, true)
 		} else {
-			seed := 0
-			if askApprovedOnce {
-				seed = 1
-			}
+			// No seed credit: every HTTP request triggers its own
+			// per-request approval with method and path visible in
+			// the Telegram message.
 			checker := NewRequestPolicyChecker(r.engine, r.broker,
 				WithPersist(r.buildPersistFunc()),
-				WithSeedCredits(seed),
 			)
 			ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
 		}
@@ -1447,56 +1416,14 @@ func (s *Server) sniPolicyCheckBeforeDial(ctx context.Context, request *socks5.R
 			log.Printf("[SNI->DENY] %s:%d (hostname %s: ask treated as deny, no broker)", ipStr, port, sni)
 			return nil, ctx, false
 		}
-		log.Printf("[SNI->ASK] %s:%d (hostname %s: waiting for approval)", ipStr, port, sni)
-		timeout := time.Duration(eng.TimeoutSec) * time.Second
-		proto := DetectProtocol(port)
-		resp, reqErr := s.rules.broker.Request(sni, port, proto.String(), timeout)
-		if reqErr != nil {
-			log.Printf("[SNI->DENY] %s:%d (hostname %s: approval timeout: %v)", ipStr, port, sni, reqErr)
-			return nil, ctx, false
-		}
-		switch resp {
-		case channel.ResponseAllowOnce:
-			log.Printf("[SNI->ALLOW] %s:%d (hostname %s: user approved once)", ipStr, port, sni)
-			// Ask-approved once: attach a checker seeded with one prepaid
-			// allow credit so the first HTTP request on the new tunnel does
-			// not re-prompt the user (the SNI-level approval is reused for
-			// the first request). Subsequent requests on the same keep-alive
-			// connection re-trigger the ask flow normally.
-			checker := NewRequestPolicyChecker(s.rules.engine, s.rules.broker,
-				WithPersist(s.rules.buildPersistFunc()),
-				WithSeedCredits(1),
-			)
-			ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
-			return reader, ctx, true
-		case channel.ResponseAlwaysAllow:
-			log.Printf("[SNI->ALLOW+SAVE] %s:%d (hostname %s: user approved always)", ipStr, port, sni)
-			// Persist the new allow rule. If the persist path fails we
-			// fall back to attaching a checker as a safety net so the
-			// current keep-alive connection is still policy-checked on
-			// every request (the failure was only logged inside
-			// sniSaveRule, so the in-memory engine may still evaluate
-			// sni:port as ask). The checker is seeded with one credit
-			// because the user already approved this connection.
-			if ok := s.sniSaveRule("allow", sni, port); ok {
-				ctx = context.WithValue(ctx, ctxKeySkipPerRequest, true)
-			} else {
-				log.Printf("[SNI->ALLOW+SAVE] %s:%d persistence failed; attaching per-request checker as safety net", sni, port)
-				checker := NewRequestPolicyChecker(s.rules.engine, s.rules.broker,
-					WithPersist(s.rules.buildPersistFunc()),
-					WithSeedCredits(1),
-				)
-				ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
-			}
-			return reader, ctx, true
-		case channel.ResponseAlwaysDeny:
-			log.Printf("[SNI->DENY+SAVE] %s:%d (hostname %s: user denied always)", ipStr, port, sni)
-			s.sniSaveRule("deny", sni, port)
-			return nil, ctx, false
-		default:
-			log.Printf("[SNI->DENY] %s:%d (hostname %s: user denied)", ipStr, port, sni)
-			return nil, ctx, false
-		}
+		// Auto-allow the connection and defer approval to per-request
+		// checks where the HTTP method and path are visible.
+		log.Printf("[SNI->DEFER] %s:%d (hostname %s: approval deferred to per-request)", ipStr, port, sni)
+		checker := NewRequestPolicyChecker(s.rules.engine, s.rules.broker,
+			WithPersist(s.rules.buildPersistFunc()),
+		)
+		ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
+		return reader, ctx, true
 	default:
 		log.Printf("[SNI->DENY] %s:%d (hostname %s: default deny)", ipStr, port, sni)
 		return nil, ctx, false
