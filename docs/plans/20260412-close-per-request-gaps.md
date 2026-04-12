@@ -165,10 +165,10 @@ Three changes to close remaining per-request policy gaps on the `per-request-pol
 - Modify: `internal/policy/engine.go`
 - Modify: `internal/policy/engine_test.go`
 
-- [ ] Add `EvaluateQUICDetailed(dest, port) (Verdict, MatchSource)` that returns Ask when an ask rule matches
-- [ ] Refactor `EvaluateQUIC` to call `EvaluateQUICDetailed` internally
-- [ ] Write tests: ask rule returns Ask+RuleMatch, explicit allow returns Allow+RuleMatch, deny returns Deny+RuleMatch, default returns Deny+DefaultVerdict
-- [ ] Run tests
+- [x] Add `EvaluateQUICDetailed(dest, port) (Verdict, MatchSource)` that returns Ask when an ask rule matches
+- [x] Refactor `EvaluateQUIC` to call `EvaluateQUICDetailed` internally
+- [x] Write tests: ask rule returns Ask+RuleMatch, explicit allow returns Allow+RuleMatch, deny returns Deny+RuleMatch, default returns Deny+DefaultVerdict
+- [x] Run tests
 
 ### Task 9: Wire QUIC per-request checker through buildHandler
 
@@ -177,12 +177,12 @@ Three changes to close remaining per-request policy gaps on the `per-request-pol
 - Modify: `internal/proxy/server.go`
 - Modify: `internal/proxy/quic_test.go`
 
-- [ ] Re-add checker parameter to `buildHandler(sni string, port int, checker *RequestPolicyChecker)`
-- [ ] Re-add `RegisterExpectedHostWithChecker` or equivalent
-- [ ] In `buildHandler`, call `checker.CheckAndConsume(host, port)` before forwarding each HTTP/3 request. If denied, return 403.
-- [ ] In UDP dispatch loop (server.go), use `EvaluateQUICDetailed`. On Ask verdict, create `RequestPolicyChecker` and pass to `RegisterExpectedHostWithChecker`. On Allow/Deny, pass nil checker.
-- [ ] Write tests: QUIC per-request allow-once consumed, deny returns 403, explicit allow skips checker
-- [ ] Run tests
+- [x] Re-add checker parameter to `buildHandler(sni string, port int, checker *RequestPolicyChecker)`
+- [x] Re-add `RegisterExpectedHostWithChecker` or equivalent
+- [x] In `buildHandler`, call `checker.CheckAndConsume(host, port)` before forwarding each HTTP/3 request. If denied, return 403.
+- [x] In UDP dispatch loop (server.go), use `EvaluateQUICDetailed`. On Ask verdict, create `RequestPolicyChecker` and pass to `RegisterExpectedHostWithChecker`. On Allow/Deny, pass nil checker.
+- [x] Write tests: QUIC per-request allow-once consumed, deny returns 403, explicit allow skips checker
+- [x] Run tests
 
 ### Task 10: Add e2e webhook test infrastructure
 

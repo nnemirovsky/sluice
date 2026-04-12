@@ -1079,6 +1079,123 @@ protocols = ["udp"]
 	}
 }
 
+func TestEvaluateQUICDetailed(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "allowed.example.com"
+ports = [443]
+protocols = ["quic"]
+
+[[deny]]
+destination = "blocked.example.com"
+protocols = ["quic"]
+
+[[ask]]
+destination = "ask-me.example.com"
+ports = [443]
+protocols = ["quic"]
+
+[[ask]]
+destination = "ask-udp.example.com"
+ports = [443]
+protocols = ["udp"]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		dest       string
+		port       int
+		wantV      Verdict
+		wantSource MatchSource
+	}{
+		{"quic_allow_rule", "allowed.example.com", 443, Allow, RuleMatch},
+		{"quic_deny_rule", "blocked.example.com", 443, Deny, RuleMatch},
+		{"quic_ask_rule", "ask-me.example.com", 443, Ask, RuleMatch},
+		{"udp_ask_fallback", "ask-udp.example.com", 443, Ask, RuleMatch},
+		{"default_deny", "unknown.example.com", 443, Deny, DefaultVerdict},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotV, gotSource := eng.EvaluateQUICDetailed(tt.dest, tt.port)
+			if gotV != tt.wantV {
+				t.Errorf("EvaluateQUICDetailed(%q, %d) verdict = %v, want %v",
+					tt.dest, tt.port, gotV, tt.wantV)
+			}
+			if gotSource != tt.wantSource {
+				t.Errorf("EvaluateQUICDetailed(%q, %d) source = %v, want %v",
+					tt.dest, tt.port, gotSource, tt.wantSource)
+			}
+		})
+	}
+}
+
+func TestEvaluateQUICDetailed_AskCollapsedByEvaluateQUIC(t *testing.T) {
+	// EvaluateQUIC collapses Ask to Deny for backward compatibility.
+	// EvaluateQUICDetailed preserves Ask for per-request policy callers.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[ask]]
+destination = "ask-me.example.com"
+ports = [443]
+protocols = ["quic"]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// EvaluateQUICDetailed returns Ask.
+	v, src := eng.EvaluateQUICDetailed("ask-me.example.com", 443)
+	if v != Ask || src != RuleMatch {
+		t.Errorf("EvaluateQUICDetailed = (%v, %v), want (Ask, RuleMatch)", v, src)
+	}
+
+	// EvaluateQUIC collapses Ask to Deny.
+	if got := eng.EvaluateQUIC("ask-me.example.com", 443); got != Deny {
+		t.Errorf("EvaluateQUIC(ask rule) = %v, want Deny (collapsed from Ask)", got)
+	}
+}
+
+func TestEvaluateQUICDetailed_DenyOverridesAsk(t *testing.T) {
+	// Deny rules take priority over ask rules for the same destination.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[deny]]
+destination = "overlap.example.com"
+protocols = ["quic"]
+
+[[ask]]
+destination = "overlap.example.com"
+protocols = ["quic"]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	v, src := eng.EvaluateQUICDetailed("overlap.example.com", 443)
+	if v != Deny || src != RuleMatch {
+		t.Errorf("EvaluateQUICDetailed(deny+ask overlap) = (%v, %v), want (Deny, RuleMatch)", v, src)
+	}
+}
+
+func TestEvaluateQUICDetailed_NilCompiled(t *testing.T) {
+	// Engine with nil compiled state returns Deny with DefaultVerdict.
+	eng := &Engine{}
+	v, src := eng.EvaluateQUICDetailed("anything.com", 443)
+	if v != Deny || src != DefaultVerdict {
+		t.Errorf("EvaluateQUICDetailed(nil compiled) = (%v, %v), want (Deny, DefaultVerdict)", v, src)
+	}
+}
+
 func TestEvaluateUDP_UnscopedRulesIgnored(t *testing.T) {
 	// Rules without explicit protocols must NOT match EvaluateUDP or
 	// EvaluateQUIC. This prevents TCP-intended allow rules from

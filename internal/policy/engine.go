@@ -721,31 +721,51 @@ func (e *Engine) EvaluateUDP(dest string, port int) Verdict {
 }
 
 // EvaluateQUIC checks a destination and port with QUIC-specific semantics.
-// Uses the same default-deny strategy as EvaluateUDP (ask is treated as deny).
+// Uses the same default-deny strategy as EvaluateUDP (ask is treated as deny
+// unless the caller uses EvaluateQUICDetailed to handle Ask explicitly).
 // QUIC-specific rules are evaluated first (deny then allow). If no QUIC rule
-// matches, falls back to EvaluateUDP. This ensures a QUIC allow rule can
+// matches, falls back to generic rules. This ensures a QUIC allow rule can
 // override a blanket UDP deny (e.g. deny * protocols=["udp"]).
 func (e *Engine) EvaluateQUIC(dest string, port int) Verdict {
+	v, _ := e.EvaluateQUICDetailed(dest, port)
+	// Collapse Ask to Deny for callers that do not handle Ask.
+	if v == Ask {
+		return Deny
+	}
+	return v
+}
+
+// EvaluateQUICDetailed returns the verdict and match source for QUIC traffic.
+// Unlike EvaluateQUIC, it preserves Ask verdicts so callers can trigger the
+// approval flow for per-request policy. Evaluation order: QUIC-specific deny,
+// QUIC-specific allow, QUIC-specific ask, then generic deny, allow, ask,
+// then default (Deny).
+func (e *Engine) EvaluateQUICDetailed(dest string, port int) (Verdict, MatchSource) {
 	dest = normalizeDestination(dest)
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.compiled == nil {
-		return Deny
+		return Deny, DefaultVerdict
 	}
-	// Check QUIC-specific deny rules first.
+	// QUIC-specific rules first.
 	if matchRulesStrictProto(e.compiled.denyRules, dest, port, protoNameQUIC) {
-		return Deny
+		return Deny, RuleMatch
 	}
-	// Check QUIC-specific allow rules.
 	if matchRulesStrictProto(e.compiled.allowRules, dest, port, protoNameQUIC) {
-		return Allow
+		return Allow, RuleMatch
 	}
-	// No QUIC-specific rule matched. Fall back to UDP evaluation.
+	if matchRulesStrictProto(e.compiled.askRules, dest, port, protoNameQUIC) {
+		return Ask, RuleMatch
+	}
+	// Fall back to generic UDP-scoped rules.
 	if matchRulesStrictProto(e.compiled.denyRules, dest, port, protoNameUDP) {
-		return Deny
+		return Deny, RuleMatch
 	}
 	if matchRulesStrictProto(e.compiled.allowRules, dest, port, protoNameUDP) {
-		return Allow
+		return Allow, RuleMatch
 	}
-	return Deny
+	if matchRulesStrictProto(e.compiled.askRules, dest, port, protoNameUDP) {
+		return Ask, RuleMatch
+	}
+	return Deny, DefaultVerdict
 }
