@@ -536,8 +536,11 @@ type quicTransportFixture struct {
 	sni       string
 }
 
-func newQUICTransportFixture(t *testing.T, proxyAddr string, caX509 *x509.Certificate, sni string) *quicTransportFixture {
+func newQUICTransportFixture(t *testing.T, proxyAddr string, caX509 *x509.Certificate) *quicTransportFixture {
 	t.Helper()
+
+	const sni = "api.example.com"
+
 	pool := x509.NewCertPool()
 	pool.AddCert(caX509)
 	localConn, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -574,14 +577,10 @@ func (f *quicTransportFixture) sourceAddr() string {
 	return f.localConn.LocalAddr().String()
 }
 
-func (f *quicTransportFixture) do(t *testing.T, method, path string, body []byte) (int, string) {
+func (f *quicTransportFixture) do(t *testing.T, path string) int {
 	t.Helper()
 	reqURL := fmt.Sprintf("https://%s%s", f.sni, path)
-	var bodyReader io.Reader
-	if body != nil {
-		bodyReader = bytes.NewReader(body)
-	}
-	req, err := http.NewRequest(method, reqURL, bodyReader)
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
 		t.Fatalf("create request: %v", err)
 	}
@@ -590,8 +589,8 @@ func (f *quicTransportFixture) do(t *testing.T, method, path string, body []byte
 		t.Fatalf("HTTP/3 request: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	respBody, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, string(respBody)
+	_, _ = io.ReadAll(resp.Body)
+	return resp.StatusCode
 }
 
 // TestQUICProxy_FastPathStillServesRequests verifies that nil checker
@@ -611,12 +610,12 @@ func TestQUICProxy_FastPathStillServesRequests(t *testing.T) {
 	proxyAddr := waitForQUICAddr(t, qp)
 	defer func() { _ = qp.Close() }()
 
-	fx := newQUICTransportFixture(t, proxyAddr, proxyCAX509, "api.example.com")
+	fx := newQUICTransportFixture(t, proxyAddr, proxyCAX509)
 	defer fx.Close()
 	qp.RegisterExpectedHost(fx.sourceAddr(), "api.example.com", 443)
 	defer qp.UnregisterExpectedHost(fx.sourceAddr())
 
-	status, _ := fx.do(t, "GET", "/v1/a", nil)
+	status := fx.do(t, "/v1/a")
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (QUIC fast path should serve requests)", status)
 	}
@@ -672,13 +671,13 @@ protocols = ["quic"]
 	// broker to Deny so the second request is blocked.
 	checker, fc := newQUICTestChecker(t, toml, channel.ResponseDeny)
 
-	fx := newQUICTransportFixture(t, proxyAddr, proxyCAX509, "api.example.com")
+	fx := newQUICTransportFixture(t, proxyAddr, proxyCAX509)
 	defer fx.Close()
 	qp.RegisterExpectedHostWithChecker(fx.sourceAddr(), "api.example.com", 443, checker)
 	defer qp.UnregisterExpectedHost(fx.sourceAddr())
 
 	// First request: uses seeded allow credit, no broker call.
-	status1, _ := fx.do(t, "GET", "/v1/first", nil)
+	status1 := fx.do(t, "/v1/first")
 	if status1 != http.StatusOK {
 		t.Fatalf("first request status = %d, want 200 (seeded credit)", status1)
 	}
@@ -687,7 +686,7 @@ protocols = ["quic"]
 	}
 
 	// Second request: seed exhausted, broker returns Deny.
-	status2, _ := fx.do(t, "GET", "/v1/second", nil)
+	status2 := fx.do(t, "/v1/second")
 	if status2 != http.StatusForbidden {
 		t.Fatalf("second request status = %d, want 403 (broker denied)", status2)
 	}
@@ -731,12 +730,12 @@ ports = [443]
 	ptr.Store(eng)
 	checker := NewRequestPolicyChecker(ptr, nil, WithSeedCredits(1))
 
-	fx := newQUICTransportFixture(t, proxyAddr, proxyCAX509, "api.example.com")
+	fx := newQUICTransportFixture(t, proxyAddr, proxyCAX509)
 	defer fx.Close()
 	qp.RegisterExpectedHostWithChecker(fx.sourceAddr(), "api.example.com", 443, checker)
 	defer qp.UnregisterExpectedHost(fx.sourceAddr())
 
-	status, _ := fx.do(t, "GET", "/v1/data", nil)
+	status := fx.do(t, "/v1/data")
 	if status != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (explicit deny beats seed credit)", status)
 	}
@@ -759,14 +758,14 @@ func TestQUICProxy_ExplicitAllowSkipsChecker(t *testing.T) {
 	proxyAddr := waitForQUICAddr(t, qp)
 	defer func() { _ = qp.Close() }()
 
-	fx := newQUICTransportFixture(t, proxyAddr, proxyCAX509, "api.example.com")
+	fx := newQUICTransportFixture(t, proxyAddr, proxyCAX509)
 	defer fx.Close()
 	qp.RegisterExpectedHost(fx.sourceAddr(), "api.example.com", 443)
 	defer qp.UnregisterExpectedHost(fx.sourceAddr())
 
 	// Multiple requests on the same session all succeed.
 	for i := 0; i < 3; i++ {
-		status, _ := fx.do(t, "GET", fmt.Sprintf("/v1/req%d", i), nil)
+		status := fx.do(t, fmt.Sprintf("/v1/req%d", i))
 		if status != http.StatusOK {
 			t.Fatalf("request %d status = %d, want 200 (explicit allow, no checker)", i, status)
 		}

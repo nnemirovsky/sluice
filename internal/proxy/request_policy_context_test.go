@@ -31,15 +31,15 @@ func newTestRuleSet(t *testing.T, toml string, broker *channel.Broker) *policyRu
 	}
 }
 
-// mkConnectRequest produces a minimal CONNECT request targeting host:port.
-func mkConnectRequest(host string, port int) *socks5.Request {
+// mkConnectRequest produces a minimal CONNECT request targeting host:443.
+func mkConnectRequest(host string) *socks5.Request {
 	return &socks5.Request{
 		Request: statute.Request{
 			Command: statute.CommandConnect,
 		},
 		DestAddr: &statute.AddrSpec{
 			FQDN: host,
-			Port: port,
+			Port: 443,
 		},
 	}
 }
@@ -54,7 +54,7 @@ destination = "api.example.com"
 ports = [443]
 `, nil)
 
-	ctx, ok := rules.Allow(context.Background(), mkConnectRequest("api.example.com", 443))
+	ctx, ok := rules.Allow(context.Background(), mkConnectRequest("api.example.com"))
 	if !ok {
 		t.Fatal("Allow returned false for explicit allow rule")
 	}
@@ -80,7 +80,7 @@ func TestAllowAttachesCheckerOnDefaultAllowWithBroker(t *testing.T) {
 default = "allow"
 `, broker)
 
-	ctx, ok := rules.Allow(context.Background(), mkConnectRequest("anything.example.com", 443))
+	ctx, ok := rules.Allow(context.Background(), mkConnectRequest("anything.example.com"))
 	if !ok {
 		t.Fatal("Allow returned false for default allow")
 	}
@@ -105,7 +105,7 @@ func TestAllowSkipsCheckerOnDefaultAllowWithoutBroker(t *testing.T) {
 default = "allow"
 `, nil)
 
-	ctx, ok := rules.Allow(context.Background(), mkConnectRequest("anything.example.com", 443))
+	ctx, ok := rules.Allow(context.Background(), mkConnectRequest("anything.example.com"))
 	if !ok {
 		t.Fatal("Allow returned false for default allow")
 	}
@@ -130,7 +130,7 @@ default = "deny"
 destination = "api.example.com"
 `, broker)
 
-	ctx, ok := rules.Allow(context.Background(), mkConnectRequest("api.example.com", 443))
+	ctx, ok := rules.Allow(context.Background(), mkConnectRequest("api.example.com"))
 	if !ok {
 		t.Fatal("Allow returned false after ask->allow-once approval")
 	}
@@ -198,7 +198,7 @@ default = "deny"
 destination = "api.example.com"
 `, broker)
 
-	ctx, ok := rules.Allow(context.Background(), mkConnectRequest("api.example.com", 443))
+	ctx, ok := rules.Allow(context.Background(), mkConnectRequest("api.example.com"))
 	if !ok {
 		t.Fatal("Allow returned false after ask->always-allow approval")
 	}
@@ -217,7 +217,7 @@ func TestAllowAttachesNoCheckerOnDeny(t *testing.T) {
 default = "deny"
 `, nil)
 
-	_, ok := rules.Allow(context.Background(), mkConnectRequest("blocked.example.com", 443))
+	_, ok := rules.Allow(context.Background(), mkConnectRequest("blocked.example.com"))
 	if ok {
 		t.Fatal("Allow returned true for default deny")
 	}
@@ -445,7 +445,7 @@ destination = "api.example.com"
 	// again.
 	_ = s.Close()
 
-	ctx, ok := rules.Allow(context.Background(), mkConnectRequest("api.example.com", 443))
+	ctx, ok := rules.Allow(context.Background(), mkConnectRequest("api.example.com"))
 	if !ok {
 		t.Fatal("Allow returned false after ask->always-allow")
 	}

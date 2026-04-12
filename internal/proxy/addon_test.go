@@ -15,12 +15,14 @@ import (
 	"time"
 
 	mitmproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
-	uuid "github.com/satori/go.uuid"
-
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
+	uuid "github.com/satori/go.uuid"
 )
+
+// testOAuthTokenURL is the token endpoint used across all OAuth test helpers.
+const testOAuthTokenURL = "https://auth.example.com/oauth/token"
 
 // newTestClientConn creates a minimal ClientConn with a random UUID for
 // testing addon lifecycle methods.
@@ -240,13 +242,13 @@ func TestSluiceAddon_MultipleClientsIsolated(t *testing.T) {
 	}
 }
 
-func TestSluiceAddon_SetConnCheckerNoState(t *testing.T) {
+func TestSluiceAddon_SetConnCheckerNoState(_ *testing.T) {
 	addon := NewSluiceAddon()
 	// Should not panic when setting checker for unknown client.
 	addon.SetConnChecker(uuid.NewV4(), &RequestPolicyChecker{})
 }
 
-func TestSluiceAddon_SetConnSkipCheckNoState(t *testing.T) {
+func TestSluiceAddon_SetConnSkipCheckNoState(_ *testing.T) {
 	addon := NewSluiceAddon()
 	// Should not panic when setting skip-check for unknown client.
 	addon.SetConnSkipCheck(uuid.NewV4())
@@ -582,14 +584,12 @@ func newTestAddonWithCreds(t *testing.T, creds map[string]string, bindings []vau
 
 // setupAddonConn connects a client, sets the server address, and
 // optionally marks skipCheck. Returns the client for use in test flows.
-func setupAddonConn(addon *SluiceAddon, addr string, skipCheck bool) *mitmproxy.ClientConn {
+func setupAddonConn(addon *SluiceAddon, addr string) *mitmproxy.ClientConn {
 	client := newTestClientConn()
 	addon.ClientConnected(client)
 	ctx := newTestConnContext(client, addr)
 	addon.ServerConnected(ctx)
-	if skipCheck {
-		addon.SetConnSkipCheck(client.Id)
-	}
+	addon.SetConnSkipCheck(client.Id)
 	return client
 }
 
@@ -602,7 +602,7 @@ func TestRequest_PhantomSwapInBody(t *testing.T) {
 			Credential:  "api_key",
 		}},
 	)
-	client := setupAddonConn(addon, "api.example.com:443", true)
+	client := setupAddonConn(addon, "api.example.com:443")
 
 	f := newTestFlow(client, "POST", "https://api.example.com/data")
 	f.Request.Body = []byte(`{"token":"SLUICE_PHANTOM:api_key"}`)
@@ -625,7 +625,7 @@ func TestRequest_PhantomSwapInHeaders(t *testing.T) {
 			Credential:  "api_key",
 		}},
 	)
-	client := setupAddonConn(addon, "api.example.com:443", true)
+	client := setupAddonConn(addon, "api.example.com:443")
 
 	f := newTestFlow(client, "GET", "https://api.example.com/data")
 	f.Request.Header.Set("X-Token", "SLUICE_PHANTOM:api_key")
@@ -650,7 +650,7 @@ func TestRequest_HeaderInjection(t *testing.T) {
 			Template:    "Bearer {value}",
 		}},
 	)
-	client := setupAddonConn(addon, "api.github.com:443", true)
+	client := setupAddonConn(addon, "api.github.com:443")
 
 	f := newTestFlow(client, "GET", "https://api.github.com/repos")
 
@@ -673,7 +673,7 @@ func TestRequest_HeaderInjectionNoTemplate(t *testing.T) {
 			Header:      "X-API-Key",
 		}},
 	)
-	client := setupAddonConn(addon, "api.example.com:443", true)
+	client := setupAddonConn(addon, "api.example.com:443")
 
 	f := newTestFlow(client, "GET", "https://api.example.com/data")
 
@@ -699,7 +699,7 @@ func TestRequest_StripUnboundPhantoms(t *testing.T) {
 			Credential:  "api_key",
 		}},
 	)
-	client := setupAddonConn(addon, "api.example.com:443", true)
+	client := setupAddonConn(addon, "api.example.com:443")
 
 	f := newTestFlow(client, "POST", "https://api.example.com/data")
 	f.Request.Body = []byte(`key=SLUICE_PHANTOM:api_key&unbound=SLUICE_PHANTOM:other_key`)
@@ -726,7 +726,7 @@ func TestRequest_NoBindingNoChange(t *testing.T) {
 		map[string]string{"api_key": "secret"},
 		nil,
 	)
-	client := setupAddonConn(addon, "api.example.com:443", true)
+	client := setupAddonConn(addon, "api.example.com:443")
 
 	f := newTestFlow(client, "POST", "https://api.example.com/data")
 	original := `{"data":"hello"}`
@@ -749,7 +749,7 @@ func TestRequest_PhantomSwapInURL(t *testing.T) {
 			Credential:  "api_key",
 		}},
 	)
-	client := setupAddonConn(addon, "api.example.com:443", true)
+	client := setupAddonConn(addon, "api.example.com:443")
 
 	f := newTestFlow(client, "GET", "https://api.example.com/data?token=SLUICE_PHANTOM:api_key")
 
@@ -767,7 +767,7 @@ func TestRequest_PhantomSwapInURL(t *testing.T) {
 func TestRequest_NilResolverNoOp(t *testing.T) {
 	// SluiceAddon without resolver/provider should not panic.
 	addon := NewSluiceAddon()
-	client := setupAddonConn(addon, "api.example.com:443", true)
+	client := setupAddonConn(addon, "api.example.com:443")
 
 	f := newTestFlow(client, "POST", "https://api.example.com/data")
 	f.Request.Body = []byte(`SLUICE_PHANTOM:api_key`)
@@ -790,7 +790,7 @@ func TestStreamRequestModifier_PhantomSwap(t *testing.T) {
 			Credential:  "api_key",
 		}},
 	)
-	client := setupAddonConn(addon, "api.example.com:443", true)
+	client := setupAddonConn(addon, "api.example.com:443")
 
 	f := newTestFlow(client, "POST", "https://api.example.com/data")
 	body := `{"token":"SLUICE_PHANTOM:api_key","data":"hello"}`
@@ -809,7 +809,7 @@ func TestStreamRequestModifier_PhantomSwap(t *testing.T) {
 
 func TestStreamRequestModifier_NilResolverPassthrough(t *testing.T) {
 	addon := NewSluiceAddon()
-	client := setupAddonConn(addon, "api.example.com:443", true)
+	client := setupAddonConn(addon, "api.example.com:443")
 
 	f := newTestFlow(client, "POST", "https://api.example.com/data")
 	original := "no phantoms here"
@@ -833,7 +833,7 @@ func TestStreamRequestModifier_LargeBodySpanningReads(t *testing.T) {
 			Credential:  "api_key",
 		}},
 	)
-	client := setupAddonConn(addon, "api.example.com:443", true)
+	client := setupAddonConn(addon, "api.example.com:443")
 
 	// Build a large body where the phantom token is placed in the middle
 	// so it may span a read boundary.
@@ -873,7 +873,7 @@ func TestStreamRequestModifier_StripUnbound(t *testing.T) {
 			Credential:  "bound",
 		}},
 	)
-	client := setupAddonConn(addon, "api.example.com:443", true)
+	client := setupAddonConn(addon, "api.example.com:443")
 
 	f := newTestFlow(client, "POST", "https://api.example.com/data")
 	body := "a=SLUICE_PHANTOM:bound&b=SLUICE_PHANTOM:unbound"
@@ -983,8 +983,9 @@ func newTestResponseFlow(client *mitmproxy.ClientConn, reqURL string, statusCode
 // setupOAuthAddon creates a SluiceAddon with OAuth response interception
 // configured. Returns the addon and the writable provider for vault
 // verification.
-func setupOAuthAddon(t *testing.T, credName, tokenURL string, oauthCred *vault.OAuthCredential) (*SluiceAddon, *addonWritableProvider) {
+func setupOAuthAddon(t *testing.T, credName string, oauthCred *vault.OAuthCredential) (*SluiceAddon, *addonWritableProvider) {
 	t.Helper()
+
 	data, err := oauthCred.Marshal()
 	if err != nil {
 		t.Fatalf("marshal oauth credential: %v", err)
@@ -1007,35 +1008,32 @@ func setupOAuthAddon(t *testing.T, credName, tokenURL string, oauthCred *vault.O
 	addon.persistDone = make(chan struct{}, 10)
 
 	metas := []store.CredentialMeta{
-		{Name: credName, CredType: "oauth", TokenURL: tokenURL},
+		{Name: credName, CredType: "oauth", TokenURL: testOAuthTokenURL},
 	}
 	addon.UpdateOAuthIndex(metas)
 
 	return addon, provider
 }
 
-// waitAddonPersist waits for n async persist goroutines to complete.
-func waitAddonPersist(t *testing.T, addon *SluiceAddon, n int) {
+// waitAddonPersist waits for the async persist goroutine to complete.
+func waitAddonPersist(t *testing.T, addon *SluiceAddon) {
 	t.Helper()
-	for i := 0; i < n; i++ {
-		select {
-		case <-addon.persistDone:
-		case <-time.After(5 * time.Second):
-			t.Fatalf("timed out waiting for addon persist goroutine %d/%d", i+1, n)
-		}
+	select {
+	case <-addon.persistDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for addon persist goroutine")
 	}
 }
 
 func TestAddonResponse_OAuthPhantomSwapJSON(t *testing.T) {
-	tokenURL := "https://auth.example.com/oauth/token"
 	oauthCred := &vault.OAuthCredential{
 		AccessToken:  "old-access",
 		RefreshToken: "old-refresh",
-		TokenURL:     tokenURL,
+		TokenURL:     testOAuthTokenURL,
 	}
 
-	addon, _ := setupOAuthAddon(t, "test_oauth", tokenURL, oauthCred)
-	client := setupAddonConn(addon, "auth.example.com:443", true)
+	addon, _ := setupOAuthAddon(t, "test_oauth", oauthCred)
+	client := setupAddonConn(addon, "auth.example.com:443")
 
 	respBody := mustJSON(t, map[string]interface{}{
 		"access_token":  "new-real-access-token-12345",
@@ -1044,7 +1042,7 @@ func TestAddonResponse_OAuthPhantomSwapJSON(t *testing.T) {
 		"token_type":    "Bearer",
 	})
 
-	f := newTestResponseFlow(client, tokenURL, 200, respBody, "application/json")
+	f := newTestResponseFlow(client, testOAuthTokenURL, 200, respBody, "application/json")
 
 	addon.Response(f)
 
@@ -1068,22 +1066,21 @@ func TestAddonResponse_OAuthPhantomSwapJSON(t *testing.T) {
 		t.Errorf("expected refresh phantom %q in response, got %q", refreshPhantom, body)
 	}
 
-	waitAddonPersist(t, addon, 1)
+	waitAddonPersist(t, addon)
 }
 
 func TestAddonResponse_OAuthPhantomSwapFormEncoded(t *testing.T) {
-	tokenURL := "https://auth.example.com/oauth/token"
 	oauthCred := &vault.OAuthCredential{
 		AccessToken: "old-access",
-		TokenURL:    tokenURL,
+		TokenURL:    testOAuthTokenURL,
 	}
 
-	addon, _ := setupOAuthAddon(t, "form_oauth", tokenURL, oauthCred)
-	client := setupAddonConn(addon, "auth.example.com:443", true)
+	addon, _ := setupOAuthAddon(t, "form_oauth", oauthCred)
+	client := setupAddonConn(addon, "auth.example.com:443")
 
 	respBody := []byte("access_token=form-real-access&refresh_token=form-real-refresh&expires_in=7200&token_type=bearer")
 
-	f := newTestResponseFlow(client, tokenURL, 200, respBody, "application/x-www-form-urlencoded")
+	f := newTestResponseFlow(client, testOAuthTokenURL, 200, respBody, "application/x-www-form-urlencoded")
 
 	addon.Response(f)
 
@@ -1101,21 +1098,20 @@ func TestAddonResponse_OAuthPhantomSwapFormEncoded(t *testing.T) {
 		t.Errorf("expected access phantom in form response, got %q", body)
 	}
 
-	waitAddonPersist(t, addon, 1)
+	waitAddonPersist(t, addon)
 }
 
 func TestAddonResponse_Non2xxPassesThrough(t *testing.T) {
-	tokenURL := "https://auth.example.com/oauth/token"
 	oauthCred := &vault.OAuthCredential{
 		AccessToken: "old-access",
-		TokenURL:    tokenURL,
+		TokenURL:    testOAuthTokenURL,
 	}
 
-	addon, _ := setupOAuthAddon(t, "err_oauth", tokenURL, oauthCred)
-	client := setupAddonConn(addon, "auth.example.com:443", true)
+	addon, _ := setupOAuthAddon(t, "err_oauth", oauthCred)
+	client := setupAddonConn(addon, "auth.example.com:443")
 
 	errBody := []byte(`{"error":"invalid_grant"}`)
-	f := newTestResponseFlow(client, tokenURL, 400, errBody, "application/json")
+	f := newTestResponseFlow(client, testOAuthTokenURL, 400, errBody, "application/json")
 
 	addon.Response(f)
 
@@ -1126,14 +1122,13 @@ func TestAddonResponse_Non2xxPassesThrough(t *testing.T) {
 }
 
 func TestAddonResponse_NonMatchingURLPassesThrough(t *testing.T) {
-	tokenURL := "https://auth.example.com/oauth/token"
 	oauthCred := &vault.OAuthCredential{
 		AccessToken: "old-access",
-		TokenURL:    tokenURL,
+		TokenURL:    testOAuthTokenURL,
 	}
 
-	addon, _ := setupOAuthAddon(t, "nomatch_oauth", tokenURL, oauthCred)
-	client := setupAddonConn(addon, "api.example.com:443", true)
+	addon, _ := setupOAuthAddon(t, "nomatch_oauth", oauthCred)
+	client := setupAddonConn(addon, "api.example.com:443")
 
 	respBody := mustJSON(t, map[string]interface{}{
 		"access_token": "looks-like-a-token-but-wrong-url",
@@ -1151,15 +1146,14 @@ func TestAddonResponse_NonMatchingURLPassesThrough(t *testing.T) {
 }
 
 func TestAddonResponse_VaultPersistence(t *testing.T) {
-	tokenURL := "https://auth.example.com/oauth/token"
 	oauthCred := &vault.OAuthCredential{
 		AccessToken:  "original-access",
 		RefreshToken: "original-refresh",
-		TokenURL:     tokenURL,
+		TokenURL:     testOAuthTokenURL,
 	}
 
-	addon, provider := setupOAuthAddon(t, "persist_oauth", tokenURL, oauthCred)
-	client := setupAddonConn(addon, "auth.example.com:443", true)
+	addon, provider := setupOAuthAddon(t, "persist_oauth", oauthCred)
+	client := setupAddonConn(addon, "auth.example.com:443")
 
 	respBody := mustJSON(t, map[string]interface{}{
 		"access_token":  "updated-access-token",
@@ -1168,10 +1162,10 @@ func TestAddonResponse_VaultPersistence(t *testing.T) {
 		"token_type":    "Bearer",
 	})
 
-	f := newTestResponseFlow(client, tokenURL, 200, respBody, "application/json")
+	f := newTestResponseFlow(client, testOAuthTokenURL, 200, respBody, "application/json")
 
 	addon.Response(f)
-	waitAddonPersist(t, addon, 1)
+	waitAddonPersist(t, addon)
 
 	// Verify vault was updated with new tokens.
 	provider.mu.Lock()
@@ -1191,19 +1185,18 @@ func TestAddonResponse_VaultPersistence(t *testing.T) {
 	if cred.ExpiresAt.IsZero() {
 		t.Error("vault expires_at should be set")
 	}
-	if cred.TokenURL != tokenURL {
-		t.Errorf("vault token_url = %q, want %q", cred.TokenURL, tokenURL)
+	if cred.TokenURL != testOAuthTokenURL {
+		t.Errorf("vault token_url = %q, want %q", cred.TokenURL, testOAuthTokenURL)
 	}
 }
 
 func TestAddonResponse_OnOAuthRefreshCallback(t *testing.T) {
-	tokenURL := "https://auth.example.com/oauth/token"
 	oauthCred := &vault.OAuthCredential{
 		AccessToken: "old-access",
-		TokenURL:    tokenURL,
+		TokenURL:    testOAuthTokenURL,
 	}
 
-	addon, _ := setupOAuthAddon(t, "cb_oauth", tokenURL, oauthCred)
+	addon, _ := setupOAuthAddon(t, "cb_oauth", oauthCred)
 
 	var callbackCred string
 	var callbackMu sync.Mutex
@@ -1213,17 +1206,17 @@ func TestAddonResponse_OnOAuthRefreshCallback(t *testing.T) {
 		callbackMu.Unlock()
 	}
 
-	client := setupAddonConn(addon, "auth.example.com:443", true)
+	client := setupAddonConn(addon, "auth.example.com:443")
 
 	respBody := mustJSON(t, map[string]interface{}{
 		"access_token": "new-access",
 		"token_type":   "Bearer",
 	})
 
-	f := newTestResponseFlow(client, tokenURL, 200, respBody, "application/json")
+	f := newTestResponseFlow(client, testOAuthTokenURL, 200, respBody, "application/json")
 
 	addon.Response(f)
-	waitAddonPersist(t, addon, 1)
+	waitAddonPersist(t, addon)
 
 	callbackMu.Lock()
 	got := callbackCred
@@ -1235,16 +1228,15 @@ func TestAddonResponse_OnOAuthRefreshCallback(t *testing.T) {
 }
 
 func TestAddonResponse_NilResponseNoOp(t *testing.T) {
-	tokenURL := "https://auth.example.com/oauth/token"
 	oauthCred := &vault.OAuthCredential{
 		AccessToken: "old-access",
-		TokenURL:    tokenURL,
+		TokenURL:    testOAuthTokenURL,
 	}
 
-	addon, _ := setupOAuthAddon(t, "nil_resp", tokenURL, oauthCred)
-	client := setupAddonConn(addon, "auth.example.com:443", true)
+	addon, _ := setupOAuthAddon(t, "nil_resp", oauthCred)
+	client := setupAddonConn(addon, "auth.example.com:443")
 
-	f := newTestFlow(client, "POST", tokenURL)
+	f := newTestFlow(client, "POST", testOAuthTokenURL)
 	f.Response = nil
 
 	// Should not panic.
@@ -1252,16 +1244,15 @@ func TestAddonResponse_NilResponseNoOp(t *testing.T) {
 }
 
 func TestAddonResponse_EmptyBodyNoOp(t *testing.T) {
-	tokenURL := "https://auth.example.com/oauth/token"
 	oauthCred := &vault.OAuthCredential{
 		AccessToken: "old-access",
-		TokenURL:    tokenURL,
+		TokenURL:    testOAuthTokenURL,
 	}
 
-	addon, _ := setupOAuthAddon(t, "empty_body", tokenURL, oauthCred)
-	client := setupAddonConn(addon, "auth.example.com:443", true)
+	addon, _ := setupOAuthAddon(t, "empty_body", oauthCred)
+	client := setupAddonConn(addon, "auth.example.com:443")
 
-	f := newTestResponseFlow(client, tokenURL, 200, nil, "application/json")
+	f := newTestResponseFlow(client, testOAuthTokenURL, 200, nil, "application/json")
 
 	// Should not panic.
 	addon.Response(f)
@@ -1272,14 +1263,13 @@ func TestAddonResponse_EmptyBodyNoOp(t *testing.T) {
 }
 
 func TestAddonStreamResponseModifier_OAuthSwap(t *testing.T) {
-	tokenURL := "https://auth.example.com/oauth/token"
 	oauthCred := &vault.OAuthCredential{
 		AccessToken: "old-access",
-		TokenURL:    tokenURL,
+		TokenURL:    testOAuthTokenURL,
 	}
 
-	addon, _ := setupOAuthAddon(t, "stream_oauth", tokenURL, oauthCred)
-	client := setupAddonConn(addon, "auth.example.com:443", true)
+	addon, _ := setupOAuthAddon(t, "stream_oauth", oauthCred)
+	client := setupAddonConn(addon, "auth.example.com:443")
 
 	respBody := mustJSON(t, map[string]interface{}{
 		"access_token":  "stream-real-access",
@@ -1287,7 +1277,7 @@ func TestAddonStreamResponseModifier_OAuthSwap(t *testing.T) {
 		"expires_in":    3600,
 	})
 
-	f := newTestResponseFlow(client, tokenURL, 200, nil, "application/json")
+	f := newTestResponseFlow(client, testOAuthTokenURL, 200, nil, "application/json")
 	reader := addon.StreamResponseModifier(f, bytes.NewReader(respBody))
 
 	out, err := io.ReadAll(reader)
@@ -1309,18 +1299,17 @@ func TestAddonStreamResponseModifier_OAuthSwap(t *testing.T) {
 		t.Errorf("expected access phantom in streamed response, got %q", body)
 	}
 
-	waitAddonPersist(t, addon, 1)
+	waitAddonPersist(t, addon)
 }
 
 func TestAddonStreamResponseModifier_NonMatchingPassthrough(t *testing.T) {
-	tokenURL := "https://auth.example.com/oauth/token"
 	oauthCred := &vault.OAuthCredential{
 		AccessToken: "old-access",
-		TokenURL:    tokenURL,
+		TokenURL:    testOAuthTokenURL,
 	}
 
-	addon, _ := setupOAuthAddon(t, "stream_nomatch", tokenURL, oauthCred)
-	client := setupAddonConn(addon, "api.example.com:443", true)
+	addon, _ := setupOAuthAddon(t, "stream_nomatch", oauthCred)
+	client := setupAddonConn(addon, "api.example.com:443")
 
 	original := []byte(`{"data":"hello"}`)
 	f := newTestResponseFlow(client, "https://api.example.com/other", 200, nil, "application/json")
@@ -1337,17 +1326,16 @@ func TestAddonStreamResponseModifier_NonMatchingPassthrough(t *testing.T) {
 }
 
 func TestAddonStreamResponseModifier_Non2xxPassthrough(t *testing.T) {
-	tokenURL := "https://auth.example.com/oauth/token"
 	oauthCred := &vault.OAuthCredential{
 		AccessToken: "old-access",
-		TokenURL:    tokenURL,
+		TokenURL:    testOAuthTokenURL,
 	}
 
-	addon, _ := setupOAuthAddon(t, "stream_err", tokenURL, oauthCred)
-	client := setupAddonConn(addon, "auth.example.com:443", true)
+	addon, _ := setupOAuthAddon(t, "stream_err", oauthCred)
+	client := setupAddonConn(addon, "auth.example.com:443")
 
 	original := []byte(`{"error":"invalid_grant"}`)
-	f := newTestResponseFlow(client, tokenURL, 401, nil, "application/json")
+	f := newTestResponseFlow(client, testOAuthTokenURL, 401, nil, "application/json")
 	reader := addon.StreamResponseModifier(f, bytes.NewReader(original))
 
 	out, err := io.ReadAll(reader)
@@ -1361,21 +1349,20 @@ func TestAddonStreamResponseModifier_Non2xxPassthrough(t *testing.T) {
 }
 
 func TestAddonResponse_ContentLengthUpdated(t *testing.T) {
-	tokenURL := "https://auth.example.com/oauth/token"
 	oauthCred := &vault.OAuthCredential{
 		AccessToken: "old-access",
-		TokenURL:    tokenURL,
+		TokenURL:    testOAuthTokenURL,
 	}
 
-	addon, _ := setupOAuthAddon(t, "cl_oauth", tokenURL, oauthCred)
-	client := setupAddonConn(addon, "auth.example.com:443", true)
+	addon, _ := setupOAuthAddon(t, "cl_oauth", oauthCred)
+	client := setupAddonConn(addon, "auth.example.com:443")
 
 	respBody := mustJSON(t, map[string]interface{}{
 		"access_token": "real-token-value",
 		"token_type":   "Bearer",
 	})
 
-	f := newTestResponseFlow(client, tokenURL, 200, respBody, "application/json")
+	f := newTestResponseFlow(client, testOAuthTokenURL, 200, respBody, "application/json")
 	f.Response.Header.Set("Content-Length", fmt.Sprintf("%d", len(respBody)))
 
 	addon.Response(f)
@@ -1387,13 +1374,13 @@ func TestAddonResponse_ContentLengthUpdated(t *testing.T) {
 		t.Errorf("Content-Length = %q, want %q", cl, want)
 	}
 
-	waitAddonPersist(t, addon, 1)
+	waitAddonPersist(t, addon)
 }
 
 func TestAddonResponse_NilOAuthIndexNoOp(t *testing.T) {
 	// No OAuth index configured. Response should pass through.
 	addon := NewSluiceAddon()
-	client := setupAddonConn(addon, "auth.example.com:443", true)
+	client := setupAddonConn(addon, "auth.example.com:443")
 
 	respBody := mustJSON(t, map[string]interface{}{
 		"access_token": "some-token",
@@ -1459,7 +1446,7 @@ func TestSluiceAddon_CancelPendingCheckerLeavesOlderEntries(t *testing.T) {
 	}
 }
 
-func TestSluiceAddon_CancelPendingCheckerNoop(t *testing.T) {
+func TestSluiceAddon_CancelPendingCheckerNoop(_ *testing.T) {
 	addon := NewSluiceAddon()
 
 	// Cancel on empty map should not panic.

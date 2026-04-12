@@ -22,7 +22,6 @@ import (
 
 	mitmcert "github.com/lqqyt2423/go-mitmproxy/cert"
 	mitmproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
-
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/policy"

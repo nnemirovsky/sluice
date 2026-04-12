@@ -14,13 +14,12 @@ import (
 	"sync/atomic"
 
 	mitmproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
-	uuid "github.com/satori/go.uuid"
-	"golang.org/x/sync/singleflight"
-
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
+	uuid "github.com/satori/go.uuid"
+	"golang.org/x/sync/singleflight"
 )
 
 // maxCredNameLen is an upper bound for credential name length. Used by
@@ -270,7 +269,7 @@ func (a *SluiceAddon) ServerConnected(ctx *mitmproxy.ConnContext) {
 // TlsEstablishedServer is called after the TLS handshake with the upstream
 // server completes. It re-captures the CONNECT target in case the address
 // was refined during the TLS handshake (e.g. via SNI resolution).
-func (a *SluiceAddon) TlsEstablishedServer(ctx *mitmproxy.ConnContext) {
+func (a *SluiceAddon) TlsEstablishedServer(ctx *mitmproxy.ConnContext) { //nolint:revive // method name defined by go-mitmproxy Addon interface
 	a.captureConnectTarget(ctx)
 }
 
