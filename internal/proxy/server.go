@@ -20,6 +20,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	mitmcert "github.com/lqqyt2423/go-mitmproxy/cert"
+	mitmproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
+
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/policy"
@@ -70,8 +73,10 @@ type Server struct {
 	socks          *socks5.Server
 	rules          *policyRuleSet
 	dnsResolver    *policyResolver
-	injector       *Injector
-	injectorLn     net.Listener
+	mitmProxy      *mitmproxy.Proxy
+	mitmAddr       string // go-mitmproxy listener address for SOCKS5 dial
+	mitmAuthSecret string // shared secret for MITM proxy auth (X-Sluice-Auth header)
+	addon          *SluiceAddon
 	sshJump        *SSHJumpHost
 	mailProxy      *MailProxy
 	udpRelay       *UDPRelay
@@ -598,8 +603,9 @@ func New(cfg Config) (*Server, error) {
 }
 
 // setupInjection initializes the credential injection infrastructure (HTTPS
-// MITM, SSH jump host, mail proxy). Returns an error if any component fails.
-// The caller decides whether the error is fatal based on whether bindings exist.
+// MITM via go-mitmproxy, SSH jump host, mail proxy). Returns an error if
+// any component fails. The caller decides whether the error is fatal based
+// on whether bindings exist.
 func (s *Server) setupInjection(cfg Config, _ net.Listener) error {
 	vaultDir := cfg.VaultDir
 	if vaultDir == "" {
@@ -619,15 +625,6 @@ func (s *Server) setupInjection(cfg Config, _ net.Listener) error {
 		log.Printf("WARNING: CA certificate at %s expires within 30 days. Delete and restart to regenerate.", certPath)
 	}
 
-	// Generate a random auth token so only our SOCKS5 dial function
-	// can use the injector listener. Without this, any local process
-	// that discovers the port could bypass policy and audit logging.
-	tokenBytes := make([]byte, 16)
-	if _, tokenErr := rand.Read(tokenBytes); tokenErr != nil {
-		return fmt.Errorf("generate injector auth token: %w", tokenErr)
-	}
-	authToken := hex.EncodeToString(tokenBytes)
-
 	// Create WebSocket proxy for frame-level inspection when configured.
 	var wsProxy *WSProxy
 	if len(cfg.WSBlockRules) > 0 || len(cfg.WSRedactRules) > 0 {
@@ -641,37 +638,92 @@ func (s *Server) setupInjection(cfg Config, _ net.Listener) error {
 		wsProxy, _ = NewWSProxy(cfg.Provider, &s.resolver, nil, nil)
 	}
 
-	s.injector = NewInjector(cfg.Provider, &s.resolver, caCert, authToken, wsProxy)
-	// Wire the audit logger so per-request policy denials in the HTTP/HTTPS
-	// MITM path land in the hash-chained audit log, matching the QUIC
-	// proxy which already audits per-request denies via logAudit.
-	if cfg.Audit != nil {
-		s.injector.SetAuditLogger(cfg.Audit)
+	// Create the SluiceAddon for go-mitmproxy.
+	addonOpts := []SluiceAddonOption{
+		WithResolver(&s.resolver),
+		WithProvider(cfg.Provider),
+		WithWSProxy(wsProxy),
 	}
+	if cfg.Audit != nil {
+		addonOpts = append(addonOpts, WithAuditLogger(cfg.Audit))
+	}
+	s.addon = NewSluiceAddon(addonOpts...)
 
 	// Populate the OAuth token URL index from credential metadata so
 	// the response handler can detect OAuth token endpoints from startup.
 	if cfg.Store != nil {
 		if metas, metaErr := cfg.Store.ListCredentialMeta(); metaErr == nil {
-			s.injector.UpdateOAuthIndex(metas)
+			s.addon.UpdateOAuthIndex(metas)
 		} else {
-			log.Printf("[INJECT-OAUTH] failed to load credential meta for index: %v", metaErr)
+			log.Printf("[MITM-OAUTH] failed to load credential meta for index: %v", metaErr)
 		}
 	}
 
-	injLn, injErr := net.Listen("tcp", "127.0.0.1:0")
-	if injErr != nil {
-		return fmt.Errorf("injector listener: %w", injErr)
+	// Create a cert.CA adapter so go-mitmproxy uses our existing CA.
+	ca, caAdaptErr := newSluiceCA(caCert)
+	if caAdaptErr != nil {
+		return fmt.Errorf("adapt CA for mitmproxy: %w", caAdaptErr)
 	}
-	s.injectorLn = injLn
-	go http.Serve(injLn, s.injector.Proxy) //nolint:errcheck // best-effort
+
+	// Pre-allocate a listener to discover the port, then release it so
+	// go-mitmproxy's Start() can bind. There is a small TOCTOU window
+	// between Close() and Start() where another process could grab the
+	// port. go-mitmproxy does not expose a custom net.Listener option,
+	// so this is the only way to discover the address. The risk is
+	// negligible on localhost (only sluice binds ephemeral ports here).
+	tmpLn, lnErr := net.Listen("tcp", "127.0.0.1:0")
+	if lnErr != nil {
+		return fmt.Errorf("mitmproxy listener: %w", lnErr)
+	}
+	mitmAddr := tmpLn.Addr().String()
+	_ = tmpLn.Close()
+
+	mp, mpErr := mitmproxy.NewProxy(&mitmproxy.Options{
+		Addr: mitmAddr,
+		// SslInsecure skips certificate verification on upstream connections.
+		// Required because go-mitmproxy connects to the real upstream server
+		// from the MITM proxy, and we need to accept whatever cert the upstream
+		// presents (sluice's CA is only for the agent-facing side).
+		SslInsecure: true,
+		NewCaFunc:   func() (mitmcert.CA, error) { return ca, nil },
+	})
+	if mpErr != nil {
+		return fmt.Errorf("create mitmproxy: %w", mpErr)
+	}
+
+	// Always intercept HTTPS connections so phantom tokens can be
+	// replaced in any traffic (MITM-all policy).
+	mp.SetShouldInterceptRule(func(_ *http.Request) bool { return true })
+
+	// Authenticate CONNECT requests with a shared secret so only sluice's
+	// own SOCKS5 dial path can use the MITM listener. Without this, any
+	// process on localhost could connect directly and bypass policy checks.
+	// In Docker deployments the listener is network-isolated, but --runtime
+	// none exposes it on the host.
+	var secretBytes [16]byte
+	if _, randErr := rand.Read(secretBytes[:]); randErr != nil {
+		return fmt.Errorf("generate mitm auth secret: %w", randErr)
+	}
+	mitmSecret := hex.EncodeToString(secretBytes[:])
+	mp.SetAuthProxy(func(_ http.ResponseWriter, req *http.Request) (bool, error) {
+		return req.Header.Get("X-Sluice-Auth") == mitmSecret, nil
+	})
+
+	mp.AddAddon(s.addon)
+	s.mitmProxy = mp
+	s.mitmAddr = mitmAddr
+	s.mitmAuthSecret = mitmSecret
+
+	go func() {
+		if startErr := mp.Start(); startErr != nil {
+			log.Printf("[MITM] proxy stopped: %v", startErr)
+		}
+	}()
 
 	// SSH jump host for credential-injected SSH connections.
 	hostKey, hkErr := GenerateSSHHostKey()
 	if hkErr != nil {
-		_ = injLn.Close()
-		s.injectorLn = nil
-		s.injector = nil
+		_ = mp.Close()
 		return fmt.Errorf("generate SSH host key: %w", hkErr)
 	}
 	s.sshJump = NewSSHJumpHost(cfg.Provider, hostKey)
@@ -713,11 +765,18 @@ func bindingIsMetaOnly(b vault.Binding) bool {
 	return true
 }
 
+// skipPerRequestFromContext returns true when the SOCKS5 context flags
+// the connection as exempt from per-request policy checks.
+func skipPerRequestFromContext(ctx context.Context) bool {
+	skip, _ := ctx.Value(ctxKeySkipPerRequest).(bool)
+	return skip
+}
+
 // perRequestCheckerFromContext extracts the per-request policy checker from
 // the SOCKS5 context. Returns nil when the connection matched an explicit
 // allow rule (ctxKeySkipPerRequest is set) or when no checker is attached.
 func perRequestCheckerFromContext(ctx context.Context) *RequestPolicyChecker {
-	if skip, _ := ctx.Value(ctxKeySkipPerRequest).(bool); skip {
+	if skipPerRequestFromContext(ctx) {
 		return nil
 	}
 	if c, ok := ctx.Value(ctxKeyPerRequestPolicy).(*RequestPolicyChecker); ok {
@@ -726,10 +785,77 @@ func perRequestCheckerFromContext(ctx context.Context) *RequestPolicyChecker {
 	return nil
 }
 
+// storePendingChecker transfers the per-request policy state from the
+// SOCKS5 context into the SluiceAddon's pending checkers map so that
+// ServerConnected can attach it to the connection state. The dest
+// argument is "host:port" matching the CONNECT target.
+func (s *Server) storePendingChecker(ctx context.Context, dest string) {
+	if s.addon == nil {
+		return
+	}
+	skip := skipPerRequestFromContext(ctx)
+	checker := perRequestCheckerFromContext(ctx)
+	if skip || checker != nil {
+		s.addon.PendingChecker(dest, checker, skip)
+	}
+}
+
+// cancelPendingChecker removes the most recent pending checker for dest
+// when dialThroughMITM fails after storePendingChecker was called.
+// Without this cleanup a stale checker would leak and attach to the next
+// connection to the same host:port.
+func (s *Server) cancelPendingChecker(dest string) {
+	if s.addon == nil {
+		return
+	}
+	s.addon.CancelPendingChecker(dest)
+}
+
+// dialThroughMITM connects to the local go-mitmproxy listener and
+// establishes an HTTP CONNECT tunnel for the target host. go-mitmproxy
+// intercepts the CONNECT request and sets up MITM for the inner
+// HTTP/HTTPS traffic. The per-request checker is passed through the
+// addon's pendingCheckers map (keyed by host:port) before calling this.
+// The authSecret is sent as X-Sluice-Auth to pass go-mitmproxy's
+// SetAuthProxy check.
+func dialThroughMITM(mitmAddr, host string, port int, authSecret string) (net.Conn, error) {
+	conn, err := net.DialTimeout("tcp", mitmAddr, connectTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("connect to mitmproxy: %w", err)
+	}
+
+	target := net.JoinHostPort(host, strconv.Itoa(port))
+	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\nX-Sluice-Auth: %s\r\n\r\n", target, target, authSecret)
+	if _, wErr := io.WriteString(conn, req); wErr != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("send CONNECT: %w", wErr)
+	}
+
+	br := bufio.NewReader(conn)
+	resp, rErr := http.ReadResponse(br, &http.Request{Method: "CONNECT"})
+	if rErr != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("read CONNECT response: %w", rErr)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_ = conn.Close()
+		return nil, fmt.Errorf("CONNECT rejected: %s", resp.Status)
+	}
+
+	// If the buffered reader consumed bytes past the HTTP response headers,
+	// wrap the connection so those bytes are read first.
+	if br.Buffered() > 0 {
+		return &bufferedConn{Reader: br, Conn: conn}, nil
+	}
+	return conn, nil
+}
+
 // dial is the custom dialer for go-socks5. When a credential binding matches
 // the destination, the connection is routed through the appropriate injection
-// handler (HTTPS MITM, SSH jump host, or mail proxy). Otherwise it falls
-// through to a direct TCP connection with DNS fallback support.
+// handler (HTTPS MITM via go-mitmproxy, SSH jump host, or mail proxy).
+// Otherwise it falls through to a direct TCP connection with DNS fallback
+// support.
 func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, error) {
 	perReqChecker := perRequestCheckerFromContext(ctx)
 	if r := s.resolver.Load(); r != nil {
@@ -744,12 +870,6 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 			// with different protocols (e.g. one for SSH, one for HTTPS).
 			binding, ok := r.ResolveForProtocol(fqdn, port, proto.String())
 			if !ok {
-				// No protocol-specific or protocol-agnostic binding
-				// matched. Fall back to any dest+port binding and adopt
-				// its protocol when unambiguous. ResolveProtocolHint
-				// scans ALL bindings for this dest+port and returns false
-				// when multiple single-protocol bindings disagree,
-				// preventing order-dependent protocol selection.
 				binding, ok = r.Resolve(fqdn, port)
 				if ok && len(binding.Protocols) == 1 {
 					if hint, hok := r.ResolveProtocolHint(fqdn, port); hok {
@@ -759,13 +879,6 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 					}
 				}
 			}
-			// When protocol is still generic (non-standard port) and
-			// resolution returned a protocol-agnostic or meta-protocol
-			// binding, check if a specific-protocol binding exists for
-			// this dest+port. Without this, the agnostic/meta fallback
-			// from ResolveForProtocol masks protocol-specific bindings
-			// and the connection falls through to the timeout-sensitive
-			// byte-detection path instead of using the fast hint path.
 			if ok && proto == ProtoGeneric && (len(binding.Protocols) == 0 || bindingIsMetaOnly(binding)) {
 				if hint, hok := r.ResolveProtocolHint(fqdn, port); hok {
 					if parsed, perr := ParseProtocol(hint); perr == nil {
@@ -777,15 +890,7 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 				}
 			}
 			if ok {
-				// hostAddr uses the FQDN for TLS SNI and SSH known_hosts
-				// verification. addr (the go-socks5 dial target) uses the
-				// policy-approved resolved IP for the actual TCP connection,
-				// preventing DNS rebinding between policy evaluation and dial.
 				hostAddr := net.JoinHostPort(fqdn, portStr)
-
-				// Build address list from primary + policy-approved fallbacks
-				// so injection handlers have the same dual-stack resilience
-				// as the non-injected direct connection path.
 				dialAddrs := []string{addr}
 				if fallbacks, ok := ctx.Value(ctxKeyFallbackAddrs).([]net.IP); ok {
 					for _, ip := range fallbacks {
@@ -794,27 +899,21 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 				}
 
 				switch proto {
-				case ProtoHTTP, ProtoHTTPS:
-					if s.injector != nil {
-						// Pin the policy-approved IPs so goproxy's
-						// transport dials them instead of re-resolving.
-						// Each connection gets a unique pin ID to avoid
-						// races between concurrent same-host connections.
-						ips := make([]string, len(dialAddrs))
-						for i, a := range dialAddrs {
-							ip, _, _ := net.SplitHostPort(a)
-							ips[i] = ip
-						}
-						pinID := generatePinID()
-						s.injector.PinIPs(pinID, ips)
-						s.injector.PinChecker(pinID, perReqChecker)
-						conn, err := dialThroughInjector(s.injectorLn.Addr().String(), fqdn, port, s.injector.authToken, pinID)
+				case ProtoHTTPS:
+					if s.mitmProxy != nil {
+						dest := net.JoinHostPort(fqdn, strconv.Itoa(port))
+						s.storePendingChecker(ctx, dest)
+						conn, err := dialThroughMITM(s.mitmAddr, fqdn, port, s.mitmAuthSecret)
 						if err != nil {
-							s.injector.UnpinIPs(pinID)
+							s.cancelPendingChecker(dest)
 							return nil, err
 						}
-						return &pinnedConn{Conn: conn, injector: s.injector, pinID: pinID}, nil
+						return conn, nil
 					}
+				case ProtoHTTP:
+					// Plain HTTP: go-mitmproxy only parses TLS-intercepted traffic.
+					// Fall through to direct connection. Phantom replacement for
+					// plain HTTP bindings is not yet supported via go-mitmproxy.
 				case ProtoSSH:
 					if s.sshJump != nil {
 						return dialWithHandler(func(agentConn net.Conn, ready chan<- error) {
@@ -833,12 +932,9 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 					}
 				}
 				// Non-standard port with binding: use byte-level detection
-				// to determine the correct injection handler. Port-based
-				// detection returned ProtoGeneric (or ProtoTCP from a
-				// binding hint), so peek the client's first bytes to
-				// identify the actual protocol.
+				// to determine the correct injection handler.
 				if proto == ProtoGeneric || proto == ProtoTCP {
-					bnd := binding // capture for closure
+					bnd := binding
 					return dialWithHandler(func(agentConn net.Conn, ready chan<- error) {
 						s.handleWithDetection(agentConn, ready, &bnd, fqdn, port, hostAddr, dialAddrs, perReqChecker)
 					})
@@ -847,39 +943,28 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 		}
 	}
 
-	// Route unbound HTTP/HTTPS through the injector when available so
+	// Route unbound HTTP/HTTPS through go-mitmproxy when available so
 	// phantom tokens are stripped from requests to hosts without bindings.
-	// Without this, requests bypassing the binding-match block above
-	// would go direct and leak SLUICE_PHANTOM:* tokens upstream.
-	if s.injector != nil {
+	if s.mitmProxy != nil {
 		_, portStr, _ := net.SplitHostPort(addr)
 		port, _ := strconv.Atoi(portStr)
 		proto := DetectProtocol(port)
 		switch proto {
-		case ProtoHTTP, ProtoHTTPS:
+		case ProtoHTTPS:
 			fqdn, _ := ctx.Value(ctxKeyFQDN).(string)
 			if fqdn == "" {
 				host, _, _ := net.SplitHostPort(addr)
 				fqdn = host
 			}
-			ips := []string{}
-			if ip, _, err := net.SplitHostPort(addr); err == nil {
-				ips = append(ips, ip)
-			}
-			if fallbacks, ok := ctx.Value(ctxKeyFallbackAddrs).([]net.IP); ok {
-				for _, ip := range fallbacks {
-					ips = append(ips, ip.String())
-				}
-			}
-			pinID := generatePinID()
-			s.injector.PinIPs(pinID, ips)
-			s.injector.PinChecker(pinID, perReqChecker)
-			conn, err := dialThroughInjector(s.injectorLn.Addr().String(), fqdn, port, s.injector.authToken, pinID)
+			dest := net.JoinHostPort(fqdn, strconv.Itoa(port))
+			s.storePendingChecker(ctx, dest)
+			conn, err := dialThroughMITM(s.mitmAddr, fqdn, port, s.mitmAuthSecret)
 			if err != nil {
-				s.injector.UnpinIPs(pinID)
+				s.cancelPendingChecker(dest)
 				// Fall through to direct connection below.
+				log.Printf("[MITM] dial through mitmproxy failed for %s: %v", dest, err)
 			} else {
-				return &pinnedConn{Conn: conn, injector: s.injector, pinID: pinID}, nil
+				return conn, nil
 			}
 		case ProtoGeneric:
 			// Non-standard port without binding: use byte-level
@@ -985,36 +1070,37 @@ func (s *Server) handleWithDetection(
 	}
 
 	switch proto {
-	case ProtoHTTPS, ProtoHTTP:
-		if s.injector != nil {
-			ips := make([]string, 0, len(dialAddrs))
-			for _, a := range dialAddrs {
-				if ip, _, err := net.SplitHostPort(a); err == nil {
-					ips = append(ips, ip)
-				}
-			}
-			pinID := generatePinID()
-			s.injector.PinIPs(pinID, ips)
-			s.injector.PinChecker(pinID, checker)
-			defer s.injector.UnpinIPs(pinID)
-			injConn, err := dialThroughInjector(s.injectorLn.Addr().String(), fqdn, port, s.injector.authToken, pinID)
+	case ProtoHTTPS:
+		if s.mitmProxy != nil {
+			dest := net.JoinHostPort(fqdn, strconv.Itoa(port))
+			s.addon.PendingChecker(dest, checker, checker == nil)
+			mitmConn, err := dialThroughMITM(s.mitmAddr, fqdn, port, s.mitmAuthSecret)
 			if err != nil {
-				log.Printf("[DETECT] injector failed for %s: %v", hostAddr, err)
+				s.addon.CancelPendingChecker(dest)
+				log.Printf("[DETECT] mitmproxy failed for %s: %v", hostAddr, err)
 				if binding != nil {
-					// Fail closed for bound connections: credential
-					// injection is required and phantom tokens must not
-					// leak upstream. Unlike the standard bound path
-					// (which returns an error before CONNECT succeeds),
-					// the detection path has already signaled ready, so
-					// this drops the connection at the application layer.
 					return
 				}
 				relayDirect(peekConn, dialAddrs)
 				return
 			}
-			bidirectionalRelay(peekConn, injConn)
+			bidirectionalRelay(peekConn, mitmConn)
 			return
 		}
+	case ProtoHTTP:
+		// Plain HTTP detected by byte sniffing. go-mitmproxy only parses
+		// TLS-intercepted traffic through CONNECT tunnels, so plain HTTP
+		// goes through direct relay without phantom replacement.
+		//
+		// Known gap: credentials bound to plain HTTP on non-standard ports
+		// will not be injected and phantom tokens will not be stripped.
+		// This is acceptable because (1) credential bindings almost always
+		// target HTTPS endpoints, and (2) the old goproxy-based path had
+		// the same limitation. A future fix could add a lightweight HTTP
+		// reverse proxy here or route plain HTTP through go-mitmproxy's
+		// non-TLS code path if it gains support.
+		relayDirect(peekConn, dialAddrs)
+		return
 	case ProtoSSH:
 		if s.sshJump != nil && binding != nil {
 			// Pass nil for ready: SOCKS5 CONNECT already succeeded (see
@@ -1164,44 +1250,6 @@ func bidirectionalRelay(a, b io.ReadWriter) {
 	<-errc
 }
 
-// dialThroughInjector connects to the local goproxy MITM listener and
-// establishes an HTTP CONNECT tunnel for the target host. The authToken
-// is included as a header so the injector can verify the request
-// originated from the SOCKS5 proxy rather than an unauthorized local process.
-// The pinID identifies the per-connection pinned IPs for DNS rebinding protection.
-func dialThroughInjector(injectorAddr, host string, port int, authToken, pinID string) (net.Conn, error) {
-	conn, err := net.DialTimeout("tcp", injectorAddr, connectTimeout)
-	if err != nil {
-		return nil, fmt.Errorf("connect to injector: %w", err)
-	}
-
-	target := net.JoinHostPort(host, strconv.Itoa(port))
-	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\nX-Sluice-Auth: %s\r\nX-Sluice-Pin: %s\r\n\r\n", target, target, authToken, pinID)
-	if _, wErr := io.WriteString(conn, req); wErr != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("send CONNECT: %w", wErr)
-	}
-
-	br := bufio.NewReader(conn)
-	resp, rErr := http.ReadResponse(br, &http.Request{Method: "CONNECT"})
-	if rErr != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("read CONNECT response: %w", rErr)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		_ = conn.Close()
-		return nil, fmt.Errorf("CONNECT rejected: %s", resp.Status)
-	}
-
-	// If the buffered reader consumed bytes past the HTTP response headers,
-	// wrap the connection so those bytes are read first.
-	if br.Buffered() > 0 {
-		return &bufferedConn{Reader: br, Conn: conn}, nil
-	}
-	return conn, nil
-}
-
 // handleAssociate is the custom SOCKS5 UDP ASSOCIATE handler registered via
 // WithAssociateHandle. It creates a UDP listener, replies with its address,
 // handleConnect is a custom SOCKS5 CONNECT handler that supports SNI-based
@@ -1291,9 +1339,9 @@ func (s *Server) handleConnect(ctx context.Context, writer io.Writer, request *s
 // When the first direction finishes (either client or target closes), the
 // writer (SOCKS5 connection) is closed to unblock the second goroutine.
 // target is NOT closed here to avoid triggering broken pipe warnings in
-// goproxy. The caller's deferred target.Close() handles final cleanup.
-// If the second goroutine is blocked reading from target (e.g. pending
-// long-poll), a short deadline forces it to return instead of blocking
+// the MITM proxy. The caller's deferred target.Close() handles final
+// cleanup. If the second goroutine is blocked reading from target (e.g.
+// pending long-poll), a short deadline forces it to return instead of blocking
 // indefinitely and leaking the SOCKS5 connection in CLOSE_WAIT state.
 func (s *Server) relayData(clientReader io.Reader, writer io.Writer, target net.Conn) error {
 	errCh := make(chan error, 2)
@@ -1317,8 +1365,8 @@ func (s *Server) relayData(clientReader io.Reader, writer io.Writer, target net.
 
 	// Close writer to unblock goroutine 2 if it's stuck writing. Set a
 	// read deadline on target to unblock goroutine 2 if it's stuck reading
-	// (e.g. goproxy waiting for a long-poll response). This avoids closing
-	// target directly, which would trigger broken pipe warnings in goproxy.
+	// (e.g. the MITM proxy waiting for a long-poll response). This avoids
+	// closing target directly, which would trigger broken pipe warnings.
 	if cl, ok := writer.(io.Closer); ok {
 		cl.Close() //nolint:errcheck
 	}
@@ -1622,21 +1670,8 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 				if IsQUICPacket(payload) {
 					quicAddr := s.quicProxy.Addr()
 					if quicAddr != nil {
-						// Evaluate policy using QUIC-specific matching so rules
-						// with protocols = ["quic"] are honored.
-						verdict := s.udpRelay.engine.Load().EvaluateQUIC(dest, port)
-						if verdict != policy.Allow {
-							if s.udpRelay.audit != nil {
-								if logErr := s.udpRelay.audit.Log(audit.Event{
-									Destination: dest,
-									Port:        port,
-									Protocol:    ProtoQUIC.String(),
-									Verdict:     "deny",
-									Reason:      "quic denied by policy",
-								}); logErr != nil {
-									log.Printf("audit log write error: %v", logErr)
-								}
-							}
+						checker, drop := s.resolveQUICPolicy(dest, port)
+						if drop {
 							continue
 						}
 
@@ -1647,12 +1682,14 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 						}
 						// Register expected host so the QUIC proxy can verify
 						// that the TLS SNI matches the policy-checked destination.
-						// EvaluateQUIC above only returns Allow for explicit QUIC
-						// (or UDP) allow-rule matches, so QUIC traffic reaching
-						// this branch is always an explicit rule match and the
-						// HTTP/3 handler has no per-request policy gate (see
-						// QUICProxy.buildHandler).
-						s.quicProxy.RegisterExpectedHost(upstream.LocalAddr().String(), dest, port)
+						// A non-nil checker enables per-HTTP/3-request approval
+						// for ask-rule matches. Allow with RuleMatch passes nil
+						// (fast path, no per-request check).
+						if checker != nil {
+							s.quicProxy.RegisterExpectedHostWithChecker(upstream.LocalAddr().String(), dest, port, checker)
+						} else {
+							s.quicProxy.RegisterExpectedHost(upstream.LocalAddr().String(), dest, port)
+						}
 						mu.Lock()
 						sess = &udpSession{upstream: upstream, lastSeen: time.Now()}
 						sessions[sessionKey] = sess
@@ -1781,6 +1818,92 @@ func (s *Server) relayUDPResponses(upstream net.PacketConn, relay *net.UDPConn, 
 // relayQUICResponses reads response datagrams from a QUIC proxy upstream and
 // wraps them in SOCKS5 UDP headers using the original destination address
 // (not the local QUIC proxy address) before sending to the client.
+// resolveQUICPolicy evaluates QUIC-specific policy for a destination and
+// handles the Ask approval flow. Returns a per-request checker (nil for
+// explicit allow fast path) and a drop flag. When drop is true the caller
+// should discard the packet without creating a session.
+func (s *Server) resolveQUICPolicy(dest string, port int) (checker *RequestPolicyChecker, drop bool) {
+	verdict, matchSource := s.udpRelay.engine.Load().EvaluateQUICDetailed(dest, port)
+
+	if verdict == policy.Deny {
+		if s.udpRelay.audit != nil {
+			if logErr := s.udpRelay.audit.Log(audit.Event{
+				Destination: dest,
+				Port:        port,
+				Protocol:    ProtoQUIC.String(),
+				Verdict:     "deny",
+				Reason:      "quic denied by policy",
+			}); logErr != nil {
+				log.Printf("audit log write error: %v", logErr)
+			}
+		}
+		return nil, true
+	}
+
+	if verdict == policy.Ask {
+		if s.rules.broker == nil {
+			log.Printf("[QUIC->DENY] %s:%d (ask treated as deny, no broker)", dest, port)
+			if s.udpRelay.audit != nil {
+				if logErr := s.udpRelay.audit.Log(audit.Event{
+					Destination: dest,
+					Port:        port,
+					Protocol:    ProtoQUIC.String(),
+					Verdict:     "deny",
+					Reason:      "ask treated as deny (no approval broker)",
+				}); logErr != nil {
+					log.Printf("audit log write error: %v", logErr)
+				}
+			}
+			return nil, true
+		}
+
+		eng := s.udpRelay.engine.Load()
+		timeout := time.Duration(eng.TimeoutSec) * time.Second
+		log.Printf("[QUIC->ASK] %s:%d (waiting for approval)", dest, port)
+		resp, reqErr := s.rules.broker.Request(dest, port, ProtoQUIC.String(), timeout)
+		if reqErr != nil {
+			log.Printf("[QUIC->DENY] %s:%d (approval timeout: %v)", dest, port, reqErr)
+			return nil, true
+		}
+
+		switch resp {
+		case channel.ResponseAllowOnce:
+			log.Printf("[QUIC->ALLOW] %s:%d (user approved once)", dest, port)
+			return NewRequestPolicyChecker(s.rules.engine, s.rules.broker,
+				WithPersist(s.rules.buildPersistFunc()),
+				WithSeedCredits(1),
+			), false
+		case channel.ResponseAlwaysAllow:
+			log.Printf("[QUIC->ALLOW+SAVE] %s:%d (user approved always)", dest, port)
+			if persist := s.rules.buildPersistFunc(); persist != nil {
+				persist(PersistAllow, dest, port)
+			}
+			return nil, false
+		case channel.ResponseAlwaysDeny:
+			log.Printf("[QUIC->DENY+SAVE] %s:%d (user denied always)", dest, port)
+			if persist := s.rules.buildPersistFunc(); persist != nil {
+				persist(PersistDeny, dest, port)
+			}
+			return nil, true
+		default:
+			log.Printf("[QUIC->DENY] %s:%d (user denied)", dest, port)
+			return nil, true
+		}
+	}
+
+	// Allow with default verdict: attach a checker so per-request
+	// evaluation picks up policy changes.
+	if verdict == policy.Allow && matchSource == policy.DefaultVerdict {
+		return NewRequestPolicyChecker(s.rules.engine, s.rules.broker,
+			WithPersist(s.rules.buildPersistFunc()),
+			WithSeedCredits(1),
+		), false
+	}
+
+	// Explicit allow: fast path, no per-request check needed.
+	return nil, false
+}
+
 func (s *Server) relayQUICResponses(upstream net.PacketConn, relay *net.UDPConn, clientAddr net.Addr, originalDst *net.UDPAddr) {
 	buf := make([]byte, 65535)
 	for {
@@ -1803,32 +1926,6 @@ func (s *Server) relayQUICResponses(upstream net.PacketConn, relay *net.UDPConn,
 // isHTTPSPort returns true for ports commonly used by HTTPS/HTTP3.
 func isHTTPSPort(port int) bool {
 	return port == 443 || port == 8443
-}
-
-// generatePinID returns a random hex string used to key per-connection
-// pinned IPs in the injector. Each SOCKS5 connection gets its own pin ID
-// so concurrent connections to the same host do not interfere.
-func generatePinID() string {
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-// pinnedConn wraps a net.Conn and removes the associated pin entry from the
-// injector's sync.Map when the connection is closed. This prevents pin entries
-// from leaking when clients disconnect without making any outbound requests
-// and ensures the pins persist for the full tunnel lifetime (not just the
-// first transport dial).
-type pinnedConn struct {
-	net.Conn
-	injector *Injector
-	pinID    string
-	once     sync.Once
-}
-
-func (c *pinnedConn) Close() error {
-	c.once.Do(func() { c.injector.UnpinIPs(c.pinID) })
-	return c.Conn.Close()
 }
 
 // bufferedConn wraps a net.Conn with a buffered reader to drain bytes read
@@ -1922,8 +2019,8 @@ func (s *Server) UpdateInspectRules(eng *policy.Engine) {
 	for _, r := range eng.InspectRedactRules {
 		wsRedact = append(wsRedact, WSRedactRuleConfig{Pattern: r.Pattern, Replacement: r.Replacement, Name: r.Name})
 	}
-	if s.injector != nil && s.injector.wsProxy != nil {
-		if err := s.injector.wsProxy.UpdateRules(wsBlock, wsRedact); err != nil {
+	if s.addon != nil && s.addon.wsProxy != nil {
+		if err := s.addon.wsProxy.UpdateRules(wsBlock, wsRedact); err != nil {
 			log.Printf("update ws inspect rules: %v", err)
 		}
 	}
@@ -1943,7 +2040,7 @@ func (s *Server) UpdateInspectRules(eng *policy.Engine) {
 }
 
 // StoreResolver atomically stores a new binding resolver. The caller must
-// hold ReloadMu() when concurrent mutations are possible. The injector
+// hold ReloadMu() when concurrent mutations are possible. The MITM addon
 // shares the same atomic pointer so both the dial function and MITM proxy
 // see the updated bindings.
 func (s *Server) StoreResolver(r *vault.BindingResolver) {
@@ -1955,18 +2052,18 @@ func (s *Server) StoreResolver(r *vault.BindingResolver) {
 // after Telegram credential mutations so the response handler detects
 // new or removed OAuth token endpoints.
 func (s *Server) UpdateOAuthIndex(metas []store.CredentialMeta) {
-	if s.injector != nil {
-		s.injector.UpdateOAuthIndex(metas)
+	if s.addon != nil {
+		s.addon.UpdateOAuthIndex(metas)
 	}
 }
 
-// SetOnOAuthRefresh configures a callback on the injector that is invoked
+// SetOnOAuthRefresh configures a callback on the addon that is invoked
 // after an OAuth token refresh is persisted to the vault. The callback
 // receives the credential name so the caller can re-inject updated phantom
 // env vars into the agent container.
 func (s *Server) SetOnOAuthRefresh(fn func(credName string)) {
-	if s.injector != nil {
-		s.injector.SetOnOAuthRefresh(fn)
+	if s.addon != nil {
+		s.addon.SetOnOAuthRefresh(fn)
 	}
 }
 
@@ -2012,8 +2109,8 @@ func (s *Server) IsListening() bool {
 // Close stops the server by closing the listener and any internal resources.
 func (s *Server) Close() error {
 	s.closed.Store(true)
-	if s.injectorLn != nil {
-		_ = s.injectorLn.Close()
+	if s.mitmProxy != nil {
+		_ = s.mitmProxy.Close()
 	}
 	if s.quicProxy != nil {
 		_ = s.quicProxy.Close()
@@ -2029,8 +2126,8 @@ func (s *Server) GracefulShutdown(timeout time.Duration) error {
 	s.closed.Store(true)
 	// Stop accepting new connections.
 	_ = s.listener.Close()
-	if s.injectorLn != nil {
-		_ = s.injectorLn.Close()
+	if s.mitmProxy != nil {
+		_ = s.mitmProxy.Close()
 	}
 	if s.quicProxy != nil {
 		_ = s.quicProxy.Close()

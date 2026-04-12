@@ -505,6 +505,12 @@ func (q *QUICProxy) buildHandler(upstreamHost string, destPort int) http.Handler
 
 // buildPhantomPairs resolves credentials bound to the destination and returns
 // phantom/secret pairs sorted by phantom length descending.
+//
+// TODO: this duplicates SluiceAddon.buildPhantomPairs in addon.go. The two
+// implementations use different receiver types (QUICProxy uses vault.BindingResolver
+// directly, SluiceAddon uses atomic.Pointer). Consolidating requires a shared
+// abstraction which is premature while the two code paths diverge on
+// protocol-specific details (HTTP/1-2 streaming vs HTTP/3 buffered).
 func (q *QUICProxy) buildPhantomPairs(host string, port int) []phantomPair {
 	var pairs []phantomPair
 	if res := q.resolver.Load(); res != nil {

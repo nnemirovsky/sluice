@@ -7,14 +7,15 @@ require (
 	github.com/1password/onepassword-sdk-go v0.4.0
 	github.com/BurntSushi/toml v1.6.0
 	github.com/coder/websocket v1.8.14
-	github.com/elazarl/goproxy v1.8.3
 	github.com/getkin/kin-openapi v0.134.0
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/hashicorp/vault/api v1.23.0
+	github.com/lqqyt2423/go-mitmproxy v1.8.10
 	github.com/oapi-codegen/runtime v1.3.1
 	github.com/quic-go/quic-go v0.59.0
+	github.com/satori/go.uuid v1.2.0
 	github.com/things-go/go-socks5 v0.1.1
 	github.com/tobischo/gokeepasslib/v3 v3.6.2
 	golang.org/x/crypto v0.49.0
@@ -27,6 +28,7 @@ require (
 
 require (
 	filippo.io/hpke v0.4.0 // indirect
+	github.com/andybalholm/brotli v1.0.5 // indirect
 	github.com/apapsch/go-jsonmerge/v2 v2.0.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
@@ -36,7 +38,9 @@ require (
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
 	github.com/go-openapi/swag v0.23.0 // indirect
 	github.com/gobwas/glob v0.2.3 // indirect
+	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
@@ -48,6 +52,7 @@ require (
 	github.com/hashicorp/hcl v1.0.1-vault-7 // indirect
 	github.com/ianlancetaylor/demangle v0.0.0-20251118225945-96ee0021ea0f // indirect
 	github.com/josharian/intern v1.0.0 // indirect
+	github.com/klauspost/compress v1.17.8 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.7 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
@@ -61,11 +66,13 @@ require (
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/ryanuber/go-glob v1.0.0 // indirect
+	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/tetratelabs/wabin v0.0.0-20230304001439-f6f874872834 // indirect
 	github.com/tetratelabs/wazero v1.11.0 // indirect
 	github.com/tobischo/argon2 v0.1.0 // indirect
 	github.com/woodsbury/decimal128 v1.3.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.9.0 // indirect
+	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 	golang.org/x/time v0.12.0 // indirect

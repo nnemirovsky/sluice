@@ -245,43 +245,48 @@ func TestPerRequestCheckerFromContextEmptyContextReturnsNil(t *testing.T) {
 	}
 }
 
-func TestInjectorPinCheckerRoundTrip(t *testing.T) {
-	inj := &Injector{}
+func TestAddonPendingCheckerRoundTrip(t *testing.T) {
+	addon := NewSluiceAddon()
 	ptr := new(atomic.Pointer[policy.Engine])
 	ptr.Store(&policy.Engine{Default: policy.Allow})
 	checker := NewRequestPolicyChecker(ptr, nil)
 
-	inj.PinChecker("pin-abc", checker)
-	if got := inj.lookupChecker("pin-abc"); got != checker {
-		t.Fatalf("lookupChecker returned %v, want %v", got, checker)
+	addon.PendingChecker("api.example.com:443", checker, false)
+	pc := addon.consumePendingChecker("api.example.com:443")
+	if pc == nil {
+		t.Fatal("consumePendingChecker returned nil")
+	}
+	if pc.checker != checker {
+		t.Fatalf("consumePendingChecker returned %v, want %v", pc.checker, checker)
 	}
 
-	// UnpinIPs should also evict the checker so connection teardown cleans
-	// both maps. Otherwise long-lived proxies accumulate stale checkers.
-	inj.UnpinIPs("pin-abc")
-	if got := inj.lookupChecker("pin-abc"); got != nil {
-		t.Fatalf("lookupChecker after UnpinIPs = %v, want nil", got)
+	// Second consume should return nil (consumed).
+	if got := addon.consumePendingChecker("api.example.com:443"); got != nil {
+		t.Fatalf("second consumePendingChecker returned %v, want nil", got)
 	}
 }
 
-func TestInjectorPinCheckerNilNoop(t *testing.T) {
-	inj := &Injector{}
-	inj.PinChecker("pin-xyz", nil)
-	if got := inj.lookupChecker("pin-xyz"); got != nil {
-		t.Fatalf("storing nil checker leaked entry: %v", got)
+func TestAddonPendingCheckerSkip(t *testing.T) {
+	addon := NewSluiceAddon()
+	addon.PendingChecker("api.example.com:443", nil, true)
+	pc := addon.consumePendingChecker("api.example.com:443")
+	if pc == nil {
+		t.Fatal("consumePendingChecker returned nil")
+	}
+	if !pc.skip {
+		t.Fatal("expected skip=true")
+	}
+	if pc.checker != nil {
+		t.Fatal("expected nil checker when skip=true")
 	}
 }
 
-func TestProxyConnStateUserDataShape(t *testing.T) {
-	// Guard against a regression where UserData falls back to a bare string.
-	// The HandleConnect callback is expected to install a proxyConnState so
-	// pin ID, checker, and CONNECT target are available to inner request handlers.
-	state := proxyConnState{pinID: "pin-123", connectHost: "api.example.com", connectPort: 443}
-	if state.pinID != "pin-123" {
-		t.Fatalf("pinID = %q, want pin-123", state.pinID)
-	}
+func TestConnStateShape(t *testing.T) {
+	// Guard against a regression where connState shape changes break the
+	// SOCKS5 -> addon handoff.
+	state := connState{connectHost: "api.example.com", connectPort: 443}
 	if state.checker != nil {
-		t.Fatal("default proxyConnState.checker should be nil")
+		t.Fatal("default connState.checker should be nil")
 	}
 	if state.connectHost != "api.example.com" {
 		t.Fatalf("connectHost = %q, want api.example.com", state.connectHost)
