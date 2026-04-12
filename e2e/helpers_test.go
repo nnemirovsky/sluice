@@ -4,10 +4,16 @@ package e2e
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -518,6 +524,51 @@ func startVerdictServer(t *testing.T, verdicts ...string) (*httptest.Server, *ve
 	srv := newIPv4Server(t, vs)
 	t.Cleanup(srv.Close)
 	return srv, vs
+}
+
+// generateServerTLSCert creates a TLS certificate signed by the test CA for
+// use by test servers. The cert is valid for the given IP address (typically
+// "127.0.0.1").
+func generateServerTLSCert(t *testing.T, ca *testCA, ip string) (tls.Certificate, error) {
+	t.Helper()
+
+	serverKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("generate server key: %w", err)
+	}
+
+	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	serverTemplate := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: ip},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP(ip)},
+	}
+
+	serverCertDER, err := x509.CreateCertificate(rand.Reader, serverTemplate, ca.X509, &serverKey.PublicKey, ca.Cert.PrivateKey)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("create server cert: %w", err)
+	}
+
+	return tls.Certificate{
+		Certificate: [][]byte{serverCertDER, ca.Cert.Certificate[0]},
+		PrivateKey:  serverKey,
+	}, nil
+}
+
+// freeUDPPort returns a UDP port number that is currently available for binding.
+func freeUDPPort(t *testing.T) int {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("find free udp port: %v", err)
+	}
+	port := conn.LocalAddr().(*net.UDPAddr).Port
+	_ = conn.Close()
+	return port
 }
 
 // sluiceWithWebhook starts a sluice process with the given policy TOML
