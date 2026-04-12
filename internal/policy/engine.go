@@ -721,11 +721,12 @@ func (e *Engine) EvaluateUDP(dest string, port int) Verdict {
 }
 
 // EvaluateQUIC checks a destination and port with QUIC-specific semantics.
-// Uses the same default-deny strategy as EvaluateUDP (ask is treated as deny
-// unless the caller uses EvaluateQUICDetailed to handle Ask explicitly).
-// QUIC-specific rules are evaluated first (deny then allow). If no QUIC rule
-// matches, falls back to generic rules. This ensures a QUIC allow rule can
-// override a blanket UDP deny (e.g. deny * protocols=["udp"]).
+// Ask verdicts are collapsed to Deny for callers that do not handle Ask
+// (use EvaluateQUICDetailed to preserve Ask). QUIC-specific rules are
+// evaluated first (deny then allow). If no QUIC rule matches, falls back
+// to generic UDP-scoped rules, then the engine default verdict. This
+// ensures a QUIC allow rule can override a blanket UDP deny
+// (e.g. deny * protocols=["udp"]).
 func (e *Engine) EvaluateQUIC(dest string, port int) Verdict {
 	v, _ := e.EvaluateQUICDetailed(dest, port)
 	// Collapse Ask to Deny for callers that do not handle Ask.
@@ -745,7 +746,7 @@ func (e *Engine) EvaluateQUICDetailed(dest string, port int) (Verdict, MatchSour
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.compiled == nil {
-		return Deny, DefaultVerdict
+		return e.Default, DefaultVerdict
 	}
 	// QUIC-specific rules first.
 	if matchRulesStrictProto(e.compiled.denyRules, dest, port, protoNameQUIC) {

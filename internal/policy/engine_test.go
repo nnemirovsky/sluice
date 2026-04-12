@@ -1188,11 +1188,19 @@ protocols = ["quic"]
 }
 
 func TestEvaluateQUICDetailed_NilCompiled(t *testing.T) {
-	// Engine with nil compiled state returns Deny with DefaultVerdict.
+	// Engine with nil compiled state returns engine default with DefaultVerdict.
+	// Zero-value Engine has Default=Allow (consistent with EvaluateDetailedWithProtocol).
 	eng := &Engine{}
 	v, src := eng.EvaluateQUICDetailed("anything.com", 443)
-	if v != Deny || src != DefaultVerdict {
-		t.Errorf("EvaluateQUICDetailed(nil compiled) = (%v, %v), want (Deny, DefaultVerdict)", v, src)
+	if v != Allow || src != DefaultVerdict {
+		t.Errorf("EvaluateQUICDetailed(nil compiled) = (%v, %v), want (Allow, DefaultVerdict)", v, src)
+	}
+
+	// Engine with explicit Deny default returns Deny.
+	eng2 := &Engine{Default: Deny}
+	v2, src2 := eng2.EvaluateQUICDetailed("anything.com", 443)
+	if v2 != Deny || src2 != DefaultVerdict {
+		t.Errorf("EvaluateQUICDetailed(nil compiled, default=Deny) = (%v, %v), want (Deny, DefaultVerdict)", v2, src2)
 	}
 }
 

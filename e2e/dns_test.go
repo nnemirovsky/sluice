@@ -4,7 +4,6 @@ package e2e
 
 import (
 	"encoding/binary"
-	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -157,14 +156,14 @@ func TestDNS_DenyRuleReturnsNXDOMAIN(t *testing.T) {
 		}
 	}()
 
-	config := fmt.Sprintf(`
+	config := `
 [policy]
 default = "deny"
 
 [[deny]]
 destination = "evil.example.com"
 name = "block evil domain"
-`)
+`
 
 	proc := startSluice(t, SluiceOpts{
 		ConfigTOML: config,

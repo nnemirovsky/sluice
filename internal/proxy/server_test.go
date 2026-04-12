@@ -3844,13 +3844,11 @@ type delayedCountingChannel struct {
 	mu       sync.Mutex
 	count    int
 	delay    time.Duration
-	requests []channel.ApprovalRequest
 }
 
 func (c *delayedCountingChannel) RequestApproval(_ context.Context, req channel.ApprovalRequest) error {
 	c.mu.Lock()
 	c.count++
-	c.requests = append(c.requests, req)
 	c.mu.Unlock()
 	go func() {
 		if c.delay > 0 {
@@ -3943,20 +3941,27 @@ func TestPendingQUICSessionDenied(t *testing.T) {
 	}
 }
 
-// TestQUICPendingSessionDedupOneBrokerRequest verifies that multiple QUIC
-// Initial packets for the same destination during an approval wait trigger
-// only a single broker request. The additional packets are buffered and
-// flushed when approval resolves.
-func TestQUICPendingSessionDedupOneBrokerRequest(t *testing.T) {
-	// Create a counting channel that delays resolution by 200ms.
+// quicBrokerTestEnv holds resources created by setupQUICBrokerTest.
+type quicBrokerTestEnv struct {
+	ch       *delayedCountingChannel
+	srv      *Server
+	udpConn  *net.UDPConn
+	bindAddr *net.UDPAddr
+}
+
+// setupQUICBrokerTest creates a sluice server with a delayed counting channel,
+// an ask-all policy, a SOCKS5 UDP ASSOCIATE connection, and a UDP socket ready
+// to send QUIC packets. Cleanup is registered via t.Cleanup.
+func setupQUICBrokerTest(t *testing.T, response channel.Response, delay time.Duration) quicBrokerTestEnv {
+	t.Helper()
+
 	ch := &delayedCountingChannel{
-		response: channel.ResponseAllowOnce,
-		delay:    200 * time.Millisecond,
+		response: response,
+		delay:    delay,
 	}
 	broker := channel.NewBroker([]channel.Channel{ch})
 	ch.broker = broker
 
-	// Policy: ask for all QUIC traffic on port 443.
 	eng, err := policy.LoadFromBytes([]byte(`
 [policy]
 default = "deny"
@@ -3983,13 +3988,12 @@ ports = [443]
 		t.Fatal(err)
 	}
 	go func() { _ = srv.ListenAndServe() }()
-	defer func() { _ = srv.Close() }()
+	t.Cleanup(func() { _ = srv.Close() })
 
 	if srv.quicProxy == nil {
 		t.Fatal("expected QUIC proxy to be created")
 	}
 
-	// Wait for QUIC proxy to start.
 	for i := 0; i < 50; i++ {
 		if srv.quicProxy.Addr() != nil {
 			break
@@ -4000,14 +4004,12 @@ ports = [443]
 		t.Fatal("QUIC proxy did not start listening")
 	}
 
-	// Connect via SOCKS5 UDP ASSOCIATE.
 	tcpConn, err := net.Dial("tcp", srv.Addr())
 	if err != nil {
 		t.Fatalf("dial SOCKS5: %v", err)
 	}
-	defer func() { _ = tcpConn.Close() }()
+	t.Cleanup(func() { _ = tcpConn.Close() })
 
-	// SOCKS5 handshake: no auth.
 	_, _ = tcpConn.Write([]byte{0x05, 0x01, 0x00})
 	authResp := make([]byte, 2)
 	if _, err := io.ReadFull(tcpConn, authResp); err != nil {
@@ -4017,8 +4019,6 @@ ports = [443]
 		t.Fatalf("unexpected auth method: %d", authResp[1])
 	}
 
-	// SOCKS5 UDP ASSOCIATE command (0x03).
-	// Request: VER=5, CMD=3, RSV=0, ATYP=1 (IPv4), ADDR=0.0.0.0, PORT=0
 	_, _ = tcpConn.Write([]byte{0x05, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
 	assocResp := make([]byte, 10)
 	if _, err := io.ReadFull(tcpConn, assocResp); err != nil {
@@ -4028,38 +4028,54 @@ ports = [443]
 		t.Fatalf("ASSOCIATE failed with reply %d", assocResp[1])
 	}
 
-	// Parse the bind address from the ASSOCIATE response.
 	bindPort := int(assocResp[8])<<8 | int(assocResp[9])
 	bindIP := net.IP(assocResp[4:8])
 	bindAddr := &net.UDPAddr{IP: bindIP, Port: bindPort}
 
-	// Create a UDP socket from the same IP as the TCP connection.
 	localTCPAddr := tcpConn.LocalAddr().(*net.TCPAddr)
 	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: localTCPAddr.IP, Port: 0})
 	if err != nil {
 		t.Fatalf("listen UDP: %v", err)
 	}
-	defer func() { _ = udpConn.Close() }()
+	t.Cleanup(func() { _ = udpConn.Close() })
 
-	// Build a QUIC Initial packet (passes IsQUICPacket check).
-	quicPayload := buildQUICInitial(t, "dedup-test.example.com", quicVersionV1)
+	return quicBrokerTestEnv{
+		ch:       ch,
+		srv:      srv,
+		udpConn:  udpConn,
+		bindAddr: bindAddr,
+	}
+}
 
-	// Wrap in SOCKS5 UDP header: RSV(2) + FRAG(1) + ATYP(1) + ADDR(4) + PORT(2) + DATA
-	destIP := net.ParseIP("10.0.0.1").To4()
+// buildQUICDatagram wraps a QUIC Initial packet in a SOCKS5 UDP header
+// targeting the given IPv4 destination and port 443.
+func buildQUICDatagram(t *testing.T, sni string, destIP net.IP) []byte {
+	t.Helper()
+	quicPayload := buildQUICInitial(t, sni, quicVersionV1)
+	ip4 := destIP.To4()
 	destPort := 443
 	socks5Header := []byte{
-		0x00, 0x00, // RSV
-		0x00,                                       // FRAG
-		0x01,                                       // ATYP IPv4
-		destIP[0], destIP[1], destIP[2], destIP[3], // DST.ADDR
-		byte(destPort >> 8), byte(destPort), // DST.PORT
+		0x00, 0x00,
+		0x00,
+		0x01,
+		ip4[0], ip4[1], ip4[2], ip4[3],
+		byte(destPort >> 8), byte(destPort),
 	}
-	datagram := append(socks5Header, quicPayload...)
+	return append(socks5Header, quicPayload...)
+}
+
+// TestQUICPendingSessionDedupOneBrokerRequest verifies that multiple QUIC
+// Initial packets for the same destination during an approval wait trigger
+// only a single broker request. The additional packets are buffered and
+// flushed when approval resolves.
+func TestQUICPendingSessionDedupOneBrokerRequest(t *testing.T) {
+	env := setupQUICBrokerTest(t, channel.ResponseAllowOnce, 200*time.Millisecond)
+	datagram := buildQUICDatagram(t, "dedup-test.example.com", net.ParseIP("10.0.0.1"))
 
 	// Send 5 QUIC Initial packets rapidly. Only one should trigger
 	// a broker request. The rest should be buffered.
 	for i := 0; i < 5; i++ {
-		if _, err := udpConn.WriteTo(datagram, bindAddr); err != nil {
+		if _, err := env.udpConn.WriteTo(datagram, env.bindAddr); err != nil {
 			t.Fatalf("send QUIC packet %d: %v", i, err)
 		}
 		// Tiny delay to ensure the dispatch loop processes each packet.
@@ -4070,7 +4086,7 @@ ports = [443]
 	time.Sleep(400 * time.Millisecond)
 
 	// Verify only one broker request was made.
-	got := ch.Count()
+	got := env.ch.Count()
 	if got != 1 {
 		t.Errorf("expected 1 broker request, got %d", got)
 	}
@@ -4080,104 +4096,12 @@ ports = [443]
 // denies a QUIC session, all buffered packets are discarded and no session
 // is created.
 func TestQUICPendingSessionDeniedDiscardsBuffer(t *testing.T) {
-	// Create a counting channel that denies after a delay.
-	ch := &delayedCountingChannel{
-		response: channel.ResponseDeny,
-		delay:    100 * time.Millisecond,
-	}
-	broker := channel.NewBroker([]channel.Channel{ch})
-	ch.broker = broker
-
-	eng, err := policy.LoadFromBytes([]byte(`
-[policy]
-default = "deny"
-timeout_sec = 10
-
-[[ask]]
-destination = "*"
-ports = [443]
-`))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	tmpDir := t.TempDir()
-	srv, err := New(Config{
-		ListenAddr: "127.0.0.1:0",
-		Policy:     eng,
-		Broker:     broker,
-		Provider:   &stubQUICProvider{},
-		Resolver:   mustBindingResolver(t),
-		VaultDir:   tmpDir,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() { _ = srv.ListenAndServe() }()
-	defer func() { _ = srv.Close() }()
-
-	if srv.quicProxy == nil {
-		t.Fatal("expected QUIC proxy to be created")
-	}
-
-	for i := 0; i < 50; i++ {
-		if srv.quicProxy.Addr() != nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if srv.quicProxy.Addr() == nil {
-		t.Fatal("QUIC proxy did not start listening")
-	}
-
-	// Connect via SOCKS5 UDP ASSOCIATE.
-	tcpConn, err := net.Dial("tcp", srv.Addr())
-	if err != nil {
-		t.Fatalf("dial SOCKS5: %v", err)
-	}
-	defer func() { _ = tcpConn.Close() }()
-
-	_, _ = tcpConn.Write([]byte{0x05, 0x01, 0x00})
-	authResp := make([]byte, 2)
-	if _, err := io.ReadFull(tcpConn, authResp); err != nil {
-		t.Fatalf("read auth response: %v", err)
-	}
-
-	_, _ = tcpConn.Write([]byte{0x05, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
-	assocResp := make([]byte, 10)
-	if _, err := io.ReadFull(tcpConn, assocResp); err != nil {
-		t.Fatalf("read ASSOCIATE response: %v", err)
-	}
-	if assocResp[1] != 0x00 {
-		t.Fatalf("ASSOCIATE failed with reply %d", assocResp[1])
-	}
-
-	bindPort := int(assocResp[8])<<8 | int(assocResp[9])
-	bindIP := net.IP(assocResp[4:8])
-	bindAddr := &net.UDPAddr{IP: bindIP, Port: bindPort}
-
-	localTCPAddr := tcpConn.LocalAddr().(*net.TCPAddr)
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: localTCPAddr.IP, Port: 0})
-	if err != nil {
-		t.Fatalf("listen UDP: %v", err)
-	}
-	defer func() { _ = udpConn.Close() }()
-
-	quicPayload := buildQUICInitial(t, "denied-test.example.com", quicVersionV1)
-	destIP := net.ParseIP("10.0.0.2").To4()
-	destPort := 443
-	socks5Header := []byte{
-		0x00, 0x00,
-		0x00,
-		0x01,
-		destIP[0], destIP[1], destIP[2], destIP[3],
-		byte(destPort >> 8), byte(destPort),
-	}
-	datagram := append(socks5Header, quicPayload...)
+	env := setupQUICBrokerTest(t, channel.ResponseDeny, 100*time.Millisecond)
+	datagram := buildQUICDatagram(t, "denied-test.example.com", net.ParseIP("10.0.0.2"))
 
 	// Send 3 packets. All should be buffered, then discarded on denial.
 	for i := 0; i < 3; i++ {
-		if _, err := udpConn.WriteTo(datagram, bindAddr); err != nil {
+		if _, err := env.udpConn.WriteTo(datagram, env.bindAddr); err != nil {
 			t.Fatalf("send QUIC packet %d: %v", i, err)
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -4187,19 +4111,19 @@ ports = [443]
 	time.Sleep(300 * time.Millisecond)
 
 	// Verify only one broker request was made (dedup worked).
-	got := ch.Count()
+	got := env.ch.Count()
 	if got != 1 {
 		t.Errorf("expected 1 broker request for denied session, got %d", got)
 	}
 
 	// Send another packet after denial. Since the pending entry was removed,
 	// this should trigger a new broker request.
-	if _, err := udpConn.WriteTo(datagram, bindAddr); err != nil {
+	if _, err := env.udpConn.WriteTo(datagram, env.bindAddr); err != nil {
 		t.Fatalf("send post-denial QUIC packet: %v", err)
 	}
 	time.Sleep(200 * time.Millisecond)
 
-	got = ch.Count()
+	got = env.ch.Count()
 	if got != 2 {
 		t.Errorf("expected 2 broker requests total (one per approval cycle), got %d", got)
 	}
@@ -4209,102 +4133,13 @@ ports = [443]
 // maxPendingQUICPackets arrive during an approval wait, excess packets
 // are dropped.
 func TestQUICPendingSessionBufferOverflow(t *testing.T) {
-	// Create a channel with a long delay to keep the session pending.
-	ch := &delayedCountingChannel{
-		response: channel.ResponseAllowOnce,
-		delay:    500 * time.Millisecond,
-	}
-	broker := channel.NewBroker([]channel.Channel{ch})
-	ch.broker = broker
-
-	eng, err := policy.LoadFromBytes([]byte(`
-[policy]
-default = "deny"
-timeout_sec = 10
-
-[[ask]]
-destination = "*"
-ports = [443]
-`))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	tmpDir := t.TempDir()
-	srv, err := New(Config{
-		ListenAddr: "127.0.0.1:0",
-		Policy:     eng,
-		Broker:     broker,
-		Provider:   &stubQUICProvider{},
-		Resolver:   mustBindingResolver(t),
-		VaultDir:   tmpDir,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() { _ = srv.ListenAndServe() }()
-	defer func() { _ = srv.Close() }()
-
-	if srv.quicProxy == nil {
-		t.Fatal("expected QUIC proxy to be created")
-	}
-
-	for i := 0; i < 50; i++ {
-		if srv.quicProxy.Addr() != nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Connect via SOCKS5 UDP ASSOCIATE.
-	tcpConn, err := net.Dial("tcp", srv.Addr())
-	if err != nil {
-		t.Fatalf("dial SOCKS5: %v", err)
-	}
-	defer func() { _ = tcpConn.Close() }()
-
-	_, _ = tcpConn.Write([]byte{0x05, 0x01, 0x00})
-	authResp := make([]byte, 2)
-	if _, err := io.ReadFull(tcpConn, authResp); err != nil {
-		t.Fatalf("read auth response: %v", err)
-	}
-
-	_, _ = tcpConn.Write([]byte{0x05, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
-	assocResp := make([]byte, 10)
-	if _, err := io.ReadFull(tcpConn, assocResp); err != nil {
-		t.Fatalf("read ASSOCIATE response: %v", err)
-	}
-	if assocResp[1] != 0x00 {
-		t.Fatalf("ASSOCIATE failed with reply %d", assocResp[1])
-	}
-
-	bindPort := int(assocResp[8])<<8 | int(assocResp[9])
-	bindIP := net.IP(assocResp[4:8])
-	bindAddr := &net.UDPAddr{IP: bindIP, Port: bindPort}
-
-	localTCPAddr := tcpConn.LocalAddr().(*net.TCPAddr)
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: localTCPAddr.IP, Port: 0})
-	if err != nil {
-		t.Fatalf("listen UDP: %v", err)
-	}
-	defer func() { _ = udpConn.Close() }()
-
-	quicPayload := buildQUICInitial(t, "overflow-test.example.com", quicVersionV1)
-	destIP := net.ParseIP("10.0.0.3").To4()
-	destPort := 443
-	socks5Header := []byte{
-		0x00, 0x00,
-		0x00,
-		0x01,
-		destIP[0], destIP[1], destIP[2], destIP[3],
-		byte(destPort >> 8), byte(destPort),
-	}
-	datagram := append(socks5Header, quicPayload...)
+	env := setupQUICBrokerTest(t, channel.ResponseAllowOnce, 500*time.Millisecond)
+	datagram := buildQUICDatagram(t, "overflow-test.example.com", net.ParseIP("10.0.0.3"))
 
 	// Send maxPendingQUICPackets + 10 packets. The extra ones should be dropped.
 	total := maxPendingQUICPackets + 10
 	for i := 0; i < total; i++ {
-		if _, err := udpConn.WriteTo(datagram, bindAddr); err != nil {
+		if _, err := env.udpConn.WriteTo(datagram, env.bindAddr); err != nil {
 			t.Fatalf("send QUIC packet %d: %v", i, err)
 		}
 		// No delay: blast them all as fast as possible.
@@ -4314,7 +4149,7 @@ ports = [443]
 	time.Sleep(100 * time.Millisecond)
 
 	// Still only one broker request.
-	got := ch.Count()
+	got := env.ch.Count()
 	if got != 1 {
 		t.Errorf("expected 1 broker request during overflow test, got %d", got)
 	}

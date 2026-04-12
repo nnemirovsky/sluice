@@ -1575,6 +1575,7 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 				log.Printf("[UDP] invalid datagram from %s: %v", srcAddr, parseErr)
 				continue
 			}
+
 			// DNS interception: port 53 traffic goes to the DNS interceptor.
 			if port == 53 && s.dnsInterceptor != nil {
 				resp, dnsErr := s.dnsInterceptor.HandleQuery(payload)
