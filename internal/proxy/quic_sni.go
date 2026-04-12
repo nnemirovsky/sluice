@@ -214,8 +214,8 @@ func ExtractQUICSNI(packet []byte) string {
 	}
 
 	// Parse QUIC frames looking for CRYPTO frames (type 0x06).
-	// Reassemble CRYPTO data (we only handle offset 0 for simplicity,
-	// which covers the vast majority of Initial packets).
+	// Reassemble CRYPTO data contiguous from offset 0, which covers the
+	// vast majority of Initial packets.
 	clientHello := extractCryptoData(plaintext)
 	if clientHello == nil {
 		return ""
@@ -248,88 +248,95 @@ func extractSNIFromHandshake(hs []byte) string {
 // extractCryptoData scans QUIC frames for CRYPTO frames (type 0x06) and
 // returns the concatenated data. Only processes frames with offset 0 or
 // contiguous from offset 0 (sufficient for Initial packets which contain
-// the full ClientHello). Skips PADDING (0x00), PING (0x01), and ACK frames.
+// the full ClientHello). Skips PADDING, PING, ACK, and CONNECTION_CLOSE
+// frames. Unknown frame types are skipped gracefully (return data collected
+// so far) since their length cannot be determined.
 func extractCryptoData(frames []byte) []byte {
 	var result []byte
 	var nextOffset uint64
 
 	pos := 0
 	for pos < len(frames) {
-		frameType := frames[pos]
+		// Frame types are variable-length integers per RFC 9000 Section 12.4.
+		if pos >= len(frames) {
+			break
+		}
+		frameType, n := readQUICVarint(frames[pos:])
+		if n == 0 {
+			break
+		}
+		pos += n
 
 		switch {
 		case frameType == 0x00:
-			// PADDING frame: single zero byte.
-			pos++
+			// PADDING frame: single-byte type, no payload. The type byte
+			// was already consumed above.
 
 		case frameType == 0x01:
-			// PING frame: single byte, no payload.
-			pos++
+			// PING frame: single-byte type, no payload.
 
 		case frameType == 0x02 || frameType == 0x03:
 			// ACK frame: skip it. Parse enough to find the length.
-			pos++
 			// Largest Acknowledged (varint)
-			_, n := readQUICVarint(frames[pos:])
-			if n == 0 {
+			_, vn := readQUICVarint(frames[pos:])
+			if vn == 0 {
 				return result
 			}
-			pos += n
+			pos += vn
 			// ACK Delay (varint)
-			_, n = readQUICVarint(frames[pos:])
-			if n == 0 {
+			_, vn = readQUICVarint(frames[pos:])
+			if vn == 0 {
 				return result
 			}
-			pos += n
+			pos += vn
 			// ACK Range Count (varint)
-			rangeCount, n := readQUICVarint(frames[pos:])
-			if n == 0 {
+			rangeCount, vn := readQUICVarint(frames[pos:])
+			if vn == 0 {
 				return result
 			}
-			pos += n
+			pos += vn
 			// First ACK Range (varint)
-			_, n = readQUICVarint(frames[pos:])
-			if n == 0 {
+			_, vn = readQUICVarint(frames[pos:])
+			if vn == 0 {
 				return result
 			}
-			pos += n
+			pos += vn
 			// Additional ACK Ranges: each has Gap (varint) + ACK Range (varint)
 			for i := uint64(0); i < rangeCount; i++ {
-				_, n = readQUICVarint(frames[pos:])
-				if n == 0 {
+				_, vn = readQUICVarint(frames[pos:])
+				if vn == 0 {
 					return result
 				}
-				pos += n
-				_, n = readQUICVarint(frames[pos:])
-				if n == 0 {
+				pos += vn
+				_, vn = readQUICVarint(frames[pos:])
+				if vn == 0 {
 					return result
 				}
-				pos += n
+				pos += vn
 			}
 			// ECN counts for type 0x03
 			if frameType == 0x03 {
 				for i := 0; i < 3; i++ {
-					_, n = readQUICVarint(frames[pos:])
-					if n == 0 {
+					_, vn = readQUICVarint(frames[pos:])
+					if vn == 0 {
 						return result
 					}
-					pos += n
+					pos += vn
 				}
 			}
 
 		case frameType == 0x06:
-			// CRYPTO frame: type(1) + offset(varint) + length(varint) + data
-			pos++
-			offset, n := readQUICVarint(frames[pos:])
-			if n == 0 {
+			// CRYPTO frame: offset(varint) + length(varint) + data
+			offset, vn := readQUICVarint(frames[pos:])
+			if vn == 0 {
 				return result
 			}
-			pos += n
-			dataLen, n := readQUICVarint(frames[pos:])
-			if n == 0 || dataLen > math.MaxInt {
+			pos += vn
+			dataLen, vn := readQUICVarint(frames[pos:])
+			if vn == 0 || dataLen > math.MaxInt {
 				return result
 			}
-			pos += n
+			pos += vn
 			if pos+int(dataLen) > len(frames) {
 				return result
 			}
@@ -340,8 +347,35 @@ func extractCryptoData(frames []byte) []byte {
 			}
 			pos += int(dataLen)
 
+		case frameType == 0x1c || frameType == 0x1d:
+			// CONNECTION_CLOSE frame: error_code(varint) + frame_type(varint,
+			// only for 0x1c) + reason_phrase_length(varint) + reason_phrase.
+			_, vn := readQUICVarint(frames[pos:])
+			if vn == 0 {
+				return result
+			}
+			pos += vn
+			if frameType == 0x1c {
+				// Frame Type field (only in transport CONNECTION_CLOSE).
+				_, vn = readQUICVarint(frames[pos:])
+				if vn == 0 {
+					return result
+				}
+				pos += vn
+			}
+			reasonLen, vn := readQUICVarint(frames[pos:])
+			if vn == 0 || reasonLen > math.MaxInt {
+				return result
+			}
+			pos += vn
+			if pos+int(reasonLen) > len(frames) {
+				return result
+			}
+			pos += int(reasonLen)
+
 		default:
-			// Unknown frame type. Stop parsing.
+			// Unknown frame type. We cannot determine its length, so return
+			// whatever CRYPTO data we have collected so far.
 			return result
 		}
 	}

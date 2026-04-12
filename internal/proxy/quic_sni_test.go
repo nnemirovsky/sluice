@@ -119,6 +119,256 @@ func TestExtractCryptoData_NonZeroOffset(t *testing.T) {
 	}
 }
 
+func TestExtractCryptoData_MultipleCryptoFrames(t *testing.T) {
+	// Two contiguous CRYPTO frames: offset=0 len=3 "abc" + offset=3 len=3 "def"
+	var frame []byte
+	frame = append(frame, 0x06, 0x00, 0x03, 'a', 'b', 'c') // CRYPTO offset=0 len=3
+	frame = append(frame, 0x06, 0x03, 0x03, 'd', 'e', 'f') // CRYPTO offset=3 len=3
+	data := extractCryptoData(frame)
+	if string(data) != "abcdef" {
+		t.Errorf("expected abcdef, got %q", string(data))
+	}
+}
+
+func TestExtractCryptoData_PaddingBetweenCryptoFrames(t *testing.T) {
+	// CRYPTO + PADDING + CRYPTO (contiguous offsets).
+	var frame []byte
+	frame = append(frame, 0x06, 0x00, 0x02, 'h', 'i')         // CRYPTO offset=0 len=2
+	frame = append(frame, 0x00, 0x00, 0x00)                   // 3 PADDING bytes
+	frame = append(frame, 0x06, 0x02, 0x03, 'b', 'y', 'e')    // CRYPTO offset=2 len=3
+	frame = append(frame, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00) // trailing PADDING
+	data := extractCryptoData(frame)
+	if string(data) != "hibye" {
+		t.Errorf("expected hibye, got %q", string(data))
+	}
+}
+
+func TestExtractCryptoData_ConnectionClose(t *testing.T) {
+	// CRYPTO frame followed by a CONNECTION_CLOSE (type 0x1c) frame.
+	var frame []byte
+	frame = append(frame, 0x06, 0x00, 0x03, 'a', 'b', 'c') // CRYPTO
+	// CONNECTION_CLOSE (0x1c): error_code=0x00, frame_type=0x00, reason_len=0
+	frame = append(frame, 0x1c, 0x00, 0x00, 0x00)
+	data := extractCryptoData(frame)
+	if string(data) != "abc" {
+		t.Errorf("expected abc, got %q", string(data))
+	}
+}
+
+func TestExtractCryptoData_ConnectionCloseApp(t *testing.T) {
+	// CONNECTION_CLOSE application (0x1d) before a CRYPTO frame.
+	// 0x1d: error_code=0x01, reason_len=4, reason="test"
+	var frame []byte
+	frame = append(frame, 0x1d, 0x01, 0x04, 't', 'e', 's', 't')
+	frame = append(frame, 0x06, 0x00, 0x03, 'x', 'y', 'z') // CRYPTO
+	data := extractCryptoData(frame)
+	if string(data) != "xyz" {
+		t.Errorf("expected xyz, got %q", string(data))
+	}
+}
+
+func TestExtractCryptoData_UnknownFrameAfterCrypto(t *testing.T) {
+	// CRYPTO frame followed by an unknown frame type. The unknown frame
+	// should not discard the CRYPTO data already collected.
+	var frame []byte
+	frame = append(frame, 0x06, 0x00, 0x05, 'h', 'e', 'l', 'l', 'o') // CRYPTO
+	frame = append(frame, 0x30)                                      // unknown type 0x30
+	frame = append(frame, 0xFF, 0xFF)                                // garbage
+	data := extractCryptoData(frame)
+	if string(data) != "hello" {
+		t.Errorf("expected hello, got %q", string(data))
+	}
+}
+
+func TestExtractCryptoData_UnknownFrameBeforeCrypto(t *testing.T) {
+	// Unknown frame type before any CRYPTO frame. We return nil since no
+	// CRYPTO data was found before the unknown frame.
+	var frame []byte
+	frame = append(frame, 0x30)                            // unknown type 0x30
+	frame = append(frame, 0x06, 0x00, 0x03, 'a', 'b', 'c') // CRYPTO (unreachable)
+	data := extractCryptoData(frame)
+	if len(data) != 0 {
+		t.Errorf("expected empty for unknown frame before CRYPTO, got %q", string(data))
+	}
+}
+
+func TestExtractCryptoData_ACKThenCrypto(t *testing.T) {
+	// ACK frame (type 0x02) followed by a CRYPTO frame. Tests that the ACK
+	// parser correctly skips the ACK so the CRYPTO frame is found.
+	var frame []byte
+	// ACK: largest_ack=10, delay=0, range_count=0, first_range=0
+	frame = append(frame, 0x02, 0x0a, 0x00, 0x00, 0x00)
+	frame = append(frame, 0x06, 0x00, 0x04, 't', 'e', 's', 't') // CRYPTO
+	data := extractCryptoData(frame)
+	if string(data) != "test" {
+		t.Errorf("expected test, got %q", string(data))
+	}
+}
+
+func TestExtractCryptoData_ACKECNThenCrypto(t *testing.T) {
+	// ACK_ECN frame (type 0x03) followed by a CRYPTO frame.
+	var frame []byte
+	// ACK_ECN: largest_ack=5, delay=0, range_count=0, first_range=0, ect0=1, ect1=0, ecn_ce=0
+	frame = append(frame, 0x03, 0x05, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00)
+	frame = append(frame, 0x06, 0x00, 0x02, 'o', 'k') // CRYPTO
+	data := extractCryptoData(frame)
+	if string(data) != "ok" {
+		t.Errorf("expected ok, got %q", string(data))
+	}
+}
+
+func TestExtractQUICSNI_WithPaddingAndMultipleCrypto(t *testing.T) {
+	// Build a full QUIC Initial packet where the ClientHello is split across
+	// two CRYPTO frames with PADDING between them, mimicking real-world
+	// quic-go behavior.
+	packet := buildQUICInitialMultiCrypto(t, "multi-crypto.example.com", quicVersionV1)
+	sni := ExtractQUICSNI(packet)
+	if sni != "multi-crypto.example.com" {
+		t.Errorf("expected multi-crypto.example.com, got %q", sni)
+	}
+}
+
+// buildQUICInitialMultiCrypto constructs a QUIC Initial packet where the
+// ClientHello is split across two CRYPTO frames with PADDING in between,
+// reproducing the pattern seen in real quic-go traffic.
+func buildQUICInitialMultiCrypto(t *testing.T, hostname string, version uint32) []byte {
+	t.Helper()
+
+	dcid := []byte{0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}
+
+	fullRecord := buildClientHello(hostname)
+	clientHello := fullRecord[5:] // strip TLS record header
+
+	// Split the ClientHello roughly in half across two CRYPTO frames.
+	splitAt := len(clientHello) / 2
+	part1 := clientHello[:splitAt]
+	part2 := clientHello[splitAt:]
+
+	// CRYPTO frame 1: offset=0, data=part1
+	var crypto1 []byte
+	crypto1 = append(crypto1, 0x06, 0x00)
+	crypto1 = append(crypto1, encodeQUICVarint(uint64(len(part1)))...)
+	crypto1 = append(crypto1, part1...)
+
+	// 50 bytes of PADDING
+	padding := make([]byte, 50)
+
+	// CRYPTO frame 2: offset=len(part1), data=part2
+	var crypto2 []byte
+	crypto2 = append(crypto2, 0x06)
+	crypto2 = append(crypto2, encodeQUICVarint(uint64(len(part1)))...)
+	crypto2 = append(crypto2, encodeQUICVarint(uint64(len(part2)))...)
+	crypto2 = append(crypto2, part2...)
+
+	plaintext := append(crypto1, padding...)
+	plaintext = append(plaintext, crypto2...)
+
+	return buildQUICInitialFromPlaintext(t, dcid, plaintext, version)
+}
+
+// buildQUICInitialFromPlaintext encrypts the given plaintext (QUIC frames)
+// into a valid QUIC Initial packet. Shared helper for custom frame layouts.
+func buildQUICInitialFromPlaintext(t *testing.T, dcid, plaintext []byte, version uint32) []byte {
+	t.Helper()
+
+	var salt []byte
+	var hpLabel, keyLabel, ivLabel string
+	switch version {
+	case quicVersionV1:
+		salt = quicV1Salt
+		hpLabel = "quic hp"
+		keyLabel = "quic key"
+		ivLabel = "quic iv"
+	case quicVersionV2:
+		salt = quicV2Salt
+		hpLabel = "quicv2 hp"
+		keyLabel = "quicv2 key"
+		ivLabel = "quicv2 iv"
+	}
+
+	clientSecret, err := deriveQUICClientSecret(dcid, salt, version)
+	if err != nil {
+		t.Fatalf("deriveQUICClientSecret: %v", err)
+	}
+	hpKey, err := hkdfExpandLabel(clientSecret, hpLabel, 16)
+	if err != nil {
+		t.Fatalf("hkdfExpandLabel(hp): %v", err)
+	}
+	packetKey, err := hkdfExpandLabel(clientSecret, keyLabel, 16)
+	if err != nil {
+		t.Fatalf("hkdfExpandLabel(key): %v", err)
+	}
+	iv, err := hkdfExpandLabel(clientSecret, ivLabel, 12)
+	if err != nil {
+		t.Fatalf("hkdfExpandLabel(iv): %v", err)
+	}
+
+	pnLen := 2
+	pnBytes := []byte{0x00, 0x00}
+	var pn uint64
+
+	var firstByte byte
+	switch version {
+	case quicVersionV1:
+		firstByte = 0xC0 | byte(pnLen-1)
+	case quicVersionV2:
+		firstByte = 0xC0 | 0x10 | byte(pnLen-1)
+	}
+
+	header := []byte{firstByte}
+	versionBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(versionBytes, version)
+	header = append(header, versionBytes...)
+	header = append(header, byte(len(dcid)))
+	header = append(header, dcid...)
+	header = append(header, 0) // SCID length = 0
+	header = append(header, 0) // Token length = 0
+
+	aesBlock, err := aes.NewCipher(packetKey)
+	if err != nil {
+		t.Fatalf("aes.NewCipher: %v", err)
+	}
+	gcm, err := cipher.NewGCM(aesBlock)
+	if err != nil {
+		t.Fatalf("cipher.NewGCM: %v", err)
+	}
+
+	payloadLen := pnLen + len(plaintext) + gcm.Overhead()
+	header = append(header, encodeQUICVarintTwoBytes(uint64(payloadLen))...)
+
+	aad := append(header, pnBytes...)
+
+	nonce := make([]byte, 12)
+	copy(nonce, iv)
+	for i := 0; i < 8; i++ {
+		nonce[12-1-i] ^= byte(pn >> (8 * i))
+	}
+
+	ciphertext := gcm.Seal(nil, nonce, plaintext, aad)
+	protectedPayload := append(pnBytes, ciphertext...)
+
+	sample := protectedPayload[4 : 4+16]
+	hpBlock, err := aes.NewCipher(hpKey)
+	if err != nil {
+		t.Fatalf("aes.NewCipher(hp): %v", err)
+	}
+	var mask [16]byte
+	hpBlock.Encrypt(mask[:], sample)
+
+	protectedFirst := firstByte ^ (mask[0] & 0x0f)
+	protectedPN := make([]byte, pnLen)
+	for i := 0; i < pnLen; i++ {
+		protectedPN[i] = pnBytes[i] ^ mask[1+i]
+	}
+
+	packet := []byte{protectedFirst}
+	packet = append(packet, header[1:]...)
+	packet = append(packet, protectedPN...)
+	packet = append(packet, ciphertext...)
+
+	return packet
+}
+
 func TestExtractSNIFromHandshake(t *testing.T) {
 	// Build a ClientHello handshake message (without TLS record wrapper).
 	full := buildClientHello("test.example.com")
