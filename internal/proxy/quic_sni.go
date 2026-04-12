@@ -224,6 +224,12 @@ func ExtractQUICSNI(packet []byte) string {
 	// The CRYPTO frame contains a TLS handshake message (ClientHello) WITHOUT
 	// the TLS record layer header. extractSNI expects the TLS record wrapper,
 	// so we prepend a synthetic one.
+	//
+	// Note: quic-go may fragment the ClientHello across multiple QUIC Initial
+	// packets, with each packet containing a CRYPTO frame at a different
+	// offset. When the first packet's CRYPTO frame is too small to contain
+	// the extensions section (where SNI lives), extraction fails silently
+	// and the caller falls back to DNS reverse cache.
 	return extractSNIFromHandshake(clientHello)
 }
 
