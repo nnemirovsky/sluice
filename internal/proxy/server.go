@@ -319,14 +319,16 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 			log.Printf("[ASK->DENY] %s:%d (no approval broker)", dest, port)
 		} else {
 			// Auto-allow the SOCKS5 CONNECT without prompting the user.
-			// Approval happens per-request inside the MITM handler where
-			// the HTTP method and path are known, producing a single
-			// combined Telegram message per request instead of two
-			// separate messages (connection + request).
+			// For TLS connections: approval happens per-request inside the
+			// MITM handler where the HTTP method and path are known.
+			// For non-TLS connections (SSH, plain TCP): the checker is
+			// attached but the direct-relay path in handleWithDetection
+			// calls CheckAndConsume once before relaying, providing a
+			// connection-level approval prompt.
 			allowed = true
 			effectiveVerdict = policy.Allow
 			reason = "ask deferred to per-request"
-			log.Printf("[ASK->DEFER] %s:%d (approval deferred to per-request)", dest, port)
+			log.Printf("[ASK->DEFER] %s:%d (approval deferred to handler)", dest, port)
 		}
 	}
 
@@ -1042,31 +1044,36 @@ func (s *Server) handleWithDetection(
 			return
 		}
 	case ProtoHTTP:
-		// Plain HTTP detected by byte sniffing. go-mitmproxy only parses
-		// TLS-intercepted traffic through CONNECT tunnels, so plain HTTP
-		// goes through direct relay without phantom replacement.
-		//
-		// Known gap: credentials bound to plain HTTP on non-standard ports
-		// will not be injected and phantom tokens will not be stripped.
-		// This is acceptable because (1) credential bindings almost always
-		// target HTTPS endpoints, and (2) the old goproxy-based path had
-		// the same limitation. A future fix could add a lightweight HTTP
-		// reverse proxy here or route plain HTTP through go-mitmproxy's
-		// non-TLS code path if it gains support.
+		// Plain HTTP: no MITM handler. Check connection-level policy
+		// before relaying if a checker was deferred from Allow().
+		if checker != nil {
+			if v, _ := checker.CheckAndConsume(fqdn, port); v != policy.Allow {
+				log.Printf("[DETECT-DENY] %s:%d plain HTTP blocked by deferred policy", fqdn, port)
+				return
+			}
+		}
 		relayDirect(peekConn, dialAddrs)
 		return
 	case ProtoSSH:
+		if checker != nil {
+			if v, _ := checker.CheckAndConsume(fqdn, port); v != policy.Allow {
+				log.Printf("[DETECT-DENY] %s:%d SSH blocked by deferred policy", fqdn, port)
+				return
+			}
+		}
 		if s.sshJump != nil && binding != nil {
-			// Pass nil for ready: SOCKS5 CONNECT already succeeded (see
-			// comment above), so the handler's readiness signal is unused.
-			// Both HandleConnection implementations guard with
-			// "if ready != nil" before sending.
 			if err := s.sshJump.HandleConnection(peekConn, dialAddrs, hostAddr, *binding, nil); err != nil {
 				log.Printf("[SSH] handler error for %s: %v", hostAddr, err)
 			}
 			return
 		}
 	case ProtoIMAP, ProtoSMTP:
+		if checker != nil {
+			if v, _ := checker.CheckAndConsume(fqdn, port); v != policy.Allow {
+				log.Printf("[DETECT-DENY] %s:%d %s blocked by deferred policy", fqdn, port, proto)
+				return
+			}
+		}
 		if s.mailProxy != nil && binding != nil {
 			if err := s.mailProxy.HandleConnection(peekConn, dialAddrs, hostAddr, *binding, proto, nil); err != nil {
 				log.Printf("[MAIL] handler error for %s: %v", hostAddr, err)
@@ -1082,10 +1089,23 @@ func (s *Server) handleWithDetection(
 	// can only route through the mail proxy and the upstream probe is wasted
 	// without a binding to inject.
 	if n == 0 && binding != nil && s.mailProxy != nil {
+		if checker != nil {
+			if v, _ := checker.CheckAndConsume(fqdn, port); v != policy.Allow {
+				log.Printf("[DETECT-DENY] %s:%d server-first blocked by deferred policy", fqdn, port)
+				return
+			}
+		}
 		s.handleServerFirstDetection(peekConn, binding, hostAddr, dialAddrs)
 		return
 	}
 
+	// Generic fallback: direct relay. Check deferred policy first.
+	if checker != nil {
+		if v, _ := checker.CheckAndConsume(fqdn, port); v != policy.Allow {
+			log.Printf("[DETECT-DENY] %s:%d blocked by deferred policy", fqdn, port)
+			return
+		}
+	}
 	relayDirect(peekConn, dialAddrs)
 }
 
