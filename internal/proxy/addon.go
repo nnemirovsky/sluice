@@ -336,8 +336,17 @@ func (a *SluiceAddon) storeConnectTarget(clientID uuid.UUID, host string, port i
 		return
 	}
 	cs := v.(*connState)
-	cs.connectHost = host
-	cs.connectPort = port
+	// Only update host/port if not already set by a prior callback
+	// (ServerConnected fires before TlsEstablishedServer). This prevents
+	// a host-only TLS callback from overwriting a correct port with a
+	// recovered/defaulted value.
+	if cs.connectHost == "" {
+		cs.connectHost = host
+		cs.connectPort = port
+	} else if host != "" && host != cs.connectHost {
+		cs.connectHost = host
+		cs.connectPort = port
+	}
 
 	// Consume any pending checker for this destination.
 	dest := net.JoinHostPort(host, strconv.Itoa(port))

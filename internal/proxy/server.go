@@ -955,7 +955,8 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 			host, _, _ := net.SplitHostPort(addr)
 			fqdn = host
 		}
-		if v, _ := perReqChecker.CheckAndConsume(fqdn, port); v != policy.Allow {
+		proto := DetectProtocol(port)
+		if v, _ := perReqChecker.CheckAndConsume(fqdn, port, WithProtocol(proto.String())); v != policy.Allow {
 			log.Printf("[DIAL-DENY] %s deferred ask denied", addr)
 			return nil, fmt.Errorf("connection denied by policy")
 		}
@@ -1063,7 +1064,7 @@ func (s *Server) handleWithDetection(
 		// Plain HTTP: no MITM handler. Check connection-level policy
 		// before relaying if a checker was deferred from Allow().
 		if checker != nil {
-			if v, _ := checker.CheckAndConsume(fqdn, port); v != policy.Allow {
+			if v, _ := checker.CheckAndConsume(fqdn, port, WithProtocol(proto.String())); v != policy.Allow {
 				log.Printf("[DETECT-DENY] %s:%d plain HTTP blocked by deferred policy", fqdn, port)
 				return
 			}
@@ -1072,7 +1073,7 @@ func (s *Server) handleWithDetection(
 		return
 	case ProtoSSH:
 		if checker != nil {
-			if v, _ := checker.CheckAndConsume(fqdn, port); v != policy.Allow {
+			if v, _ := checker.CheckAndConsume(fqdn, port, WithProtocol(proto.String())); v != policy.Allow {
 				log.Printf("[DETECT-DENY] %s:%d SSH blocked by deferred policy", fqdn, port)
 				return
 			}
@@ -1085,7 +1086,7 @@ func (s *Server) handleWithDetection(
 		}
 	case ProtoIMAP, ProtoSMTP:
 		if checker != nil {
-			if v, _ := checker.CheckAndConsume(fqdn, port); v != policy.Allow {
+			if v, _ := checker.CheckAndConsume(fqdn, port, WithProtocol(proto.String())); v != policy.Allow {
 				log.Printf("[DETECT-DENY] %s:%d %s blocked by deferred policy", fqdn, port, proto)
 				return
 			}
@@ -1106,7 +1107,7 @@ func (s *Server) handleWithDetection(
 	// without a binding to inject.
 	if n == 0 && binding != nil && s.mailProxy != nil {
 		if checker != nil {
-			if v, _ := checker.CheckAndConsume(fqdn, port); v != policy.Allow {
+			if v, _ := checker.CheckAndConsume(fqdn, port, WithProtocol(proto.String())); v != policy.Allow {
 				log.Printf("[DETECT-DENY] %s:%d server-first blocked by deferred policy", fqdn, port)
 				return
 			}
@@ -1117,7 +1118,7 @@ func (s *Server) handleWithDetection(
 
 	// Generic fallback: direct relay. Check deferred policy first.
 	if checker != nil {
-		if v, _ := checker.CheckAndConsume(fqdn, port); v != policy.Allow {
+		if v, _ := checker.CheckAndConsume(fqdn, port, WithProtocol(proto.String())); v != policy.Allow {
 			log.Printf("[DETECT-DENY] %s:%d blocked by deferred policy", fqdn, port)
 			return
 		}
