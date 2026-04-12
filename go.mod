@@ -82,3 +82,5 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+replace github.com/lqqyt2423/go-mitmproxy => github.com/nnemirovsky/go-mitmproxy v1.8.11-0.20260412092537-661f1983cb97

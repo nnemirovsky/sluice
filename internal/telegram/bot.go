@@ -91,9 +91,13 @@ func FormatApprovalMessage(req channel.ApprovalRequest) string {
 // for convenience; everything else defaults to http.
 func schemeForApproval(req channel.ApprovalRequest) string {
 	switch req.Protocol {
-	case "https", "wss", "grpc", "quic":
+	case "wss":
+		return "wss"
+	case "ws":
+		return "ws"
+	case "https", "grpc", "quic":
 		return "https"
-	case "http", "ws":
+	case "http":
 		return "http"
 	}
 	if req.Port == 443 {

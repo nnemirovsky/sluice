@@ -448,8 +448,13 @@ func (a *SluiceAddon) Requestheaders(f *mitmproxy.Flow) {
 	if httpVer == "" && f.ConnContext.ClientConn.NegotiatedProtocol == "h2" {
 		httpVer = "HTTP/2"
 	}
+	method := f.Request.Method
+	if proto == ProtoWS || proto == ProtoWSS {
+		method = "UPGRADE"
+		httpVer = ""
+	}
 	verdict, err := checker.CheckAndConsume(connectHost, connectPort,
-		WithRequestInfo(f.Request.Method, f.Request.URL.Path),
+		WithRequestInfo(method, f.Request.URL.Path),
 		WithProtocol(protoStr),
 		WithHTTPVersion(httpVer),
 		WithSkipBrokerRateLimit(),
