@@ -767,5 +767,9 @@ func (e *Engine) EvaluateQUICDetailed(dest string, port int) (Verdict, MatchSour
 	if matchRulesStrictProto(e.compiled.askRules, dest, port, protoNameUDP) {
 		return Ask, RuleMatch
 	}
-	return Deny, DefaultVerdict
+	// Use the engine's configured default verdict. Unscoped rules (no
+	// protocol filter) are NOT matched for QUIC because they are
+	// TCP-scoped by convention and should not inadvertently allow or
+	// deny UDP/QUIC traffic.
+	return e.Default, DefaultVerdict
 }
