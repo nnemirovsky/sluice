@@ -162,8 +162,8 @@ Current e2e coverage: HTTP/HTTPS, SSH, MCP only. Missing: WebSocket, gRPC, QUIC/
 
 ### Task 7: [Final] Update documentation
 
-- [ ] Update CLAUDE.md if QUIC handling details changed
-- [ ] Move this plan to `docs/plans/completed/`
+- [x] Update CLAUDE.md if QUIC handling details changed
+- [x] Move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 
