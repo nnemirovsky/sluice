@@ -3970,6 +3970,7 @@ timeout_sec = 10
 [[ask]]
 destination = "*"
 ports = [443]
+protocols = ["quic"]
 `))
 	if err != nil {
 		t.Fatal(err)

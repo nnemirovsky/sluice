@@ -1510,15 +1510,23 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 			// Snapshot pending sessions before releasing the lock. Each
 			// goroutine closes pending.done when it completes, so we
 			// wait instead of force-closing (which could double-close
-			// if the goroutine is mid-flight).
+			// if the goroutine is mid-flight). Use a timeout to avoid
+			// blocking shutdown if a broker approval is stuck.
 			pending := make([]*pendingQUICSession, 0, len(pendingQUICSessions))
 			for _, p := range pendingQUICSessions {
 				pending = append(pending, p)
 			}
 			mu.Unlock()
+			pendingTimeout := time.After(5 * time.Second)
 			for _, p := range pending {
-				<-p.done
+				select {
+				case <-p.done:
+				case <-pendingTimeout:
+					log.Printf("[QUIC] shutdown: timed out waiting for %d pending approvals", len(pending))
+					goto donePending
+				}
 			}
+		donePending:
 			closeBind()
 		}()
 
@@ -1653,16 +1661,26 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 						mu.Lock()
 						if pending, ok := pendingQUICSessions[sessionKey]; ok {
 							pending.mu.Lock()
-							if len(pending.packets) < maxPendingQUICPackets {
+							if pending.resolved {
+								// The approval goroutine already drained
+								// packets but has not yet deleted the map
+								// entry. Remove it so we can create a fresh
+								// pending session below.
+								pending.mu.Unlock()
+								delete(pendingQUICSessions, sessionKey)
+							} else if len(pending.packets) < maxPendingQUICPackets {
 								pkt := make([]byte, len(payload))
 								copy(pkt, payload)
 								pending.packets = append(pending.packets, pkt)
+								pending.mu.Unlock()
+								mu.Unlock()
+								continue
 							} else {
 								log.Printf("[QUIC] pending buffer full for %s, dropping packet", sessionKey)
+								pending.mu.Unlock()
+								mu.Unlock()
+								continue
 							}
-							pending.mu.Unlock()
-							mu.Unlock()
-							continue
 						}
 
 						// First Initial for this session key: create a
@@ -1689,13 +1707,20 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 							pending.mu.Lock()
 							pending.allowed = !drop
 							pending.checker = checker
+							pending.resolved = true
 							buffered := pending.packets
 							pending.packets = nil
 							pending.mu.Unlock()
-							close(pending.done)
 
 							mu.Lock()
-							delete(pendingQUICSessions, capturedKey)
+							// Only delete if the map still holds this
+							// exact pending entry. The dispatch loop may
+							// have already replaced it with a new one
+							// after seeing the resolved flag.
+							if pendingQUICSessions[capturedKey] == pending {
+								delete(pendingQUICSessions, capturedKey)
+							}
+							close(pending.done)
 							if drop {
 								mu.Unlock()
 								log.Printf("[QUIC] denied %s, discarding %d buffered packets", capturedKey, len(buffered))
@@ -1859,10 +1884,11 @@ const maxPendingQUICPackets = 32
 // broker call blocks, subsequent QUIC Initial packets for the same session
 // key are buffered instead of triggering duplicate broker requests.
 type pendingQUICSession struct {
-	mu      sync.Mutex
-	packets [][]byte // buffered payloads (max maxPendingQUICPackets)
-	done    chan struct{}
-	allowed bool // true if approved, false if denied
+	mu       sync.Mutex
+	packets  [][]byte // buffered payloads (max maxPendingQUICPackets)
+	done     chan struct{}
+	allowed  bool // true if approved, false if denied
+	resolved bool // true once the approval goroutine has drained packets
 	// Fields needed to create the session after approval resolves.
 	checker *RequestPolicyChecker
 }

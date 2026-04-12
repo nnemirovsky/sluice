@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"crypto/sha256"
 	"encoding/binary"
+	"math"
 
 	"golang.org/x/crypto/hkdf"
 )
@@ -105,7 +106,7 @@ func ExtractQUICSNI(packet []byte) string {
 
 	// Token length (variable-length integer) + token
 	tokenLen, n := readQUICVarint(packet[pos:])
-	if n == 0 {
+	if n == 0 || tokenLen > math.MaxInt {
 		return ""
 	}
 	pos += n + int(tokenLen)
@@ -115,7 +116,7 @@ func ExtractQUICSNI(packet []byte) string {
 
 	// Payload length (variable-length integer)
 	payloadLen, n := readQUICVarint(packet[pos:])
-	if n == 0 {
+	if n == 0 || payloadLen > math.MaxInt {
 		return ""
 	}
 	pos += n
@@ -325,7 +326,7 @@ func extractCryptoData(frames []byte) []byte {
 			}
 			pos += n
 			dataLen, n := readQUICVarint(frames[pos:])
-			if n == 0 {
+			if n == 0 || dataLen > math.MaxInt {
 				return result
 			}
 			pos += n
