@@ -114,11 +114,11 @@ Client -> tun2proxy -> SOCKS5 UDP ASSOCIATE -> bindLn
 - Modify: `internal/proxy/server.go` (relayQUICResponses)
 - Modify: `internal/proxy/quic.go` (if response routing is wrong)
 
-- [ ] Verify that quic-go's listener sends responses to the address that forwarded the Initial packet (upstream.LocalAddr). Check quic-go's source or test empirically.
-- [ ] If quic-go sends to the original client address (from QUIC packet header) instead of the forwarding address, fix by using a connected UDP socket or adjusting the relay.
-- [ ] Ensure relayQUICResponses wraps response payloads in SOCKS5 UDP headers with the original destination (not the QUIC proxy address)
-- [ ] Write test: forward a QUIC-like packet to a UDP echo server through the relay, verify response returns via relayQUICResponses
-- [ ] Run tests
+- [x] Verify that quic-go's listener sends responses to the address that forwarded the Initial packet (upstream.LocalAddr). Check quic-go's source or test empirically.
+- [x] If quic-go sends to the original client address (from QUIC packet header) instead of the forwarding address, fix by using a connected UDP socket or adjusting the relay.
+- [x] Ensure relayQUICResponses wraps response payloads in SOCKS5 UDP headers with the original destination (not the QUIC proxy address)
+- [x] Write test: forward a QUIC-like packet to a UDP echo server through the relay, verify response returns via relayQUICResponses
+- [x] Run tests
 
 ### Task 4: Fix httptest IPv6 listener failures
 

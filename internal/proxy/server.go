@@ -1845,9 +1845,6 @@ type pendingQUICSession struct {
 	checker *RequestPolicyChecker
 }
 
-// relayQUICResponses reads response datagrams from a QUIC proxy upstream and
-// wraps them in SOCKS5 UDP headers using the original destination address
-// (not the local QUIC proxy address) before sending to the client.
 // resolveQUICPolicy evaluates QUIC-specific policy for a destination and
 // handles the Ask approval flow. Returns a per-request checker (nil for
 // explicit allow fast path) and a drop flag. When drop is true the caller
@@ -1934,6 +1931,13 @@ func (s *Server) resolveQUICPolicy(dest string, port int) (checker *RequestPolic
 	return nil, false
 }
 
+// relayQUICResponses reads response datagrams from a QUIC session's upstream
+// PacketConn and wraps them in SOCKS5 UDP headers using the original
+// destination address (not the local QUIC proxy address) before writing to the
+// relay UDPConn. The quic-go listener sends responses back to the address that
+// forwarded the Initial packet (upstream.LocalAddr), so reading from upstream
+// captures all response traffic for that session. The function exits when the
+// upstream PacketConn is closed (session cleanup).
 func (s *Server) relayQUICResponses(upstream net.PacketConn, relay *net.UDPConn, clientAddr net.Addr, originalDst *net.UDPAddr) {
 	buf := make([]byte, 65535)
 	for {

@@ -4270,3 +4270,243 @@ ports = [443]
 		t.Errorf("expected 1 broker request during overflow test, got %d", got)
 	}
 }
+
+// TestRelayQUICResponsesWrapsSOCKS5Header verifies that relayQUICResponses
+// reads response packets from the upstream PacketConn, wraps them in SOCKS5
+// UDP headers using the original destination address (not the QUIC proxy
+// address), and writes them to the relay UDPConn.
+func TestRelayQUICResponsesWrapsSOCKS5Header(t *testing.T) {
+	// 1. Create the upstream PacketConn (simulates per-session listener that
+	//    quic-go writes responses to).
+	upstream, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	defer func() { _ = upstream.Close() }()
+
+	// 2. Create the relay UDPConn (simulates bindLn from SOCKS5 UDP ASSOCIATE).
+	relay, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen relay: %v", err)
+	}
+	defer func() { _ = relay.Close() }()
+
+	// 3. Create a "client" that will read from the relay.
+	client, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	clientAddr := client.LocalAddr()
+	originalDst := &net.UDPAddr{IP: net.ParseIP("93.184.216.34"), Port: 443}
+
+	// 4. Start relayQUICResponses in a goroutine.
+	srv := &Server{}
+	go srv.relayQUICResponses(upstream, relay, clientAddr, originalDst)
+
+	// 5. Simulate quic-go sending a response by writing to the upstream.
+	responsePayload := []byte("QUIC response data from upstream")
+	sender, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen sender: %v", err)
+	}
+	defer func() { _ = sender.Close() }()
+
+	if _, err := sender.WriteTo(responsePayload, upstream.LocalAddr()); err != nil {
+		t.Fatalf("write to upstream: %v", err)
+	}
+
+	// 6. Read from the client and verify SOCKS5 wrapping.
+	_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 65535)
+	n, _, readErr := client.ReadFrom(buf)
+	if readErr != nil {
+		t.Fatalf("read from client: %v", readErr)
+	}
+
+	// Parse the SOCKS5 UDP header.
+	addr, port, payload, parseErr := ParseSOCKS5UDPHeader(buf[:n])
+	if parseErr != nil {
+		t.Fatalf("parse SOCKS5 UDP header: %v", parseErr)
+	}
+
+	// Verify the address is the original destination, not the QUIC proxy.
+	if addr != "93.184.216.34" {
+		t.Errorf("SOCKS5 header addr = %q, want %q", addr, "93.184.216.34")
+	}
+	if port != 443 {
+		t.Errorf("SOCKS5 header port = %d, want %d", port, 443)
+	}
+	if !bytes.Equal(payload, responsePayload) {
+		t.Errorf("payload = %q, want %q", string(payload), string(responsePayload))
+	}
+
+	// Clean up: close upstream to stop the relay goroutine.
+	_ = upstream.Close()
+}
+
+// TestRelayQUICResponsesIPv6OriginalDst verifies that relayQUICResponses
+// correctly wraps responses when the original destination is an IPv6 address.
+func TestRelayQUICResponsesIPv6OriginalDst(t *testing.T) {
+	upstream, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	defer func() { _ = upstream.Close() }()
+
+	relay, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen relay: %v", err)
+	}
+	defer func() { _ = relay.Close() }()
+
+	client, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	clientAddr := client.LocalAddr()
+	// Use an IPv6 original destination.
+	originalDst := &net.UDPAddr{IP: net.ParseIP("2606:4700::6810:84e5"), Port: 443}
+
+	srv := &Server{}
+	go srv.relayQUICResponses(upstream, relay, clientAddr, originalDst)
+
+	responsePayload := []byte("IPv6 response")
+	sender, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen sender: %v", err)
+	}
+	defer func() { _ = sender.Close() }()
+
+	if _, err := sender.WriteTo(responsePayload, upstream.LocalAddr()); err != nil {
+		t.Fatalf("write to upstream: %v", err)
+	}
+
+	_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 65535)
+	n, _, readErr := client.ReadFrom(buf)
+	if readErr != nil {
+		t.Fatalf("read from client: %v", readErr)
+	}
+
+	addr, port, payload, parseErr := ParseSOCKS5UDPHeader(buf[:n])
+	if parseErr != nil {
+		t.Fatalf("parse SOCKS5 UDP header: %v", parseErr)
+	}
+
+	if addr != "2606:4700::6810:84e5" {
+		t.Errorf("SOCKS5 header addr = %q, want %q", addr, "2606:4700::6810:84e5")
+	}
+	if port != 443 {
+		t.Errorf("SOCKS5 header port = %d, want %d", port, 443)
+	}
+	if !bytes.Equal(payload, responsePayload) {
+		t.Errorf("payload = %q, want %q", string(payload), string(responsePayload))
+	}
+
+	_ = upstream.Close()
+}
+
+// TestRelayQUICResponsesStopsOnUpstreamClose verifies that relayQUICResponses
+// exits when the upstream PacketConn is closed.
+func TestRelayQUICResponsesStopsOnUpstreamClose(t *testing.T) {
+	upstream, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+
+	relay, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen relay: %v", err)
+	}
+	defer func() { _ = relay.Close() }()
+
+	client, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	originalDst := &net.UDPAddr{IP: net.ParseIP("93.184.216.34"), Port: 443}
+
+	done := make(chan struct{})
+	srv := &Server{}
+	go func() {
+		srv.relayQUICResponses(upstream, relay, client.LocalAddr(), originalDst)
+		close(done)
+	}()
+
+	// Close upstream to signal the relay to stop.
+	_ = upstream.Close()
+
+	select {
+	case <-done:
+		// Goroutine exited as expected.
+	case <-time.After(3 * time.Second):
+		t.Fatal("relayQUICResponses did not exit after upstream close")
+	}
+}
+
+// TestRelayQUICResponsesMultiplePackets verifies that relayQUICResponses
+// correctly relays multiple sequential response packets.
+func TestRelayQUICResponsesMultiplePackets(t *testing.T) {
+	upstream, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	defer func() { _ = upstream.Close() }()
+
+	relay, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen relay: %v", err)
+	}
+	defer func() { _ = relay.Close() }()
+
+	client, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	originalDst := &net.UDPAddr{IP: net.ParseIP("93.184.216.34"), Port: 443}
+
+	srv := &Server{}
+	go srv.relayQUICResponses(upstream, relay, client.LocalAddr(), originalDst)
+
+	sender, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen sender: %v", err)
+	}
+	defer func() { _ = sender.Close() }()
+
+	// Send 3 packets and verify each is relayed correctly.
+	for i := 0; i < 3; i++ {
+		payload := []byte(fmt.Sprintf("response packet %d", i))
+		if _, writeErr := sender.WriteTo(payload, upstream.LocalAddr()); writeErr != nil {
+			t.Fatalf("write packet %d: %v", i, writeErr)
+		}
+
+		_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+		buf := make([]byte, 65535)
+		n, _, readErr := client.ReadFrom(buf)
+		if readErr != nil {
+			t.Fatalf("read packet %d: %v", i, readErr)
+		}
+
+		addr, port, got, parseErr := ParseSOCKS5UDPHeader(buf[:n])
+		if parseErr != nil {
+			t.Fatalf("parse packet %d: %v", i, parseErr)
+		}
+		if addr != "93.184.216.34" || port != 443 {
+			t.Errorf("packet %d: addr=%q port=%d, want 93.184.216.34:443", i, addr, port)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Errorf("packet %d: payload = %q, want %q", i, string(got), string(payload))
+		}
+	}
+
+	_ = upstream.Close()
+}
