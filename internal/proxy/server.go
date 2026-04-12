@@ -944,6 +944,22 @@ func (s *Server) dial(ctx context.Context, network, addr string) (net.Conn, erro
 	}
 
 	// No credential binding or unsupported protocol: direct connection.
+	// Check deferred ask policy before connecting. For TLS ports this is
+	// handled by the MITM addon per-request, but for non-TLS (SSH, plain
+	// TCP) this is the only checkpoint.
+	if perReqChecker != nil {
+		_, portStr, _ := net.SplitHostPort(addr)
+		port, _ := strconv.Atoi(portStr)
+		fqdn, _ := ctx.Value(ctxKeyFQDN).(string)
+		if fqdn == "" {
+			host, _, _ := net.SplitHostPort(addr)
+			fqdn = host
+		}
+		if v, _ := perReqChecker.CheckAndConsume(fqdn, port); v != policy.Allow {
+			log.Printf("[DIAL-DENY] %s deferred ask denied", addr)
+			return nil, fmt.Errorf("connection denied by policy")
+		}
+	}
 	d := &net.Dialer{Timeout: connectTimeout}
 	conn, err := d.DialContext(ctx, network, addr)
 	if err == nil {
