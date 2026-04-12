@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -395,4 +396,181 @@ func echoServerAddr(t *testing.T, srv *httptest.Server) string {
 	addr := strings.TrimPrefix(srv.URL, "http://")
 	addr = strings.TrimPrefix(addr, "https://")
 	return addr
+}
+
+// verdictServer is a test HTTP server that returns a sequence of verdicts
+// in response to webhook approval requests. It records all received
+// request bodies for inspection. When the verdict sequence is exhausted
+// it defaults to "deny". Non-approval requests (cancel, notification)
+// are recorded but do not consume a verdict from the sequence.
+type verdictServer struct {
+	mu            sync.Mutex
+	verdicts      []string
+	calls         int // total POST calls (all types)
+	approvalCalls int // POST calls with type=approval only
+	requests      []map[string]interface{}
+}
+
+// Calls returns the total number of webhook calls received so far
+// (all types including cancel and notification).
+func (v *verdictServer) Calls() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.calls
+}
+
+// ApprovalCalls returns the number of approval-type webhook calls received.
+func (v *verdictServer) ApprovalCalls() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.approvalCalls
+}
+
+// Requests returns a copy of all recorded request bodies.
+func (v *verdictServer) Requests() []map[string]interface{} {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	cp := make([]map[string]interface{}, len(v.requests))
+	copy(cp, v.requests)
+	return cp
+}
+
+// ServeHTTP handles POST webhook requests by returning the next verdict
+// in the configured sequence. Only approval-type requests consume a
+// verdict from the sequence. Cancel and notification requests are
+// recorded but answered with an empty 200 OK.
+func (v *verdictServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "read body failed", http.StatusInternalServerError)
+		return
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	v.mu.Lock()
+	v.requests = append(v.requests, parsed)
+	v.calls++
+
+	// Only approval requests consume a verdict from the sequence.
+	// Cancel and notification requests are recorded but do not advance
+	// the verdict index.
+	reqType, _ := parsed["type"].(string)
+	if reqType != "approval" {
+		v.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		return
+	}
+
+	idx := v.approvalCalls
+	v.approvalCalls++
+
+	verdict := "deny"
+	if idx < len(v.verdicts) {
+		verdict = v.verdicts[idx]
+	}
+	v.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"verdict": verdict})
+}
+
+// startVerdictServer starts an httptest.Server backed by a verdictServer
+// that returns the given verdicts in order. The server is automatically
+// closed when the test finishes.
+func startVerdictServer(t *testing.T, verdicts ...string) (*httptest.Server, *verdictServer) {
+	t.Helper()
+	vs := &verdictServer{verdicts: verdicts}
+	srv := httptest.NewServer(vs)
+	t.Cleanup(srv.Close)
+	return srv, vs
+}
+
+// sluiceWithWebhook starts a sluice process with the given policy TOML
+// and an HTTP webhook channel pointing at webhookURL. It adds the channel
+// to the DB before starting sluice so the broker is initialized at startup.
+func sluiceWithWebhook(t *testing.T, policyTOML, webhookURL string) *SluiceProcess {
+	t.Helper()
+
+	binary := buildSluice(t)
+	tmpDir := t.TempDir()
+
+	dbPath := filepath.Join(tmpDir, "sluice.db")
+	auditPath := filepath.Join(tmpDir, "audit.jsonl")
+
+	// Write the policy config TOML for seeding.
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(policyTOML), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	// Seed the DB with policy rules via `sluice policy import`.
+	// This also creates the DB file and runs migrations.
+	importCmd := exec.Command(binary, "policy", "import", "--db", dbPath, configPath)
+	if out, err := importCmd.CombinedOutput(); err != nil {
+		t.Fatalf("seed policy: %v\n%s", err, out)
+	}
+
+	// Add the HTTP webhook channel to the pre-seeded DB.
+	channelCmd := exec.Command(binary, "channel", "add",
+		"--type", "http",
+		"--url", webhookURL,
+		"--db", dbPath,
+	)
+	if out, err := channelCmd.CombinedOutput(); err != nil {
+		t.Fatalf("add webhook channel: %v\n%s", err, out)
+	}
+
+	// Start sluice with the pre-populated DB (no --config since DB is
+	// already seeded and seedStoreFromConfig skips non-empty DBs).
+	proxyPort := freePort(t)
+	healthPort := freePort(t)
+
+	proxyAddr := fmt.Sprintf("127.0.0.1:%d", proxyPort)
+	healthAddr := fmt.Sprintf("127.0.0.1:%d", healthPort)
+
+	args := []string{
+		"--listen", proxyAddr,
+		"--db", dbPath,
+		"--audit", auditPath,
+		"--health-addr", healthAddr,
+		"--runtime", "none",
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		t.Fatalf("start sluice: %v", err)
+	}
+
+	proc := &SluiceProcess{
+		Cmd:       cmd,
+		ProxyAddr: proxyAddr,
+		HealthURL: fmt.Sprintf("http://%s/healthz", healthAddr),
+		DBPath:    dbPath,
+		AuditPath: auditPath,
+		ConfigDir: tmpDir,
+		cancel:    cancel,
+	}
+
+	t.Cleanup(func() {
+		stopSluice(t, proc)
+	})
+
+	waitForHealthy(t, proc.HealthURL, 10*time.Second)
+	return proc
 }

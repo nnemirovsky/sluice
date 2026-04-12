@@ -189,11 +189,11 @@ Three changes to close remaining per-request policy gaps on the `per-request-pol
 **Files:**
 - Modify: `e2e/helpers_test.go`
 
-- [ ] Add `verdictServer` struct: accepts verdict sequence, records webhook requests, returns verdicts in order, defaults to "deny" when exhausted
-- [ ] Add `startVerdictServer(t, verdicts []string) (*httptest.Server, *verdictServer)` helper
-- [ ] Add `sluiceWithWebhook(t, policyTOML, webhookURL string) *SluiceProcess` helper that configures `[channel.http]` in the TOML
-- [ ] Write tests for the webhook server itself (returns verdicts in order, records requests)
-- [ ] Run tests
+- [x] Add `verdictServer` struct: accepts verdict sequence, records webhook requests, returns verdicts in order, defaults to "deny" when exhausted
+- [x] Add `startVerdictServer(t, verdicts []string) (*httptest.Server, *verdictServer)` helper
+- [x] Add `sluiceWithWebhook(t, policyTOML, webhookURL string) *SluiceProcess` helper that configures `[channel.http]` in the TOML
+- [x] Write tests for the webhook server itself (returns verdicts in order, records requests)
+- [x] Run tests
 
 ### Task 11: Add e2e per-request policy tests
 
@@ -201,12 +201,12 @@ Three changes to close remaining per-request policy gaps on the `per-request-pol
 - Create: `e2e/per_request_test.go`
 - Modify: `e2e/proxy_test.go` (remove TODO comment)
 
-- [ ] Test: AllowOnceBlocksSecondRequest - verdicts=["allow_once", "deny"], two keep-alive requests, first succeeds, second 403
-- [ ] Test: AlwaysAllowPermitsBoth - verdicts=["always_allow"], two keep-alive requests, both succeed, webhook called once
-- [ ] Test: DenyBlocksFirst - verdicts=["deny"], first request 403
-- [ ] Test: AllowOnceReAsksSecondRequest - verdicts=["allow_once", "allow_once"], both succeed, webhook called twice
-- [ ] Remove TODO(per-request-policy-e2e) comment from `e2e/proxy_test.go`
-- [ ] Run e2e tests: `go test -tags=e2e ./e2e/ -v -count=1 -timeout=300s`
+- [x] Test: AllowOnceBlocksSecondRequest - verdicts=["allow_once", "deny"], two keep-alive requests, first succeeds, second 403
+- [x] Test: AlwaysAllowPermitsBoth - verdicts=["always_allow"], two keep-alive requests, both succeed, webhook called once
+- [x] Test: DenyBlocksFirst - verdicts=["deny"], first request 403
+- [x] Test: AllowOnceReAsksSecondRequest - verdicts=["allow_once", "allow_once"], both succeed, webhook called twice
+- [x] Remove TODO(per-request-policy-e2e) comment from `e2e/proxy_test.go`
+- [x] Run e2e tests: `go test -tags=e2e ./e2e/ -v -count=1 -timeout=300s`
 
 ### Task 12: Verify acceptance criteria
 
