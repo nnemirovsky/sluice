@@ -465,20 +465,6 @@ func (r *policyRuleSet) persistApprovalRule(verdict, dest string, port int) bool
 	return true
 }
 
-// persistAlwaysAllow writes an allow rule for dest:port from an ask->Always
-// Allow approval and swaps in a recompiled engine. Thin wrapper around
-// persistApprovalRule for call-site readability.
-func (r *policyRuleSet) persistAlwaysAllow(dest string, port int) bool {
-	return r.persistApprovalRule("allow", dest, port)
-}
-
-// persistAlwaysDeny writes a deny rule for dest:port from an ask->Always
-// Deny approval and swaps in a recompiled engine. Thin wrapper around
-// persistApprovalRule for call-site readability.
-func (r *policyRuleSet) persistAlwaysDeny(dest string, port int) bool {
-	return r.persistApprovalRule("deny", dest, port)
-}
-
 // buildPersistFunc returns a closure that persists a new allow/deny rule
 // via the SOCKS5 rule set's store and swaps in a recompiled engine. It
 // mirrors the always-allow/always-deny handling in Allow() so per-request
@@ -1428,14 +1414,6 @@ func (s *Server) sniPolicyCheckBeforeDial(ctx context.Context, request *socks5.R
 		log.Printf("[SNI->DENY] %s:%d (hostname %s: default deny)", ipStr, port, sni)
 		return nil, ctx, false
 	}
-}
-
-// sniSaveRule persists an allow or deny rule from an SNI-based approval.
-// Returns true only when the rule was successfully written to the store AND
-// a recompiled engine was swapped in. Callers use the return value to
-// decide whether to attach a per-request checker as a safety net.
-func (s *Server) sniSaveRule(verdict, dest string, port int) bool {
-	return s.rules.persistApprovalRule(verdict, dest, port)
 }
 
 // then dispatches datagrams to the DNSInterceptor (port 53) or UDPRelay
