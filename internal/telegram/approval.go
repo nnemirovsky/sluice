@@ -169,6 +169,7 @@ func (tc *TelegramChannel) sendApprovalMessage(req channel.ApprovalRequest) {
 		edit := tgbotapi.NewEditMessageText(tc.chatID, sent.MessageID,
 			FormatApprovalMessage(req)+"\n\n(request timed out)")
 		edit.ParseMode = tgbotapi.ModeHTML
+		edit.DisableWebPagePreview = true
 		if _, editErr := tc.api.Send(edit); editErr == nil {
 			tc.broker.ClearTimedOut(req.ID)
 		}
@@ -193,6 +194,7 @@ func (tc *TelegramChannel) CancelApproval(id string) error {
 	edit := tgbotapi.NewEditMessageText(tc.chatID, am.messageID,
 		FormatApprovalMessage(am.req)+"\n\n"+reason)
 	edit.ParseMode = tgbotapi.ModeHTML
+	edit.DisableWebPagePreview = true
 	_, _ = tc.api.Send(edit)
 	return nil
 }
@@ -346,6 +348,7 @@ func (tc *TelegramChannel) handleCallback(cq *tgbotapi.CallbackQuery) {
 		}
 		edit := tgbotapi.NewEditMessageText(tc.chatID, cq.Message.MessageID, body)
 		edit.ParseMode = tgbotapi.ModeHTML
+		edit.DisableWebPagePreview = true
 		_, _ = tc.api.Send(edit)
 	} else if tc.broker != nil && tc.broker.WasTimedOut(reqID) {
 		tc.broker.ClearTimedOut(reqID)
@@ -360,6 +363,7 @@ func (tc *TelegramChannel) handleCallback(cq *tgbotapi.CallbackQuery) {
 		}
 		edit := tgbotapi.NewEditMessageText(tc.chatID, cq.Message.MessageID, body)
 		edit.ParseMode = tgbotapi.ModeHTML
+		edit.DisableWebPagePreview = true
 		_, _ = tc.api.Send(edit)
 
 	} else {
