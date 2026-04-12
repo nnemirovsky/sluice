@@ -209,6 +209,23 @@ func (a *SluiceAddon) consumePendingChecker(dest string) *pendingCheck {
 	return pc
 }
 
+// recoverPortFromPending scans the pending checker map for a key whose
+// host part matches the given hostname and returns its port as a string.
+// Falls back to "443" if no match is found. This handles the case where
+// go-mitmproxy's TlsEstablishedServer provides a host-only address
+// without the port from the original SOCKS5 CONNECT.
+func (a *SluiceAddon) recoverPortFromPending(host string) string {
+	a.pendingMu.Lock()
+	defer a.pendingMu.Unlock()
+	for key := range a.pendingCheckers {
+		h, p, err := net.SplitHostPort(key)
+		if err == nil && h == host {
+			return p
+		}
+	}
+	return "443"
+}
+
 // CancelPendingChecker removes the most recent pending checker for the
 // given host:port key without consuming it for a connection. This must be
 // called when dialThroughMITM fails after PendingChecker was called, so the
@@ -287,10 +304,12 @@ func (a *SluiceAddon) captureConnectTarget(ctx *mitmproxy.ConnContext) {
 
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
-		// Address might be host-only without a port (e.g. during
-		// TLS establishment). Default to 443 for TLS connections.
+		// Address is host-only without a port (common in
+		// TlsEstablishedServer). Recover the port from the pending
+		// checker map which was keyed on the exact host:port from
+		// the SOCKS5 CONNECT.
 		host = addr
-		portStr = "443"
+		portStr = a.recoverPortFromPending(host)
 	}
 
 	port, err := strconv.Atoi(portStr)
