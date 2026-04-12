@@ -287,9 +287,10 @@ func (a *SluiceAddon) captureConnectTarget(ctx *mitmproxy.ConnContext) {
 
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
-		// Address might be host-only without a port.
-		log.Printf("[ADDON] failed to parse server address %q: %v", addr, err)
-		return
+		// Address might be host-only without a port (e.g. during
+		// TLS establishment). Default to 443 for TLS connections.
+		host = addr
+		portStr = "443"
 	}
 
 	port, err := strconv.Atoi(portStr)
