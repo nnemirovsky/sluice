@@ -424,9 +424,14 @@ func (a *SluiceAddon) Requestheaders(f *mitmproxy.Flow) {
 	proto := a.detectRequestProtocol(f, connectPort)
 	protoStr := proto.String()
 
+	httpVer := f.Request.Proto
+	if httpVer == "" && f.ConnContext.ClientConn.NegotiatedProtocol == "h2" {
+		httpVer = "HTTP/2"
+	}
 	verdict, err := checker.CheckAndConsume(connectHost, connectPort,
 		WithRequestInfo(f.Request.Method, f.Request.URL.Path),
 		WithProtocol(protoStr),
+		WithHTTPVersion(httpVer),
 		WithSkipBrokerRateLimit(),
 	)
 	if err != nil {

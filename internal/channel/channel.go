@@ -71,8 +71,11 @@ type ApprovalRequest struct {
 	Method string
 	// Path is the request URL path for per-request approvals (e.g. "/users/me").
 	// Empty for connection-level approvals and non-HTTP protocols.
-	Path      string
-	CreatedAt time.Time
+	Path string
+	// HTTPVersion is the negotiated HTTP version (e.g. "HTTP/1.1", "HTTP/2").
+	// Empty for non-HTTP protocols.
+	HTTPVersion string
+	CreatedAt   time.Time
 }
 
 // Command represents an admin command received from a channel (e.g. Telegram

@@ -136,6 +136,14 @@ func WithMethodAndPath(method, path string) RequestOption {
 	}
 }
 
+// WithHTTPVersion sets the negotiated HTTP version (e.g. "HTTP/2") for a
+// per-request approval so channels can display the protocol version.
+func WithHTTPVersion(version string) RequestOption {
+	return func(c *requestConfig) {
+		c.req.HTTPVersion = version
+	}
+}
+
 // WithBypassRateLimit tells the broker to skip the per-destination rate
 // limiter for this request. Per-request policy callers use this so a
 // keep-alive connection hammering a single destination does not silently

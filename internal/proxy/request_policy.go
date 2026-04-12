@@ -214,6 +214,7 @@ type checkContext struct {
 	method          string
 	path            string
 	protocol        string
+	httpVersion     string
 	bypassRateLimit bool
 }
 
@@ -243,6 +244,14 @@ func WithRequestInfo(method, path string) CheckOption {
 func WithProtocol(proto string) CheckOption {
 	return func(c *checkContext) {
 		c.protocol = proto
+	}
+}
+
+// WithHTTPVersion attaches the negotiated HTTP version (e.g. "HTTP/2") so
+// channels can display it alongside the request.
+func WithHTTPVersion(version string) CheckOption {
+	return func(c *checkContext) {
+		c.httpVersion = version
 	}
 }
 
@@ -280,6 +289,9 @@ func (c *RequestPolicyChecker) resolveAsk(dest string, port int, eng *policy.Eng
 	var reqOpts []channel.RequestOption
 	if ctx.method != "" || ctx.path != "" {
 		reqOpts = append(reqOpts, channel.WithMethodAndPath(ctx.method, ctx.path))
+	}
+	if ctx.httpVersion != "" {
+		reqOpts = append(reqOpts, channel.WithHTTPVersion(ctx.httpVersion))
 	}
 	if ctx.bypassRateLimit {
 		reqOpts = append(reqOpts, channel.WithBypassRateLimit())

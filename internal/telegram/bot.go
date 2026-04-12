@@ -70,10 +70,14 @@ func FormatApprovalMessage(req channel.ApprovalRequest) string {
 		display = req.Protocol
 	}
 	if req.Method != "" {
+		ver := ""
+		if req.HTTPVersion != "" {
+			ver = " (" + htmlEscape(req.HTTPVersion) + ")"
+		}
 		return fmt.Sprintf(
-			"OpenClaw wants to connect to:\n\n%s %s:%d\n%s %s\n\nAllow this request?",
+			"OpenClaw wants to connect to:\n\n%s %s:%d\n%s %s%s\n\nAllow this request?",
 			htmlEscape(display), htmlEscape(req.Destination), req.Port,
-			htmlEscape(req.Method), htmlEscape(buildRequestURL(req)),
+			htmlEscape(req.Method), htmlEscape(buildRequestURL(req)), ver,
 		)
 	}
 	return fmt.Sprintf(
