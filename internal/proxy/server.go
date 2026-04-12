@@ -1608,9 +1608,24 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 				}
 
 				if IsQUICPacket(payload) {
+					// Recover hostname from the QUIC Initial packet. Try SNI
+					// extraction first, then DNS reverse cache, then raw IP.
+					policyDest := dest
+					if sni := ExtractQUICSNI(payload); sni != "" {
+						policyDest = sni
+						sessionKey = "quic:" + sni + ":" + strconv.Itoa(port)
+						log.Printf("[QUIC] SNI extracted: %s (IP: %s)", sni, dest)
+					} else if s.dnsInterceptor != nil {
+						if hostname := s.dnsInterceptor.ReverseLookup(dest); hostname != "" {
+							policyDest = hostname
+							sessionKey = "quic:" + hostname + ":" + strconv.Itoa(port)
+							log.Printf("[QUIC] hostname from DNS cache: %s (IP: %s)", hostname, dest)
+						}
+					}
+
 					quicAddr := s.quicProxy.Addr()
 					if quicAddr != nil {
-						checker, drop := s.resolveQUICPolicy(dest, port)
+						checker, drop := s.resolveQUICPolicy(policyDest, port)
 						if drop {
 							continue
 						}
@@ -1626,9 +1641,9 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 						// for ask-rule matches. Allow with RuleMatch passes nil
 						// (fast path, no per-request check).
 						if checker != nil {
-							s.quicProxy.RegisterExpectedHostWithChecker(upstream.LocalAddr().String(), dest, port, checker)
+							s.quicProxy.RegisterExpectedHostWithChecker(upstream.LocalAddr().String(), policyDest, port, checker)
 						} else {
-							s.quicProxy.RegisterExpectedHost(upstream.LocalAddr().String(), dest, port)
+							s.quicProxy.RegisterExpectedHost(upstream.LocalAddr().String(), policyDest, port)
 						}
 						mu.Lock()
 						sess = &udpSession{upstream: upstream, lastSeen: time.Now()}

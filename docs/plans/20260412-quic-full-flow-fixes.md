@@ -12,7 +12,8 @@ Three bugs prevent QUIC/HTTP3 from working end-to-end in production. The approva
 - QUIC packet detection: `internal/proxy/protocol.go` (IsQUICPacket)
 - Response relay: `internal/proxy/server.go:relayQUICResponses`
 - DNS interceptor reverse cache: `internal/proxy/dns.go` (ReverseLookup for IP -> hostname)
-- Existing SNI extraction: `internal/proxy/sni.go` (works on raw TLS records, not QUIC)
+- TLS SNI extraction: `internal/proxy/sni.go` (`extractSNI()` parses TLS ClientHello, reuse for QUIC after decryption)
+- QUIC SNI extraction: `internal/proxy/quic_sni.go` (new, decrypts QUIC Initial to get ClientHello)
 
 ## Development Approach
 
@@ -32,7 +33,7 @@ Three bugs prevent QUIC/HTTP3 from working end-to-end in production. The approva
 
 ## Solution Overview
 
-1. **Hostname recovery via DNS reverse cache** (not QUIC packet parsing). QUIC Initial packets encrypt the TLS ClientHello (RFC 9001 Section 5.2), so extracting SNI requires decrypting with Initial keys derived from the connection ID. This is complex and fragile. Since tun2proxy resolves DNS before sending UDP, sluice's DNS interceptor already has the IP -> hostname mapping in its reverse cache. Use that as the primary strategy.
+1. **Hostname recovery via QUIC SNI extraction** (primary) with DNS reverse cache fallback. QUIC Initial packets encrypt the TLS ClientHello, but the encryption uses keys derived from the Destination Connection ID (DCID) visible in the packet header (RFC 9001 Section 5). Any observer can derive the keys and decrypt to extract SNI. This mirrors TLS SNI extraction used for HTTPS. DNS reverse cache serves as fallback when decryption fails (malformed packets, unsupported versions).
 
 2. **Pending session dedup with bounded buffer**. Before calling `resolveQUICPolicy` (which blocks on broker), check if there's already a pending approval for this session key. Buffer up to 32 packets per session. When approval resolves, flush or discard.
 
@@ -40,13 +41,23 @@ Three bugs prevent QUIC/HTTP3 from working end-to-end in production. The approva
 
 ## Technical Details
 
-**Hostname recovery flow:**
+**QUIC SNI extraction flow:**
 ```
-1. QUIC packet arrives at dispatch: dest = "104.16.132.229", port = 443
-2. Call dnsInterceptor.ReverseLookup("104.16.132.229") -> "cloudflare.com"
-3. Use "cloudflare.com" for policy eval and approval message
-4. Fall back to raw IP if reverse lookup misses
+1. QUIC Initial packet arrives at dispatch: dest = "104.16.132.229", port = 443
+2. Parse QUIC long header -> extract DCID
+3. Derive Initial secret: HKDF-Extract(SHA256, DCID, salt)
+4. Derive client secret: HKDF-Expand-Label("client in")
+5. Derive HP key, packet key, IV
+6. Remove header protection (AES-ECB on sample) -> get packet number
+7. Decrypt payload with AES-128-GCM(key, IV ^ pn, payload, AAD=header)
+8. Parse CRYPTO frames -> reassemble TLS ClientHello
+9. extractSNI(clientHello) -> "cloudflare.com"
+10. Fall back to dnsInterceptor.ReverseLookup(dest) if extraction fails
+11. Fall back to raw IP if both miss
 ```
+
+**QUIC v1 salt (RFC 9001):** `0x38762cf7f55934b34d179ae6a4c80cadccbb7f0a`
+**QUIC v2 salt (RFC 9369):** `0x0dede3def700a6db819381be6e269dcbf9bd2ed9`
 
 **Pending session dedup:**
 ```
@@ -72,18 +83,17 @@ Client -> tun2proxy -> SOCKS5 UDP ASSOCIATE -> bindLn
 
 ## Implementation Steps
 
-### Task 1: Recover hostname from DNS reverse cache
+### Task 1: Extract SNI from QUIC Initial packets
 
 **Files:**
-- Modify: `internal/proxy/server.go`
-- Modify: `internal/proxy/dns.go` (if ReverseLookup doesn't exist, add it)
-- Modify: `internal/proxy/server_test.go` or create `internal/proxy/dns_test.go`
+- Create: `internal/proxy/quic_sni.go` (QUIC Initial decryption + SNI extraction)
+- Create: `internal/proxy/quic_sni_test.go`
+- Modify: `internal/proxy/server.go` (wire into UDP dispatch loop)
 
-- [ ] Add `ReverseLookup(ip string) (hostname string, ok bool)` to the DNS interceptor if it doesn't exist (check the reverse cache that's populated during DNS query handling)
-- [ ] In the UDP dispatch loop, after `IsQUICPacket` returns true, call `dnsInterceptor.ReverseLookup(dest)`. If hostname found, replace `dest` with it for both `sessionKey` and `resolveQUICPolicy`
-- [ ] Update the approval message: when hostname is recovered, the Telegram prompt shows `cloudflare.com:443` instead of `104.16.132.229:443`
-- [ ] Write tests: reverse lookup hit replaces IP, reverse lookup miss keeps IP, hostname used in session key
-- [ ] Run tests
+- [x] Implement `ExtractQUICSNI(packet []byte) string` in `quic_sni.go`. Parse QUIC long header to get DCID and packet type (must be Initial). Derive Initial keys from DCID via HKDF (RFC 9001 Section 5). Remove header protection (AES-ECB). Decrypt payload with AES-128-GCM. Parse CRYPTO frames to reassemble TLS ClientHello. Reuse existing `extractSNI()` for the ClientHello. Support both QUIC v1 and v2 salts. Return empty string on any failure.
+- [x] In the UDP dispatch loop (`handleAssociate`), after `IsQUICPacket` returns true, call `ExtractQUICSNI(payload)`. If SNI found, use it for `sessionKey` and `resolveQUICPolicy`. If extraction fails, fall back to `dnsInterceptor.ReverseLookup(dest)`. If both miss, use raw IP.
+- [x] Write tests: real QUIC Initial packet with known SNI (capture or construct), malformed packet returns empty, QUIC v2 packet, fallback to DNS reverse cache, fallback to raw IP
+- [x] Run tests
 
 ### Task 2: Deduplicate broker requests with bounded buffer
 
