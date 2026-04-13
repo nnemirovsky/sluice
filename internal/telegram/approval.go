@@ -434,6 +434,15 @@ func (tc *TelegramChannel) handleMessage(msg *tgbotapi.Message) {
 	}
 
 	reply := tgbotapi.NewMessage(tc.chatID, response)
+	// Responses that contain <code> or <b> are pre-rendered HTML (see
+	// policyShow / policyShowFromStore). Send them with HTML parse mode so
+	// the tags render and Telegram does not auto-link URLs inside <code>.
+	// Plain-text responses never contain these tags because dynamic input
+	// gets HTML-escaped before insertion.
+	if strings.Contains(response, "<code>") || strings.Contains(response, "<b>") {
+		reply.ParseMode = tgbotapi.ModeHTML
+		reply.DisableWebPagePreview = true
+	}
 	if _, err := tc.api.Send(reply); err != nil {
 		log.Printf("telegram send error: %s", sanitizeError(err))
 	}

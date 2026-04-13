@@ -216,9 +216,7 @@ func (h *CommandHandler) policyShow() string {
 	// Fallback to engine snapshot when store is not configured.
 	snap := h.engine.Load().Snapshot()
 	var b strings.Builder
-	b.WriteString("Current policy (default: ")
-	b.WriteString(snap.Default.String())
-	b.WriteString(")\n\n")
+	fmt.Fprintf(&b, "Current policy (default: %s)\n\n", htmlCode(snap.Default.String()))
 
 	for _, section := range []struct {
 		label string
@@ -235,14 +233,14 @@ func (h *CommandHandler) policyShow() string {
 		b.WriteString(":\n")
 		for _, r := range section.rules {
 			b.WriteString("  ")
-			b.WriteString(r.Destination)
+			b.WriteString(htmlCode(r.Destination))
 			if len(r.Ports) > 0 {
 				b.WriteString(" ports=")
 				b.WriteString(formatPorts(r.Ports))
 			}
 			if len(r.Protocols) > 0 {
 				b.WriteString(" protocols=")
-				b.WriteString(strings.Join(r.Protocols, ","))
+				b.WriteString(htmlCode(strings.Join(r.Protocols, ",")))
 			}
 			b.WriteString("\n")
 		}
@@ -253,6 +251,13 @@ func (h *CommandHandler) policyShow() string {
 	}
 
 	return b.String()
+}
+
+// htmlCode wraps s in <code>...</code> after HTML-escaping it. Inside <code>
+// Telegram will not auto-detect URLs, so destinations like api.github.com
+// render as monospace text rather than clickable blue links.
+func htmlCode(s string) string {
+	return "<code>" + htmlEscape(s) + "</code>"
 }
 
 func (h *CommandHandler) policyShowFromStore() string {
@@ -271,9 +276,7 @@ func (h *CommandHandler) policyShowFromStore() string {
 	}
 
 	var b strings.Builder
-	b.WriteString("Current policy (default: ")
-	b.WriteString(dv)
-	b.WriteString(")\n\n")
+	fmt.Fprintf(&b, "Current policy (default: %s)\n\n", htmlCode(dv))
 
 	for _, section := range []struct {
 		label   string
@@ -293,8 +296,9 @@ func (h *CommandHandler) policyShowFromStore() string {
 		if len(sectionRules) == 0 {
 			continue
 		}
+		b.WriteString("<b>")
 		b.WriteString(section.label)
-		b.WriteString(":\n")
+		b.WriteString("</b>:\n")
 		for _, r := range sectionRules {
 			target := r.Destination
 			if r.Tool != "" {
@@ -302,23 +306,23 @@ func (h *CommandHandler) policyShowFromStore() string {
 			} else if r.Pattern != "" {
 				target = "pattern:" + r.Pattern
 			}
-			fmt.Fprintf(&b, "  [%d] %s", r.ID, target)
+			fmt.Fprintf(&b, "  [%d] %s", r.ID, htmlCode(target))
 			if len(r.Ports) > 0 {
 				b.WriteString(" ports=")
 				b.WriteString(formatPorts(r.Ports))
 			}
 			if len(r.Protocols) > 0 {
 				b.WriteString(" protocols=")
-				b.WriteString(strings.Join(r.Protocols, ","))
+				b.WriteString(htmlCode(strings.Join(r.Protocols, ",")))
 			}
 			if r.Replacement != "" {
-				fmt.Fprintf(&b, " -> %q", r.Replacement)
+				fmt.Fprintf(&b, " -> %s", htmlCode(r.Replacement))
 			}
 			if r.Name != "" {
-				fmt.Fprintf(&b, " (%s)", r.Name)
+				fmt.Fprintf(&b, " (%s)", htmlEscape(r.Name))
 			}
 			if r.Source != "" {
-				fmt.Fprintf(&b, " [%s]", r.Source)
+				fmt.Fprintf(&b, " [%s]", htmlEscape(r.Source))
 			}
 			b.WriteString("\n")
 		}
@@ -350,14 +354,14 @@ func (h *CommandHandler) policyAllow(dest string) string {
 		if err := h.recompileAndSwap(); err != nil {
 			return fmt.Sprintf("Added allow rule but failed to recompile: %v", err)
 		}
-		return fmt.Sprintf("Added allow rule: %s", dest)
+		return "Added allow rule: " + htmlCode(dest)
 	}
 
 	// Fallback to in-memory mutation when store is not configured.
 	if err := h.engine.Load().AddAllowRule(dest); err != nil { //nolint:staticcheck // backward compat fallback when no store
 		return fmt.Sprintf("Failed to add allow rule: %v", err)
 	}
-	return fmt.Sprintf("Added allow rule: %s%s", dest, inMemoryWarning)
+	return "Added allow rule: " + htmlCode(dest) + inMemoryWarning
 }
 
 func (h *CommandHandler) policyDeny(dest string) string {
@@ -375,13 +379,13 @@ func (h *CommandHandler) policyDeny(dest string) string {
 		if err := h.recompileAndSwap(); err != nil {
 			return fmt.Sprintf("Added deny rule but failed to recompile: %v", err)
 		}
-		return fmt.Sprintf("Added deny rule: %s", dest)
+		return "Added deny rule: " + htmlCode(dest)
 	}
 
 	if err := h.engine.Load().AddDenyRule(dest); err != nil { //nolint:staticcheck // backward compat fallback when no store
 		return fmt.Sprintf("Failed to add deny rule: %v", err)
 	}
-	return fmt.Sprintf("Added deny rule: %s%s", dest, inMemoryWarning)
+	return "Added deny rule: " + htmlCode(dest) + inMemoryWarning
 }
 
 func (h *CommandHandler) policyRemove(idStr string) string {
