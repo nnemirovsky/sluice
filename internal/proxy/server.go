@@ -1485,6 +1485,10 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 	sessions := make(map[string]*udpSession)
 	// Track in-flight QUIC broker approvals. Protected by mu.
 	pendingQUICSessions := make(map[string]*pendingQUICSession)
+	// Track in-progress SNI accumulation across multiple QUIC Initial
+	// packets for sessions that have not yet resolved policy. Protected
+	// by mu.
+	sniAccumulators := make(map[string]*sniAccumulator)
 
 	// Ensure bindLn is closed exactly once regardless of which goroutine
 	// exits first (dispatch loop vs TCP control connection reader).
@@ -1547,6 +1551,13 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 							}
 							_ = sess.upstream.Close()
 							delete(sessions, key)
+						}
+					}
+					// Drop stale SNI accumulators so they cannot leak
+					// memory for sessions that silently disappeared.
+					for key, acc := range sniAccumulators {
+						if now.Sub(acc.firstSeen) > sniAccumulatorTTL {
+							delete(sniAccumulators, key)
 						}
 					}
 					mu.Unlock()
@@ -1637,20 +1648,110 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 
 				if IsQUICPacket(payload) {
 					// Recover hostname from the QUIC Initial packet. Try SNI
-					// extraction first, then DNS reverse cache, then raw IP.
+					// extraction first (single packet, then accumulated
+					// across multiple Initial packets for fragmented
+					// ClientHellos), then DNS reverse cache, then raw IP.
 					// The session key stays IP-based so that post-handshake
 					// short-header packets (which only carry the raw IP from
 					// the SOCKS5 UDP header) find the session. The hostname
 					// is used only for policy evaluation and broker display.
+					//
+					// accumulatedPackets holds extra Initial packets buffered
+					// during SNI accumulation that need to be flushed to the
+					// QUIC proxy alongside the current one once approval
+					// resolves.
 					policyDest := dest
+					var accumulatedPackets [][]byte
+					sniSource := ""
 					if sni := ExtractQUICSNI(payload); sni != "" {
 						policyDest = sni
-						log.Printf("[QUIC] SNI extracted: %s (IP: %s)", sni, dest)
-					} else if s.dnsInterceptor != nil {
-						if hostname := s.dnsInterceptor.ReverseLookup(dest); hostname != "" {
-							policyDest = hostname
-							log.Printf("[QUIC] hostname from DNS cache: %s (IP: %s)", hostname, dest)
+						sniSource = "single-packet"
+						// Drop any in-progress accumulator for this key
+						// since we no longer need it.
+						mu.Lock()
+						delete(sniAccumulators, sessionKey)
+						mu.Unlock()
+					} else {
+						// Try accumulating CRYPTO data across multiple
+						// Initial packets. quic-go fragments ClientHellos
+						// larger than the Initial payload limit, so the
+						// SNI may span several packets.
+						if cryptoData, offset := ExtractQUICCryptoData(payload); cryptoData != nil {
+							mu.Lock()
+							acc, ok := sniAccumulators[sessionKey]
+							if !ok {
+								if len(sniAccumulators) >= maxSNIAccumulators {
+									// Evict the oldest accumulator to make
+									// room. This is a safety valve for
+									// resource exhaustion.
+									var oldestKey string
+									var oldestTime time.Time
+									for k, a := range sniAccumulators {
+										if oldestKey == "" || a.firstSeen.Before(oldestTime) {
+											oldestKey = k
+											oldestTime = a.firstSeen
+										}
+									}
+									if oldestKey != "" {
+										delete(sniAccumulators, oldestKey)
+									}
+								}
+								acc = &sniAccumulator{
+									cryptoByOffset: make(map[uint64][]byte),
+									firstSeen:      time.Now(),
+								}
+								sniAccumulators[sessionKey] = acc
+							}
+							acc.addChunk(offset, cryptoData)
+							pktCopy := make([]byte, len(payload))
+							copy(pktCopy, payload)
+							acc.packets = append(acc.packets, pktCopy)
+
+							reassembled := acc.reassemble()
+							tooManyPackets := len(acc.packets) >= maxSNIAccumulatorPackets
+							if len(reassembled) >= sniMinReassemblyBytes {
+								if sni := extractSNIFromHandshake(reassembled); sni != "" {
+									policyDest = sni
+									sniSource = "accumulated"
+									accumulatedPackets = acc.packets[:len(acc.packets)-1]
+									delete(sniAccumulators, sessionKey)
+								}
+							}
+							if sniSource == "" && !tooManyPackets {
+								// Not enough data yet and we still have
+								// budget. Buffer this packet and wait for
+								// the next Initial to arrive. No policy
+								// check yet.
+								mu.Unlock()
+								continue
+							}
+							if sniSource == "" && tooManyPackets {
+								// Exhausted accumulator budget without
+								// finding SNI. Flush buffered packets
+								// alongside current one through policy
+								// using DNS reverse cache / raw IP as
+								// fallback.
+								accumulatedPackets = acc.packets[:len(acc.packets)-1]
+								delete(sniAccumulators, sessionKey)
+							}
+							mu.Unlock()
 						}
+					}
+					if sniSource == "" {
+						if s.dnsInterceptor != nil {
+							if hostname := s.dnsInterceptor.ReverseLookup(dest); hostname != "" {
+								policyDest = hostname
+								sniSource = "dns-cache"
+							}
+						}
+					}
+					switch sniSource {
+					case "single-packet":
+						log.Printf("[QUIC] SNI extracted: %s (IP: %s)", policyDest, dest)
+					case "accumulated":
+						log.Printf("[QUIC] SNI extracted via accumulation: %s (IP: %s, %d buffered packets)", policyDest, dest, len(accumulatedPackets))
+					case "dns-cache":
+						log.Printf("[QUIC] hostname from DNS cache: %s (IP: %s)", policyDest, dest)
 					}
 
 					quicAddr := s.quicProxy.Addr()
@@ -1685,10 +1786,17 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 
 						// First Initial for this session key: create a
 						// pending entry and launch the approval goroutine.
+						// Seed the pending packet buffer with any packets
+						// that were accumulated during SNI reassembly, plus
+						// the current one. They will all be flushed to the
+						// QUIC proxy on approval.
+						initialPackets := make([][]byte, 0, len(accumulatedPackets)+1)
+						initialPackets = append(initialPackets, accumulatedPackets...)
 						pkt := make([]byte, len(payload))
 						copy(pkt, payload)
+						initialPackets = append(initialPackets, pkt)
 						pending := &pendingQUICSession{
-							packets: [][]byte{pkt},
+							packets: initialPackets,
 							done:    make(chan struct{}),
 						}
 						pendingQUICSessions[sessionKey] = pending
@@ -1879,6 +1987,71 @@ func (s *Server) relayUDPResponses(upstream net.PacketConn, relay *net.UDPConn, 
 // maxPendingQUICPackets is the maximum number of QUIC packets buffered per
 // session while waiting for broker approval. Packets beyond this are dropped.
 const maxPendingQUICPackets = 32
+
+// QUIC SNI accumulation limits. quic-go fragments large ClientHellos across
+// multiple Initial packets, each carrying a CRYPTO frame at a different
+// offset in the TLS handshake stream. Accumulating CRYPTO data across these
+// packets is safe per RFC 9000: Initial packets can only carry CRYPTO,
+// PADDING, PING, ACK, and CONNECTION_CLOSE frames. No application data flows
+// until after the handshake completes in 1-RTT packets.
+const (
+	// maxSNIAccumulatorPackets caps raw Initial packets buffered per
+	// accumulator. If SNI cannot be extracted within this many packets,
+	// we fall back to DNS reverse cache.
+	maxSNIAccumulatorPackets = 5
+	// maxSNIAccumulators caps total in-flight SNI accumulators across all
+	// ASSOCIATE sessions in one handleAssociate invocation.
+	maxSNIAccumulators = 100
+	// sniAccumulatorTTL bounds how long a stale accumulator can live
+	// before cleanup removes it.
+	sniAccumulatorTTL = 15 * time.Second
+	// sniMinReassemblyBytes is the minimum reassembled CRYPTO data size
+	// we attempt SNI extraction on. Below this, the TLS ClientHello has
+	// certainly not arrived in full. A typical ClientHello is over 200
+	// bytes, but we keep the threshold conservative to accommodate small
+	// test-only handshakes while still skipping clearly incomplete data.
+	sniMinReassemblyBytes = 64
+)
+
+// sniAccumulator buffers QUIC Initial packets and their CRYPTO frame data
+// across multiple datagrams so a fragmented ClientHello can be reassembled
+// and its SNI extension extracted.
+type sniAccumulator struct {
+	// cryptoByOffset maps CRYPTO frame offsets to their data chunks.
+	cryptoByOffset map[uint64][]byte
+	// packets stores the raw Initial packets in arrival order so they can
+	// be flushed to the QUIC proxy once policy resolves.
+	packets [][]byte
+	// firstSeen is the time the accumulator was created. Used for TTL
+	// cleanup of stale entries.
+	firstSeen time.Time
+}
+
+// addChunk records a CRYPTO frame chunk at the given offset. Chunks at
+// duplicate offsets are ignored (the first wins).
+func (a *sniAccumulator) addChunk(offset uint64, data []byte) {
+	if _, ok := a.cryptoByOffset[offset]; ok {
+		return
+	}
+	buf := make([]byte, len(data))
+	copy(buf, data)
+	a.cryptoByOffset[offset] = buf
+}
+
+// reassemble concatenates CRYPTO chunks starting from offset 0, stopping at
+// the first gap. Returns the contiguous prefix of the TLS handshake stream.
+func (a *sniAccumulator) reassemble() []byte {
+	var out []byte
+	nextOffset := uint64(0)
+	for {
+		chunk, ok := a.cryptoByOffset[nextOffset]
+		if !ok {
+			return out
+		}
+		out = append(out, chunk...)
+		nextOffset += uint64(len(chunk))
+	}
+}
 
 // pendingQUICSession tracks an in-flight QUIC approval request. While the
 // broker call blocks, subsequent QUIC Initial packets for the same session

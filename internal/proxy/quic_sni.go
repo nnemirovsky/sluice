@@ -233,6 +233,268 @@ func ExtractQUICSNI(packet []byte) string {
 	return extractSNIFromHandshake(clientHello)
 }
 
+// ExtractQUICCryptoData attempts to decrypt a QUIC Initial packet and return
+// the raw CRYPTO frame data and its starting offset within the TLS handshake
+// stream. This allows callers to accumulate CRYPTO data across multiple QUIC
+// Initial packets (which happens when quic-go fragments large ClientHellos).
+// Returns nil data on any failure (malformed packet, decryption error, etc.).
+func ExtractQUICCryptoData(packet []byte) (data []byte, offset uint64) {
+	if len(packet) < 5 {
+		return nil, 0
+	}
+
+	if packet[0]&0xC0 != 0xC0 {
+		return nil, 0
+	}
+
+	version := binary.BigEndian.Uint32(packet[1:5])
+
+	var salt []byte
+	var hpLabel, keyLabel, ivLabel string
+
+	switch version {
+	case quicVersionV1:
+		salt = quicV1Salt
+		hpLabel = "quic hp"
+		keyLabel = "quic key"
+		ivLabel = "quic iv"
+	case quicVersionV2:
+		salt = quicV2Salt
+		hpLabel = "quicv2 hp"
+		keyLabel = "quicv2 key"
+		ivLabel = "quicv2 iv"
+	default:
+		return nil, 0
+	}
+
+	pos := 5
+	if pos >= len(packet) {
+		return nil, 0
+	}
+	dcidLen := int(packet[pos])
+	pos++
+	if pos+dcidLen > len(packet) {
+		return nil, 0
+	}
+	dcid := packet[pos : pos+dcidLen]
+	pos += dcidLen
+
+	if pos >= len(packet) {
+		return nil, 0
+	}
+	scidLen := int(packet[pos])
+	pos++
+	pos += scidLen
+	if pos > len(packet) {
+		return nil, 0
+	}
+
+	firstByte := packet[0]
+	pktType := (firstByte & 0x30) >> 4
+	if version == quicVersionV1 && pktType != 0x00 {
+		return nil, 0
+	}
+	if version == quicVersionV2 && pktType != 0x01 {
+		return nil, 0
+	}
+
+	tokenLen, n := readQUICVarint(packet[pos:])
+	if n == 0 || tokenLen > math.MaxInt {
+		return nil, 0
+	}
+	pos += n + int(tokenLen)
+	if pos > len(packet) {
+		return nil, 0
+	}
+
+	payloadLen, n := readQUICVarint(packet[pos:])
+	if n == 0 || payloadLen > math.MaxInt {
+		return nil, 0
+	}
+	pos += n
+
+	if pos+int(payloadLen) > len(packet) {
+		return nil, 0
+	}
+
+	clientSecret, err := deriveQUICClientSecret(dcid, salt, version)
+	if err != nil {
+		return nil, 0
+	}
+
+	hpKey, err := hkdfExpandLabel(clientSecret, hpLabel, 16)
+	if err != nil {
+		return nil, 0
+	}
+	packetKey, err := hkdfExpandLabel(clientSecret, keyLabel, 16)
+	if err != nil {
+		return nil, 0
+	}
+	iv, err := hkdfExpandLabel(clientSecret, ivLabel, 12)
+	if err != nil {
+		return nil, 0
+	}
+
+	protectedPayload := packet[pos : pos+int(payloadLen)]
+	if len(protectedPayload) < 4+16 {
+		return nil, 0
+	}
+	sample := protectedPayload[4 : 4+16]
+
+	hpBlock, err := aes.NewCipher(hpKey)
+	if err != nil {
+		return nil, 0
+	}
+	var mask [16]byte
+	hpBlock.Encrypt(mask[:], sample)
+
+	unmaskedFirst := firstByte ^ (mask[0] & 0x0f)
+	pnLen := int(unmaskedFirst&0x03) + 1
+
+	pnBytes := make([]byte, pnLen)
+	for i := 0; i < pnLen; i++ {
+		pnBytes[i] = protectedPayload[i] ^ mask[1+i]
+	}
+
+	var pn uint64
+	for _, b := range pnBytes {
+		pn = pn<<8 | uint64(b)
+	}
+
+	headerLen := pos + pnLen
+	aad := make([]byte, headerLen)
+	copy(aad, packet[:headerLen])
+	aad[0] = unmaskedFirst
+	copy(aad[pos:], pnBytes)
+
+	nonce := make([]byte, 12)
+	copy(nonce, iv)
+	for i := 0; i < 8; i++ {
+		nonce[12-1-i] ^= byte(pn >> (8 * i))
+	}
+
+	aesBlock, err := aes.NewCipher(packetKey)
+	if err != nil {
+		return nil, 0
+	}
+	gcm, err := cipher.NewGCM(aesBlock)
+	if err != nil {
+		return nil, 0
+	}
+
+	ciphertext := protectedPayload[pnLen:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, aad)
+	if err != nil {
+		return nil, 0
+	}
+
+	// Extract the first CRYPTO frame's data and offset.
+	return extractFirstCryptoFrame(plaintext)
+}
+
+// extractFirstCryptoFrame scans QUIC frames for the first CRYPTO frame
+// (type 0x06) and returns its data and stream offset. Skips PADDING, PING,
+// ACK, and CONNECTION_CLOSE frames. Returns nil if no CRYPTO frame is found.
+func extractFirstCryptoFrame(frames []byte) ([]byte, uint64) {
+	pos := 0
+	for pos < len(frames) {
+		frameType, n := readQUICVarint(frames[pos:])
+		if n == 0 {
+			break
+		}
+		pos += n
+
+		switch {
+		case frameType == 0x00: // PADDING
+		case frameType == 0x01: // PING
+		case frameType == 0x02 || frameType == 0x03: // ACK
+			_, vn := readQUICVarint(frames[pos:])
+			if vn == 0 {
+				return nil, 0
+			}
+			pos += vn
+			_, vn = readQUICVarint(frames[pos:])
+			if vn == 0 {
+				return nil, 0
+			}
+			pos += vn
+			rangeCount, vn := readQUICVarint(frames[pos:])
+			if vn == 0 {
+				return nil, 0
+			}
+			pos += vn
+			_, vn = readQUICVarint(frames[pos:])
+			if vn == 0 {
+				return nil, 0
+			}
+			pos += vn
+			for i := uint64(0); i < rangeCount; i++ {
+				_, vn = readQUICVarint(frames[pos:])
+				if vn == 0 {
+					return nil, 0
+				}
+				pos += vn
+				_, vn = readQUICVarint(frames[pos:])
+				if vn == 0 {
+					return nil, 0
+				}
+				pos += vn
+			}
+			if frameType == 0x03 {
+				for i := 0; i < 3; i++ {
+					_, vn = readQUICVarint(frames[pos:])
+					if vn == 0 {
+						return nil, 0
+					}
+					pos += vn
+				}
+			}
+		case frameType == 0x06: // CRYPTO
+			cryptoOffset, vn := readQUICVarint(frames[pos:])
+			if vn == 0 {
+				return nil, 0
+			}
+			pos += vn
+			dataLen, vn := readQUICVarint(frames[pos:])
+			if vn == 0 || dataLen > math.MaxInt {
+				return nil, 0
+			}
+			pos += vn
+			if pos+int(dataLen) > len(frames) {
+				return nil, 0
+			}
+			result := make([]byte, int(dataLen))
+			copy(result, frames[pos:pos+int(dataLen)])
+			return result, cryptoOffset
+		case frameType == 0x1c || frameType == 0x1d: // CONNECTION_CLOSE
+			_, vn := readQUICVarint(frames[pos:])
+			if vn == 0 {
+				return nil, 0
+			}
+			pos += vn
+			if frameType == 0x1c {
+				_, vn = readQUICVarint(frames[pos:])
+				if vn == 0 {
+					return nil, 0
+				}
+				pos += vn
+			}
+			reasonLen, vn := readQUICVarint(frames[pos:])
+			if vn == 0 || reasonLen > math.MaxInt {
+				return nil, 0
+			}
+			pos += vn
+			if pos+int(reasonLen) > len(frames) {
+				return nil, 0
+			}
+			pos += int(reasonLen)
+		default:
+			return nil, 0
+		}
+	}
+	return nil, 0
+}
+
 // extractSNIFromHandshake parses a raw TLS handshake message (no record layer)
 // and extracts the SNI hostname. This wraps the message in a synthetic TLS
 // record header and delegates to extractSNI.

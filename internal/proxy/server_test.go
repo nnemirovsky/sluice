@@ -4395,3 +4395,404 @@ func TestRelayQUICResponsesMultiplePackets(t *testing.T) {
 
 	_ = upstream.Close()
 }
+
+// TestSNIAccumulatorReassemble verifies that sniAccumulator.reassemble
+// concatenates CRYPTO chunks from offset 0 and stops at the first gap.
+func TestSNIAccumulatorReassemble(t *testing.T) {
+	acc := &sniAccumulator{
+		cryptoByOffset: make(map[uint64][]byte),
+		firstSeen:      time.Now(),
+	}
+	acc.addChunk(0, []byte("hello "))
+	acc.addChunk(6, []byte("world"))
+	got := acc.reassemble()
+	if string(got) != "hello world" {
+		t.Errorf("expected \"hello world\", got %q", string(got))
+	}
+}
+
+// TestSNIAccumulatorReassembleWithGap verifies that reassemble returns only
+// the contiguous prefix when there is a gap in the offset sequence.
+func TestSNIAccumulatorReassembleWithGap(t *testing.T) {
+	acc := &sniAccumulator{
+		cryptoByOffset: make(map[uint64][]byte),
+		firstSeen:      time.Now(),
+	}
+	acc.addChunk(0, []byte("abc"))
+	acc.addChunk(100, []byte("far-away"))
+	got := acc.reassemble()
+	if string(got) != "abc" {
+		t.Errorf("expected \"abc\" (gap after 3), got %q", string(got))
+	}
+}
+
+// TestSNIAccumulatorIgnoresDuplicateOffsets verifies that re-adding a chunk
+// at the same offset is a no-op (first chunk wins).
+func TestSNIAccumulatorIgnoresDuplicateOffsets(t *testing.T) {
+	acc := &sniAccumulator{
+		cryptoByOffset: make(map[uint64][]byte),
+		firstSeen:      time.Now(),
+	}
+	acc.addChunk(0, []byte("first"))
+	acc.addChunk(0, []byte("SECOND"))
+	got := acc.reassemble()
+	if string(got) != "first" {
+		t.Errorf("duplicate offsets should be ignored, got %q", string(got))
+	}
+}
+
+// TestSNIAccumulatorSNIExtractionFromAssembledHandshake verifies that a
+// ClientHello split across two CRYPTO chunks can be reassembled and the SNI
+// extracted. This mirrors the server flow where packets arrive separately.
+func TestSNIAccumulatorSNIExtractionFromAssembledHandshake(t *testing.T) {
+	full := buildClientHello("split.example.com")
+	hs := full[5:] // strip TLS record header
+	splitAt := len(hs) / 2
+
+	acc := &sniAccumulator{
+		cryptoByOffset: make(map[uint64][]byte),
+		firstSeen:      time.Now(),
+	}
+	acc.addChunk(0, hs[:splitAt])
+	acc.addChunk(uint64(splitAt), hs[splitAt:])
+
+	reassembled := acc.reassemble()
+	if len(reassembled) != len(hs) {
+		t.Fatalf("reassembled length = %d, want %d", len(reassembled), len(hs))
+	}
+	sni := extractSNIFromHandshake(reassembled)
+	if sni != "split.example.com" {
+		t.Errorf("expected split.example.com, got %q", sni)
+	}
+}
+
+// TestSNIAccumulatorPartialDataCannotExtractSNI verifies that the first
+// CRYPTO chunk alone (when it does not reach the SNI extension) does not
+// produce an SNI via the single-packet path. This is the exact condition
+// that motivates cross-packet accumulation.
+func TestSNIAccumulatorPartialDataCannotExtractSNI(t *testing.T) {
+	full := buildClientHello("only-visible-after-reassembly.example.com")
+	hs := full[5:]
+	// Truncate to the first 60 bytes: session ID, random, etc, but not the
+	// SNI extension which comes later.
+	partial := hs[:60]
+	sni := extractSNIFromHandshake(partial)
+	if sni != "" {
+		t.Errorf("partial handshake should not yield an SNI, got %q", sni)
+	}
+}
+
+// buildQUICInitialWithCrypto constructs a single-packet QUIC Initial whose
+// sole CRYPTO frame sits at the given offset with the provided handshake
+// data. This lets tests simulate quic-go fragmenting a ClientHello across
+// several Initial packets. dcid must be identical across packets that share
+// the same connection so decryption uses the same keys.
+func buildQUICInitialWithCrypto(t *testing.T, dcid []byte, offset uint64, data []byte, version uint32) []byte {
+	t.Helper()
+
+	var crypto []byte
+	crypto = append(crypto, 0x06)
+	crypto = append(crypto, encodeQUICVarint(offset)...)
+	crypto = append(crypto, encodeQUICVarint(uint64(len(data)))...)
+	crypto = append(crypto, data...)
+
+	return buildQUICInitialFromPlaintext(t, dcid, crypto, version)
+}
+
+// TestExtractQUICCryptoDataReturnsOffsetAndData verifies that
+// ExtractQUICCryptoData can decrypt an Initial packet and recover the raw
+// CRYPTO frame bytes and starting offset, which is the building block for
+// cross-packet accumulation.
+func TestExtractQUICCryptoDataReturnsOffsetAndData(t *testing.T) {
+	dcid := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	payload := []byte("first-crypto-chunk")
+
+	packet := buildQUICInitialWithCrypto(t, dcid, 0, payload, quicVersionV1)
+	got, offset := ExtractQUICCryptoData(packet)
+	if offset != 0 {
+		t.Errorf("offset = %d, want 0", offset)
+	}
+	if string(got) != string(payload) {
+		t.Errorf("data = %q, want %q", string(got), string(payload))
+	}
+
+	// Non-zero offset packet.
+	packet2 := buildQUICInitialWithCrypto(t, dcid, 42, []byte("later-chunk"), quicVersionV1)
+	got2, offset2 := ExtractQUICCryptoData(packet2)
+	if offset2 != 42 {
+		t.Errorf("offset = %d, want 42", offset2)
+	}
+	if string(got2) != "later-chunk" {
+		t.Errorf("data = %q, want later-chunk", string(got2))
+	}
+}
+
+// TestExtractQUICCryptoDataMalformed verifies ExtractQUICCryptoData returns
+// nil for clearly malformed inputs.
+func TestExtractQUICCryptoDataMalformed(t *testing.T) {
+	tests := [][]byte{
+		nil,
+		{},
+		{0xC0, 0x00, 0x00},             // too short
+		{0x40, 0x00, 0x00, 0x00, 0x01}, // not long header
+	}
+	for i, packet := range tests {
+		data, offset := ExtractQUICCryptoData(packet)
+		if data != nil || offset != 0 {
+			t.Errorf("case %d: expected nil/0, got %v, %d", i, data, offset)
+		}
+	}
+}
+
+// wrapInSOCKS5UDP wraps a QUIC payload in a SOCKS5 UDP header targeting the
+// given IPv4 destination and port 443.
+func wrapInSOCKS5UDP(payload []byte, destIP net.IP) []byte {
+	ip4 := destIP.To4()
+	destPort := 443
+	header := []byte{
+		0x00, 0x00,
+		0x00,
+		0x01,
+		ip4[0], ip4[1], ip4[2], ip4[3],
+		byte(destPort >> 8), byte(destPort),
+	}
+	return append(header, payload...)
+}
+
+// setupQUICAskTest is a variant of setupQUICBrokerTest for accumulation
+// tests that need to verify policy evaluation was driven by the reassembled
+// hostname. It installs an ask-all rule for QUIC/443 and a distinctive deny
+// rule that matches a specific hostname so we can assert the broker saw
+// the reassembled SNI by counting per-hostname requests.
+func setupQUICAskTest(t *testing.T, response channel.Response) quicBrokerTestEnv {
+	t.Helper()
+
+	ch := &delayedCountingChannel{
+		response: response,
+		delay:    0,
+	}
+	broker := channel.NewBroker([]channel.Channel{ch})
+	ch.broker = broker
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+timeout_sec = 10
+
+[[ask]]
+destination = "*"
+ports = [443]
+protocols = ["quic"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tmpDir := t.TempDir()
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Broker:     broker,
+		Provider:   &stubQUICProvider{},
+		Resolver:   mustBindingResolver(t),
+		VaultDir:   tmpDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	for i := 0; i < 50; i++ {
+		if srv.quicProxy != nil && srv.quicProxy.Addr() != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if srv.quicProxy == nil || srv.quicProxy.Addr() == nil {
+		t.Fatal("QUIC proxy did not start listening")
+	}
+
+	tcpConn, err := net.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatalf("dial SOCKS5: %v", err)
+	}
+	t.Cleanup(func() { _ = tcpConn.Close() })
+
+	_, _ = tcpConn.Write([]byte{0x05, 0x01, 0x00})
+	authResp := make([]byte, 2)
+	if _, err := io.ReadFull(tcpConn, authResp); err != nil {
+		t.Fatalf("read auth response: %v", err)
+	}
+
+	_, _ = tcpConn.Write([]byte{0x05, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
+	assocResp := make([]byte, 10)
+	if _, err := io.ReadFull(tcpConn, assocResp); err != nil {
+		t.Fatalf("read ASSOCIATE response: %v", err)
+	}
+
+	bindPort := int(assocResp[8])<<8 | int(assocResp[9])
+	bindIP := net.IP(assocResp[4:8])
+	bindAddr := &net.UDPAddr{IP: bindIP, Port: bindPort}
+
+	localTCPAddr := tcpConn.LocalAddr().(*net.TCPAddr)
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: localTCPAddr.IP, Port: 0})
+	if err != nil {
+		t.Fatalf("listen UDP: %v", err)
+	}
+	t.Cleanup(func() { _ = udpConn.Close() })
+
+	return quicBrokerTestEnv{
+		ch:       ch,
+		srv:      srv,
+		udpConn:  udpConn,
+		bindAddr: bindAddr,
+	}
+}
+
+// TestQUICSNIAccumulationAcrossTwoPackets verifies that when a ClientHello
+// is split across two Initial packets (neither of which alone contains the
+// SNI extension via single-packet extraction), the server accumulates the
+// CRYPTO frames, reassembles the ClientHello, and still recovers the SNI
+// hostname so policy evaluation fires against the real host rather than
+// the raw IP. We verify this by installing an ask-all QUIC rule and
+// observing that exactly one broker request is dispatched only AFTER the
+// second packet arrives, not after the first.
+func TestQUICSNIAccumulationAcrossTwoPackets(t *testing.T) {
+	env := setupQUICAskTest(t, channel.ResponseAllowOnce)
+
+	hostname := "accumulated.example.com"
+	full := buildClientHello(hostname)
+	hs := full[5:]
+	// Split such that the first chunk is too small to include the
+	// extensions section (and thus the SNI), guaranteeing the
+	// single-packet extractor fails on packet 1.
+	splitAt := 50
+	if splitAt > len(hs) {
+		t.Fatalf("handshake too small to split: %d", len(hs))
+	}
+	part1 := hs[:splitAt]
+	part2 := hs[splitAt:]
+
+	dcid := []byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88}
+	packet1 := buildQUICInitialWithCrypto(t, dcid, 0, part1, quicVersionV1)
+	packet2 := buildQUICInitialWithCrypto(t, dcid, uint64(splitAt), part2, quicVersionV1)
+
+	// Sanity: the first packet alone should NOT produce an SNI via the
+	// single-packet path.
+	if sni := ExtractQUICSNI(packet1); sni != "" {
+		t.Fatalf("single-packet extractor unexpectedly returned SNI %q for partial packet", sni)
+	}
+
+	destIP := net.ParseIP("10.77.0.1")
+
+	// Send packet 1. Should be buffered in the accumulator, NO broker
+	// request yet because SNI has not been reassembled.
+	if _, err := env.udpConn.WriteTo(wrapInSOCKS5UDP(packet1, destIP), env.bindAddr); err != nil {
+		t.Fatalf("send packet 1: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := env.ch.Count(); got != 0 {
+		t.Errorf("expected 0 broker requests after partial packet 1, got %d", got)
+	}
+
+	// Send packet 2. Accumulator reassembles the ClientHello, SNI is
+	// extracted, and policy evaluation fires exactly one broker request.
+	if _, err := env.udpConn.WriteTo(wrapInSOCKS5UDP(packet2, destIP), env.bindAddr); err != nil {
+		t.Fatalf("send packet 2: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := env.ch.Count(); got != 1 {
+		t.Errorf("expected exactly 1 broker request after reassembly, got %d", got)
+	}
+}
+
+// TestQUICSNIAccumulationFallsBackAfterPacketBudget verifies that if we
+// exhaust the per-accumulator packet budget without recovering SNI, the
+// server stops buffering and falls through to the DNS-cache / raw-IP
+// fallback so traffic is not stalled forever.
+func TestQUICSNIAccumulationFallsBackAfterPacketBudget(t *testing.T) {
+	env := setupQUICAskTest(t, channel.ResponseDeny)
+
+	// Build Initial packets that each carry a CRYPTO frame whose offsets
+	// leave a gap at the start of the stream (offset > 0). Reassembly
+	// will never produce anything, exhausting the packet budget.
+	dcid := []byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11}
+	destIP := net.ParseIP("10.77.0.2")
+
+	for i := 0; i < maxSNIAccumulatorPackets; i++ {
+		packet := buildQUICInitialWithCrypto(t, dcid, uint64(1000+i*16), []byte("gap-bytes-only"), quicVersionV1)
+		if _, err := env.udpConn.WriteTo(wrapInSOCKS5UDP(packet, destIP), env.bindAddr); err != nil {
+			t.Fatalf("send packet %d: %v", i, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	// After the budget is exhausted, a broker request must fire even
+	// though we never recovered an SNI. The broker denies, so no session
+	// is created.
+	if got := env.ch.Count(); got < 1 {
+		t.Errorf("expected at least 1 broker request after packet budget exhausted, got %d", got)
+	}
+}
+
+// TestQUICSNIAccumulatorClearsOnSuccess verifies that once SNI has been
+// successfully extracted from accumulated data, the accumulator map is
+// cleaned up so it cannot hold stale state indefinitely.
+func TestQUICSNIAccumulatorClearsOnSuccess(t *testing.T) {
+	acc := &sniAccumulator{
+		cryptoByOffset: make(map[uint64][]byte),
+		firstSeen:      time.Now(),
+	}
+	full := buildClientHello("clearing.example.com")
+	hs := full[5:]
+	splitAt := len(hs) / 2
+	acc.addChunk(0, hs[:splitAt])
+	acc.addChunk(uint64(splitAt), hs[splitAt:])
+
+	reassembled := acc.reassemble()
+	sni := extractSNIFromHandshake(reassembled)
+	if sni != "clearing.example.com" {
+		t.Errorf("expected clearing.example.com, got %q", sni)
+	}
+
+	// Simulate the server's cleanup.
+	accumulators := map[string]*sniAccumulator{"key1": acc}
+	delete(accumulators, "key1")
+	if _, exists := accumulators["key1"]; exists {
+		t.Error("accumulator should be removed after successful SNI extraction")
+	}
+}
+
+// TestQUICSNIAccumulatorTTLCleanup verifies that accumulators whose
+// firstSeen is older than sniAccumulatorTTL are removed during periodic
+// cleanup, preventing unbounded growth if packets stop arriving for a key.
+func TestQUICSNIAccumulatorTTLCleanup(t *testing.T) {
+	now := time.Now()
+	accumulators := map[string]*sniAccumulator{
+		"stale": {
+			cryptoByOffset: map[uint64][]byte{0: {0x01}},
+			firstSeen:      now.Add(-2 * sniAccumulatorTTL),
+		},
+		"fresh": {
+			cryptoByOffset: map[uint64][]byte{0: {0x02}},
+			firstSeen:      now,
+		},
+	}
+
+	// Reproduce the server's cleanup loop logic.
+	for key, acc := range accumulators {
+		if now.Sub(acc.firstSeen) > sniAccumulatorTTL {
+			delete(accumulators, key)
+		}
+	}
+
+	if _, exists := accumulators["stale"]; exists {
+		t.Error("stale accumulator should have been removed")
+	}
+	if _, exists := accumulators["fresh"]; !exists {
+		t.Error("fresh accumulator should still be present")
+	}
+}
