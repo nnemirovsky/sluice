@@ -1759,29 +1759,36 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 						// Deduplicate broker requests: if there is already
 						// a pending approval for this session key, buffer
 						// the packet instead of triggering another call.
+						//
+						// The pending map is keyed by hostname (policyDest)
+						// when available so that two QUIC connections to
+						// different hostnames that happen to share an IP
+						// (common with CDNs) each get their own approval
+						// flow. The sessions map below stays IP-keyed so
+						// short-header packets (which only carry the IP)
+						// still route to the right upstream.
+						pendingKey := "quic:" + policyDest + ":" + strconv.Itoa(port)
 						mu.Lock()
-						if pending, ok := pendingQUICSessions[sessionKey]; ok {
+						if pending, ok := pendingQUICSessions[pendingKey]; ok {
+							// The approval goroutine resolves the pending
+							// entry atomically under mu: it either publishes
+							// a session (and this packet will route via the
+							// sessions map on the next iteration) or removes
+							// the entry (and the next packet creates a new
+							// pending). While the entry is still in the map,
+							// always buffer the packet so we never trigger a
+							// duplicate broker call.
 							pending.mu.Lock()
-							if pending.resolved {
-								// The approval goroutine already drained
-								// packets but has not yet deleted the map
-								// entry. Remove it so we can create a fresh
-								// pending session below.
-								pending.mu.Unlock()
-								delete(pendingQUICSessions, sessionKey)
-							} else if len(pending.packets) < maxPendingQUICPackets {
+							if len(pending.packets) < maxPendingQUICPackets {
 								pkt := make([]byte, len(payload))
 								copy(pkt, payload)
 								pending.packets = append(pending.packets, pkt)
-								pending.mu.Unlock()
-								mu.Unlock()
-								continue
 							} else {
-								log.Printf("[QUIC] pending buffer full for %s, dropping packet", sessionKey)
-								pending.mu.Unlock()
-								mu.Unlock()
-								continue
+								log.Printf("[QUIC] pending buffer full for %s, dropping packet", pendingKey)
 							}
+							pending.mu.Unlock()
+							mu.Unlock()
+							continue
 						}
 
 						// First Initial for this session key: create a
@@ -1799,11 +1806,12 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 							packets: initialPackets,
 							done:    make(chan struct{}),
 						}
-						pendingQUICSessions[sessionKey] = pending
+						pendingQUICSessions[pendingKey] = pending
 						mu.Unlock()
 
 						// Capture loop variables for the goroutine.
 						capturedKey := sessionKey
+						capturedPendingKey := pendingKey
 						capturedDest := dest
 						capturedPolicyDest := policyDest
 						capturedPort := port
@@ -1812,26 +1820,35 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 						go func() {
 							checker, drop := s.resolveQUICPolicy(capturedPolicyDest, capturedPort)
 
-							pending.mu.Lock()
-							pending.allowed = !drop
-							pending.checker = checker
-							pending.resolved = true
-							buffered := pending.packets
-							pending.packets = nil
-							pending.mu.Unlock()
-
-							mu.Lock()
-							// Only delete if the map still holds this
-							// exact pending entry. The dispatch loop may
-							// have already replaced it with a new one
-							// after seeing the resolved flag.
-							if pendingQUICSessions[capturedKey] == pending {
-								delete(pendingQUICSessions, capturedKey)
-							}
-							close(pending.done)
-							if drop {
+							// drainAndDelete atomically transitions the
+							// pending entry out of the map. It runs under
+							// mu so the dispatch loop cannot observe a
+							// half-resolved state (resolved=true but entry
+							// still in the map), which would trigger a
+							// duplicate broker call. The success path
+							// below inlines the equivalent critical section
+							// so it can publish the session in the same
+							// mu.Lock window.
+							drainAndDelete := func() [][]byte {
+								mu.Lock()
+								pending.mu.Lock()
+								pending.allowed = !drop
+								pending.checker = checker
+								pending.resolved = true
+								buffered := pending.packets
+								pending.packets = nil
+								pending.mu.Unlock()
+								if pendingQUICSessions[capturedPendingKey] == pending {
+									delete(pendingQUICSessions, capturedPendingKey)
+								}
 								mu.Unlock()
-								log.Printf("[QUIC] denied %s, discarding %d buffered packets", capturedKey, len(buffered))
+								return buffered
+							}
+
+							if drop {
+								buffered := drainAndDelete()
+								close(pending.done)
+								log.Printf("[QUIC] denied %s, discarding %d buffered packets", capturedPendingKey, len(buffered))
 								return
 							}
 
@@ -1840,17 +1857,22 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 							// won't know about sessions created after it.
 							select {
 							case <-loopDone:
-								mu.Unlock()
-								log.Printf("[QUIC] dispatch loop exited, discarding approved session %s", capturedKey)
+								buffered := drainAndDelete()
+								close(pending.done)
+								log.Printf("[QUIC] dispatch loop exited, discarding approved session %s (%d buffered packets)", capturedPendingKey, len(buffered))
 								return
 							default:
 							}
 
 							// Create the session and flush buffered packets.
+							// If ListenPacket or upstream registration fails,
+							// bail out via drainAndDelete so the next packet
+							// gets a fresh approval cycle.
 							upstream, listenErr := net.ListenPacket("udp", "127.0.0.1:0")
 							if listenErr != nil {
-								mu.Unlock()
-								log.Printf("[QUIC] create upstream for %s: %v", capturedKey, listenErr)
+								drainAndDelete()
+								close(pending.done)
+								log.Printf("[QUIC] create upstream for %s: %v", capturedPendingKey, listenErr)
 								return
 							}
 							if checker != nil {
@@ -1859,8 +1881,32 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 								s.quicProxy.RegisterExpectedHost(upstream.LocalAddr().String(), capturedPolicyDest, capturedPort)
 							}
 							sess := &udpSession{upstream: upstream, lastSeen: time.Now()}
+
+							// Atomically publish the session, drain buffered
+							// packets, mark the pending entry resolved, and
+							// remove it from the map. The single mu.Lock
+							// here prevents the dispatch loop from observing
+							// an in-between state where the pending entry is
+							// already resolved but neither the session nor
+							// the map entry is authoritative. If two
+							// hostnames on the same IP create simultaneous
+							// sessions, the later one overwrites the earlier
+							// in the sessions map; the QUIC proxy's SNI
+							// validation keeps correctness.
+							mu.Lock()
+							pending.mu.Lock()
+							pending.allowed = true
+							pending.checker = checker
+							pending.resolved = true
+							buffered := pending.packets
+							pending.packets = nil
+							pending.mu.Unlock()
 							sessions[capturedKey] = sess
+							if pendingQUICSessions[capturedPendingKey] == pending {
+								delete(pendingQUICSessions, capturedPendingKey)
+							}
 							mu.Unlock()
+							close(pending.done)
 
 							origDst := &net.UDPAddr{IP: net.ParseIP(capturedDest), Port: capturedPort}
 							if origDst.IP == nil {
@@ -1878,7 +1924,7 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 									log.Printf("[QUIC] flush buffered to proxy: %v", writeErr)
 								}
 							}
-							log.Printf("[QUIC] approved %s, flushed %d buffered packets", capturedKey, len(buffered))
+							log.Printf("[QUIC] approved %s, flushed %d buffered packets", capturedPendingKey, len(buffered))
 						}()
 
 						continue
