@@ -202,6 +202,9 @@ func (s *Store) AddRule(verdict string, opts RuleOpts) (int64, error) {
 			return 0, fmt.Errorf("invalid port %d (must be 1-65535)", p)
 		}
 	}
+	if err := validateProtocols(opts.Protocols, fmt.Sprintf("rule %q", opts.Destination+opts.Tool+opts.Pattern)); err != nil {
+		return 0, err
+	}
 	source := opts.Source
 	if source == "" {
 		source = "manual"
