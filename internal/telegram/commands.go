@@ -240,6 +240,10 @@ func (h *CommandHandler) policyShow() string {
 				b.WriteString(" ports=")
 				b.WriteString(formatPorts(r.Ports))
 			}
+			if len(r.Protocols) > 0 {
+				b.WriteString(" protocols=")
+				b.WriteString(strings.Join(r.Protocols, ","))
+			}
 			b.WriteString("\n")
 		}
 	}
@@ -302,6 +306,19 @@ func (h *CommandHandler) policyShowFromStore() string {
 			if len(r.Ports) > 0 {
 				b.WriteString(" ports=")
 				b.WriteString(formatPorts(r.Ports))
+			}
+			if len(r.Protocols) > 0 {
+				b.WriteString(" protocols=")
+				b.WriteString(strings.Join(r.Protocols, ","))
+			}
+			if r.Replacement != "" {
+				fmt.Fprintf(&b, " -> %q", r.Replacement)
+			}
+			if r.Name != "" {
+				fmt.Fprintf(&b, " (%s)", r.Name)
+			}
+			if r.Source != "" {
+				fmt.Fprintf(&b, " [%s]", r.Source)
 			}
 			b.WriteString("\n")
 		}
