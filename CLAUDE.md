@@ -11,7 +11,7 @@ go test ./... -v -timeout 30s
 
 ## E2e Tests
 
-End-to-end tests live in `e2e/` and use build tags. They start a real sluice binary, configure policies, make connections through the proxy, and verify credential injection, MCP gateway flows, and audit log integrity.
+End-to-end tests live in `e2e/` and use build tags. They start a real sluice binary, configure policies, make connections through the proxy, and verify credential injection, MCP gateway flows, and audit log integrity. Protocol coverage: HTTP/HTTPS, SSH, MCP, WebSocket, gRPC, QUIC/HTTP3, DNS, and IMAP/SMTP.
 
 Build tags:
 - `e2e` -- required for all e2e tests
@@ -150,6 +150,7 @@ Extends phantom swap to handle OAuth credentials bidirectionally. Static credent
 - `internal/vault/phantom.go` -- `GeneratePhantomToken` for MITM phantom strings
 - `internal/proxy/oauth_index.go` -- Token URL index for response matching
 - `internal/proxy/oauth_response.go` -- Response interception, phantom swap, async vault persistence
+- `internal/proxy/quic_sni.go` -- `ExtractQUICSNI` decrypts QUIC Initial to extract SNI hostname
 - `internal/container/docker.go` -- `InjectEnvVars` implementation for Docker backend
 - `internal/container/types.go` -- `ContainerManager` interface with `InjectEnvVars`
 - `internal/store/migrations/000002_credential_meta.up.sql` -- Schema for credential metadata
@@ -165,22 +166,28 @@ Extends phantom swap to handle OAuth credentials bidirectionally. Static credent
 | SSH | Jump host, key from vault | N/A | Per-connection (channels belong to one session) |
 | IMAP/SMTP | AUTH command proxy, phantom password swap | N/A | Per-connection (one mailbox session) |
 | DNS | N/A | Deny-only (NXDOMAIN). See DNS design note below. | Per-query deny, other verdicts resolved at SOCKS5 |
-| QUIC/HTTP3 | HTTP/3 MITM via quic-go | Full HTTP/3 request/response | Per-request (each HTTP/3 request triggers policy check) |
+| QUIC/HTTP3 | HTTP/3 MITM via quic-go, SNI from Initial packet | Full HTTP/3 request/response | Per-request (each HTTP/3 request triggers policy check) |
 | APNS | Connection-level allow/deny (port 5223) | N/A | Per-connection |
 
 **Per-request policy evaluation** applies to HTTP/HTTPS, gRPC-over-HTTP/2, and QUIC/HTTP3. Policy is re-evaluated for every HTTP request (or HTTP/2 stream, or HTTP/3 request), so "Allow Once" permits a single request and subsequent requests on the same connection re-trigger the approval flow. When a per-request approval resolves to "Always Allow" or "Always Deny", the `RequestPolicyChecker` persists the new rule to the policy store via its `PersistRuleFunc` callback and swaps in a freshly compiled engine, so subsequent requests match via the fast path instead of re-entering the approval flow. A fast path skips per-request checks when the SOCKS5 CONNECT matched an explicit allow rule (`RuleMatch`, not default verdict) so normally allowed destinations incur no extra overhead. WebSocket, SSH, and IMAP/SMTP remain connection-level on purpose: per-message or per-command policy on those would blow past the broker's 5/min per-destination rate limit and break normal usage.
 
 **MITM library:** HTTPS interception uses go-mitmproxy (`github.com/lqqyt2423/go-mitmproxy`). The `SluiceAddon` struct in `internal/proxy/addon.go` implements go-mitmproxy's `Addon` interface. `Requestheaders` fires per HTTP/2 stream, giving true per-request policy for gRPC and other HTTP/2 traffic. `Request` handles credential injection (three-pass phantom swap). `Response` handles OAuth token interception.
 
-**QUIC per-request:** `EvaluateQUICDetailed` returns Ask when an ask rule matches. The UDP dispatch loop creates a `RequestPolicyChecker` and passes it to `buildHandler`, which calls `CheckAndConsume` per HTTP/3 request.
+**QUIC per-request:** `EvaluateQUICDetailed` returns Ask when an ask rule matches and falls back to the engine's configured default verdict (not hardcoded Deny). The UDP dispatch loop creates a `RequestPolicyChecker` and passes it to `buildHandler`, which calls `CheckAndConsume` per HTTP/3 request. When the default verdict is "allow", a per-request checker is still attached (with seed credits of 1) so long-lived QUIC sessions re-evaluate policy on subsequent requests.
 
-See `internal/proxy/request_policy.go`, `internal/policy/engine.go` (`EvaluateDetailed`, `EvaluateQUICDetailed`), and `internal/proxy/addon.go` (`SluiceAddon`).
+**QUIC SNI extraction:** Hostname recovery uses `ExtractQUICSNI()` to decrypt the QUIC Initial packet and extract SNI from the embedded TLS ClientHello. QUIC Initial packets encrypt the ClientHello, but the encryption keys are derived from the Destination Connection ID (DCID) visible in the packet header (RFC 9001 Section 5). Supports both QUIC v1 and v2 salts. Falls back to DNS reverse cache lookup, then raw IP if extraction fails.
+
+**QUIC broker dedup:** `pendingQUICSessions` in `server.go` prevents duplicate Telegram approval prompts when multiple UDP packets arrive for the same destination during the approval wait. Packets are buffered (max 32 per session). When approval resolves, buffered packets are flushed (if allowed) or discarded (if denied).
+
+See `internal/proxy/request_policy.go`, `internal/policy/engine.go` (`EvaluateDetailed`, `EvaluateQUICDetailed`), `internal/proxy/quic_sni.go` (`ExtractQUICSNI`), and `internal/proxy/addon.go` (`SluiceAddon`).
 
 ## Implementation Details
 
 ### Policy engine
 
 `LoadFromStore` reads rules from SQLite, compiles glob patterns into regexes, produces read-only Engine snapshot. `Evaluate(dest, port)` checks deny first, then allow, then ask, falling back to default verdict. Mutations go through the store, then a new Engine is compiled and atomically swapped via `srv.StoreEngine()`. SIGHUP also rebuilds the binding resolver and swaps it via `srv.StoreResolver()`.
+
+**Unscoped rules match all transports.** A rule without a `protocols` field (the common case for CLI-added rules like `sluice policy add allow cloudflare.com --ports 443`) matches TCP, UDP, and QUIC traffic. `EvaluateUDP` and `EvaluateQUICDetailed` first check protocol-scoped rules (`matchRulesStrictProto` with `protocols=["udp"]`/`["quic"]`) and fall back to unscoped rules (`matchRulesUnscoped`) before the engine's configured default verdict. UDP and QUIC use the same default as TCP; there is no hidden "UDP default-deny" override. `EvaluateUDP` collapses an Ask default to Deny because per-packet approval is impractical, while `EvaluateQUICDetailed` preserves Ask for the QUIC per-request approval flow. Protocol-scoped rules (`protocols=["tcp"]`, `["udp"]`, `["quic"]`, etc.) still apply only to their declared protocol. DNS has its own evaluation path via `IsDeniedDomain`, so the unscoped-rule fallback for UDP/QUIC does not affect DNS query handling.
 
 ### Protocol detection
 
@@ -192,7 +199,7 @@ Two-phase detection: port-based guess first, then byte-level for non-standard po
 
 `CouldBeAllowed(dest, includeAsk)`: when broker configured, Ask-matching destinations resolve via DNS for approval flow. When no broker, Ask treated as Deny at DNS stage to prevent leaking queries.
 
-**DNS approval design**: The DNS interceptor intentionally only blocks explicitly denied domains (returns NXDOMAIN). All other queries (allow, ask, default) are forwarded to the upstream resolver. This is by design. Policy enforcement for "ask" destinations happens at the SOCKS5 CONNECT layer, not at DNS. Blocking DNS for "ask" destinations would prevent the TCP connection from ever reaching the SOCKS5 handler where the approval flow triggers. The DNS layer populates the reverse DNS cache (IP -> hostname) so the SOCKS5 handler can recover hostnames from IP-only CONNECT requests.
+**DNS approval design**: The DNS interceptor intentionally only blocks explicitly denied domains (returns NXDOMAIN). All other queries (allow, ask, default) are forwarded to the upstream resolver. This is by design. Policy enforcement for "ask" destinations happens at the SOCKS5 CONNECT layer, not at DNS. Blocking DNS for "ask" destinations would prevent the TCP connection from ever reaching the SOCKS5 handler where the approval flow triggers. The DNS layer populates the reverse DNS cache (IP -> hostname) so the SOCKS5 handler can recover hostnames from IP-only CONNECT requests. DNS uses `IsDeniedDomain`, a separate evaluation path that is independent from the unscoped-rule matching in `EvaluateUDP` / `EvaluateQUICDetailed`. Unscoped rules therefore widen TCP/UDP/QUIC policy without changing DNS behavior.
 
 ### Audit logger
 

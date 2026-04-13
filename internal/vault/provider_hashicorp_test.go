@@ -2,11 +2,28 @@ package vault
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+// newIPv4Server creates an httptest.Server that listens on IPv4 only. This
+// avoids failures in environments where IPv6 is not available.
+func newIPv4Server(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &httptest.Server{
+		Listener: ln,
+		Config:   &http.Server{Handler: handler},
+	}
+	srv.Start()
+	return srv
+}
 
 // newMockVaultServer creates an httptest.Server that simulates HashiCorp Vault
 // KV v2 endpoints. secrets maps path -> key -> value for GET requests.
@@ -14,7 +31,7 @@ import (
 // If approleToken is non-empty, POST to auth/approle/login returns that token.
 func newMockVaultServer(t *testing.T, secrets map[string]map[string]string, listKeys map[string][]string, approleToken string) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// AppRole login. The Vault SDK sends PUT for write operations.
 		if (r.Method == http.MethodPut || r.Method == http.MethodPost) && strings.HasSuffix(r.URL.Path, "/v1/auth/approle/login") {
 			if approleToken == "" {
@@ -511,7 +528,7 @@ func TestHashiCorpProviderInterfaceCompliance(t *testing.T) {
 
 func TestHashiCorpProviderMalformedResponse(t *testing.T) {
 	// Server returns data where "data" nested key is not a map.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Vault-Token") == "" {
 			w.WriteHeader(http.StatusForbidden)
 			return
@@ -544,7 +561,7 @@ func TestHashiCorpProviderMalformedResponse(t *testing.T) {
 
 func TestHashiCorpProviderValueNotString(t *testing.T) {
 	// Server returns a "value" key that is not a string.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Vault-Token") == "" {
 			w.WriteHeader(http.StatusForbidden)
 			return
@@ -577,7 +594,7 @@ func TestHashiCorpProviderValueNotString(t *testing.T) {
 
 func TestHashiCorpProviderNoDataField(t *testing.T) {
 	// Server returns data without the nested "data" key.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Vault-Token") == "" {
 			w.WriteHeader(http.StatusForbidden)
 			return
@@ -609,7 +626,7 @@ func TestHashiCorpProviderNoDataField(t *testing.T) {
 
 func TestHashiCorpProviderListKeysNotList(t *testing.T) {
 	// Server returns "keys" that is not a list.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Vault-Token") == "" {
 			w.WriteHeader(http.StatusForbidden)
 			return
@@ -641,7 +658,7 @@ func TestHashiCorpProviderListKeysNotList(t *testing.T) {
 
 func TestHashiCorpProviderConnectionTimeout(t *testing.T) {
 	// Server that never responds (sleeps longer than HTTP client timeout).
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// The provider sets a 30s client timeout, so we can't wait that long
 		// in a test. Instead, test against a closed server.
 		w.WriteHeader(http.StatusInternalServerError)

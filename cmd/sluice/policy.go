@@ -89,7 +89,7 @@ func handlePolicyList(args []string) error {
 
 func handlePolicyAdd(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: sluice policy add <allow|deny|ask> <destination> [--ports 443,80] [--name \"reason\"]")
+		return fmt.Errorf("usage: sluice policy add <allow|deny|ask> <destination> [--ports 443,80] [--protocols quic,udp] [--name \"reason\"]")
 	}
 
 	verdict := args[0]
@@ -100,13 +100,14 @@ func handlePolicyAdd(args []string) error {
 	fs := flag.NewFlagSet("policy add", flag.ContinueOnError)
 	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	portsStr := fs.String("ports", "", "comma-separated port list (e.g. 443,80)")
+	protocolsStr := fs.String("protocols", "", "comma-separated protocol list (e.g. quic,udp)")
 	note := fs.String("name", "", "human-readable name")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
 
 	if fs.NArg() == 0 {
-		return fmt.Errorf("usage: sluice policy add <allow|deny|ask> <destination> [--ports 443,80] [--name \"reason\"]")
+		return fmt.Errorf("usage: sluice policy add <allow|deny|ask> <destination> [--ports 443,80] [--protocols quic,udp] [--name \"reason\"]")
 	}
 	destination := fs.Arg(0)
 
@@ -119,13 +120,18 @@ func handlePolicyAdd(args []string) error {
 		return err
 	}
 
+	protocols, err := parseProtocolsList(*protocolsStr)
+	if err != nil {
+		return err
+	}
+
 	db, err := store.New(*dbPath)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 
-	id, err := db.AddRule(verdict, store.RuleOpts{Destination: destination, Ports: ports, Name: *note})
+	id, err := db.AddRule(verdict, store.RuleOpts{Destination: destination, Ports: ports, Protocols: protocols, Name: *note})
 	if err != nil {
 		return fmt.Errorf("add rule: %w", err)
 	}

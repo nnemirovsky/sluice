@@ -305,6 +305,68 @@ func TestHandlePolicyAddWithGlob(t *testing.T) {
 	}
 }
 
+func TestHandlePolicyAddWithProtocols(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	output := capturePolicyOutput(t, func() {
+		if err := handlePolicyAdd([]string{"allow", "--db", dbPath, "--protocols", "quic,udp", "--ports", "443", "cdn.example.com"}); err != nil {
+			t.Fatalf("handlePolicyAdd with protocols: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, "added allow rule") {
+		t.Errorf("expected 'added allow rule' in output: %s", output)
+	}
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rules, _ := db.ListRules(store.RuleFilter{Verdict: "allow"})
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rules))
+	}
+	if len(rules[0].Protocols) != 2 {
+		t.Fatalf("expected 2 protocols, got %v", rules[0].Protocols)
+	}
+	protos := make(map[string]bool)
+	for _, p := range rules[0].Protocols {
+		protos[p] = true
+	}
+	if !protos["quic"] || !protos["udp"] {
+		t.Errorf("expected quic and udp, got %v", rules[0].Protocols)
+	}
+}
+
+func TestHandlePolicyAddInvalidProtocol(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	err := handlePolicyAdd([]string{"allow", "--db", dbPath, "--protocols", "htp", "example.com"})
+	if err == nil {
+		t.Fatal("expected error for invalid protocol")
+	}
+	if !strings.Contains(err.Error(), "unknown protocol") {
+		t.Errorf("expected 'unknown protocol' in error, got: %v", err)
+	}
+}
+
+func TestHandlePolicyAddEmptyProtocol(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	err := handlePolicyAdd([]string{"allow", "--db", dbPath, "--protocols", "quic,,udp", "example.com"})
+	if err == nil {
+		t.Fatal("expected error for empty protocol name")
+	}
+	if !strings.Contains(err.Error(), "empty protocol name") {
+		t.Errorf("expected 'empty protocol name' in error, got: %v", err)
+	}
+}
+
 // --- handlePolicyRemove tests ---
 
 func TestHandlePolicyRemoveValid(t *testing.T) {

@@ -83,4 +83,4 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace github.com/lqqyt2423/go-mitmproxy => github.com/nnemirovsky/go-mitmproxy v1.8.11-0.20260412092537-661f1983cb97
+replace github.com/lqqyt2423/go-mitmproxy => github.com/nnemirovsky/go-mitmproxy v1.8.11-0.20260413022640-c8d3fb9ddaa1

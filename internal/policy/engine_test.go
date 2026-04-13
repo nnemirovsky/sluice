@@ -1188,18 +1188,72 @@ protocols = ["quic"]
 }
 
 func TestEvaluateQUICDetailed_NilCompiled(t *testing.T) {
-	// Engine with nil compiled state returns Deny with DefaultVerdict.
+	// Engine with nil compiled state returns engine default with DefaultVerdict.
+	// Zero-value Engine has Default=Allow (consistent with EvaluateDetailedWithProtocol).
 	eng := &Engine{}
 	v, src := eng.EvaluateQUICDetailed("anything.com", 443)
-	if v != Deny || src != DefaultVerdict {
-		t.Errorf("EvaluateQUICDetailed(nil compiled) = (%v, %v), want (Deny, DefaultVerdict)", v, src)
+	if v != Allow || src != DefaultVerdict {
+		t.Errorf("EvaluateQUICDetailed(nil compiled) = (%v, %v), want (Allow, DefaultVerdict)", v, src)
+	}
+
+	// Engine with explicit Deny default returns Deny.
+	eng2 := &Engine{Default: Deny}
+	v2, src2 := eng2.EvaluateQUICDetailed("anything.com", 443)
+	if v2 != Deny || src2 != DefaultVerdict {
+		t.Errorf("EvaluateQUICDetailed(nil compiled, default=Deny) = (%v, %v), want (Deny, DefaultVerdict)", v2, src2)
 	}
 }
 
-func TestEvaluateUDP_UnscopedRulesIgnored(t *testing.T) {
-	// Rules without explicit protocols must NOT match EvaluateUDP or
-	// EvaluateQUIC. This prevents TCP-intended allow rules from
-	// inadvertently allowing UDP/QUIC traffic.
+func TestEvaluateQUICDetailed_DefaultAllow(t *testing.T) {
+	// When default = "allow", unknown destinations should return Allow
+	// with DefaultVerdict, not hardcoded Deny.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+
+[[deny]]
+destination = "blocked.example.com"
+protocols = ["quic"]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// Unknown destination falls back to default "allow".
+	v, src := eng.EvaluateQUICDetailed("unknown.example.com", 443)
+	if v != Allow || src != DefaultVerdict {
+		t.Errorf("EvaluateQUICDetailed(default=allow, unknown) = (%v, %v), want (Allow, DefaultVerdict)", v, src)
+	}
+
+	// Explicit deny still takes priority.
+	v, src = eng.EvaluateQUICDetailed("blocked.example.com", 443)
+	if v != Deny || src != RuleMatch {
+		t.Errorf("EvaluateQUICDetailed(default=allow, denied) = (%v, %v), want (Deny, RuleMatch)", v, src)
+	}
+}
+
+func TestEvaluateQUICDetailed_DefaultAsk(t *testing.T) {
+	// When default = "ask", unknown destinations should return Ask
+	// with DefaultVerdict so the caller can trigger the approval flow.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "ask"
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	v, src := eng.EvaluateQUICDetailed("anything.example.com", 443)
+	if v != Ask || src != DefaultVerdict {
+		t.Errorf("EvaluateQUICDetailed(default=ask) = (%v, %v), want (Ask, DefaultVerdict)", v, src)
+	}
+}
+
+func TestEvaluateUDP_UnscopedRulesMatch(t *testing.T) {
+	// Unscoped rules (no protocols field) match UDP and QUIC traffic as
+	// well as TCP. This keeps `sluice policy add allow example.com` working
+	// consistently across transports. Protocol-scoped rules (protocols=
+	// ["udp"] or ["quic"]) still take priority when present.
 	eng, err := LoadFromBytes([]byte(`
 [policy]
 default = "deny"
@@ -1217,14 +1271,14 @@ protocols = ["udp"]
 		t.Fatalf("load: %v", err)
 	}
 
-	// Unscoped allow rule must NOT allow UDP traffic.
-	if got := eng.EvaluateUDP("api.anthropic.com", 443); got != Deny {
-		t.Errorf("EvaluateUDP(unscoped allow) = %v, want Deny", got)
+	// Unscoped allow rule now matches UDP traffic.
+	if got := eng.EvaluateUDP("api.anthropic.com", 443); got != Allow {
+		t.Errorf("EvaluateUDP(unscoped allow) = %v, want Allow", got)
 	}
 
-	// Unscoped allow rule must NOT allow QUIC traffic.
-	if got := eng.EvaluateQUIC("api.anthropic.com", 443); got != Deny {
-		t.Errorf("EvaluateQUIC(unscoped allow) = %v, want Deny", got)
+	// Unscoped allow rule now matches QUIC traffic.
+	if got := eng.EvaluateQUIC("api.anthropic.com", 443); got != Allow {
+		t.Errorf("EvaluateQUIC(unscoped allow) = %v, want Allow", got)
 	}
 
 	// Explicitly scoped UDP rule must still work.
@@ -1235,6 +1289,199 @@ protocols = ["udp"]
 	// Regular Evaluate must still allow unscoped rules.
 	if got := eng.Evaluate("api.anthropic.com", 443); got != Allow {
 		t.Errorf("Evaluate(unscoped allow) = %v, want Allow", got)
+	}
+
+	// Unscoped rule with a port filter still respects the port.
+	if got := eng.EvaluateUDP("api.anthropic.com", 80); got != Deny {
+		t.Errorf("EvaluateUDP(unscoped allow, wrong port) = %v, want Deny", got)
+	}
+}
+
+func TestEvaluateUDP_UnscopedAllowMatches(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "cloudflare.com"
+ports = [443]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := eng.EvaluateUDP("cloudflare.com", 443); got != Allow {
+		t.Errorf("EvaluateUDP(unscoped allow) = %v, want Allow", got)
+	}
+}
+
+func TestEvaluateUDP_DefaultAllow(t *testing.T) {
+	// When the engine default is "allow", an unmatched UDP destination
+	// returns Allow (just like TCP Evaluate). This mirrors how the engine
+	// default is used as the terminal fallback for every transport except
+	// DNS (which has its own IsDeniedDomain path).
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+
+[[deny]]
+destination = "blocked.example.com"
+ports = [443]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// Unknown destination falls back to default "allow".
+	if got := eng.EvaluateUDP("unknown.example.com", 443); got != Allow {
+		t.Errorf("EvaluateUDP(default=allow, unknown) = %v, want Allow", got)
+	}
+
+	// Explicit deny still takes priority over default allow.
+	if got := eng.EvaluateUDP("blocked.example.com", 443); got != Deny {
+		t.Errorf("EvaluateUDP(default=allow, denied) = %v, want Deny", got)
+	}
+}
+
+func TestEvaluateUDP_DefaultDeny(t *testing.T) {
+	// When the engine default is "deny", an unmatched UDP destination
+	// returns Deny.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "allowed.example.com"
+ports = [443]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	// Unknown destination falls back to default "deny".
+	if got := eng.EvaluateUDP("unknown.example.com", 443); got != Deny {
+		t.Errorf("EvaluateUDP(default=deny, unknown) = %v, want Deny", got)
+	}
+
+	// Matching allow rule still produces Allow.
+	if got := eng.EvaluateUDP("allowed.example.com", 443); got != Allow {
+		t.Errorf("EvaluateUDP(default=deny, allowed) = %v, want Allow", got)
+	}
+}
+
+func TestEvaluateUDP_DefaultAsk(t *testing.T) {
+	// EvaluateUDP has no approval flow (per-packet approval is impractical),
+	// so an Ask default collapses to Deny. This mirrors the contract of
+	// EvaluateQUIC (non-detailed), which collapses Ask to Deny for callers
+	// that do not know how to drive the approval flow.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "ask"
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	if got := eng.EvaluateUDP("anything.example.com", 443); got != Deny {
+		t.Errorf("EvaluateUDP(default=ask) = %v, want Deny (collapsed)", got)
+	}
+}
+
+func TestEvaluateUDP_NilCompiled(t *testing.T) {
+	// Engine with nil compiled state returns the engine default (Ask
+	// collapses to Deny). Zero-value Engine has Default=Allow.
+	eng := &Engine{}
+	if got := eng.EvaluateUDP("anything.com", 443); got != Allow {
+		t.Errorf("EvaluateUDP(nil compiled, default=Allow) = %v, want Allow", got)
+	}
+
+	eng2 := &Engine{Default: Deny}
+	if got := eng2.EvaluateUDP("anything.com", 443); got != Deny {
+		t.Errorf("EvaluateUDP(nil compiled, default=Deny) = %v, want Deny", got)
+	}
+
+	eng3 := &Engine{Default: Ask}
+	if got := eng3.EvaluateUDP("anything.com", 443); got != Deny {
+		t.Errorf("EvaluateUDP(nil compiled, default=Ask) = %v, want Deny (collapsed)", got)
+	}
+}
+
+func TestEvaluateQUICDetailed_UnscopedAllowMatches(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "cloudflare.com"
+ports = [443]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	v, src := eng.EvaluateQUICDetailed("cloudflare.com", 443)
+	if v != Allow || src != RuleMatch {
+		t.Errorf("EvaluateQUICDetailed(unscoped allow) = (%v, %v), want (Allow, RuleMatch)", v, src)
+	}
+}
+
+func TestEvaluateQUICDetailed_UnscopedDenyPriority(t *testing.T) {
+	// Unscoped deny beats unscoped allow for QUIC, matching the behavior
+	// of TCP evaluation.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+
+[[allow]]
+destination = "overlap.example.com"
+ports = [443]
+
+[[deny]]
+destination = "overlap.example.com"
+ports = [443]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	v, src := eng.EvaluateQUICDetailed("overlap.example.com", 443)
+	if v != Deny || src != RuleMatch {
+		t.Errorf("EvaluateQUICDetailed(unscoped deny over unscoped allow) = (%v, %v), want (Deny, RuleMatch)", v, src)
+	}
+}
+
+func TestEvaluateQUICDetailed_ProtocolScopedTakesPriority(t *testing.T) {
+	// An explicit QUIC deny rule must beat an unscoped allow rule, and an
+	// explicit UDP allow must beat an unscoped deny for QUIC evaluation.
+	eng, err := LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+
+[[allow]]
+destination = "quic-deny.example.com"
+ports = [443]
+
+[[deny]]
+destination = "quic-deny.example.com"
+ports = [443]
+protocols = ["quic"]
+
+[[deny]]
+destination = "udp-allow.example.com"
+ports = [443]
+
+[[allow]]
+destination = "udp-allow.example.com"
+ports = [443]
+protocols = ["udp"]
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	// QUIC-scoped deny wins over unscoped allow.
+	if v, src := eng.EvaluateQUICDetailed("quic-deny.example.com", 443); v != Deny || src != RuleMatch {
+		t.Errorf("EvaluateQUICDetailed(quic deny) = (%v, %v), want (Deny, RuleMatch)", v, src)
+	}
+	// UDP-scoped allow wins over unscoped deny.
+	if v, src := eng.EvaluateQUICDetailed("udp-allow.example.com", 443); v != Allow || src != RuleMatch {
+		t.Errorf("EvaluateQUICDetailed(udp allow) = (%v, %v), want (Allow, RuleMatch)", v, src)
 	}
 }
 

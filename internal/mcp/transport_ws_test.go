@@ -17,7 +17,7 @@ import (
 // initialize, tools/list, and tools/call.
 func mockWSMCPServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 			Subprotocols: []string{"mcp"},
 		})
@@ -89,7 +89,7 @@ func mockWSMCPServer(t *testing.T) *httptest.Server {
 // and a server-initiated request before the tools/call response.
 func mockWSMCPServerWithNotifications(t *testing.T) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 			Subprotocols: []string{"mcp"},
 		})
@@ -171,7 +171,7 @@ func mockWSMCPServerWithDisconnect(t *testing.T) *httptest.Server {
 	t.Helper()
 	var connCount atomic.Int32
 
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 			Subprotocols: []string{"mcp"},
 		})

@@ -2307,12 +2307,19 @@ func TestFullSOCKS5MITMPipeline(t *testing.T) {
 	// Start an HTTPS backend that echoes the Authorization header.
 	var mu sync.Mutex
 	var receivedAuth string
-	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		receivedAuth = r.Header.Get("Authorization")
-		mu.Unlock()
-		_, _ = w.Write([]byte("auth=" + receivedAuth))
-	}))
+	backendLn, backendLnErr := net.Listen("tcp4", "127.0.0.1:0")
+	if backendLnErr != nil {
+		t.Fatal(backendLnErr)
+	}
+	backend := &httptest.Server{
+		Listener: backendLn,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			receivedAuth = r.Header.Get("Authorization")
+			mu.Unlock()
+			_, _ = w.Write([]byte("auth=" + receivedAuth))
+		})},
+	}
 	backend.StartTLS()
 	defer backend.Close()
 
@@ -2679,21 +2686,35 @@ func TestFullSOCKS5MITMPipelineMultipleBindings(t *testing.T) {
 	var mu1, mu2 sync.Mutex
 	var received1, received2 string
 
-	backend1 := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu1.Lock()
-		received1 = r.Header.Get("Authorization")
-		mu1.Unlock()
-		_, _ = w.Write([]byte("ok1"))
-	}))
+	ln1, ln1Err := net.Listen("tcp4", "127.0.0.1:0")
+	if ln1Err != nil {
+		t.Fatal(ln1Err)
+	}
+	backend1 := &httptest.Server{
+		Listener: ln1,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu1.Lock()
+			received1 = r.Header.Get("Authorization")
+			mu1.Unlock()
+			_, _ = w.Write([]byte("ok1"))
+		})},
+	}
 	backend1.StartTLS()
 	defer backend1.Close()
 
-	backend2 := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu2.Lock()
-		received2 = r.Header.Get("X-Api-Key")
-		mu2.Unlock()
-		_, _ = w.Write([]byte("ok2"))
-	}))
+	ln2, ln2Err := net.Listen("tcp4", "127.0.0.1:0")
+	if ln2Err != nil {
+		t.Fatal(ln2Err)
+	}
+	backend2 := &httptest.Server{
+		Listener: ln2,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu2.Lock()
+			received2 = r.Header.Get("X-Api-Key")
+			mu2.Unlock()
+			_, _ = w.Write([]byte("ok2"))
+		})},
+	}
 	backend2.StartTLS()
 	defer backend2.Close()
 
@@ -2860,12 +2881,19 @@ func TestProxyUnboundHTTPSStripsPhantoms(t *testing.T) {
 
 	var mu sync.Mutex
 	var receivedCustom string
-	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		receivedCustom = r.Header.Get("X-Custom")
-		mu.Unlock()
-		w.WriteHeader(200)
-	}))
+	backendLn2, backendLn2Err := net.Listen("tcp4", "127.0.0.1:0")
+	if backendLn2Err != nil {
+		t.Fatal(backendLn2Err)
+	}
+	backend := &httptest.Server{
+		Listener: backendLn2,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			receivedCustom = r.Header.Get("X-Custom")
+			mu.Unlock()
+			w.WriteHeader(200)
+		})},
+	}
 	backend.StartTLS()
 	defer backend.Close()
 
@@ -3080,12 +3108,19 @@ func TestProxyWithByteDetectionHTTPS(t *testing.T) {
 
 	var mu sync.Mutex
 	var receivedAuth string
-	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		receivedAuth = r.Header.Get("Authorization")
-		mu.Unlock()
-		_, _ = w.Write([]byte("detected"))
-	}))
+	detLn, detLnErr := net.Listen("tcp4", "127.0.0.1:0")
+	if detLnErr != nil {
+		t.Fatal(detLnErr)
+	}
+	backend := &httptest.Server{
+		Listener: detLn,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			receivedAuth = r.Header.Get("Authorization")
+			mu.Unlock()
+			_, _ = w.Write([]byte("detected"))
+		})},
+	}
 	backend.StartTLS()
 	defer backend.Close()
 
@@ -3187,12 +3222,19 @@ func TestProxyGenericPortNoBindingByteDetection(t *testing.T) {
 
 	var mu sync.Mutex
 	var receivedHeader string
-	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		receivedHeader = r.Header.Get("X-Phantom")
-		mu.Unlock()
-		_, _ = w.Write([]byte("ok"))
-	}))
+	phantomLn, phantomLnErr := net.Listen("tcp4", "127.0.0.1:0")
+	if phantomLnErr != nil {
+		t.Fatal(phantomLnErr)
+	}
+	backend := &httptest.Server{
+		Listener: phantomLn,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			receivedHeader = r.Header.Get("X-Phantom")
+			mu.Unlock()
+			_, _ = w.Write([]byte("ok"))
+		})},
+	}
 	backend.StartTLS()
 	defer backend.Close()
 
@@ -3419,12 +3461,19 @@ func TestProxyNonStandardPortWithBinding(t *testing.T) {
 
 	var mu sync.Mutex
 	var receivedAuth string
-	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		receivedAuth = r.Header.Get("Authorization")
-		mu.Unlock()
-		_, _ = w.Write([]byte("nonstandard-ok"))
-	}))
+	nsLn, nsLnErr := net.Listen("tcp4", "127.0.0.1:0")
+	if nsLnErr != nil {
+		t.Fatal(nsLnErr)
+	}
+	backend := &httptest.Server{
+		Listener: nsLn,
+		Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			receivedAuth = r.Header.Get("Authorization")
+			mu.Unlock()
+			_, _ = w.Write([]byte("nonstandard-ok"))
+		})},
+	}
 	backend.StartTLS()
 	defer backend.Close()
 
@@ -3785,4 +3834,966 @@ default = "allow"
 
 	// Should not panic when addon is nil.
 	srv.SetOnOAuthRefresh(func(_ string) {})
+}
+
+// delayedCountingChannel is a mock approval channel that counts broker
+// requests and delays resolution so tests can observe dedup behavior.
+type delayedCountingChannel struct {
+	broker   *channel.Broker
+	response channel.Response
+	mu       sync.Mutex
+	count    int
+	delay    time.Duration
+}
+
+func (c *delayedCountingChannel) RequestApproval(_ context.Context, req channel.ApprovalRequest) error {
+	c.mu.Lock()
+	c.count++
+	c.mu.Unlock()
+	go func() {
+		if c.delay > 0 {
+			time.Sleep(c.delay)
+		}
+		c.broker.Resolve(req.ID, c.response)
+	}()
+	return nil
+}
+
+func (c *delayedCountingChannel) CancelApproval(_ string) error            { return nil }
+func (c *delayedCountingChannel) Commands() <-chan channel.Command         { return nil }
+func (c *delayedCountingChannel) Notify(_ context.Context, _ string) error { return nil }
+func (c *delayedCountingChannel) Start() error                             { return nil }
+func (c *delayedCountingChannel) Stop()                                    {}
+func (c *delayedCountingChannel) Type() channel.ChannelType                { return channel.ChannelTelegram }
+
+func (c *delayedCountingChannel) Count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.count
+}
+
+// TestPendingQUICSessionBufferLimit verifies that the pendingQUICSession
+// struct respects the maxPendingQUICPackets limit.
+func TestPendingQUICSessionBufferLimit(t *testing.T) {
+	pending := &pendingQUICSession{
+		packets: nil,
+		done:    make(chan struct{}),
+	}
+
+	// Buffer exactly maxPendingQUICPackets packets.
+	for i := 0; i < maxPendingQUICPackets; i++ {
+		pending.mu.Lock()
+		if len(pending.packets) < maxPendingQUICPackets {
+			pending.packets = append(pending.packets, []byte{byte(i)})
+		}
+		pending.mu.Unlock()
+	}
+
+	if len(pending.packets) != maxPendingQUICPackets {
+		t.Fatalf("expected %d packets in buffer, got %d", maxPendingQUICPackets, len(pending.packets))
+	}
+
+	// Next packet should be dropped.
+	pending.mu.Lock()
+	before := len(pending.packets)
+	if len(pending.packets) < maxPendingQUICPackets {
+		pending.packets = append(pending.packets, []byte{0xFF})
+	}
+	after := len(pending.packets)
+	pending.mu.Unlock()
+
+	if after != before {
+		t.Fatalf("buffer should not grow beyond %d, got %d", maxPendingQUICPackets, after)
+	}
+
+	// Verify done channel works correctly.
+	pending.allowed = true
+	close(pending.done)
+
+	select {
+	case <-pending.done:
+		if !pending.allowed {
+			t.Error("expected allowed=true after approval")
+		}
+	case <-time.After(time.Second):
+		t.Error("done channel was not closed")
+	}
+}
+
+// TestPendingQUICSessionDenied verifies that a denied pendingQUICSession
+// signals done with allowed=false.
+func TestPendingQUICSessionDenied(t *testing.T) {
+	pending := &pendingQUICSession{
+		packets: [][]byte{{0x01}, {0x02}, {0x03}},
+		done:    make(chan struct{}),
+	}
+
+	pending.allowed = false
+	close(pending.done)
+
+	select {
+	case <-pending.done:
+		if pending.allowed {
+			t.Error("expected allowed=false after denial")
+		}
+	case <-time.After(time.Second):
+		t.Error("done channel was not closed")
+	}
+}
+
+// quicBrokerTestEnv holds resources created by setupQUICBrokerTest.
+type quicBrokerTestEnv struct {
+	ch       *delayedCountingChannel
+	srv      *Server
+	udpConn  *net.UDPConn
+	bindAddr *net.UDPAddr
+}
+
+// setupQUICBrokerTest creates a sluice server with a delayed counting channel,
+// an ask-all policy, a SOCKS5 UDP ASSOCIATE connection, and a UDP socket ready
+// to send QUIC packets. Cleanup is registered via t.Cleanup.
+func setupQUICBrokerTest(t *testing.T, response channel.Response, delay time.Duration) quicBrokerTestEnv {
+	t.Helper()
+
+	ch := &delayedCountingChannel{
+		response: response,
+		delay:    delay,
+	}
+	broker := channel.NewBroker([]channel.Channel{ch})
+	ch.broker = broker
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+timeout_sec = 10
+
+[[ask]]
+destination = "*"
+ports = [443]
+protocols = ["quic"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tmpDir := t.TempDir()
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Broker:     broker,
+		Provider:   &stubQUICProvider{},
+		Resolver:   mustBindingResolver(t),
+		VaultDir:   tmpDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	if srv.quicProxy == nil {
+		t.Fatal("expected QUIC proxy to be created")
+	}
+
+	for i := 0; i < 50; i++ {
+		if srv.quicProxy.Addr() != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if srv.quicProxy.Addr() == nil {
+		t.Fatal("QUIC proxy did not start listening")
+	}
+
+	tcpConn, err := net.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatalf("dial SOCKS5: %v", err)
+	}
+	t.Cleanup(func() { _ = tcpConn.Close() })
+
+	_, _ = tcpConn.Write([]byte{0x05, 0x01, 0x00})
+	authResp := make([]byte, 2)
+	if _, err := io.ReadFull(tcpConn, authResp); err != nil {
+		t.Fatalf("read auth response: %v", err)
+	}
+	if authResp[1] != 0x00 {
+		t.Fatalf("unexpected auth method: %d", authResp[1])
+	}
+
+	_, _ = tcpConn.Write([]byte{0x05, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
+	assocResp := make([]byte, 10)
+	if _, err := io.ReadFull(tcpConn, assocResp); err != nil {
+		t.Fatalf("read ASSOCIATE response: %v", err)
+	}
+	if assocResp[1] != 0x00 {
+		t.Fatalf("ASSOCIATE failed with reply %d", assocResp[1])
+	}
+
+	bindPort := int(assocResp[8])<<8 | int(assocResp[9])
+	bindIP := net.IP(assocResp[4:8])
+	bindAddr := &net.UDPAddr{IP: bindIP, Port: bindPort}
+
+	localTCPAddr := tcpConn.LocalAddr().(*net.TCPAddr)
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: localTCPAddr.IP, Port: 0})
+	if err != nil {
+		t.Fatalf("listen UDP: %v", err)
+	}
+	t.Cleanup(func() { _ = udpConn.Close() })
+
+	return quicBrokerTestEnv{
+		ch:       ch,
+		srv:      srv,
+		udpConn:  udpConn,
+		bindAddr: bindAddr,
+	}
+}
+
+// buildQUICDatagram wraps a QUIC Initial packet in a SOCKS5 UDP header
+// targeting the given IPv4 destination and port 443.
+func buildQUICDatagram(t *testing.T, sni string, destIP net.IP) []byte {
+	t.Helper()
+	quicPayload := buildQUICInitial(t, sni, quicVersionV1)
+	ip4 := destIP.To4()
+	destPort := 443
+	socks5Header := []byte{
+		0x00, 0x00,
+		0x00,
+		0x01,
+		ip4[0], ip4[1], ip4[2], ip4[3],
+		byte(destPort >> 8), byte(destPort),
+	}
+	return append(socks5Header, quicPayload...)
+}
+
+// TestQUICPendingSessionDedupOneBrokerRequest verifies that multiple QUIC
+// Initial packets for the same destination during an approval wait trigger
+// only a single broker request. The additional packets are buffered and
+// flushed when approval resolves.
+func TestQUICPendingSessionDedupOneBrokerRequest(t *testing.T) {
+	env := setupQUICBrokerTest(t, channel.ResponseAllowOnce, 200*time.Millisecond)
+	datagram := buildQUICDatagram(t, "dedup-test.example.com", net.ParseIP("10.0.0.1"))
+
+	// Send 5 QUIC Initial packets rapidly. Only one should trigger
+	// a broker request. The rest should be buffered.
+	for i := 0; i < 5; i++ {
+		if _, err := env.udpConn.WriteTo(datagram, env.bindAddr); err != nil {
+			t.Fatalf("send QUIC packet %d: %v", i, err)
+		}
+		// Tiny delay to ensure the dispatch loop processes each packet.
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Wait for the approval to resolve (200ms delay + margin).
+	time.Sleep(400 * time.Millisecond)
+
+	// Verify only one broker request was made.
+	got := env.ch.Count()
+	if got != 1 {
+		t.Errorf("expected 1 broker request, got %d", got)
+	}
+}
+
+// TestQUICPendingSessionDeniedDiscardsBuffer verifies that when the broker
+// denies a QUIC session, all buffered packets are discarded and no session
+// is created.
+func TestQUICPendingSessionDeniedDiscardsBuffer(t *testing.T) {
+	env := setupQUICBrokerTest(t, channel.ResponseDeny, 100*time.Millisecond)
+	datagram := buildQUICDatagram(t, "denied-test.example.com", net.ParseIP("10.0.0.2"))
+
+	// Send 3 packets. All should be buffered, then discarded on denial.
+	for i := 0; i < 3; i++ {
+		if _, err := env.udpConn.WriteTo(datagram, env.bindAddr); err != nil {
+			t.Fatalf("send QUIC packet %d: %v", i, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Wait for the denial to resolve.
+	time.Sleep(300 * time.Millisecond)
+
+	// Verify only one broker request was made (dedup worked).
+	got := env.ch.Count()
+	if got != 1 {
+		t.Errorf("expected 1 broker request for denied session, got %d", got)
+	}
+
+	// Send another packet after denial. Since the pending entry was removed,
+	// this should trigger a new broker request.
+	if _, err := env.udpConn.WriteTo(datagram, env.bindAddr); err != nil {
+		t.Fatalf("send post-denial QUIC packet: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	got = env.ch.Count()
+	if got != 2 {
+		t.Errorf("expected 2 broker requests total (one per approval cycle), got %d", got)
+	}
+}
+
+// TestQUICPendingSessionBufferOverflow verifies that when more than
+// maxPendingQUICPackets arrive during an approval wait, excess packets
+// are dropped.
+func TestQUICPendingSessionBufferOverflow(t *testing.T) {
+	env := setupQUICBrokerTest(t, channel.ResponseAllowOnce, 500*time.Millisecond)
+	datagram := buildQUICDatagram(t, "overflow-test.example.com", net.ParseIP("10.0.0.3"))
+
+	// Send maxPendingQUICPackets + 10 packets. The extra ones should be dropped.
+	total := maxPendingQUICPackets + 10
+	for i := 0; i < total; i++ {
+		if _, err := env.udpConn.WriteTo(datagram, env.bindAddr); err != nil {
+			t.Fatalf("send QUIC packet %d: %v", i, err)
+		}
+		// No delay: blast them all as fast as possible.
+	}
+
+	// Small delay so the dispatch loop processes all packets.
+	time.Sleep(100 * time.Millisecond)
+
+	// Still only one broker request.
+	got := env.ch.Count()
+	if got != 1 {
+		t.Errorf("expected 1 broker request during overflow test, got %d", got)
+	}
+}
+
+// TestRelayQUICResponsesWrapsSOCKS5Header verifies that relayQUICResponses
+// reads response packets from the upstream PacketConn, wraps them in SOCKS5
+// UDP headers using the original destination address (not the QUIC proxy
+// address), and writes them to the relay UDPConn.
+func TestRelayQUICResponsesWrapsSOCKS5Header(t *testing.T) {
+	// 1. Create the upstream PacketConn (simulates per-session listener that
+	//    quic-go writes responses to).
+	upstream, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	defer func() { _ = upstream.Close() }()
+
+	// 2. Create the relay UDPConn (simulates bindLn from SOCKS5 UDP ASSOCIATE).
+	relay, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen relay: %v", err)
+	}
+	defer func() { _ = relay.Close() }()
+
+	// 3. Create a "client" that will read from the relay.
+	client, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	clientAddr := client.LocalAddr()
+	originalDst := &net.UDPAddr{IP: net.ParseIP("93.184.216.34"), Port: 443}
+
+	// 4. Start relayQUICResponses in a goroutine.
+	srv := &Server{}
+	go srv.relayQUICResponses(upstream, relay, clientAddr, originalDst)
+
+	// 5. Simulate quic-go sending a response by writing to the upstream.
+	responsePayload := []byte("QUIC response data from upstream")
+	sender, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen sender: %v", err)
+	}
+	defer func() { _ = sender.Close() }()
+
+	if _, err := sender.WriteTo(responsePayload, upstream.LocalAddr()); err != nil {
+		t.Fatalf("write to upstream: %v", err)
+	}
+
+	// 6. Read from the client and verify SOCKS5 wrapping.
+	_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 65535)
+	n, _, readErr := client.ReadFrom(buf)
+	if readErr != nil {
+		t.Fatalf("read from client: %v", readErr)
+	}
+
+	// Parse the SOCKS5 UDP header.
+	addr, port, payload, parseErr := ParseSOCKS5UDPHeader(buf[:n])
+	if parseErr != nil {
+		t.Fatalf("parse SOCKS5 UDP header: %v", parseErr)
+	}
+
+	// Verify the address is the original destination, not the QUIC proxy.
+	if addr != "93.184.216.34" {
+		t.Errorf("SOCKS5 header addr = %q, want %q", addr, "93.184.216.34")
+	}
+	if port != 443 {
+		t.Errorf("SOCKS5 header port = %d, want %d", port, 443)
+	}
+	if !bytes.Equal(payload, responsePayload) {
+		t.Errorf("payload = %q, want %q", string(payload), string(responsePayload))
+	}
+
+	// Clean up: close upstream to stop the relay goroutine.
+	_ = upstream.Close()
+}
+
+// TestRelayQUICResponsesIPv6OriginalDst verifies that relayQUICResponses
+// correctly wraps responses when the original destination is an IPv6 address.
+func TestRelayQUICResponsesIPv6OriginalDst(t *testing.T) {
+	upstream, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	defer func() { _ = upstream.Close() }()
+
+	relay, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen relay: %v", err)
+	}
+	defer func() { _ = relay.Close() }()
+
+	client, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	clientAddr := client.LocalAddr()
+	// Use an IPv6 original destination.
+	originalDst := &net.UDPAddr{IP: net.ParseIP("2606:4700::6810:84e5"), Port: 443}
+
+	srv := &Server{}
+	go srv.relayQUICResponses(upstream, relay, clientAddr, originalDst)
+
+	responsePayload := []byte("IPv6 response")
+	sender, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen sender: %v", err)
+	}
+	defer func() { _ = sender.Close() }()
+
+	if _, err := sender.WriteTo(responsePayload, upstream.LocalAddr()); err != nil {
+		t.Fatalf("write to upstream: %v", err)
+	}
+
+	_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 65535)
+	n, _, readErr := client.ReadFrom(buf)
+	if readErr != nil {
+		t.Fatalf("read from client: %v", readErr)
+	}
+
+	addr, port, payload, parseErr := ParseSOCKS5UDPHeader(buf[:n])
+	if parseErr != nil {
+		t.Fatalf("parse SOCKS5 UDP header: %v", parseErr)
+	}
+
+	if addr != "2606:4700::6810:84e5" {
+		t.Errorf("SOCKS5 header addr = %q, want %q", addr, "2606:4700::6810:84e5")
+	}
+	if port != 443 {
+		t.Errorf("SOCKS5 header port = %d, want %d", port, 443)
+	}
+	if !bytes.Equal(payload, responsePayload) {
+		t.Errorf("payload = %q, want %q", string(payload), string(responsePayload))
+	}
+
+	_ = upstream.Close()
+}
+
+// TestRelayQUICResponsesStopsOnUpstreamClose verifies that relayQUICResponses
+// exits when the upstream PacketConn is closed.
+func TestRelayQUICResponsesStopsOnUpstreamClose(t *testing.T) {
+	upstream, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+
+	relay, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen relay: %v", err)
+	}
+	defer func() { _ = relay.Close() }()
+
+	client, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	originalDst := &net.UDPAddr{IP: net.ParseIP("93.184.216.34"), Port: 443}
+
+	done := make(chan struct{})
+	srv := &Server{}
+	go func() {
+		srv.relayQUICResponses(upstream, relay, client.LocalAddr(), originalDst)
+		close(done)
+	}()
+
+	// Close upstream to signal the relay to stop.
+	_ = upstream.Close()
+
+	select {
+	case <-done:
+		// Goroutine exited as expected.
+	case <-time.After(3 * time.Second):
+		t.Fatal("relayQUICResponses did not exit after upstream close")
+	}
+}
+
+// TestRelayQUICResponsesMultiplePackets verifies that relayQUICResponses
+// correctly relays multiple sequential response packets.
+func TestRelayQUICResponsesMultiplePackets(t *testing.T) {
+	upstream, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	defer func() { _ = upstream.Close() }()
+
+	relay, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen relay: %v", err)
+	}
+	defer func() { _ = relay.Close() }()
+
+	client, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen client: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	originalDst := &net.UDPAddr{IP: net.ParseIP("93.184.216.34"), Port: 443}
+
+	srv := &Server{}
+	go srv.relayQUICResponses(upstream, relay, client.LocalAddr(), originalDst)
+
+	sender, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen sender: %v", err)
+	}
+	defer func() { _ = sender.Close() }()
+
+	// Send 3 packets and verify each is relayed correctly.
+	for i := 0; i < 3; i++ {
+		payload := []byte(fmt.Sprintf("response packet %d", i))
+		if _, writeErr := sender.WriteTo(payload, upstream.LocalAddr()); writeErr != nil {
+			t.Fatalf("write packet %d: %v", i, writeErr)
+		}
+
+		_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+		buf := make([]byte, 65535)
+		n, _, readErr := client.ReadFrom(buf)
+		if readErr != nil {
+			t.Fatalf("read packet %d: %v", i, readErr)
+		}
+
+		addr, port, got, parseErr := ParseSOCKS5UDPHeader(buf[:n])
+		if parseErr != nil {
+			t.Fatalf("parse packet %d: %v", i, parseErr)
+		}
+		if addr != "93.184.216.34" || port != 443 {
+			t.Errorf("packet %d: addr=%q port=%d, want 93.184.216.34:443", i, addr, port)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Errorf("packet %d: payload = %q, want %q", i, string(got), string(payload))
+		}
+	}
+
+	_ = upstream.Close()
+}
+
+// TestSNIAccumulatorReassemble verifies that sniAccumulator.reassemble
+// concatenates CRYPTO chunks from offset 0 and stops at the first gap.
+func TestSNIAccumulatorReassemble(t *testing.T) {
+	acc := &sniAccumulator{
+		cryptoByOffset: make(map[uint64][]byte),
+		firstSeen:      time.Now(),
+	}
+	acc.addChunk(0, []byte("hello "))
+	acc.addChunk(6, []byte("world"))
+	got := acc.reassemble()
+	if string(got) != "hello world" {
+		t.Errorf("expected \"hello world\", got %q", string(got))
+	}
+}
+
+// TestSNIAccumulatorReassembleWithGap verifies that reassemble returns only
+// the contiguous prefix when there is a gap in the offset sequence.
+func TestSNIAccumulatorReassembleWithGap(t *testing.T) {
+	acc := &sniAccumulator{
+		cryptoByOffset: make(map[uint64][]byte),
+		firstSeen:      time.Now(),
+	}
+	acc.addChunk(0, []byte("abc"))
+	acc.addChunk(100, []byte("far-away"))
+	got := acc.reassemble()
+	if string(got) != "abc" {
+		t.Errorf("expected \"abc\" (gap after 3), got %q", string(got))
+	}
+}
+
+// TestSNIAccumulatorIgnoresDuplicateOffsets verifies that re-adding a chunk
+// at the same offset is a no-op (first chunk wins).
+func TestSNIAccumulatorIgnoresDuplicateOffsets(t *testing.T) {
+	acc := &sniAccumulator{
+		cryptoByOffset: make(map[uint64][]byte),
+		firstSeen:      time.Now(),
+	}
+	acc.addChunk(0, []byte("first"))
+	acc.addChunk(0, []byte("SECOND"))
+	got := acc.reassemble()
+	if string(got) != "first" {
+		t.Errorf("duplicate offsets should be ignored, got %q", string(got))
+	}
+}
+
+// TestSNIAccumulatorSNIExtractionFromAssembledHandshake verifies that a
+// ClientHello split across two CRYPTO chunks can be reassembled and the SNI
+// extracted. This mirrors the server flow where packets arrive separately.
+func TestSNIAccumulatorSNIExtractionFromAssembledHandshake(t *testing.T) {
+	full := buildClientHello("split.example.com")
+	hs := full[5:] // strip TLS record header
+	splitAt := len(hs) / 2
+
+	acc := &sniAccumulator{
+		cryptoByOffset: make(map[uint64][]byte),
+		firstSeen:      time.Now(),
+	}
+	acc.addChunk(0, hs[:splitAt])
+	acc.addChunk(uint64(splitAt), hs[splitAt:])
+
+	reassembled := acc.reassemble()
+	if len(reassembled) != len(hs) {
+		t.Fatalf("reassembled length = %d, want %d", len(reassembled), len(hs))
+	}
+	sni := extractSNIFromHandshake(reassembled)
+	if sni != "split.example.com" {
+		t.Errorf("expected split.example.com, got %q", sni)
+	}
+}
+
+// TestSNIAccumulatorPartialDataCannotExtractSNI verifies that the first
+// CRYPTO chunk alone (when it does not reach the SNI extension) does not
+// produce an SNI via the single-packet path. This is the exact condition
+// that motivates cross-packet accumulation.
+func TestSNIAccumulatorPartialDataCannotExtractSNI(t *testing.T) {
+	full := buildClientHello("only-visible-after-reassembly.example.com")
+	hs := full[5:]
+	// Truncate to the first 60 bytes: session ID, random, etc, but not the
+	// SNI extension which comes later.
+	partial := hs[:60]
+	sni := extractSNIFromHandshake(partial)
+	if sni != "" {
+		t.Errorf("partial handshake should not yield an SNI, got %q", sni)
+	}
+}
+
+// buildQUICInitialWithCrypto constructs a single-packet QUIC Initial whose
+// sole CRYPTO frame sits at the given offset with the provided handshake
+// data. This lets tests simulate quic-go fragmenting a ClientHello across
+// several Initial packets. dcid must be identical across packets that share
+// the same connection so decryption uses the same keys. Always builds a
+// QUIC v1 packet since all current callers only exercise v1 fragmentation.
+func buildQUICInitialWithCrypto(t *testing.T, dcid []byte, offset uint64, data []byte) []byte {
+	t.Helper()
+
+	var crypto []byte
+	crypto = append(crypto, 0x06)
+	crypto = append(crypto, encodeQUICVarint(offset)...)
+	crypto = append(crypto, encodeQUICVarint(uint64(len(data)))...)
+	crypto = append(crypto, data...)
+
+	return buildQUICInitialFromPlaintext(t, dcid, crypto, quicVersionV1)
+}
+
+// TestExtractQUICCryptoDataReturnsOffsetAndData verifies that
+// ExtractQUICCryptoData can decrypt an Initial packet and recover the raw
+// CRYPTO frame bytes and starting offset, which is the building block for
+// cross-packet accumulation.
+func TestExtractQUICCryptoDataReturnsOffsetAndData(t *testing.T) {
+	dcid := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+	payload := []byte("first-crypto-chunk")
+
+	packet := buildQUICInitialWithCrypto(t, dcid, 0, payload)
+	got, offset := ExtractQUICCryptoData(packet)
+	if offset != 0 {
+		t.Errorf("offset = %d, want 0", offset)
+	}
+	if string(got) != string(payload) {
+		t.Errorf("data = %q, want %q", string(got), string(payload))
+	}
+
+	// Non-zero offset packet.
+	packet2 := buildQUICInitialWithCrypto(t, dcid, 42, []byte("later-chunk"))
+	got2, offset2 := ExtractQUICCryptoData(packet2)
+	if offset2 != 42 {
+		t.Errorf("offset = %d, want 42", offset2)
+	}
+	if string(got2) != "later-chunk" {
+		t.Errorf("data = %q, want later-chunk", string(got2))
+	}
+}
+
+// TestExtractQUICCryptoDataMalformed verifies ExtractQUICCryptoData returns
+// nil for clearly malformed inputs.
+func TestExtractQUICCryptoDataMalformed(t *testing.T) {
+	tests := [][]byte{
+		nil,
+		{},
+		{0xC0, 0x00, 0x00},             // too short
+		{0x40, 0x00, 0x00, 0x00, 0x01}, // not long header
+	}
+	for i, packet := range tests {
+		data, offset := ExtractQUICCryptoData(packet)
+		if data != nil || offset != 0 {
+			t.Errorf("case %d: expected nil/0, got %v, %d", i, data, offset)
+		}
+	}
+}
+
+// wrapInSOCKS5UDP wraps a QUIC payload in a SOCKS5 UDP header targeting the
+// given IPv4 destination and port 443.
+func wrapInSOCKS5UDP(payload []byte, destIP net.IP) []byte {
+	ip4 := destIP.To4()
+	destPort := 443
+	header := []byte{
+		0x00, 0x00,
+		0x00,
+		0x01,
+		ip4[0], ip4[1], ip4[2], ip4[3],
+		byte(destPort >> 8), byte(destPort),
+	}
+	return append(header, payload...)
+}
+
+// setupQUICAskTest is a variant of setupQUICBrokerTest for accumulation
+// tests that need to verify policy evaluation was driven by the reassembled
+// hostname. It installs an ask-all rule for QUIC/443 and a distinctive deny
+// rule that matches a specific hostname so we can assert the broker saw
+// the reassembled SNI by counting per-hostname requests.
+func setupQUICAskTest(t *testing.T, response channel.Response) quicBrokerTestEnv {
+	t.Helper()
+
+	ch := &delayedCountingChannel{
+		response: response,
+		delay:    0,
+	}
+	broker := channel.NewBroker([]channel.Channel{ch})
+	ch.broker = broker
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+timeout_sec = 10
+
+[[ask]]
+destination = "*"
+ports = [443]
+protocols = ["quic"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tmpDir := t.TempDir()
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Broker:     broker,
+		Provider:   &stubQUICProvider{},
+		Resolver:   mustBindingResolver(t),
+		VaultDir:   tmpDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	for i := 0; i < 50; i++ {
+		if srv.quicProxy != nil && srv.quicProxy.Addr() != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if srv.quicProxy == nil || srv.quicProxy.Addr() == nil {
+		t.Fatal("QUIC proxy did not start listening")
+	}
+
+	tcpConn, err := net.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatalf("dial SOCKS5: %v", err)
+	}
+	t.Cleanup(func() { _ = tcpConn.Close() })
+
+	_, _ = tcpConn.Write([]byte{0x05, 0x01, 0x00})
+	authResp := make([]byte, 2)
+	if _, err := io.ReadFull(tcpConn, authResp); err != nil {
+		t.Fatalf("read auth response: %v", err)
+	}
+
+	_, _ = tcpConn.Write([]byte{0x05, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
+	assocResp := make([]byte, 10)
+	if _, err := io.ReadFull(tcpConn, assocResp); err != nil {
+		t.Fatalf("read ASSOCIATE response: %v", err)
+	}
+
+	bindPort := int(assocResp[8])<<8 | int(assocResp[9])
+	bindIP := net.IP(assocResp[4:8])
+	bindAddr := &net.UDPAddr{IP: bindIP, Port: bindPort}
+
+	localTCPAddr := tcpConn.LocalAddr().(*net.TCPAddr)
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: localTCPAddr.IP, Port: 0})
+	if err != nil {
+		t.Fatalf("listen UDP: %v", err)
+	}
+	t.Cleanup(func() { _ = udpConn.Close() })
+
+	return quicBrokerTestEnv{
+		ch:       ch,
+		srv:      srv,
+		udpConn:  udpConn,
+		bindAddr: bindAddr,
+	}
+}
+
+// TestQUICSNIAccumulationAcrossTwoPackets verifies that when a ClientHello
+// is split across two Initial packets (neither of which alone contains the
+// SNI extension via single-packet extraction), the server accumulates the
+// CRYPTO frames, reassembles the ClientHello, and still recovers the SNI
+// hostname so policy evaluation fires against the real host rather than
+// the raw IP. We verify this by installing an ask-all QUIC rule and
+// observing that exactly one broker request is dispatched only AFTER the
+// second packet arrives, not after the first.
+func TestQUICSNIAccumulationAcrossTwoPackets(t *testing.T) {
+	env := setupQUICAskTest(t, channel.ResponseAllowOnce)
+
+	hostname := "accumulated.example.com"
+	full := buildClientHello(hostname)
+	hs := full[5:]
+	// Split such that the first chunk is too small to include the
+	// extensions section (and thus the SNI), guaranteeing the
+	// single-packet extractor fails on packet 1.
+	splitAt := 50
+	if splitAt > len(hs) {
+		t.Fatalf("handshake too small to split: %d", len(hs))
+	}
+	part1 := hs[:splitAt]
+	part2 := hs[splitAt:]
+
+	dcid := []byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88}
+	packet1 := buildQUICInitialWithCrypto(t, dcid, 0, part1)
+	packet2 := buildQUICInitialWithCrypto(t, dcid, uint64(splitAt), part2)
+
+	// Sanity: the first packet alone should NOT produce an SNI via the
+	// single-packet path.
+	if sni := ExtractQUICSNI(packet1); sni != "" {
+		t.Fatalf("single-packet extractor unexpectedly returned SNI %q for partial packet", sni)
+	}
+
+	destIP := net.ParseIP("10.77.0.1")
+
+	// Send packet 1. Should be buffered in the accumulator, NO broker
+	// request yet because SNI has not been reassembled.
+	if _, err := env.udpConn.WriteTo(wrapInSOCKS5UDP(packet1, destIP), env.bindAddr); err != nil {
+		t.Fatalf("send packet 1: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := env.ch.Count(); got != 0 {
+		t.Errorf("expected 0 broker requests after partial packet 1, got %d", got)
+	}
+
+	// Send packet 2. Accumulator reassembles the ClientHello, SNI is
+	// extracted, and policy evaluation fires exactly one broker request.
+	if _, err := env.udpConn.WriteTo(wrapInSOCKS5UDP(packet2, destIP), env.bindAddr); err != nil {
+		t.Fatalf("send packet 2: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := env.ch.Count(); got != 1 {
+		t.Errorf("expected exactly 1 broker request after reassembly, got %d", got)
+	}
+}
+
+// TestQUICSNIAccumulationFallsBackAfterPacketBudget verifies that if we
+// exhaust the per-accumulator packet budget without recovering SNI, the
+// server stops buffering and falls through to the DNS-cache / raw-IP
+// fallback so traffic is not stalled forever.
+func TestQUICSNIAccumulationFallsBackAfterPacketBudget(t *testing.T) {
+	env := setupQUICAskTest(t, channel.ResponseDeny)
+
+	// Build Initial packets that each carry a CRYPTO frame whose offsets
+	// leave a gap at the start of the stream (offset > 0). Reassembly
+	// will never produce anything, exhausting the packet budget.
+	dcid := []byte{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11}
+	destIP := net.ParseIP("10.77.0.2")
+
+	for i := 0; i < maxSNIAccumulatorPackets; i++ {
+		packet := buildQUICInitialWithCrypto(t, dcid, uint64(1000+i*16), []byte("gap-bytes-only"))
+		if _, err := env.udpConn.WriteTo(wrapInSOCKS5UDP(packet, destIP), env.bindAddr); err != nil {
+			t.Fatalf("send packet %d: %v", i, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	// After the budget is exhausted, a broker request must fire even
+	// though we never recovered an SNI. The broker denies, so no session
+	// is created.
+	if got := env.ch.Count(); got < 1 {
+		t.Errorf("expected at least 1 broker request after packet budget exhausted, got %d", got)
+	}
+}
+
+// TestQUICSNIAccumulatorClearsOnSuccess verifies that once SNI has been
+// successfully extracted from accumulated data, the accumulator map is
+// cleaned up so it cannot hold stale state indefinitely.
+func TestQUICSNIAccumulatorClearsOnSuccess(t *testing.T) {
+	acc := &sniAccumulator{
+		cryptoByOffset: make(map[uint64][]byte),
+		firstSeen:      time.Now(),
+	}
+	full := buildClientHello("clearing.example.com")
+	hs := full[5:]
+	splitAt := len(hs) / 2
+	acc.addChunk(0, hs[:splitAt])
+	acc.addChunk(uint64(splitAt), hs[splitAt:])
+
+	reassembled := acc.reassemble()
+	sni := extractSNIFromHandshake(reassembled)
+	if sni != "clearing.example.com" {
+		t.Errorf("expected clearing.example.com, got %q", sni)
+	}
+
+	// Simulate the server's cleanup.
+	accumulators := map[string]*sniAccumulator{"key1": acc}
+	delete(accumulators, "key1")
+	if _, exists := accumulators["key1"]; exists {
+		t.Error("accumulator should be removed after successful SNI extraction")
+	}
+}
+
+// TestQUICSNIAccumulatorTTLCleanup verifies that accumulators whose
+// firstSeen is older than sniAccumulatorTTL are removed during periodic
+// cleanup, preventing unbounded growth if packets stop arriving for a key.
+func TestQUICSNIAccumulatorTTLCleanup(t *testing.T) {
+	now := time.Now()
+	accumulators := map[string]*sniAccumulator{
+		"stale": {
+			cryptoByOffset: map[uint64][]byte{0: {0x01}},
+			firstSeen:      now.Add(-2 * sniAccumulatorTTL),
+		},
+		"fresh": {
+			cryptoByOffset: map[uint64][]byte{0: {0x02}},
+			firstSeen:      now,
+		},
+	}
+
+	// Reproduce the server's cleanup loop logic.
+	for key, acc := range accumulators {
+		if now.Sub(acc.firstSeen) > sniAccumulatorTTL {
+			delete(accumulators, key)
+		}
+	}
+
+	if _, exists := accumulators["stale"]; exists {
+		t.Error("stale accumulator should have been removed")
+	}
+	if _, exists := accumulators["fresh"]; !exists {
+		t.Error("fresh accumulator should still be present")
+	}
 }

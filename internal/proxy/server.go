@@ -1483,15 +1483,27 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 	// Track upstream UDP sessions for non-DNS traffic.
 	var mu sync.Mutex
 	sessions := make(map[string]*udpSession)
+	// Track in-flight QUIC broker approvals. Protected by mu.
+	pendingQUICSessions := make(map[string]*pendingQUICSession)
+	// Track in-progress SNI accumulation across multiple QUIC Initial
+	// packets for sessions that have not yet resolved policy. Protected
+	// by mu.
+	sniAccumulators := make(map[string]*sniAccumulator)
 
 	// Ensure bindLn is closed exactly once regardless of which goroutine
 	// exits first (dispatch loop vs TCP control connection reader).
 	var closeBindOnce sync.Once
 	closeBind := func() { closeBindOnce.Do(func() { _ = bindLn.Close() }) }
 
+	// loopDone is closed when the dispatch loop exits. Approval goroutines
+	// check this after resolveQUICPolicy returns to avoid creating orphaned
+	// sessions after the cleanup defer has already run.
+	loopDone := make(chan struct{})
+
 	// Start the datagram dispatch loop in a goroutine.
 	go func() {
 		defer func() {
+			close(loopDone)
 			mu.Lock()
 			for _, sess := range sessions {
 				if s.quicProxy != nil {
@@ -1499,7 +1511,26 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 				}
 				_ = sess.upstream.Close()
 			}
+			// Snapshot pending sessions before releasing the lock. Each
+			// goroutine closes pending.done when it completes, so we
+			// wait instead of force-closing (which could double-close
+			// if the goroutine is mid-flight). Use a timeout to avoid
+			// blocking shutdown if a broker approval is stuck.
+			pending := make([]*pendingQUICSession, 0, len(pendingQUICSessions))
+			for _, p := range pendingQUICSessions {
+				pending = append(pending, p)
+			}
 			mu.Unlock()
+			pendingTimeout := time.After(5 * time.Second)
+			for _, p := range pending {
+				select {
+				case <-p.done:
+				case <-pendingTimeout:
+					log.Printf("[QUIC] shutdown: timed out waiting for %d pending approvals", len(pending))
+					goto donePending
+				}
+			}
+		donePending:
 			closeBind()
 		}()
 
@@ -1520,6 +1551,13 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 							}
 							_ = sess.upstream.Close()
 							delete(sessions, key)
+						}
+					}
+					// Drop stale SNI accumulators so they cannot leak
+					// memory for sessions that silently disappeared.
+					for key, acc := range sniAccumulators {
+						if now.Sub(acc.firstSeen) > sniAccumulatorTTL {
+							delete(sniAccumulators, key)
 						}
 					}
 					mu.Unlock()
@@ -1609,50 +1647,286 @@ func (s *Server) handleAssociate(_ context.Context, writer io.Writer, request *s
 				}
 
 				if IsQUICPacket(payload) {
-					quicAddr := s.quicProxy.Addr()
-					if quicAddr != nil {
-						checker, drop := s.resolveQUICPolicy(dest, port)
-						if drop {
-							continue
-						}
-
-						upstream, listenErr := net.ListenPacket("udp", "127.0.0.1:0")
-						if listenErr != nil {
-							log.Printf("[QUIC] create upstream for %s: %v", sessionKey, listenErr)
-							continue
-						}
-						// Register expected host so the QUIC proxy can verify
-						// that the TLS SNI matches the policy-checked destination.
-						// A non-nil checker enables per-HTTP/3-request approval
-						// for ask-rule matches. Allow with RuleMatch passes nil
-						// (fast path, no per-request check).
-						if checker != nil {
-							s.quicProxy.RegisterExpectedHostWithChecker(upstream.LocalAddr().String(), dest, port, checker)
-						} else {
-							s.quicProxy.RegisterExpectedHost(upstream.LocalAddr().String(), dest, port)
-						}
+					// Recover hostname from the QUIC Initial packet. Try SNI
+					// extraction first (single packet, then accumulated
+					// across multiple Initial packets for fragmented
+					// ClientHellos), then DNS reverse cache, then raw IP.
+					// The session key stays IP-based so that post-handshake
+					// short-header packets (which only carry the raw IP from
+					// the SOCKS5 UDP header) find the session. The hostname
+					// is used only for policy evaluation and broker display.
+					//
+					// accumulatedPackets holds extra Initial packets buffered
+					// during SNI accumulation that need to be flushed to the
+					// QUIC proxy alongside the current one once approval
+					// resolves.
+					policyDest := dest
+					var accumulatedPackets [][]byte
+					sniSource := ""
+					if sni := ExtractQUICSNI(payload); sni != "" {
+						policyDest = sni
+						sniSource = "single-packet"
+						// Drop any in-progress accumulator for this key
+						// since we no longer need it.
 						mu.Lock()
-						sess = &udpSession{upstream: upstream, lastSeen: time.Now()}
-						sessions[sessionKey] = sess
+						delete(sniAccumulators, sessionKey)
 						mu.Unlock()
-						// Use the original destination for SOCKS5 response headers
-						// since the QUIC proxy is local and its address would be
-						// meaningless to the client.
-						origDst := &net.UDPAddr{IP: net.ParseIP(dest), Port: port}
-						if origDst.IP == nil {
-							// Domain destination: resolve for response header.
-							addrs, resolveErr := net.LookupIP(dest)
-							if resolveErr == nil && len(addrs) > 0 {
-								origDst.IP = addrs[0]
-							} else {
-								origDst.IP = net.IPv4zero
+					} else {
+						// Try accumulating CRYPTO data across multiple
+						// Initial packets. quic-go fragments ClientHellos
+						// larger than the Initial payload limit, so the
+						// SNI may span several packets.
+						if cryptoData, offset := ExtractQUICCryptoData(payload); cryptoData != nil {
+							mu.Lock()
+							acc, ok := sniAccumulators[sessionKey]
+							if !ok {
+								if len(sniAccumulators) >= maxSNIAccumulators {
+									// Evict the oldest accumulator to make
+									// room. This is a safety valve for
+									// resource exhaustion.
+									var oldestKey string
+									var oldestTime time.Time
+									for k, a := range sniAccumulators {
+										if oldestKey == "" || a.firstSeen.Before(oldestTime) {
+											oldestKey = k
+											oldestTime = a.firstSeen
+										}
+									}
+									if oldestKey != "" {
+										delete(sniAccumulators, oldestKey)
+									}
+								}
+								acc = &sniAccumulator{
+									cryptoByOffset: make(map[uint64][]byte),
+									firstSeen:      time.Now(),
+								}
+								sniAccumulators[sessionKey] = acc
+							}
+							acc.addChunk(offset, cryptoData)
+							pktCopy := make([]byte, len(payload))
+							copy(pktCopy, payload)
+							acc.packets = append(acc.packets, pktCopy)
+
+							reassembled := acc.reassemble()
+							tooManyPackets := len(acc.packets) >= maxSNIAccumulatorPackets
+							if len(reassembled) >= sniMinReassemblyBytes {
+								if sni := extractSNIFromHandshake(reassembled); sni != "" {
+									policyDest = sni
+									sniSource = "accumulated"
+									accumulatedPackets = acc.packets[:len(acc.packets)-1]
+									delete(sniAccumulators, sessionKey)
+								}
+							}
+							if sniSource == "" && !tooManyPackets {
+								// Not enough data yet and we still have
+								// budget. Buffer this packet and wait for
+								// the next Initial to arrive. No policy
+								// check yet.
+								mu.Unlock()
+								continue
+							}
+							if sniSource == "" && tooManyPackets {
+								// Exhausted accumulator budget without
+								// finding SNI. Flush buffered packets
+								// alongside current one through policy
+								// using DNS reverse cache / raw IP as
+								// fallback.
+								accumulatedPackets = acc.packets[:len(acc.packets)-1]
+								delete(sniAccumulators, sessionKey)
+							}
+							mu.Unlock()
+						}
+					}
+					if sniSource == "" {
+						if s.dnsInterceptor != nil {
+							if hostname := s.dnsInterceptor.ReverseLookup(dest); hostname != "" {
+								policyDest = hostname
+								sniSource = "dns-cache"
 							}
 						}
-						go s.relayQUICResponses(upstream, bindLn, srcAddr, origDst)
+					}
+					switch sniSource {
+					case "single-packet":
+						log.Printf("[QUIC] SNI extracted: %s (IP: %s)", policyDest, dest)
+					case "accumulated":
+						log.Printf("[QUIC] SNI extracted via accumulation: %s (IP: %s, %d buffered packets)", policyDest, dest, len(accumulatedPackets))
+					case "dns-cache":
+						log.Printf("[QUIC] hostname from DNS cache: %s (IP: %s)", policyDest, dest)
+					}
 
-						if _, writeErr := sess.upstream.WriteTo(payload, quicAddr); writeErr != nil {
-							log.Printf("[QUIC] write to proxy: %v", writeErr)
+					quicAddr := s.quicProxy.Addr()
+					if quicAddr != nil {
+						// Deduplicate broker requests: if there is already
+						// a pending approval for this session key, buffer
+						// the packet instead of triggering another call.
+						//
+						// The pending map is keyed by hostname (policyDest)
+						// when available so that two QUIC connections to
+						// different hostnames that happen to share an IP
+						// (common with CDNs) each get their own approval
+						// flow. The sessions map below stays IP-keyed so
+						// short-header packets (which only carry the IP)
+						// still route to the right upstream.
+						pendingKey := "quic:" + policyDest + ":" + strconv.Itoa(port)
+						mu.Lock()
+						if pending, ok := pendingQUICSessions[pendingKey]; ok {
+							// The approval goroutine resolves the pending
+							// entry atomically under mu: it either publishes
+							// a session (and this packet will route via the
+							// sessions map on the next iteration) or removes
+							// the entry (and the next packet creates a new
+							// pending). While the entry is still in the map,
+							// always buffer the packet so we never trigger a
+							// duplicate broker call.
+							pending.mu.Lock()
+							if len(pending.packets) < maxPendingQUICPackets {
+								pkt := make([]byte, len(payload))
+								copy(pkt, payload)
+								pending.packets = append(pending.packets, pkt)
+							} else {
+								log.Printf("[QUIC] pending buffer full for %s, dropping packet", pendingKey)
+							}
+							pending.mu.Unlock()
+							mu.Unlock()
+							continue
 						}
+
+						// First Initial for this session key: create a
+						// pending entry and launch the approval goroutine.
+						// Seed the pending packet buffer with any packets
+						// that were accumulated during SNI reassembly, plus
+						// the current one. They will all be flushed to the
+						// QUIC proxy on approval.
+						initialPackets := make([][]byte, 0, len(accumulatedPackets)+1)
+						initialPackets = append(initialPackets, accumulatedPackets...)
+						pkt := make([]byte, len(payload))
+						copy(pkt, payload)
+						initialPackets = append(initialPackets, pkt)
+						pending := &pendingQUICSession{
+							packets: initialPackets,
+							done:    make(chan struct{}),
+						}
+						pendingQUICSessions[pendingKey] = pending
+						mu.Unlock()
+
+						// Capture loop variables for the goroutine.
+						capturedKey := sessionKey
+						capturedPendingKey := pendingKey
+						capturedDest := dest
+						capturedPolicyDest := policyDest
+						capturedPort := port
+						capturedSrcAddr := srcAddr
+						capturedQuicAddr := quicAddr
+						go func() {
+							checker, drop := s.resolveQUICPolicy(capturedPolicyDest, capturedPort)
+
+							// drainAndDelete atomically transitions the
+							// pending entry out of the map. It runs under
+							// mu so the dispatch loop cannot observe a
+							// half-resolved state (resolved=true but entry
+							// still in the map), which would trigger a
+							// duplicate broker call. The success path
+							// below inlines the equivalent critical section
+							// so it can publish the session in the same
+							// mu.Lock window.
+							drainAndDelete := func() [][]byte {
+								mu.Lock()
+								pending.mu.Lock()
+								pending.allowed = !drop
+								pending.checker = checker
+								pending.resolved = true
+								buffered := pending.packets
+								pending.packets = nil
+								pending.mu.Unlock()
+								if pendingQUICSessions[capturedPendingKey] == pending {
+									delete(pendingQUICSessions, capturedPendingKey)
+								}
+								mu.Unlock()
+								return buffered
+							}
+
+							if drop {
+								buffered := drainAndDelete()
+								close(pending.done)
+								log.Printf("[QUIC] denied %s, discarding %d buffered packets", capturedPendingKey, len(buffered))
+								return
+							}
+
+							// If the dispatch loop already exited, don't create
+							// an orphaned session. The cleanup defer has run and
+							// won't know about sessions created after it.
+							select {
+							case <-loopDone:
+								buffered := drainAndDelete()
+								close(pending.done)
+								log.Printf("[QUIC] dispatch loop exited, discarding approved session %s (%d buffered packets)", capturedPendingKey, len(buffered))
+								return
+							default:
+							}
+
+							// Create the session and flush buffered packets.
+							// If ListenPacket or upstream registration fails,
+							// bail out via drainAndDelete so the next packet
+							// gets a fresh approval cycle.
+							upstream, listenErr := net.ListenPacket("udp", "127.0.0.1:0")
+							if listenErr != nil {
+								drainAndDelete()
+								close(pending.done)
+								log.Printf("[QUIC] create upstream for %s: %v", capturedPendingKey, listenErr)
+								return
+							}
+							if checker != nil {
+								s.quicProxy.RegisterExpectedHostWithChecker(upstream.LocalAddr().String(), capturedPolicyDest, capturedPort, checker)
+							} else {
+								s.quicProxy.RegisterExpectedHost(upstream.LocalAddr().String(), capturedPolicyDest, capturedPort)
+							}
+							sess := &udpSession{upstream: upstream, lastSeen: time.Now()}
+
+							// Atomically publish the session, drain buffered
+							// packets, mark the pending entry resolved, and
+							// remove it from the map. The single mu.Lock
+							// here prevents the dispatch loop from observing
+							// an in-between state where the pending entry is
+							// already resolved but neither the session nor
+							// the map entry is authoritative. If two
+							// hostnames on the same IP create simultaneous
+							// sessions, the later one overwrites the earlier
+							// in the sessions map; the QUIC proxy's SNI
+							// validation keeps correctness.
+							mu.Lock()
+							pending.mu.Lock()
+							pending.allowed = true
+							pending.checker = checker
+							pending.resolved = true
+							buffered := pending.packets
+							pending.packets = nil
+							pending.mu.Unlock()
+							sessions[capturedKey] = sess
+							if pendingQUICSessions[capturedPendingKey] == pending {
+								delete(pendingQUICSessions, capturedPendingKey)
+							}
+							mu.Unlock()
+							close(pending.done)
+
+							origDst := &net.UDPAddr{IP: net.ParseIP(capturedDest), Port: capturedPort}
+							if origDst.IP == nil {
+								addrs, resolveErr := net.LookupIP(capturedDest)
+								if resolveErr == nil && len(addrs) > 0 {
+									origDst.IP = addrs[0]
+								} else {
+									origDst.IP = net.IPv4zero
+								}
+							}
+							go s.relayQUICResponses(upstream, bindLn, capturedSrcAddr, origDst)
+
+							for _, pkt := range buffered {
+								if _, writeErr := sess.upstream.WriteTo(pkt, capturedQuicAddr); writeErr != nil {
+									log.Printf("[QUIC] flush buffered to proxy: %v", writeErr)
+								}
+							}
+							log.Printf("[QUIC] approved %s, flushed %d buffered packets", capturedPendingKey, len(buffered))
+						}()
+
 						continue
 					}
 					// QUICProxy not yet listening, fall through to normal UDP handling.
@@ -1756,9 +2030,88 @@ func (s *Server) relayUDPResponses(upstream net.PacketConn, relay *net.UDPConn, 
 	}
 }
 
-// relayQUICResponses reads response datagrams from a QUIC proxy upstream and
-// wraps them in SOCKS5 UDP headers using the original destination address
-// (not the local QUIC proxy address) before sending to the client.
+// maxPendingQUICPackets is the maximum number of QUIC packets buffered per
+// session while waiting for broker approval. Packets beyond this are dropped.
+const maxPendingQUICPackets = 32
+
+// QUIC SNI accumulation limits. quic-go fragments large ClientHellos across
+// multiple Initial packets, each carrying a CRYPTO frame at a different
+// offset in the TLS handshake stream. Accumulating CRYPTO data across these
+// packets is safe per RFC 9000: Initial packets can only carry CRYPTO,
+// PADDING, PING, ACK, and CONNECTION_CLOSE frames. No application data flows
+// until after the handshake completes in 1-RTT packets.
+const (
+	// maxSNIAccumulatorPackets caps raw Initial packets buffered per
+	// accumulator. If SNI cannot be extracted within this many packets,
+	// we fall back to DNS reverse cache.
+	maxSNIAccumulatorPackets = 5
+	// maxSNIAccumulators caps total in-flight SNI accumulators across all
+	// ASSOCIATE sessions in one handleAssociate invocation.
+	maxSNIAccumulators = 100
+	// sniAccumulatorTTL bounds how long a stale accumulator can live
+	// before cleanup removes it.
+	sniAccumulatorTTL = 15 * time.Second
+	// sniMinReassemblyBytes is the minimum reassembled CRYPTO data size
+	// we attempt SNI extraction on. Below this, the TLS ClientHello has
+	// certainly not arrived in full. A typical ClientHello is over 200
+	// bytes, but we keep the threshold conservative to accommodate small
+	// test-only handshakes while still skipping clearly incomplete data.
+	sniMinReassemblyBytes = 64
+)
+
+// sniAccumulator buffers QUIC Initial packets and their CRYPTO frame data
+// across multiple datagrams so a fragmented ClientHello can be reassembled
+// and its SNI extension extracted.
+type sniAccumulator struct {
+	// cryptoByOffset maps CRYPTO frame offsets to their data chunks.
+	cryptoByOffset map[uint64][]byte
+	// packets stores the raw Initial packets in arrival order so they can
+	// be flushed to the QUIC proxy once policy resolves.
+	packets [][]byte
+	// firstSeen is the time the accumulator was created. Used for TTL
+	// cleanup of stale entries.
+	firstSeen time.Time
+}
+
+// addChunk records a CRYPTO frame chunk at the given offset. Chunks at
+// duplicate offsets are ignored (the first wins).
+func (a *sniAccumulator) addChunk(offset uint64, data []byte) {
+	if _, ok := a.cryptoByOffset[offset]; ok {
+		return
+	}
+	buf := make([]byte, len(data))
+	copy(buf, data)
+	a.cryptoByOffset[offset] = buf
+}
+
+// reassemble concatenates CRYPTO chunks starting from offset 0, stopping at
+// the first gap. Returns the contiguous prefix of the TLS handshake stream.
+func (a *sniAccumulator) reassemble() []byte {
+	var out []byte
+	nextOffset := uint64(0)
+	for {
+		chunk, ok := a.cryptoByOffset[nextOffset]
+		if !ok {
+			return out
+		}
+		out = append(out, chunk...)
+		nextOffset += uint64(len(chunk))
+	}
+}
+
+// pendingQUICSession tracks an in-flight QUIC approval request. While the
+// broker call blocks, subsequent QUIC Initial packets for the same session
+// key are buffered instead of triggering duplicate broker requests.
+type pendingQUICSession struct {
+	mu       sync.Mutex
+	packets  [][]byte // buffered payloads (max maxPendingQUICPackets)
+	done     chan struct{}
+	allowed  bool // true if approved, false if denied
+	resolved bool // true once the approval goroutine has drained packets
+	// Fields needed to create the session after approval resolves.
+	checker *RequestPolicyChecker
+}
+
 // resolveQUICPolicy evaluates QUIC-specific policy for a destination and
 // handles the Ask approval flow. Returns a per-request checker (nil for
 // explicit allow fast path) and a drop flag. When drop is true the caller
@@ -1832,8 +2185,13 @@ func (s *Server) resolveQUICPolicy(dest string, port int) (checker *RequestPolic
 		}
 	}
 
-	// Allow with default verdict: attach a checker so per-request
-	// evaluation picks up policy changes.
+	// Allow with default verdict: attach a per-request checker even though
+	// the current default is "allow". Unlike TCP (where connections are
+	// short-lived), QUIC sessions persist across many requests. If the
+	// operator changes the default verdict or adds a deny rule mid-session,
+	// the checker ensures subsequent HTTP/3 requests on the same session
+	// re-evaluate policy. SeedCredits(1) means the first request passes
+	// without a broker call, then the checker kicks in.
 	if verdict == policy.Allow && matchSource == policy.DefaultVerdict {
 		return NewRequestPolicyChecker(s.rules.engine, s.rules.broker,
 			WithPersist(s.rules.buildPersistFunc()),
@@ -1845,6 +2203,13 @@ func (s *Server) resolveQUICPolicy(dest string, port int) (checker *RequestPolic
 	return nil, false
 }
 
+// relayQUICResponses reads response datagrams from a QUIC session's upstream
+// PacketConn and wraps them in SOCKS5 UDP headers using the original
+// destination address (not the local QUIC proxy address) before writing to the
+// relay UDPConn. The quic-go listener sends responses back to the address that
+// forwarded the Initial packet (upstream.LocalAddr), so reading from upstream
+// captures all response traffic for that session. The function exits when the
+// upstream PacketConn is closed (session cleanup).
 func (s *Server) relayQUICResponses(upstream net.PacketConn, relay *net.UDPConn, clientAddr net.Addr, originalDst *net.UDPAddr) {
 	buf := make([]byte, 65535)
 	for {

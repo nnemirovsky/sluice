@@ -153,8 +153,15 @@ func startTLSEchoServerWithCA(t *testing.T, ca *testCA) *httptest.Server {
 		}
 	})
 
-	srv := httptest.NewUnstartedServer(handler)
-	srv.TLS = &tls.Config{Certificates: []tls.Certificate{serverTLSCert}}
+	ln, listenErr := net.Listen("tcp4", "127.0.0.1:0")
+	if listenErr != nil {
+		t.Fatal(listenErr)
+	}
+	srv := &httptest.Server{
+		Listener: ln,
+		TLS:      &tls.Config{Certificates: []tls.Certificate{serverTLSCert}},
+		Config:   &http.Server{Handler: handler},
+	}
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	return srv

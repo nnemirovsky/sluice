@@ -4,10 +4,16 @@ package e2e
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +28,22 @@ import (
 
 	"golang.org/x/net/proxy"
 )
+
+// newIPv4Server creates an httptest.Server that listens on IPv4 only. This
+// avoids failures in environments where IPv6 is not available.
+func newIPv4Server(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &httptest.Server{
+		Listener: ln,
+		Config:   &http.Server{Handler: handler},
+	}
+	srv.Start()
+	return srv
+}
 
 // buildOnce ensures the sluice binary is built exactly once per test run.
 var (
@@ -226,12 +248,13 @@ func importConfig(t *testing.T, proc *SluiceProcess, toml string) {
 	}
 }
 
-// startEchoServer starts an HTTP server that echoes request details back.
-// Returns an httptest.Server; the caller should defer s.Close().
-func startEchoServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// httpEchoHandler returns an http.HandlerFunc that echoes request details
+// (Proto, Method, URL, Host, headers, body) as plain text. Used by all
+// protocol-specific echo servers so the response format is consistent.
+func httpEchoHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprintf(w, "Proto: %s\n", r.Proto)
 		fmt.Fprintf(w, "Method: %s\n", r.Method)
 		fmt.Fprintf(w, "URL: %s\n", r.URL.String())
 		fmt.Fprintf(w, "Host: %s\n", r.Host)
@@ -246,7 +269,14 @@ func startEchoServer(t *testing.T) *httptest.Server {
 				fmt.Fprintf(w, "Body: %s\n", string(body))
 			}
 		}
-	}))
+	}
+}
+
+// startEchoServer starts an HTTP server that echoes request details back.
+// Returns an httptest.Server; the caller should defer s.Close().
+func startEchoServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := newIPv4Server(t, httpEchoHandler())
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -255,23 +285,15 @@ func startEchoServer(t *testing.T) *httptest.Server {
 // address (host:port). The server uses a self-signed certificate.
 func startTLSEchoServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain")
-		fmt.Fprintf(w, "Method: %s\n", r.Method)
-		fmt.Fprintf(w, "URL: %s\n", r.URL.String())
-		fmt.Fprintf(w, "Host: %s\n", r.Host)
-		for name, vals := range r.Header {
-			for _, v := range vals {
-				fmt.Fprintf(w, "Header: %s: %s\n", name, v)
-			}
-		}
-		if r.Body != nil {
-			body, _ := io.ReadAll(r.Body)
-			if len(body) > 0 {
-				fmt.Fprintf(w, "Body: %s\n", string(body))
-			}
-		}
-	}))
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &httptest.Server{
+		Listener: ln,
+		Config:   &http.Server{Handler: httpEchoHandler()},
+	}
+	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -491,9 +513,54 @@ func (v *verdictServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func startVerdictServer(t *testing.T, verdicts ...string) (*httptest.Server, *verdictServer) {
 	t.Helper()
 	vs := &verdictServer{verdicts: verdicts}
-	srv := httptest.NewServer(vs)
+	srv := newIPv4Server(t, vs)
 	t.Cleanup(srv.Close)
 	return srv, vs
+}
+
+// generateServerTLSCert creates a TLS certificate signed by the test CA for
+// use by test servers. The cert is valid for the given IP address (typically
+// "127.0.0.1").
+func generateServerTLSCert(t *testing.T, ca *testCA, ip string) (tls.Certificate, error) {
+	t.Helper()
+
+	serverKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("generate server key: %w", err)
+	}
+
+	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	serverTemplate := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: ip},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP(ip)},
+	}
+
+	serverCertDER, err := x509.CreateCertificate(rand.Reader, serverTemplate, ca.X509, &serverKey.PublicKey, ca.Cert.PrivateKey)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("create server cert: %w", err)
+	}
+
+	return tls.Certificate{
+		Certificate: [][]byte{serverCertDER, ca.Cert.Certificate[0]},
+		PrivateKey:  serverKey,
+	}, nil
+}
+
+// freeUDPPort returns a UDP port number that is currently available for binding.
+func freeUDPPort(t *testing.T) int {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("find free udp port: %v", err)
+	}
+	port := conn.LocalAddr().(*net.UDPAddr).Port
+	_ = conn.Close()
+	return port
 }
 
 // sluiceWithWebhook starts a sluice process with the given policy TOML

@@ -3,12 +3,29 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 )
+
+// newIPv4Server creates an httptest.Server that listens on IPv4 only. This
+// avoids failures in environments where IPv6 is not available.
+func newIPv4Server(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &httptest.Server{
+		Listener: ln,
+		Config:   &http.Server{Handler: handler},
+	}
+	srv.Start()
+	return srv
+}
 
 // mockHTTPMCPServer returns an httptest.Server that behaves as a minimal
 // Streamable HTTP MCP server. It generates a session ID on initialize and
@@ -20,7 +37,7 @@ func mockHTTPMCPServer(t *testing.T) *httptest.Server {
 		sessionID string
 	)
 
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 
@@ -265,7 +282,7 @@ func TestHTTPUpstreamDefaultTimeout(t *testing.T) {
 // for tools/call requests and plain JSON for everything else.
 func mockSSEMCPServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -413,7 +430,7 @@ func TestHTTPUpstreamConnectionRefused(t *testing.T) {
 }
 
 func TestHTTPUpstreamServerError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}))
 	defer srv.Close()

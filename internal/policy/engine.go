@@ -307,9 +307,10 @@ func matchRules(rules []compiledRule, dest string, port int) bool {
 
 // matchRulesStrictProto matches rules that explicitly include the given
 // protocol in their protocols field. Rules without a protocols field are NOT
-// matched. Used by EvaluateUDP and EvaluateQUIC where only protocol-explicit
-// rules should apply, preventing unscoped TCP rules from inadvertently
-// allowing UDP/QUIC traffic.
+// matched. Used by EvaluateUDP and EvaluateQUICDetailed for their
+// protocol-scoped first-pass evaluation. Unscoped rules are handled
+// separately by matchRulesUnscoped so UDP and QUIC fall back to the same
+// transport-agnostic rules that TCP matches via matchRulesWithProto.
 func matchRulesStrictProto(rules []compiledRule, dest string, port int, proto string) bool {
 	for _, r := range rules {
 		if !r.glob.Match(dest) {
@@ -319,8 +320,30 @@ func matchRulesStrictProto(rules []compiledRule, dest string, port int, proto st
 			continue
 		}
 		// Require explicit protocol match. Rules without a protocols field
-		// are skipped to prevent TCP-intended rules from matching UDP/QUIC.
+		// are skipped here; matchRulesUnscoped handles those separately.
 		if len(r.protocols) == 0 || !r.protocols[proto] {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// matchRulesUnscoped matches rules that have NO protocols field (unscoped).
+// Used as a fallback in EvaluateUDP and EvaluateQUICDetailed after strict
+// protocol-scoped matching fails, so that unscoped rules (the common case
+// for user-configured destination rules) apply consistently across TCP,
+// UDP, and QUIC transports. DNS has its own evaluation path (IsDeniedDomain)
+// and is unaffected.
+func matchRulesUnscoped(rules []compiledRule, dest string, port int) bool {
+	for _, r := range rules {
+		if !r.glob.Match(dest) {
+			continue
+		}
+		if len(r.ports) > 0 && !r.ports[port] {
+			continue
+		}
+		if len(r.protocols) != 0 {
 			continue
 		}
 		return true
@@ -699,17 +722,27 @@ func (e *Engine) EvaluateDetailedWithProtocol(dest string, port int, proto strin
 	return e.Default, DefaultVerdict
 }
 
-// EvaluateUDP checks a destination and port with UDP-specific semantics.
-// Only explicit allow rules produce an Allow verdict. Deny rules take priority
-// as usual. Ask rules and the engine default verdict are treated as Deny
-// because per-packet approval is impractical. This implements the UDP
-// default-deny strategy where UDP traffic requires an explicit allow rule.
+// EvaluateUDP checks a destination and port for UDP traffic. Behavior mirrors
+// the TCP Evaluate path: deny rules take priority, then allow, then the engine
+// default verdict. Ask is not a valid terminal verdict for UDP (per-packet
+// approval is impractical), so an Ask default is collapsed to Deny. Callers
+// that need Ask semantics for QUIC should use EvaluateQUICDetailed, which
+// preserves Ask for the approval flow.
+//
+// Evaluation order: UDP-scoped deny, UDP-scoped allow, unscoped deny, unscoped
+// allow, then the engine's configured default verdict. Unscoped rules (no
+// protocols field) are transport-agnostic so a user-configured
+// `allow example.com` rule applies to TCP, UDP, and QUIC consistently. DNS is
+// the only transport with a separate evaluation path (IsDeniedDomain).
 func (e *Engine) EvaluateUDP(dest string, port int) Verdict {
 	dest = normalizeDestination(dest)
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.compiled == nil {
-		return Deny
+		if e.Default == Ask {
+			return Deny
+		}
+		return e.Default
 	}
 	if matchRulesStrictProto(e.compiled.denyRules, dest, port, protoNameUDP) {
 		return Deny
@@ -717,15 +750,28 @@ func (e *Engine) EvaluateUDP(dest string, port int) Verdict {
 	if matchRulesStrictProto(e.compiled.allowRules, dest, port, protoNameUDP) {
 		return Allow
 	}
-	return Deny
+	if matchRulesUnscoped(e.compiled.denyRules, dest, port) {
+		return Deny
+	}
+	if matchRulesUnscoped(e.compiled.allowRules, dest, port) {
+		return Allow
+	}
+	// Fall back to the engine's configured default verdict. EvaluateUDP has
+	// no Ask flow (no broker per-packet), so an Ask default collapses to
+	// Deny. Callers that need Ask must use EvaluateQUICDetailed.
+	if e.Default == Ask {
+		return Deny
+	}
+	return e.Default
 }
 
 // EvaluateQUIC checks a destination and port with QUIC-specific semantics.
-// Uses the same default-deny strategy as EvaluateUDP (ask is treated as deny
-// unless the caller uses EvaluateQUICDetailed to handle Ask explicitly).
-// QUIC-specific rules are evaluated first (deny then allow). If no QUIC rule
-// matches, falls back to generic rules. This ensures a QUIC allow rule can
-// override a blanket UDP deny (e.g. deny * protocols=["udp"]).
+// Ask verdicts are collapsed to Deny for callers that do not handle Ask
+// (use EvaluateQUICDetailed to preserve Ask). QUIC-specific rules are
+// evaluated first (deny then allow). If no QUIC rule matches, falls back
+// to generic UDP-scoped rules, then the engine default verdict. This
+// ensures a QUIC allow rule can override a blanket UDP deny
+// (e.g. deny * protocols=["udp"]).
 func (e *Engine) EvaluateQUIC(dest string, port int) Verdict {
 	v, _ := e.EvaluateQUICDetailed(dest, port)
 	// Collapse Ask to Deny for callers that do not handle Ask.
@@ -737,15 +783,18 @@ func (e *Engine) EvaluateQUIC(dest string, port int) Verdict {
 
 // EvaluateQUICDetailed returns the verdict and match source for QUIC traffic.
 // Unlike EvaluateQUIC, it preserves Ask verdicts so callers can trigger the
-// approval flow for per-request policy. Evaluation order: QUIC-specific deny,
-// QUIC-specific allow, QUIC-specific ask, then generic deny, allow, ask,
-// then default (Deny).
+// approval flow for per-request policy. Evaluation order: QUIC-scoped deny,
+// QUIC-scoped allow, QUIC-scoped ask, UDP-scoped deny, UDP-scoped allow,
+// UDP-scoped ask, unscoped deny, unscoped allow, unscoped ask, then engine
+// default verdict. Unscoped rules (no protocols field) are treated as
+// transport-agnostic so user-configured destination rules apply consistently
+// across TCP, UDP, and QUIC.
 func (e *Engine) EvaluateQUICDetailed(dest string, port int) (Verdict, MatchSource) {
 	dest = normalizeDestination(dest)
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.compiled == nil {
-		return Deny, DefaultVerdict
+		return e.Default, DefaultVerdict
 	}
 	// QUIC-specific rules first.
 	if matchRulesStrictProto(e.compiled.denyRules, dest, port, protoNameQUIC) {
@@ -767,5 +816,16 @@ func (e *Engine) EvaluateQUICDetailed(dest string, port int) (Verdict, MatchSour
 	if matchRulesStrictProto(e.compiled.askRules, dest, port, protoNameUDP) {
 		return Ask, RuleMatch
 	}
-	return Deny, DefaultVerdict
+	// Fall back to unscoped rules so transport-agnostic user rules apply.
+	if matchRulesUnscoped(e.compiled.denyRules, dest, port) {
+		return Deny, RuleMatch
+	}
+	if matchRulesUnscoped(e.compiled.allowRules, dest, port) {
+		return Allow, RuleMatch
+	}
+	if matchRulesUnscoped(e.compiled.askRules, dest, port) {
+		return Ask, RuleMatch
+	}
+	// Use the engine's configured default verdict.
+	return e.Default, DefaultVerdict
 }

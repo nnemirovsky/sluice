@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -16,6 +17,22 @@ import (
 
 	"github.com/nemirovsky/sluice/internal/channel"
 )
+
+// newIPv4Server creates an httptest.Server that listens on IPv4 only. This
+// avoids failures in environments where IPv6 is not available.
+func newIPv4Server(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &httptest.Server{
+		Listener: ln,
+		Config:   &http.Server{Handler: handler},
+	}
+	srv.Start()
+	return srv
+}
 
 // newTestBroker creates a broker with the given channel for testing.
 func newTestBroker(ch channel.Channel) *channel.Broker {
@@ -60,7 +77,7 @@ func TestRequestApproval_SyncPath(t *testing.T) {
 	secret := "test-secret-123"
 	payloadCh := make(chan WebhookPayload, 1)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sig := r.Header.Get("X-Sluice-Signature")
 		body, _ := io.ReadAll(r.Body)
 
@@ -132,7 +149,7 @@ func TestRequestApproval_SyncPath(t *testing.T) {
 }
 
 func TestRequestApproval_SyncAlwaysAllow(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(WebhookResponse{Verdict: "always_allow"})
 	}))
@@ -161,7 +178,7 @@ func TestRequestApproval_SyncAlwaysAllow(t *testing.T) {
 }
 
 func TestRequestApproval_SyncDeny(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(WebhookResponse{Verdict: "deny"})
 	}))
@@ -191,7 +208,7 @@ func TestRequestApproval_SyncDeny(t *testing.T) {
 
 func TestRequestApproval_AsyncPath(t *testing.T) {
 	// Webhook returns 202 (accepted). Resolution happens via broker.Resolve externally.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload WebhookPayload
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &payload)
@@ -238,7 +255,7 @@ func TestRequestApproval_AsyncPath(t *testing.T) {
 func TestRequestApproval_RetryOnServerError(t *testing.T) {
 	var attempts atomic.Int32
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		n := attempts.Add(1)
 		if n < 3 {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -279,7 +296,7 @@ func TestRequestApproval_RetryOnServerError(t *testing.T) {
 func TestRequestApproval_AllRetriesFail(t *testing.T) {
 	var attempts atomic.Int32
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Only count approval delivery attempts, not cancel notifications.
 		body, _ := io.ReadAll(r.Body)
 		var payload struct{ Type string }
@@ -321,7 +338,7 @@ func TestRequestApproval_AllRetriesFail(t *testing.T) {
 func TestRequestApproval_NoSignatureWithoutSecret(t *testing.T) {
 	var receivedSig string
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedSig = r.Header.Get("X-Sluice-Signature")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(WebhookResponse{Verdict: "allow_once"})
@@ -354,7 +371,7 @@ func TestCancelApproval_SendsCancelNotification(t *testing.T) {
 	var mu sync.Mutex
 	called := false
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		defer mu.Unlock()
@@ -402,7 +419,7 @@ func TestNotify_SendsNotification(t *testing.T) {
 	var received NotifyPayload
 	var mu sync.Mutex
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		defer mu.Unlock()
@@ -432,7 +449,7 @@ func TestNotify_SendsNotification(t *testing.T) {
 
 func TestRequestApproval_InvalidSyncResponse(t *testing.T) {
 	// Webhook returns 200 but invalid JSON. The request should time out.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte("not json"))
 	}))
@@ -461,7 +478,7 @@ func TestRequestApproval_InvalidSyncResponse(t *testing.T) {
 }
 
 func TestRequestApproval_UnknownVerdictDefaultsToDeny(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(WebhookResponse{Verdict: "maybe"})
 	}))
@@ -491,7 +508,7 @@ func TestRequestApproval_UnknownVerdictDefaultsToDeny(t *testing.T) {
 
 func TestRequestApproval_Timeout(t *testing.T) {
 	// Webhook returns 202 (async) but no callback ever comes.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer srv.Close()
@@ -561,7 +578,7 @@ func TestParseVerdict(t *testing.T) {
 func TestMultiChannelBroadcastWithHTTP(t *testing.T) {
 	// Set up an HTTP webhook that returns 202 (async).
 	var webhookCalled atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		webhookCalled.Add(1)
 		w.WriteHeader(http.StatusAccepted)
 	}))
@@ -623,7 +640,7 @@ func (m *mockResolveChannel) Type() channel.ChannelType            { return chan
 // TestHTTPChannelFromStoreConfig verifies that an HTTP channel can be created
 // from store channel config (the same flow as main.go).
 func TestHTTPChannelFromStoreConfig(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(WebhookResponse{Verdict: "allow_once"})
 	}))
@@ -668,7 +685,7 @@ func TestHTTPChannelFromStoreConfig(t *testing.T) {
 func TestRequestApproval_StopDuringRetry(t *testing.T) {
 	var attempts atomic.Int32
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		attempts.Add(1)
 		w.WriteHeader(http.StatusInternalServerError)
 	}))

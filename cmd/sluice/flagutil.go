@@ -33,6 +33,28 @@ func parsePortsList(s string) ([]int, error) {
 	return ports, nil
 }
 
+// parseProtocolsList parses a comma-separated string of protocol names into
+// a []string. An empty input returns (nil, nil). Whitespace around each
+// entry is trimmed and the name is lowercased.
+//
+// Validation against the known protocol set is deferred to the store layer
+// (validateProtocols) which runs during AddRule/ImportTOML. This keeps
+// the canonical list in one place.
+func parseProtocolsList(s string) ([]string, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var protocols []string
+	for _, ps := range strings.Split(s, ",") {
+		ps = strings.TrimSpace(strings.ToLower(ps))
+		if ps == "" {
+			return nil, fmt.Errorf("empty protocol name in list")
+		}
+		protocols = append(protocols, ps)
+	}
+	return protocols, nil
+}
+
 // reorderFlagsBeforePositional returns a copy of args with all flag
 // arguments moved before any positional arguments, so that Go's stdlib
 // flag parser (which stops at the first non-flag) still sees every flag.

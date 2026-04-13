@@ -255,19 +255,30 @@ protocols = ["udp"]
 	}
 }
 
-func TestUDPPolicyEvaluation_DefaultDeny(t *testing.T) {
-	// Engine default is allow, but EvaluateUDP should still deny
-	// when no explicit allow rule matches.
-	eng, err := policy.LoadFromBytes([]byte(`
+func TestUDPPolicyEvaluation_DefaultFollowsEngine(t *testing.T) {
+	// EvaluateUDP mirrors TCP semantics: when no rule matches, fall back to
+	// the engine's configured default verdict. An "allow" default permits
+	// unmatched UDP destinations; a "deny" default blocks them.
+	engAllow, err := policy.LoadFromBytes([]byte(`
 [policy]
 default = "allow"
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
+	if v := engAllow.EvaluateUDP("any.example.com", 80); v != policy.Allow {
+		t.Errorf("EvaluateUDP(default=allow) = %v, want Allow", v)
+	}
 
-	if v := eng.EvaluateUDP("any.example.com", 80); v != policy.Deny {
-		t.Errorf("EvaluateUDP = %v, want Deny (UDP default-deny overrides engine default)", v)
+	engDeny, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "deny"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := engDeny.EvaluateUDP("any.example.com", 80); v != policy.Deny {
+		t.Errorf("EvaluateUDP(default=deny) = %v, want Deny", v)
 	}
 }
 
@@ -311,11 +322,12 @@ destination = "any-proto.example.com"
 		t.Fatal(err)
 	}
 
-	// Rules without an explicit protocols field must NOT match UDP
-	// evaluation. This prevents TCP-intended allow rules from
-	// inadvertently allowing UDP traffic.
-	if v := eng.EvaluateUDP("any-proto.example.com", 80); v != policy.Deny {
-		t.Errorf("any-proto.example.com = %v, want Deny (unscoped rules must not match UDP)", v)
+	// Rules without an explicit protocols field are transport-agnostic and
+	// DO match UDP evaluation. This keeps CLI-added rules consistent across
+	// TCP, UDP, and QUIC so `sluice policy add allow foo.com --ports 443`
+	// works for HTTPS and HTTP/3 without special-casing.
+	if v := eng.EvaluateUDP("any-proto.example.com", 80); v != policy.Allow {
+		t.Errorf("any-proto.example.com = %v, want Allow (unscoped rules match UDP)", v)
 	}
 }
 
