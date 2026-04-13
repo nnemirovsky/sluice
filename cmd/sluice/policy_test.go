@@ -159,6 +159,32 @@ func TestHandlePolicyListShowsPorts(t *testing.T) {
 	}
 }
 
+func TestHandlePolicyListShowsReplacement(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("create test DB: %v", err)
+	}
+	if _, err := db.AddRule("redact", store.RuleOpts{
+		Pattern:     `sk-[A-Za-z0-9]+`,
+		Replacement: "sk-REDACTED",
+	}); err != nil {
+		t.Fatalf("add redact rule: %v", err)
+	}
+	_ = db.Close()
+
+	output := capturePolicyOutput(t, func() {
+		if err := handlePolicyList([]string{"--db", dbPath}); err != nil {
+			t.Fatalf("handlePolicyList: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, `-> "sk-REDACTED"`) {
+		t.Errorf("expected replacement in output: %s", output)
+	}
+}
+
 // --- handlePolicyAdd tests ---
 
 func TestHandlePolicyAddAllow(t *testing.T) {

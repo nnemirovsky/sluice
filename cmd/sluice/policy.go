@@ -78,11 +78,15 @@ func handlePolicyList(args []string) error {
 		if len(r.Protocols) > 0 {
 			proto = " protocols=" + strings.Join(r.Protocols, ",")
 		}
+		replacement := ""
+		if r.Replacement != "" {
+			replacement = fmt.Sprintf(" -> %q", r.Replacement)
+		}
 		name := ""
 		if r.Name != "" {
 			name = " (" + r.Name + ")"
 		}
-		fmt.Printf("[%d] %s %s%s%s%s [%s]\n", r.ID, r.Verdict, target, ports, proto, name, r.Source)
+		fmt.Printf("[%d] %s %s%s%s%s%s [%s]\n", r.ID, r.Verdict, target, ports, proto, replacement, name, r.Source)
 	}
 	return nil
 }

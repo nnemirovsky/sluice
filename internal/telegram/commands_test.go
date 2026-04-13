@@ -445,6 +445,46 @@ func TestPolicyPersistence(t *testing.T) {
 	}
 }
 
+func TestPolicyShowIncludesAllFields(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.AddRule("allow", store.RuleOpts{
+		Destination: "example.com",
+		Ports:       []int{443},
+		Protocols:   []string{"quic"},
+		Name:        "test rule",
+		Source:      "manual",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddRule("redact", store.RuleOpts{
+		Pattern:     `sk-[A-Za-z0-9]+`,
+		Replacement: "sk-REDACTED",
+		Source:      "seed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	out := handler.Handle(&Command{Name: "policy", Args: []string{"show"}})
+
+	mustContain := []string{
+		"example.com",
+		"ports=443",
+		"protocols=quic",
+		"(test rule)",
+		"[manual]",
+		"pattern:sk-[A-Za-z0-9]+",
+		`-> "sk-REDACTED"`,
+		"[seed]",
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(out, want) {
+			t.Errorf("policy show output missing %q\nfull output:\n%s", want, out)
+		}
+	}
+}
+
 func TestPolicyRemoveThenRecompile(t *testing.T) {
 	s := newTestStore(t)
 	id, err := s.AddRule("allow", store.RuleOpts{Destination: "to-remove.com"})
