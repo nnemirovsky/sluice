@@ -200,12 +200,54 @@ name = "block ws echo"
 	}
 }
 
-// Credential injection in WebSocket upgrade headers does not currently work
-// end-to-end. Sluice's addon hook fires and modifies the request header, but
-// go-mitmproxy's handleWSS (websocket.go:255) passes nil headers to the
-// upstream WS dialer, discarding all custom headers. Needs an upstream fix
-// or a sluice-side WS upgrade handler that bypasses go-mitmproxy. Tracking
-// separately from the QUIC full-flow work.
+// TestWebSocket_CredentialInjectionInUpgradeHeaders verifies that phantom
+// tokens in WebSocket upgrade request headers are replaced with real
+// credentials by the MITM proxy.
+func TestWebSocket_CredentialInjectionInUpgradeHeaders(t *testing.T) {
+	setup := startCredTestSluice(t, "")
+	wsAddr := startTLSWSEchoServer(t, setup.CA)
+	_, port := splitHostPort(t, wsAddr)
+
+	// Add credential bound to the WS echo server.
+	runCredAdd(t, setup.Proc, "ws_api_key", "ws-real-secret-789",
+		"--destination", "127.0.0.1",
+		"--ports", port,
+		"--header", "X-Ws-Key",
+	)
+	sendSIGHUP(t, setup.Proc)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, "wss://127.0.0.1:"+port+"/ws", &websocket.DialOptions{
+		HTTPClient: httpClientViaSOCKS5WithTLS(t, setup.Proc.ProxyAddr),
+	})
+	if err != nil {
+		t.Fatalf("websocket dial via SOCKS5: %v", err)
+	}
+	defer conn.CloseNow()
+
+	// Read the greeting which includes request headers.
+	_, greeting, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read greeting: %v", err)
+	}
+
+	greetingStr := string(greeting)
+	t.Logf("greeting: %s", greetingStr)
+
+	// The upstream should have received the real credential in the header.
+	if !strings.Contains(greetingStr, "ws-real-secret-789") {
+		t.Errorf("upstream did not receive injected credential in WS upgrade\ngreeting: %s", greetingStr)
+	}
+
+	// Phantom token should not appear in the upstream headers.
+	if strings.Contains(greetingStr, "SLUICE_PHANTOM") {
+		t.Errorf("phantom token leaked to upstream in WS upgrade\ngreeting: %s", greetingStr)
+	}
+
+	conn.Close(websocket.StatusNormalClosure, "done")
+}
 
 // splitHostPort splits a host:port string. Unlike mustSplitAddr it does not
 // strip URL scheme prefixes.

@@ -162,7 +162,7 @@ Extends phantom swap to handle OAuth credentials bidirectionally. Static credent
 |----------|---------------------|-------------------|--------------------|
 | HTTP/HTTPS | Built-in MITM, phantom swap | Full request/response | Per-request (allow-once = one HTTP request) |
 | gRPC | Header phantom swap via go-mitmproxy Addon hooks (per HTTP/2 stream) | Request/response metadata | Per-request (each HTTP/2 stream is a separate policy check) |
-| WebSocket | Text frame phantom swap (handshake header injection blocked by go-mitmproxy upstream limitation) | Text frame deny + redact rules | Per-connection (one upgrade = one session) |
+| WebSocket | Handshake headers + text frame phantom swap | Text frame deny + redact rules | Per-connection (one upgrade = one session) |
 | SSH | Jump host, key from vault | N/A | Per-connection (channels belong to one session) |
 | IMAP/SMTP | AUTH command proxy, phantom password swap | N/A | Per-connection (one mailbox session) |
 | DNS | N/A | Deny-only (NXDOMAIN). See DNS design note below. | Per-query deny, other verdicts resolved at SOCKS5 |
