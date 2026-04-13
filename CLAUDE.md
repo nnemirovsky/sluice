@@ -33,6 +33,25 @@ go test -tags="e2e darwin" ./e2e/ -v -count=1 -timeout=300s
 
 CI runs e2e tests via `.github/workflows/e2e-linux.yml` and `.github/workflows/e2e-macos.yml`.
 
+## Releases
+
+Use the `release-tools:new` skill (`/release-tools:new`) to cut a new release. The skill handles version calculation, tag push, and description prompt.
+
+**Naming:**
+- Tag: `vX.Y.Z` (e.g. `v0.10.0`)
+- Release title: same as tag (`v0.10.0`), NOT `Version X.Y.Z`
+
+**Version selection:**
+- **Minor** (`v0.9.0` -> `v0.10.0`): default for most releases. Use when a merged PR adds `feat` commits, new CLI flags, new protocol support, or user-visible behavior changes.
+- **Hotfix** (`v0.10.0` -> `v0.10.1`): only when a PR contains `fix` commits exclusively (no feat, no breaking changes). Common case: CI-only regressions, test fixes shipped alongside a real bug fix, flakiness fixes.
+- **Major** (`v0.10.0` -> `v1.0.0`): breaking changes to CLI flags, SQLite schema, policy TOML format, or MCP gateway API. **Always discuss with the user before a major bump.** Never pick `major` autonomously.
+
+**Skip releases for:** `chore`, `docs`, `ci`, `test` only PRs (see `feedback_tag_policy.md` memory).
+
+**Release workflow (goreleaser):** Pushing a `v*` tag triggers `.github/workflows/release.yml` which uses goreleaser to build Linux/darwin binaries and upload them to the release. The workflow uploads binaries even if the release was pre-created with a description, so write the description first via `gh release edit` (or let the skill do it), then push the tag.
+
+**Cross-repo references in release notes:** Bare `#number` gets auto-linked to this repo's issue tracker, which is wrong for PRs in other repos. Use an explicit markdown link with `owner/repo#number` as the link text: `[lqqyt2423/go-mitmproxy#100](https://github.com/lqqyt2423/go-mitmproxy/pull/100)`. Don't add any prose prefix like "go-mitmproxy PR" before it.
+
 ## System Architecture
 
 Two governance layers work together:
