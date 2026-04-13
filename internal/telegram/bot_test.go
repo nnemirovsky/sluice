@@ -77,8 +77,8 @@ func TestFormatApprovalMessage(t *testing.T) {
 			Protocol:    "http",
 		}
 		msg := FormatApprovalMessage(req)
-		if !strings.Contains(msg, "HTTP example.com:8080") {
-			t.Errorf("expected 'HTTP example.com:8080' in message, got: %s", msg)
+		if !strings.Contains(msg, "HTTP <code>example.com:8080</code>") {
+			t.Errorf("expected 'HTTP <code>example.com:8080</code>' in message, got: %s", msg)
 		}
 	})
 
@@ -167,10 +167,10 @@ func TestFormatApprovalMessage(t *testing.T) {
 			Path:        "/users/me",
 		}
 		msg := FormatApprovalMessage(req)
-		if !strings.Contains(msg, "HTTPS api.example.com:443") {
+		if !strings.Contains(msg, "HTTPS <code>api.example.com:443</code>") {
 			t.Errorf("expected destination line in message, got: %s", msg)
 		}
-		if !strings.Contains(msg, "GET https://api.example.com/users/me") {
+		if !strings.Contains(msg, "GET <code>https://api.example.com/users/me</code>") {
 			t.Errorf("expected request line in message, got: %s", msg)
 		}
 		if !strings.Contains(msg, "Allow this request?") {
@@ -187,7 +187,7 @@ func TestFormatApprovalMessage(t *testing.T) {
 			Path:        "/api/submit",
 		}
 		msg := FormatApprovalMessage(req)
-		if !strings.Contains(msg, "POST http://localhost:8080/api/submit") {
+		if !strings.Contains(msg, "POST <code>http://localhost:8080/api/submit</code>") {
 			t.Errorf("expected URL with explicit port, got: %s", msg)
 		}
 	})
@@ -201,7 +201,7 @@ func TestFormatApprovalMessage(t *testing.T) {
 			Path:        "",
 		}
 		msg := FormatApprovalMessage(req)
-		if !strings.Contains(msg, "HEAD https://example.com/") {
+		if !strings.Contains(msg, "HEAD <code>https://example.com/</code>") {
 			t.Errorf("expected URL with default path '/', got: %s", msg)
 		}
 	})

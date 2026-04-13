@@ -57,7 +57,7 @@ var protoDisplayName = map[string]string{
 // Callers must set ParseMode to HTML when sending the message.
 func FormatApprovalMessage(req channel.ApprovalRequest) string {
 	if req.Protocol == "mcp" {
-		msg := "OpenClaw wants to call tool:\n\n" + htmlEscape(req.Destination)
+		msg := "OpenClaw wants to call tool:\n\n" + htmlCode(req.Destination)
 		if req.ToolArgs != "" {
 			pretty := prettyJSONOrRaw(req.ToolArgs)
 			msg += "\n\nArguments:\n<pre><code class=\"language-json\">" + htmlEscape(pretty) + "</code></pre>"
@@ -69,20 +69,21 @@ func FormatApprovalMessage(req channel.ApprovalRequest) string {
 	if display == "" {
 		display = req.Protocol
 	}
+	destPort := fmt.Sprintf("%s:%d", req.Destination, req.Port)
 	if req.Method != "" {
 		ver := ""
 		if req.HTTPVersion != "" {
 			ver = " (" + htmlEscape(req.HTTPVersion) + ")"
 		}
 		return fmt.Sprintf(
-			"OpenClaw wants to connect to:\n\n%s %s:%d\n%s %s%s\n\nAllow this request?",
-			htmlEscape(display), htmlEscape(req.Destination), req.Port,
-			htmlEscape(req.Method), htmlEscape(buildRequestURL(req)), ver,
+			"OpenClaw wants to connect to:\n\n%s %s\n%s %s%s\n\nAllow this request?",
+			htmlEscape(display), htmlCode(destPort),
+			htmlEscape(req.Method), htmlCode(buildRequestURL(req)), ver,
 		)
 	}
 	return fmt.Sprintf(
-		"OpenClaw wants to connect to:\n\n%s %s:%d\n\nAllow this connection?",
-		htmlEscape(display), htmlEscape(req.Destination), req.Port,
+		"OpenClaw wants to connect to:\n\n%s %s\n\nAllow this connection?",
+		htmlEscape(display), htmlCode(destPort),
 	)
 }
 

@@ -253,21 +253,11 @@ func (h *CommandHandler) policyShow() string {
 	return b.String()
 }
 
-// htmlEscapeText escapes the three characters that Telegram's HTML parse mode
-// requires in text nodes: &, <, >. Quotes and apostrophes are left alone
-// since we don't use them in tag attributes.
-func htmlEscapeText(s string) string {
-	s = strings.ReplaceAll(s, "&", "&amp;")
-	s = strings.ReplaceAll(s, "<", "&lt;")
-	s = strings.ReplaceAll(s, ">", "&gt;")
-	return s
-}
-
 // htmlCode wraps s in <code>...</code> after HTML-escaping it. Inside <code>
 // Telegram will not auto-detect URLs, so destinations like api.github.com
 // render as monospace text rather than clickable blue links.
 func htmlCode(s string) string {
-	return "<code>" + htmlEscapeText(s) + "</code>"
+	return "<code>" + htmlEscape(s) + "</code>"
 }
 
 func (h *CommandHandler) policyShowFromStore() string {
@@ -329,10 +319,10 @@ func (h *CommandHandler) policyShowFromStore() string {
 				fmt.Fprintf(&b, " -> %s", htmlCode(r.Replacement))
 			}
 			if r.Name != "" {
-				fmt.Fprintf(&b, " (%s)", htmlEscapeText(r.Name))
+				fmt.Fprintf(&b, " (%s)", htmlEscape(r.Name))
 			}
 			if r.Source != "" {
-				fmt.Fprintf(&b, " [%s]", htmlEscapeText(r.Source))
+				fmt.Fprintf(&b, " [%s]", htmlEscape(r.Source))
 			}
 			b.WriteString("\n")
 		}
@@ -364,14 +354,14 @@ func (h *CommandHandler) policyAllow(dest string) string {
 		if err := h.recompileAndSwap(); err != nil {
 			return fmt.Sprintf("Added allow rule but failed to recompile: %v", err)
 		}
-		return fmt.Sprintf("Added allow rule: %s", dest)
+		return "Added allow rule: " + htmlCode(dest)
 	}
 
 	// Fallback to in-memory mutation when store is not configured.
 	if err := h.engine.Load().AddAllowRule(dest); err != nil { //nolint:staticcheck // backward compat fallback when no store
 		return fmt.Sprintf("Failed to add allow rule: %v", err)
 	}
-	return fmt.Sprintf("Added allow rule: %s%s", dest, inMemoryWarning)
+	return "Added allow rule: " + htmlCode(dest) + inMemoryWarning
 }
 
 func (h *CommandHandler) policyDeny(dest string) string {
@@ -389,13 +379,13 @@ func (h *CommandHandler) policyDeny(dest string) string {
 		if err := h.recompileAndSwap(); err != nil {
 			return fmt.Sprintf("Added deny rule but failed to recompile: %v", err)
 		}
-		return fmt.Sprintf("Added deny rule: %s", dest)
+		return "Added deny rule: " + htmlCode(dest)
 	}
 
 	if err := h.engine.Load().AddDenyRule(dest); err != nil { //nolint:staticcheck // backward compat fallback when no store
 		return fmt.Sprintf("Failed to add deny rule: %v", err)
 	}
-	return fmt.Sprintf("Added deny rule: %s%s", dest, inMemoryWarning)
+	return "Added deny rule: " + htmlCode(dest) + inMemoryWarning
 }
 
 func (h *CommandHandler) policyRemove(idStr string) string {
