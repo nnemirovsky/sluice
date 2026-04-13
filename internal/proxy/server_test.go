@@ -4486,8 +4486,9 @@ func TestSNIAccumulatorPartialDataCannotExtractSNI(t *testing.T) {
 // sole CRYPTO frame sits at the given offset with the provided handshake
 // data. This lets tests simulate quic-go fragmenting a ClientHello across
 // several Initial packets. dcid must be identical across packets that share
-// the same connection so decryption uses the same keys.
-func buildQUICInitialWithCrypto(t *testing.T, dcid []byte, offset uint64, data []byte, version uint32) []byte {
+// the same connection so decryption uses the same keys. Always builds a
+// QUIC v1 packet since all current callers only exercise v1 fragmentation.
+func buildQUICInitialWithCrypto(t *testing.T, dcid []byte, offset uint64, data []byte) []byte {
 	t.Helper()
 
 	var crypto []byte
@@ -4496,7 +4497,7 @@ func buildQUICInitialWithCrypto(t *testing.T, dcid []byte, offset uint64, data [
 	crypto = append(crypto, encodeQUICVarint(uint64(len(data)))...)
 	crypto = append(crypto, data...)
 
-	return buildQUICInitialFromPlaintext(t, dcid, crypto, version)
+	return buildQUICInitialFromPlaintext(t, dcid, crypto, quicVersionV1)
 }
 
 // TestExtractQUICCryptoDataReturnsOffsetAndData verifies that
@@ -4507,7 +4508,7 @@ func TestExtractQUICCryptoDataReturnsOffsetAndData(t *testing.T) {
 	dcid := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
 	payload := []byte("first-crypto-chunk")
 
-	packet := buildQUICInitialWithCrypto(t, dcid, 0, payload, quicVersionV1)
+	packet := buildQUICInitialWithCrypto(t, dcid, 0, payload)
 	got, offset := ExtractQUICCryptoData(packet)
 	if offset != 0 {
 		t.Errorf("offset = %d, want 0", offset)
@@ -4517,7 +4518,7 @@ func TestExtractQUICCryptoDataReturnsOffsetAndData(t *testing.T) {
 	}
 
 	// Non-zero offset packet.
-	packet2 := buildQUICInitialWithCrypto(t, dcid, 42, []byte("later-chunk"), quicVersionV1)
+	packet2 := buildQUICInitialWithCrypto(t, dcid, 42, []byte("later-chunk"))
 	got2, offset2 := ExtractQUICCryptoData(packet2)
 	if offset2 != 42 {
 		t.Errorf("offset = %d, want 42", offset2)
@@ -4675,8 +4676,8 @@ func TestQUICSNIAccumulationAcrossTwoPackets(t *testing.T) {
 	part2 := hs[splitAt:]
 
 	dcid := []byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88}
-	packet1 := buildQUICInitialWithCrypto(t, dcid, 0, part1, quicVersionV1)
-	packet2 := buildQUICInitialWithCrypto(t, dcid, uint64(splitAt), part2, quicVersionV1)
+	packet1 := buildQUICInitialWithCrypto(t, dcid, 0, part1)
+	packet2 := buildQUICInitialWithCrypto(t, dcid, uint64(splitAt), part2)
 
 	// Sanity: the first packet alone should NOT produce an SNI via the
 	// single-packet path.
@@ -4721,7 +4722,7 @@ func TestQUICSNIAccumulationFallsBackAfterPacketBudget(t *testing.T) {
 	destIP := net.ParseIP("10.77.0.2")
 
 	for i := 0; i < maxSNIAccumulatorPackets; i++ {
-		packet := buildQUICInitialWithCrypto(t, dcid, uint64(1000+i*16), []byte("gap-bytes-only"), quicVersionV1)
+		packet := buildQUICInitialWithCrypto(t, dcid, uint64(1000+i*16), []byte("gap-bytes-only"))
 		if _, err := env.udpConn.WriteTo(wrapInSOCKS5UDP(packet, destIP), env.bindAddr); err != nil {
 			t.Fatalf("send packet %d: %v", i, err)
 		}

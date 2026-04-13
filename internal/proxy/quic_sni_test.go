@@ -286,7 +286,7 @@ func buildQUICInitialFromPlaintext(t *testing.T, dcid, plaintext []byte, version
 		ivLabel = "quicv2 iv"
 	}
 
-	clientSecret, err := deriveQUICClientSecret(dcid, salt, version)
+	clientSecret, err := deriveQUICClientSecret(dcid, salt)
 	if err != nil {
 		t.Fatalf("deriveQUICClientSecret: %v", err)
 	}
@@ -414,7 +414,7 @@ func buildQUICInitial(t *testing.T, hostname string, version uint32) []byte {
 	}
 
 	// Derive keys.
-	clientSecret, err := deriveQUICClientSecret(dcid, salt, version)
+	clientSecret, err := deriveQUICClientSecret(dcid, salt)
 	if err != nil {
 		t.Fatalf("deriveQUICClientSecret: %v", err)
 	}

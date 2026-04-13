@@ -128,7 +128,7 @@ func ExtractQUICSNI(packet []byte) string {
 	}
 
 	// Derive Initial secrets.
-	clientSecret, err := deriveQUICClientSecret(dcid, salt, version)
+	clientSecret, err := deriveQUICClientSecret(dcid, salt)
 	if err != nil {
 		return ""
 	}
@@ -317,7 +317,7 @@ func ExtractQUICCryptoData(packet []byte) (data []byte, offset uint64) {
 		return nil, 0
 	}
 
-	clientSecret, err := deriveQUICClientSecret(dcid, salt, version)
+	clientSecret, err := deriveQUICClientSecret(dcid, salt)
 	if err != nil {
 		return nil, 0
 	}
@@ -404,10 +404,10 @@ func extractFirstCryptoFrame(frames []byte) ([]byte, uint64) {
 		}
 		pos += n
 
-		switch {
-		case frameType == 0x00: // PADDING
-		case frameType == 0x01: // PING
-		case frameType == 0x02 || frameType == 0x03: // ACK
+		switch frameType {
+		case 0x00: // PADDING
+		case 0x01: // PING
+		case 0x02, 0x03: // ACK
 			_, vn := readQUICVarint(frames[pos:])
 			if vn == 0 {
 				return nil, 0
@@ -449,7 +449,7 @@ func extractFirstCryptoFrame(frames []byte) ([]byte, uint64) {
 					pos += vn
 				}
 			}
-		case frameType == 0x06: // CRYPTO
+		case 0x06: // CRYPTO
 			cryptoOffset, vn := readQUICVarint(frames[pos:])
 			if vn == 0 {
 				return nil, 0
@@ -466,7 +466,7 @@ func extractFirstCryptoFrame(frames []byte) ([]byte, uint64) {
 			result := make([]byte, int(dataLen))
 			copy(result, frames[pos:pos+int(dataLen)])
 			return result, cryptoOffset
-		case frameType == 0x1c || frameType == 0x1d: // CONNECTION_CLOSE
+		case 0x1c, 0x1d: // CONNECTION_CLOSE
 			_, vn := readQUICVarint(frames[pos:])
 			if vn == 0 {
 				return nil, 0
@@ -535,15 +535,15 @@ func extractCryptoData(frames []byte) []byte {
 		}
 		pos += n
 
-		switch {
-		case frameType == 0x00:
+		switch frameType {
+		case 0x00:
 			// PADDING frame: single-byte type, no payload. The type byte
 			// was already consumed above.
 
-		case frameType == 0x01:
+		case 0x01:
 			// PING frame: single-byte type, no payload.
 
-		case frameType == 0x02 || frameType == 0x03:
+		case 0x02, 0x03:
 			// ACK frame: skip it. Parse enough to find the length.
 			// Largest Acknowledged (varint)
 			_, vn := readQUICVarint(frames[pos:])
@@ -593,7 +593,7 @@ func extractCryptoData(frames []byte) []byte {
 				}
 			}
 
-		case frameType == 0x06:
+		case 0x06:
 			// CRYPTO frame: offset(varint) + length(varint) + data
 			offset, vn := readQUICVarint(frames[pos:])
 			if vn == 0 {
@@ -615,7 +615,7 @@ func extractCryptoData(frames []byte) []byte {
 			}
 			pos += int(dataLen)
 
-		case frameType == 0x1c || frameType == 0x1d:
+		case 0x1c, 0x1d:
 			// CONNECTION_CLOSE frame: error_code(varint) + frame_type(varint,
 			// only for 0x1c) + reason_phrase_length(varint) + reason_phrase.
 			_, vn := readQUICVarint(frames[pos:])
@@ -685,13 +685,14 @@ func readQUICVarint(buf []byte) (uint64, int) {
 }
 
 // deriveQUICClientSecret derives the TLS 1.3 client Initial secret from
-// the DCID and salt per RFC 9001 Section 5.2.
-func deriveQUICClientSecret(dcid, salt []byte, version uint32) ([]byte, error) {
+// the DCID and salt per RFC 9001 Section 5.2. Both QUIC v1 and v2 use the
+// same label for initial secret derivation, so the version is only reflected
+// in the caller's choice of salt.
+func deriveQUICClientSecret(dcid, salt []byte) ([]byte, error) {
 	// Step 1: initial_secret = HKDF-Extract(salt, dcid)
 	h := hkdf.Extract(sha256.New, dcid, salt)
 
 	// Step 2: client_in = HKDF-Expand-Label(initial_secret, "client in", "", 32)
-	// Both QUIC v1 and v2 use the same label for initial secret derivation.
 	return hkdfExpandLabel(h, "client in", 32)
 }
 
