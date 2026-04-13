@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/nemirovsky/sluice/internal/vault"
 	"golang.org/x/crypto/ssh"
@@ -135,6 +136,11 @@ func serveTestSSHConn(conn net.Conn, config *ssh.ServerConfig) {
 					}
 					_, _ = ch.Write([]byte("hello from ssh"))
 					_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
+					_ = ch.CloseWrite()
+					// Wait briefly before returning so the defer-close races
+					// do not close the channel before the proxy's io.Copy
+					// has drained the data buffer.
+					time.Sleep(50 * time.Millisecond)
 					return
 				default:
 					if req.WantReply {
