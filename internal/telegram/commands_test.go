@@ -469,19 +469,56 @@ func TestPolicyShowIncludesAllFields(t *testing.T) {
 	out := handler.Handle(&Command{Name: "policy", Args: []string{"show"}})
 
 	mustContain := []string{
-		"example.com",
+		"<code>example.com</code>",
 		"ports=443",
-		"protocols=quic",
+		"protocols=<code>quic</code>",
 		"(test rule)",
 		"[manual]",
-		"pattern:sk-[A-Za-z0-9]+",
-		`-> "sk-REDACTED"`,
+		"<code>pattern:sk-[A-Za-z0-9]+</code>",
+		"-> <code>sk-REDACTED</code>",
 		"[seed]",
 	}
 	for _, want := range mustContain {
 		if !strings.Contains(out, want) {
 			t.Errorf("policy show output missing %q\nfull output:\n%s", want, out)
 		}
+	}
+
+	// Section headers are bolded so the sender picks HTML parse mode,
+	// which also disables Telegram's URL auto-linking inside <code>.
+	if !strings.Contains(out, "<b>ALLOW</b>") {
+		t.Errorf("policy show output must bold section headers: %q", out)
+	}
+}
+
+func TestPolicyShowEscapesHTML(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.AddRule("deny", store.RuleOpts{
+		Pattern: "<script>",
+		Source:  "manual",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddRule("redact", store.RuleOpts{
+		Pattern:     "a&b",
+		Replacement: "<x>",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	out := handler.Handle(&Command{Name: "policy", Args: []string{"show"}})
+
+	// Raw "<script>" must not survive the <code> wrapper. It should be
+	// rendered as "<code>pattern:&lt;script&gt;</code>".
+	if strings.Contains(out, "pattern:<script>") {
+		t.Errorf("raw <script> must be HTML-escaped: %s", out)
+	}
+	if !strings.Contains(out, "&lt;script&gt;") {
+		t.Errorf("expected &lt;script&gt; in output: %s", out)
+	}
+	if !strings.Contains(out, "a&amp;b") {
+		t.Errorf("expected a&amp;b in output: %s", out)
 	}
 }
 
