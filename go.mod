@@ -6,12 +6,14 @@ require (
 	filippo.io/age v1.3.1
 	github.com/1password/onepassword-sdk-go v0.4.0
 	github.com/BurntSushi/toml v1.6.0
+	github.com/andybalholm/brotli v1.0.5
 	github.com/coder/websocket v1.8.14
 	github.com/getkin/kin-openapi v0.134.0
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/hashicorp/vault/api v1.23.0
+	github.com/klauspost/compress v1.17.8
 	github.com/lqqyt2423/go-mitmproxy v1.8.10
 	github.com/oapi-codegen/runtime v1.3.1
 	github.com/quic-go/quic-go v0.59.0
@@ -28,7 +30,6 @@ require (
 
 require (
 	filippo.io/hpke v0.4.0 // indirect
-	github.com/andybalholm/brotli v1.0.5 // indirect
 	github.com/apapsch/go-jsonmerge/v2 v2.0.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
@@ -52,7 +53,6 @@ require (
 	github.com/hashicorp/hcl v1.0.1-vault-7 // indirect
 	github.com/ianlancetaylor/demangle v0.0.0-20251118225945-96ee0021ea0f // indirect
 	github.com/josharian/intern v1.0.0 // indirect
-	github.com/klauspost/compress v1.17.8 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.7 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect

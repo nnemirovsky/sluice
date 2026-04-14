@@ -91,6 +91,25 @@ type SluiceAddon struct {
 	// phantom token replacement. Updated atomically via UpdateOAuthIndex.
 	oauthIndex atomic.Pointer[OAuthIndex]
 
+	// redactRules holds compiled MITM response DLP rules. Used by the
+	// Response handler to scan HTTPS response headers and bodies for
+	// credential patterns and redact matches. Swapped atomically via
+	// SetRedactRules (called on startup and SIGHUP). A nil value means
+	// response DLP is disabled.
+	redactRules atomic.Pointer[[]mitmRedactRule]
+
+	// dlpNoMatchScans counts DLP scans that produced no redaction.
+	// Used to rate-limit the "scanned with no match" debug log so it
+	// emits every dlpNoMatchLogEvery scans instead of once per response.
+	dlpNoMatchScans uint64
+
+	// dlpStreamWarned tracks connections that have already been warned
+	// about streaming bypass of DLP. Keyed by client connection id so
+	// the warning only fires once per connection instead of once per
+	// streamed response chunk. Use sync.Map to avoid per-lookup locking
+	// on the hot StreamResponseModifier path.
+	dlpStreamWarned sync.Map
+
 	// refreshGroup deduplicates concurrent OAuth token refresh responses
 	// for the same credential. Keyed by credential name so only one
 	// vault update occurs when multiple requests trigger simultaneous
@@ -272,6 +291,10 @@ func (a *SluiceAddon) ClientConnected(client *mitmproxy.ClientConn) {
 // ClientDisconnected removes per-connection state when a client disconnects.
 func (a *SluiceAddon) ClientDisconnected(client *mitmproxy.ClientConn) {
 	a.conns.Delete(client.Id)
+	// Drop the per-connection DLP streaming warning flag so a
+	// reconnecting client that triggers another streamed response
+	// gets a fresh warning.
+	a.dlpStreamWarned.Delete(client.Id)
 	log.Printf("[ADDON] client disconnected: %s", client.Id)
 }
 
@@ -613,17 +636,31 @@ func (a *SluiceAddon) StreamRequestModifier(f *mitmproxy.Flow, in io.Reader) io.
 	}
 }
 
-// Response performs OAuth response interception on fully-buffered response
-// bodies. When the response comes from a known OAuth token endpoint (matched
-// via OAuthIndex), real tokens are replaced with deterministic phantom tokens
-// before the response reaches the agent. The real tokens are persisted to
-// the vault asynchronously.
+// Response performs OAuth response interception and outbound DLP scanning on
+// fully-buffered response bodies. When the response comes from a known OAuth
+// token endpoint (matched via OAuthIndex), real tokens are replaced with
+// deterministic phantom tokens before the response reaches the agent. After
+// OAuth processing, response headers and body are scanned for configured
+// redact patterns (see SetRedactRules) so credential strings in upstream
+// responses are scrubbed before being relayed to the agent.
 func (a *SluiceAddon) Response(f *mitmproxy.Flow) {
 	if f.Response == nil || f.Request == nil {
 		return
 	}
 
-	// Only intercept successful responses.
+	a.processOAuthResponseIfMatching(f)
+
+	// Outbound DLP: scan response body and headers for credential
+	// patterns that should not reach the agent. Runs after OAuth
+	// processing so real tokens are already swapped to phantoms.
+	a.scanResponseForDLP(f)
+}
+
+// processOAuthResponseIfMatching performs OAuth token phantom swap on the
+// response when the request URL matches the OAuth index. Extracted from
+// Response so DLP scanning can run independently on non-OAuth responses.
+func (a *SluiceAddon) processOAuthResponseIfMatching(f *mitmproxy.Flow) {
+	// Only intercept successful responses for OAuth token handling.
 	if f.Response.StatusCode < 200 || f.Response.StatusCode > 299 {
 		return
 	}
@@ -658,9 +695,51 @@ func (a *SluiceAddon) Response(f *mitmproxy.Flow) {
 // small), tokens are swapped, and the modified body is returned as a reader.
 // For non-OAuth responses or when no OAuthIndex is configured, the original
 // reader is returned unmodified.
+//
+// IMPORTANT: response DLP scanning is bypassed when this path is active
+// because go-mitmproxy skips the Response addon callback when
+// f.Stream=true. go-mitmproxy sets f.Stream=true automatically for:
+//   - any response whose Content-Type contains "text/event-stream" (SSE,
+//     including LLM streaming completions), and
+//   - any response whose body exceeds StreamLargeBodies (default 5 MiB),
+//     applied to the range between 5 MiB and maxProxyBody (16 MiB).
+//
+// These paths bypass response DLP today. When rules are configured, we
+// emit a single WARNING per client connection so operators notice the
+// gap without log spam from multi-chunk streams. The dedup state lives
+// on dlpStreamWarned, scoped to the client connection id.
 func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) io.Reader {
 	if f.Request == nil {
 		return in
+	}
+
+	// Warn when DLP rules are configured but the response is streamed.
+	// Dedupe by client connection id so we emit at most one warning per
+	// connection. Otherwise multi-chunk streams produce a line per
+	// chunk. When the connection state is unavailable (defensive: rare
+	// in production but possible in tests or when go-mitmproxy is
+	// re-entered on an unusual code path), fall back to a non-dedup log
+	// so the warning is not silently suppressed.
+	//
+	// The warning is emitted regardless of status code. A streamed 4xx
+	// or 5xx body (e.g. an SSE error stream from an LLM API or a large
+	// error response) still bypasses DLP scanning, and operators need
+	// the visibility signal to know credential patterns in that body
+	// would not be redacted. Since the warning does not modify the
+	// response, firing it on non-2xx responses is safe.
+	if rules := a.loadRedactRules(); len(rules) > 0 {
+		host := "unknown"
+		if f.Request.URL != nil {
+			host = f.Request.URL.Host
+		}
+		if f.ConnContext != nil && f.ConnContext.ClientConn != nil {
+			connID := f.ConnContext.ClientConn.Id
+			if _, loaded := a.dlpStreamWarned.LoadOrStore(connID, struct{}{}); !loaded {
+				log.Printf("[ADDON-DLP] WARNING: streaming response bypasses DLP for %s (%d rules configured)", host, len(rules))
+			}
+		} else {
+			log.Printf("[ADDON-DLP] WARNING: streaming response bypasses DLP for %s (%d rules configured; connection state unavailable, dedup disabled)", host, len(rules))
+		}
 	}
 
 	if f.Response == nil || f.Response.StatusCode < 200 || f.Response.StatusCode > 299 {
