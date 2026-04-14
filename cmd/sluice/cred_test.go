@@ -1033,6 +1033,7 @@ func TestHandleCredAddOAuthWithoutDestination(t *testing.T) {
 	}
 	if meta == nil {
 		t.Fatal("expected credential_meta even without --destination")
+		return
 	}
 	if meta.CredType != "oauth" {
 		t.Errorf("cred_type = %q, want oauth", meta.CredType)
