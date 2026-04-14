@@ -171,6 +171,118 @@ func TestHandlePolicyDeny(t *testing.T) {
 	}
 }
 
+func TestPolicyRedactCommand(t *testing.T) {
+	s := newTestStore(t)
+
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	result := handler.Handle(&Command{Name: "policy", Args: []string{"redact", "sk-[a-z0-9]+", "[REDACTED]"}})
+
+	if !strings.Contains(result, "Added redact rule") {
+		t.Errorf("expected confirmation, got: %s", result)
+	}
+	if !strings.Contains(result, "sk-[a-z0-9]+") {
+		t.Errorf("expected pattern in reply, got: %s", result)
+	}
+	if !strings.Contains(result, "[REDACTED]") {
+		t.Errorf("expected replacement in reply, got: %s", result)
+	}
+
+	rules, err := s.ListRules(store.RuleFilter{Verdict: "redact", Type: "pattern"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 redact rule in store, got %d", len(rules))
+	}
+	if rules[0].Pattern != "sk-[a-z0-9]+" {
+		t.Errorf("pattern = %q, want sk-[a-z0-9]+", rules[0].Pattern)
+	}
+	if rules[0].Replacement != "[REDACTED]" {
+		t.Errorf("replacement = %q, want [REDACTED]", rules[0].Replacement)
+	}
+	if rules[0].Source != "telegram" {
+		t.Errorf("source = %q, want telegram", rules[0].Source)
+	}
+}
+
+func TestPolicyRedactDefaultReplacement(t *testing.T) {
+	s := newTestStore(t)
+
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	// No replacement provided, default should be [REDACTED].
+	result := handler.Handle(&Command{Name: "policy", Args: []string{"redact", "sk-[a-z0-9]+"}})
+
+	if !strings.Contains(result, "Added redact rule") {
+		t.Fatalf("expected confirmation, got: %s", result)
+	}
+
+	rules, err := s.ListRules(store.RuleFilter{Verdict: "redact", Type: "pattern"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 redact rule in store, got %d", len(rules))
+	}
+	if rules[0].Replacement != "[REDACTED]" {
+		t.Errorf("replacement should default to [REDACTED], got %q", rules[0].Replacement)
+	}
+}
+
+func TestPolicyRedactInvalidPattern(t *testing.T) {
+	s := newTestStore(t)
+
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	result := handler.Handle(&Command{Name: "policy", Args: []string{"redact", "[unclosed"}})
+
+	if !strings.Contains(result, "Invalid regex pattern") {
+		t.Errorf("expected invalid pattern error, got: %s", result)
+	}
+
+	// Confirm no rule was persisted.
+	rules, err := s.ListRules(store.RuleFilter{Verdict: "redact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 0 {
+		t.Errorf("expected 0 redact rules after invalid pattern, got %d", len(rules))
+	}
+}
+
+func TestPolicyRedactJoinsReplacementWords(t *testing.T) {
+	// /policy redact <pattern> this is the replacement -> joined with spaces.
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	result := handler.Handle(&Command{
+		Name: "policy",
+		Args: []string{"redact", "secret-[a-z]+", "this", "is", "redacted"},
+	})
+
+	if !strings.Contains(result, "Added redact rule") {
+		t.Fatalf("expected confirmation, got: %s", result)
+	}
+
+	rules, err := s.ListRules(store.RuleFilter{Verdict: "redact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rules))
+	}
+	if rules[0].Replacement != "this is redacted" {
+		t.Errorf("replacement = %q, want %q", rules[0].Replacement, "this is redacted")
+	}
+}
+
+func TestPolicyRedactUsageWhenMissingPattern(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	result := handler.Handle(&Command{Name: "policy", Args: []string{"redact"}})
+
+	if !strings.Contains(result, "Usage: /policy redact") {
+		t.Errorf("expected usage message, got: %s", result)
+	}
+}
+
 func TestHandlePolicyRemove(t *testing.T) {
 	s := newTestStore(t)
 	id, err := s.AddRule("allow", store.RuleOpts{Destination: "removeme.com"})

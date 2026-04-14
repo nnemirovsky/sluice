@@ -83,6 +83,7 @@ Two governance layers work together:
 ```
 sluice policy list [--verdict allow|deny|ask|redact] [--db sluice.db]
 sluice policy add allow|deny|ask <destination> [--ports 443,80] [--name "reason"]
+sluice policy add redact <pattern> --replacement "[REDACTED_X]" [--name "reason"]
 sluice policy remove <id>
 sluice policy import <path.toml>    # seed DB from TOML (merge semantics)
 sluice policy export                # dump current rules as TOML
@@ -192,7 +193,7 @@ Extends phantom swap to handle OAuth credentials bidirectionally. Static credent
 
 **MITM library:** HTTPS interception uses go-mitmproxy (`github.com/lqqyt2423/go-mitmproxy`). The `SluiceAddon` struct in `internal/proxy/addon.go` implements go-mitmproxy's `Addon` interface. `Requestheaders` fires per HTTP/2 stream, giving true per-request policy for gRPC and other HTTP/2 traffic. `Request` handles credential injection (three-pass phantom swap). `Response` handles OAuth token interception and response DLP scanning.
 
-**Response DLP** (`internal/proxy/response_dlp.go`, wired via `SluiceAddon.Response` in `internal/proxy/addon.go`) scans HTTPS response bodies and header values for credential patterns using `InspectRedactRule` regexes from the policy store.
+**Response DLP** (`internal/proxy/response_dlp.go`, wired via `SluiceAddon.Response` in `internal/proxy/addon.go`) scans HTTPS response bodies and header values for credential patterns using `InspectRedactRule` regexes from the policy store. Redact rules can be managed via CLI (`sluice policy add redact <pattern> --replacement "..."`), Telegram (`/policy redact <pattern> [replacement]`), or HTTP API (`POST /api/rules` with `verdict="redact"`).
 
 * Complements phantom token stripping. Phantom stripping protects outbound requests so real credentials never leak to upstreams. Response DLP protects inbound responses so real credentials from upstream bodies (echoed auth headers in API errors, debug endpoints leaking env vars, misconfigured services returning secrets) never reach the agent.
 * Header scan runs unconditionally. Headers are scanned regardless of content type and regardless of whether the body scan later succeeds. A decompression failure or a binary Content-Type cannot suppress redaction of a header-borne leak.
