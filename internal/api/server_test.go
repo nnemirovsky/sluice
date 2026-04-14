@@ -1703,6 +1703,7 @@ func TestPostApiCredentials_OAuthSuccess(t *testing.T) {
 	}
 	if meta == nil {
 		t.Fatal("expected credential meta to exist")
+		return
 	}
 	if meta.CredType != "oauth" {
 		t.Errorf("expected cred_type oauth, got %q", meta.CredType)
@@ -2016,6 +2017,7 @@ func TestPostApiCredentials_StaticWithMetaCreated(t *testing.T) {
 	}
 	if meta == nil {
 		t.Fatal("expected credential meta to exist")
+		return
 	}
 	if meta.CredType != "static" {
 		t.Errorf("expected cred_type static, got %q", meta.CredType)

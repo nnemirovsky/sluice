@@ -382,14 +382,17 @@ func TestCredential_UnboundPhantomStripped(t *testing.T) {
 }
 
 // TestCredential_RedactRulesLoaded verifies that the proxy correctly loads
-// redact rules from the policy config and that audit logging captures
-// connections when redact rules are active.
+// redact rules from the policy config and applies them to HTTPS response
+// bodies at the MITM layer, and that audit logging captures the
+// redaction.
 //
-// HTTP response redaction is applied at the WebSocket frame level and in the
-// MCP gateway. For HTTPS MITM, the proxy modifies requests (phantom
-// replacement) but does not currently modify response bodies. This test
-// verifies the content inspection pipeline is wired up (rules loaded, audit
-// active) even though HTTP response bodies pass through unmodified.
+// Response DLP runs inside `SluiceAddon.Response` (see
+// `internal/proxy/response_dlp.go`). It scans response bodies and header
+// values for `InspectRedactRule` patterns and rewrites them in place
+// before the body reaches the agent. This end-to-end test complements
+// the unit tests in `internal/proxy/response_dlp_test.go` by proving
+// the rules are loaded from TOML config, wired into the addon at
+// startup, and applied to real HTTPS responses routed through SOCKS5.
 func TestCredential_RedactRulesLoaded(t *testing.T) {
 	// Start an HTTPS echo server that includes a "secret" pattern in its
 	// response body. The echo server reflects the URL path, so we control
@@ -434,25 +437,38 @@ name = "strip api keys from responses"
 		},
 	})
 
-	// Make an HTTPS request. The echo server reflects the URL path in its
-	// response body. Since HTTP response redaction is not applied at the
-	// MITM layer (it is a WebSocket/MCP feature), the response should
-	// contain the original content.
+	// Make an HTTPS request. The echo server reflects the URL path
+	// (which contains `sk-abcdefghij1234`) in its response body. MITM
+	// response DLP must rewrite the key pattern to `[REDACTED]` before
+	// the body reaches the client.
 	status, body := httpsRequestViaSOCKS5(t, proc.ProxyAddr, "GET",
 		echo.URL+"/data?key=sk-abcdefghij1234", nil, "")
 	if status != 200 {
 		t.Fatalf("expected 200, got %d", status)
 	}
 
-	// Verify the request reached the echo server (basic connectivity).
-	if !strings.Contains(body, "URL: /data?key=sk-abcdefghij1234") {
-		t.Errorf("echo server did not reflect request URL\nresponse:\n%s", body)
+	// The real key must be gone from the response body.
+	if strings.Contains(body, "sk-abcdefghij1234") {
+		t.Errorf("expected response body to have the api key redacted, got:\n%s", body)
+	}
+	// The replacement marker must be present so we know the redact
+	// rule fired (and the path was not just dropped on the floor).
+	if !strings.Contains(body, "[REDACTED]") {
+		t.Errorf("expected redacted marker in response body, got:\n%s", body)
+	}
+	// The non-matching parts of the response must still reach the
+	// client so we know the echo server was actually hit.
+	if !strings.Contains(body, "URL: /data?key=") {
+		t.Errorf("echo server did not reflect request URL (other than key):\n%s", body)
 	}
 
-	// Verify audit log captured the connection, confirming the inspection
-	// pipeline is active for this connection.
-	if !auditLogContains(t, proc.AuditPath, "127.0.0.1") {
-		t.Error("audit log should contain an entry for the echo server connection")
+	// Verify audit log captured the redaction event so operators can
+	// see the rule fired.
+	if !auditLogContains(t, proc.AuditPath, "response_dlp_redact") {
+		t.Error("audit log should contain a response_dlp_redact entry")
+	}
+	if !auditLogContains(t, proc.AuditPath, "strip api keys from responses") {
+		t.Error("audit log should name the firing rule")
 	}
 }
 

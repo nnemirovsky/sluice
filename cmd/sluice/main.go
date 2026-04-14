@@ -487,6 +487,15 @@ func main() {
 			}
 		}
 
+		// Wire the exec argument inspector with default tool name patterns
+		// (*exec*, *shell*, *run_command*, *terminal*). Blocks trampoline
+		// patterns, dangerous commands, and GIT_SSH_COMMAND-style env
+		// overrides before the tool call reaches the upstream.
+		execInspector, execErr := mcp.NewExecInspector(nil)
+		if execErr != nil {
+			log.Fatalf("create MCP exec inspector: %v", execErr)
+		}
+
 		var credResolver mcp.CredentialResolver
 		if provider != nil {
 			credResolver = func(name string) (string, error) {
@@ -504,6 +513,7 @@ func main() {
 			Upstreams:          mcpUpstreams,
 			ToolPolicy:         toolPolicy,
 			Inspector:          mcpInspector,
+			ExecInspector:      execInspector,
 			Audit:              logger,
 			Broker:             broker,
 			TimeoutSec:         eng.TimeoutSec,

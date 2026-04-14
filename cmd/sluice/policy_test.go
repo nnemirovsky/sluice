@@ -393,6 +393,118 @@ func TestHandlePolicyAddEmptyProtocol(t *testing.T) {
 	}
 }
 
+// --- handlePolicyAdd redact tests ---
+
+func TestPolicyAddRedact(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	output := capturePolicyOutput(t, func() {
+		if err := handlePolicyAdd([]string{
+			"redact", `(?i)sk-\w+`,
+			"--replacement", "[REDACTED_KEY]",
+			"--db", dbPath,
+		}); err != nil {
+			t.Fatalf("handlePolicyAdd redact: %v", err)
+		}
+	})
+
+	if !strings.Contains(output, "added redact rule") {
+		t.Errorf("expected 'added redact rule' in output: %s", output)
+	}
+	if !strings.Contains(output, "[REDACTED_KEY]") {
+		t.Errorf("expected replacement in output: %s", output)
+	}
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rules, err := db.ListRules(store.RuleFilter{Verdict: "redact", Type: "pattern"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 redact rule, got %d", len(rules))
+	}
+	if rules[0].Pattern != `(?i)sk-\w+` {
+		t.Errorf("pattern = %q, want %q", rules[0].Pattern, `(?i)sk-\w+`)
+	}
+	if rules[0].Replacement != "[REDACTED_KEY]" {
+		t.Errorf("replacement = %q, want %q", rules[0].Replacement, "[REDACTED_KEY]")
+	}
+	if rules[0].Source != "cli" {
+		t.Errorf("source = %q, want %q", rules[0].Source, "cli")
+	}
+}
+
+func TestPolicyAddRedactInvalidPattern(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	err := handlePolicyAdd([]string{
+		"redact", "[unclosed",
+		"--replacement", "[REDACTED]",
+		"--db", dbPath,
+	})
+	if err == nil {
+		t.Fatal("expected error for malformed regex")
+	}
+	if !strings.Contains(err.Error(), "invalid regex pattern") {
+		t.Errorf("expected 'invalid regex pattern' in error, got: %v", err)
+	}
+}
+
+func TestPolicyAddRedactMissingReplacement(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	err := handlePolicyAdd([]string{
+		"redact", `sk-\w+`,
+		"--db", dbPath,
+	})
+	if err == nil {
+		t.Fatal("expected error when --replacement is missing")
+	}
+	if !strings.Contains(err.Error(), "--replacement is required") {
+		t.Errorf("expected '--replacement is required' in error, got: %v", err)
+	}
+}
+
+func TestPolicyAddRedactEmptyReplacementAllowed(t *testing.T) {
+	// An explicit empty --replacement should be accepted (deletes matches)
+	// so only the absence of the flag is an error.
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	if err := handlePolicyAdd([]string{
+		"redact", `sk-\w+`,
+		"--replacement", "",
+		"--db", dbPath,
+	}); err != nil {
+		t.Fatalf("empty replacement should be allowed: %v", err)
+	}
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rules, err := db.ListRules(store.RuleFilter{Verdict: "redact", Type: "pattern"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 redact rule, got %d", len(rules))
+	}
+	if rules[0].Replacement != "" {
+		t.Errorf("replacement should be empty, got %q", rules[0].Replacement)
+	}
+}
+
 // --- handlePolicyRemove tests ---
 
 func TestHandlePolicyRemoveValid(t *testing.T) {

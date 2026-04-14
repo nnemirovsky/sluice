@@ -304,9 +304,17 @@ curl -X POST http://localhost:3000/api/credentials \
   -d '{"name":"openai_oauth","type":"oauth","token_url":"https://auth.example.com/token","access_token":"at-xxx","refresh_token":"rt-xxx","destination":"api.openai.com","env_var":"OPENAI_API_KEY"}'
 ```
 
+## Data Loss Prevention
+
+Two complementary inspection layers protect against credential leakage and dangerous tool use:
+
+**Exec argument inspection** (MCP layer): Tools whose names match `*exec*`, `*shell*`, `*run_command*`, or `*terminal*` patterns are scanned for trampoline interpreters (`bash -c`, `python -c`, `node -e`, ...), dangerous commands (`rm -rf /`, `chmod 777`/`chmod 0777`, `curl | sh` piped to any shell or scripting language, `dd if=/dev/`, `mkfs`), and blacklisted env overrides (`GIT_SSH_COMMAND`, `LD_PRELOAD`, `DYLD_*`). Blocks emit an `exec_block` audit event. Dedicated shell tools still accept legitimate `$VAR` expansion.
+
+**Response DLP** (MITM layer): HTTPS response bodies and headers are scanned for credential patterns defined via `[[redact]]` rules in policy. Matches are redacted before the response reaches the agent. Catches credentials echoed in API errors, leaked by debug endpoints, or returned by misconfigured services. Supports `gzip`, `br`, `deflate`, and `zstd` compressed bodies (decompressed before scanning, recompressed headers stripped). Binary content types (images, fonts, archives) skip scanning. Redactions emit a `response_dlp_redact` audit event.
+
 ## Audit Log
 
-Tamper-evident JSON Lines log with blake3 hash chaining. Every connection, tool call, approval, and denial is recorded.
+Tamper-evident JSON Lines log with blake3 hash chaining. Every connection, tool call, approval, and denial is recorded. Common action names include `tool_call`, `inspect_block`, `exec_block`, `response_dlp_redact`, and `inject`.
 
 ```bash
 sluice audit verify   # check hash chain integrity

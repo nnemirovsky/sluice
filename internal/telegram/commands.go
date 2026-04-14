@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -184,7 +185,7 @@ func (h *CommandHandler) Handle(cmd *Command) string {
 
 func (h *CommandHandler) handlePolicy(args []string) string {
 	if len(args) == 0 {
-		return "Usage: /policy show | /policy allow <dest> | /policy deny <dest> | /policy remove <id>"
+		return "Usage: /policy show | /policy allow <dest> | /policy deny <dest> | /policy redact <pattern> [replacement] | /policy remove <id>"
 	}
 	switch args[0] {
 	case "show":
@@ -199,6 +200,16 @@ func (h *CommandHandler) handlePolicy(args []string) string {
 			return "Usage: /policy deny <destination>"
 		}
 		return h.policyDeny(args[1])
+	case "redact":
+		if len(args) < 2 {
+			return "Usage: /policy redact <pattern> [replacement]"
+		}
+		pattern := args[1]
+		replacement := "[REDACTED]"
+		if len(args) > 2 {
+			replacement = strings.Join(args[2:], " ")
+		}
+		return h.policyRedact(pattern, replacement)
 	case "remove":
 		if len(args) < 2 {
 			return "Usage: /policy remove <id>"
@@ -386,6 +397,32 @@ func (h *CommandHandler) policyDeny(dest string) string {
 		return fmt.Sprintf("Failed to add deny rule: %v", err)
 	}
 	return "Added deny rule: " + htmlCode(dest) + inMemoryWarning
+}
+
+// policyRedact adds a response-DLP redact rule. The pattern is compiled via
+// regexp.Compile before the store write so operators get a user-facing error
+// instead of a cryptic store-layer failure. An in-memory fallback is not
+// provided because the engine's AddRule shortcut does not cover pattern rules.
+// Redact rules always require a store.
+func (h *CommandHandler) policyRedact(pattern, replacement string) string {
+	if _, err := regexp.Compile(pattern); err != nil {
+		return fmt.Sprintf("Invalid regex pattern: %v", err)
+	}
+
+	if h.store == nil {
+		return "Cannot add redact rule: policy store is not configured."
+	}
+
+	h.reloadMu.Lock()
+	defer h.reloadMu.Unlock()
+
+	if _, err := h.store.AddRule("redact", store.RuleOpts{Pattern: pattern, Replacement: replacement, Source: "telegram"}); err != nil {
+		return fmt.Sprintf("Failed to add redact rule: %v", err)
+	}
+	if err := h.recompileAndSwap(); err != nil {
+		return fmt.Sprintf("Added redact rule but failed to recompile: %v", err)
+	}
+	return "Added redact rule: " + htmlCode(pattern) + " -> " + htmlCode(replacement)
 }
 
 func (h *CommandHandler) policyRemove(idStr string) string {
@@ -687,7 +724,7 @@ func (h *CommandHandler) handleStart() string {
 
 func (h *CommandHandler) handleHelp() string {
 	help := `Policy
-/policy show | /policy allow <dest> | /policy deny <dest> | /policy remove <id>
+/policy show | /policy allow <dest> | /policy deny <dest> | /policy redact <pattern> [replacement] | /policy remove <id>
 
 Monitoring
 /status - Proxy status

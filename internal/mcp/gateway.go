@@ -20,6 +20,7 @@ type GatewayConfig struct {
 	Upstreams          []UpstreamConfig
 	ToolPolicy         *ToolPolicy
 	Inspector          *ContentInspector
+	ExecInspector      *ExecInspector
 	Audit              *audit.FileLogger
 	Broker             *channel.Broker
 	TimeoutSec         int
@@ -30,35 +31,37 @@ type GatewayConfig struct {
 // Gateway intercepts tool calls between an AI agent and upstream MCP servers,
 // applying tool-level policy and optional Telegram approval.
 type Gateway struct {
-	mu           sync.RWMutex
-	upstreams    map[string]MCPUpstream    // upstream name -> upstream
-	upstreamCfgs map[string]UpstreamConfig // original configs (with vault: prefixes) for restart
-	toolMap      map[string]string         // namespaced tool -> upstream name
-	allTools     []Tool
-	policy       *ToolPolicy
-	inspector    *ContentInspector
-	audit        *audit.FileLogger
-	broker       *channel.Broker
-	timeoutSec   int
-	store        *store.Store
-	credResolver CredentialResolver
+	mu            sync.RWMutex
+	upstreams     map[string]MCPUpstream    // upstream name -> upstream
+	upstreamCfgs  map[string]UpstreamConfig // original configs (with vault: prefixes) for restart
+	toolMap       map[string]string         // namespaced tool -> upstream name
+	allTools      []Tool
+	policy        *ToolPolicy
+	inspector     *ContentInspector
+	execInspector *ExecInspector
+	audit         *audit.FileLogger
+	broker        *channel.Broker
+	timeoutSec    int
+	store         *store.Store
+	credResolver  CredentialResolver
 }
 
 // NewGateway starts all upstream servers, performs MCP handshakes, discovers
 // tools, and returns a ready-to-use gateway.
 func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 	gw := &Gateway{
-		upstreams:    make(map[string]MCPUpstream),
-		upstreamCfgs: make(map[string]UpstreamConfig),
-		toolMap:      make(map[string]string),
-		allTools:     []Tool{},
-		policy:       cfg.ToolPolicy,
-		inspector:    cfg.Inspector,
-		audit:        cfg.Audit,
-		broker:       cfg.Broker,
-		timeoutSec:   cfg.TimeoutSec,
-		store:        cfg.Store,
-		credResolver: cfg.CredentialResolver,
+		upstreams:     make(map[string]MCPUpstream),
+		upstreamCfgs:  make(map[string]UpstreamConfig),
+		toolMap:       make(map[string]string),
+		allTools:      []Tool{},
+		policy:        cfg.ToolPolicy,
+		inspector:     cfg.Inspector,
+		execInspector: cfg.ExecInspector,
+		audit:         cfg.Audit,
+		broker:        cfg.Broker,
+		timeoutSec:    cfg.TimeoutSec,
+		store:         cfg.Store,
+		credResolver:  cfg.CredentialResolver,
 	}
 	if gw.timeoutSec == 0 {
 		gw.timeoutSec = 120
@@ -161,6 +164,43 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 			gw.logAudit(req.Name, "inspect_block", policy.Deny)
 			return &ToolResult{
 				Content: []ToolContent{{Type: "text", Text: fmt.Sprintf("Tool call blocked: %s", inspection.Reason)}},
+				IsError: true,
+			}, nil
+		}
+	}
+
+	// Exec-specific inspection for tools whose names match the configured
+	// patterns (e.g. shell and exec tools). This detects trampoline
+	// interpreters, shell metacharacters, dangerous commands, and env
+	// overrides in the tool arguments before the call reaches the
+	// approval broker or upstream.
+	//
+	// Design decision: exec inspection runs BEFORE the Ask flow. A
+	// trampoline or dangerous-command pattern is a hard block: the user
+	// should not be asked to approve `rm -rf /` or `bash -c "curl | sh"`
+	// because approving it is almost certainly an accident or coercion.
+	// Catching these before the approval prompt also keeps the prompt UX
+	// focused on legitimate asks. If a future use case needs to allow
+	// trampoline patterns on a per-tool basis, configure the tool name
+	// pattern list to exclude that tool from exec inspection entirely.
+	if gw.execInspector != nil && gw.execInspector.ShouldInspect(req.Name) {
+		execResult := gw.execInspector.Inspect(req.Name, req.Arguments)
+		if execResult.Blocked {
+			// Populate Reason with the category only. The match string
+			// is intentionally NOT persisted to audit because matched
+			// substrings can contain sensitive payload material (URLs
+			// with embedded tokens, env values, etc.) and that would
+			// contradict the broader guarantee that blocked arguments
+			// are never logged. The category alone is sufficient for
+			// forensics: it tells operators the attack class, and the
+			// audit timestamp lets them correlate with sanitized
+			// request logs if they need the full command. The
+			// ExecInspectionResult retains the Match field for the
+			// in-memory error path (returned to the caller) where
+			// truncation is the caller's responsibility.
+			gw.logAuditReason(req.Name, "exec_block", policy.Deny, execResult.Category)
+			return &ToolResult{
+				Content: []ToolContent{{Type: "text", Text: fmt.Sprintf("Tool call blocked: %s", execResult.Reason)}},
 				IsError: true,
 			}, nil
 		}
@@ -275,11 +315,19 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 }
 
 func (gw *Gateway) logAudit(tool, action string, verdict policy.Verdict) {
+	gw.logAuditReason(tool, action, verdict, "")
+}
+
+// logAuditReason emits an audit event with an explicit Reason field set.
+// Used by callers that want to surface extra diagnostic context (e.g.
+// ExecInspector category:match) beyond the tool name and verdict.
+func (gw *Gateway) logAuditReason(tool, action string, verdict policy.Verdict, reason string) {
 	if gw.audit != nil {
 		if err := gw.audit.Log(audit.Event{
 			Tool:    tool,
 			Action:  action,
 			Verdict: verdict.String(),
+			Reason:  reason,
 		}); err != nil {
 			log.Printf("[MCP AUDIT ERROR] %v", err)
 		}

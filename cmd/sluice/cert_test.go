@@ -50,6 +50,7 @@ func TestCertGenerate(t *testing.T) {
 	certBlock, _ := pem.Decode(certData)
 	if certBlock == nil {
 		t.Fatal("ca-cert.pem is not valid PEM")
+		return
 	}
 	if certBlock.Type != "CERTIFICATE" {
 		t.Errorf("unexpected PEM type: %s", certBlock.Type)
@@ -58,6 +59,7 @@ func TestCertGenerate(t *testing.T) {
 	keyBlock, _ := pem.Decode(keyData)
 	if keyBlock == nil {
 		t.Fatal("ca-key.pem is not valid PEM")
+		return
 	}
 	if keyBlock.Type != "EC PRIVATE KEY" {
 		t.Errorf("unexpected key PEM type: %s", keyBlock.Type)

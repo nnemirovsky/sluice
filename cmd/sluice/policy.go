@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -93,20 +94,27 @@ func handlePolicyList(args []string) error {
 
 func handlePolicyAdd(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: sluice policy add <allow|deny|ask> <destination> [--ports 443,80] [--protocols quic,udp] [--name \"reason\"]")
+		return fmt.Errorf("usage: sluice policy add <allow|deny|ask> <destination> [--ports 443,80] [--protocols quic,udp] [--name \"reason\"]\n       sluice policy add redact <pattern> --replacement \"[REDACTED]\" [--name \"reason\"]")
 	}
 
 	verdict := args[0]
-	if verdict != "allow" && verdict != "deny" && verdict != "ask" {
-		return fmt.Errorf("invalid verdict: %s (must be allow, deny, or ask)", verdict)
+	switch verdict {
+	case "allow", "deny", "ask":
+		return handlePolicyAddNetwork(verdict, args[1:])
+	case "redact":
+		return handlePolicyAddRedact(args[1:])
+	default:
+		return fmt.Errorf("invalid verdict: %s (must be allow, deny, ask, or redact)", verdict)
 	}
+}
 
+func handlePolicyAddNetwork(verdict string, args []string) error {
 	fs := flag.NewFlagSet("policy add", flag.ContinueOnError)
 	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	portsStr := fs.String("ports", "", "comma-separated port list (e.g. 443,80)")
 	protocolsStr := fs.String("protocols", "", "comma-separated protocol list (e.g. quic,udp)")
 	note := fs.String("name", "", "human-readable name")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
@@ -140,6 +148,55 @@ func handlePolicyAdd(args []string) error {
 		return fmt.Errorf("add rule: %w", err)
 	}
 	fmt.Printf("added %s rule [%d] for %s\n", verdict, id, destination)
+	return nil
+}
+
+// handlePolicyAddRedact adds a response-DLP redact rule. Redact rules carry a
+// regex pattern (not a destination) plus a replacement string. The replacement
+// is required so operators consciously choose the redacted output (empty string
+// is allowed to delete the match entirely).
+func handlePolicyAddRedact(args []string) error {
+	fs := flag.NewFlagSet("policy add redact", flag.ContinueOnError)
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
+	note := fs.String("name", "", "human-readable name")
+	replacement := fs.String("replacement", "", "replacement string substituted for each regex match (required, empty string allowed)")
+	if err := fs.Parse(reorderFlagsBeforePositional(args, fs)); err != nil {
+		return err
+	}
+	// Detect whether --replacement was explicitly provided so that we can
+	// reject the command when the flag is missing but still permit an
+	// explicit empty replacement.
+	replacementSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "replacement" {
+			replacementSet = true
+		}
+	})
+
+	if fs.NArg() == 0 {
+		return fmt.Errorf("usage: sluice policy add redact <pattern> --replacement \"[REDACTED]\" [--name \"reason\"]")
+	}
+	pattern := fs.Arg(0)
+
+	if _, err := regexp.Compile(pattern); err != nil {
+		return fmt.Errorf("invalid regex pattern %q: %w", pattern, err)
+	}
+
+	if !replacementSet {
+		return fmt.Errorf("--replacement is required for redact rules (use --replacement \"\" to delete matches)")
+	}
+
+	db, err := store.New(*dbPath)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	id, err := db.AddRule("redact", store.RuleOpts{Pattern: pattern, Replacement: *replacement, Name: *note, Source: "cli"})
+	if err != nil {
+		return fmt.Errorf("add rule: %w", err)
+	}
+	fmt.Printf("added redact rule [%d] for pattern %s -> %s\n", id, pattern, *replacement)
 	return nil
 }
 

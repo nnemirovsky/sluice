@@ -991,3 +991,40 @@ func TestMCPGatewayStoreBackedUpstreams(t *testing.T) {
 		t.Errorf("expected default timeout 120, got %d", fsUpstream.TimeoutSec)
 	}
 }
+
+// TestDefaultExecInspectorConstructs verifies that the production code
+// paths (cmd/sluice/main.go and cmd/sluice/mcp.go) can construct a default
+// ExecInspector without error. If NewExecInspector(nil) ever starts
+// erroring on default patterns, this smoke test fails and prevents the
+// CRITICAL regression where ExecInspector silently gets nil-ed out in
+// production.
+//
+// This test checks ONLY that NewExecInspector(nil) succeeds and the
+// returned inspector can ShouldInspect + Inspect a simple case. It does
+// NOT exercise wiring into NewGateway. The wiring through Gateway is
+// covered end-to-end by TestGatewayExecInspector* in the mcp package,
+// which constructs a real Gateway and asserts the block path executes.
+// The historical name was misleading (it implied wiring verification);
+// this rename makes the scope explicit.
+func TestDefaultExecInspectorConstructs(t *testing.T) {
+	ei, err := mcp.NewExecInspector(nil)
+	if err != nil {
+		t.Fatalf("default ExecInspector construction failed: %v", err)
+	}
+	if ei == nil {
+		t.Fatal("NewExecInspector(nil) returned nil inspector with no error")
+	}
+
+	// Basic sanity: a trampoline pattern must be blocked for an
+	// exec-matching tool name. If defaults ever drift, this catches it.
+	if !ei.ShouldInspect("sandbox__exec") {
+		t.Error("default ExecInspector does not match *exec* tools")
+	}
+	res := ei.Inspect("sandbox__exec", []byte(`{"command":"bash -c 'evil'"}`))
+	if !res.Blocked {
+		t.Error("default ExecInspector should block trampoline patterns")
+	}
+	if res.Category != "trampoline" {
+		t.Errorf("expected category trampoline, got %q", res.Category)
+	}
+}

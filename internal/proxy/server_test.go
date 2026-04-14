@@ -3021,6 +3021,167 @@ default = "allow"
 	// The actual rule application is tested by the WebSocket and QUIC tests.
 }
 
+// TestServerLoadsInitialMITMRedactRules verifies that the MITM response DLP
+// addon is seeded with the redact rules from the policy engine at server
+// construction time. This is the startup-time equivalent of the SIGHUP path
+// tested by TestUpdateInspectRulesPropagatesToMITMAddon.
+func TestServerLoadsInitialMITMRedactRules(t *testing.T) {
+	dir := t.TempDir()
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := vault.NewBindingResolver(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng.InspectRedactRules = []policy.InspectRedactRule{
+		{Pattern: `AKIA[A-Z0-9]{16}`, Replacement: "AKIA[REDACTED]", Name: "aws_access_key"},
+		{Pattern: `Bearer [A-Za-z0-9._-]+`, Replacement: "Bearer [REDACTED]", Name: "bearer_token"},
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Provider:   vs,
+		Resolver:   resolver,
+		VaultDir:   dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	if srv.addon == nil {
+		t.Fatal("expected addon to be initialized when Provider is set")
+	}
+
+	rules := srv.addon.loadRedactRules()
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 redact rules loaded at startup, got %d", len(rules))
+	}
+
+	// Names should match the engine rules so operators can correlate audit
+	// events to the source rule.
+	got := map[string]bool{rules[0].name: true, rules[1].name: true}
+	if !got["aws_access_key"] || !got["bearer_token"] {
+		t.Errorf("expected redact rule names aws_access_key and bearer_token, got %+v", got)
+	}
+}
+
+// TestServerNoInitialMITMRedactRulesWhenEmpty confirms that no redact rules
+// are loaded when the engine has none, so the addon starts with an empty
+// rule set (response DLP disabled until a SIGHUP adds rules).
+func TestServerNoInitialMITMRedactRulesWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := vault.NewBindingResolver(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Provider:   vs,
+		Resolver:   resolver,
+		VaultDir:   dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	if srv.addon == nil {
+		t.Fatal("expected addon to be initialized when Provider is set")
+	}
+
+	if rules := srv.addon.loadRedactRules(); len(rules) != 0 {
+		t.Fatalf("expected 0 redact rules at startup with empty engine rules, got %d", len(rules))
+	}
+}
+
+// TestUpdateInspectRulesPropagatesToMITMAddon verifies that SIGHUP-triggered
+// reloads propagate new InspectRedactRules to the MITM response DLP addon,
+// matching the behavior of the WebSocket and QUIC rule updates already
+// handled by UpdateInspectRules.
+func TestUpdateInspectRulesPropagatesToMITMAddon(t *testing.T) {
+	dir := t.TempDir()
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := vault.NewBindingResolver(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eng, err := policy.LoadFromBytes([]byte(`
+[policy]
+default = "allow"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv, err := New(Config{
+		ListenAddr: "127.0.0.1:0",
+		Policy:     eng,
+		Provider:   vs,
+		Resolver:   resolver,
+		VaultDir:   dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	if srv.addon == nil {
+		t.Fatal("expected addon to be initialized when Provider is set")
+	}
+
+	// Simulate a SIGHUP reload that introduces a new redact rule set.
+	eng.InspectRedactRules = []policy.InspectRedactRule{
+		{Pattern: `AKIA[A-Z0-9]{16}`, Replacement: "AKIA[REDACTED]", Name: "aws_access_key"},
+	}
+	srv.UpdateInspectRules(eng)
+
+	rules := srv.addon.loadRedactRules()
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 redact rule after UpdateInspectRules, got %d", len(rules))
+	}
+	if rules[0].name != "aws_access_key" {
+		t.Errorf("expected rule name aws_access_key, got %q", rules[0].name)
+	}
+
+	// A second reload with no rules should clear the rule set so removed
+	// policies do not continue to apply.
+	eng.InspectRedactRules = nil
+	srv.UpdateInspectRules(eng)
+	if rules := srv.addon.loadRedactRules(); len(rules) != 0 {
+		t.Fatalf("expected 0 redact rules after clear, got %d", len(rules))
+	}
+}
+
 func TestRelayDirect(t *testing.T) {
 	// Start an echo server.
 	echo, err := net.Listen("tcp", "127.0.0.1:0")

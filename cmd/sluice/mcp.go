@@ -179,6 +179,15 @@ func handleMCPGateway(args []string) error {
 			len(eng.InspectBlockRules), len(eng.InspectRedactRules))
 	}
 
+	// Wire the exec argument inspector with default tool name patterns
+	// (*exec*, *shell*, *run_command*, *terminal*). Blocks trampoline
+	// patterns, dangerous commands, and GIT_SSH_COMMAND-style env
+	// overrides before the tool call reaches the upstream.
+	execInspector, err := mcp.NewExecInspector(nil)
+	if err != nil {
+		return fmt.Errorf("create exec inspector: %w", err)
+	}
+
 	// Build credential resolver so vault: prefixed env values in upstream
 	// configs are resolved to real credentials.
 	var credResolver mcp.CredentialResolver
@@ -206,6 +215,7 @@ func handleMCPGateway(args []string) error {
 		Upstreams:          upstreams,
 		ToolPolicy:         toolPolicy,
 		Inspector:          inspector,
+		ExecInspector:      execInspector,
 		Audit:              logger,
 		Broker:             broker,
 		TimeoutSec:         eng.TimeoutSec,
