@@ -72,24 +72,33 @@ func extractStrings(data json.RawMessage) ([]string, error) {
 		return nil, fmt.Errorf("invalid JSON arguments: %w", err)
 	}
 	var strs []string
-	walkJSON(val, func(s string) {
+	walkJSON(val, true, func(s string) {
 		strs = append(strs, s)
 	})
 	return strs, nil
 }
 
-func walkJSON(v interface{}, fn func(string)) {
+// walkJSON visits every string leaf in a JSON-decoded value and invokes fn.
+// When includeKeys is true, map keys are also visited (ContentInspector
+// behavior: patterns should match both keys and values so unicode-escaped
+// content cannot hide in either position). When false, only values are
+// visited (ExecInspector behavior: command strings live in values, and
+// including keys would be both redundant and noise-inducing for exec
+// detection).
+func walkJSON(v interface{}, includeKeys bool, fn func(string)) {
 	switch val := v.(type) {
 	case string:
 		fn(val)
 	case map[string]interface{}:
 		for k, child := range val {
-			fn(k)
-			walkJSON(child, fn)
+			if includeKeys {
+				fn(k)
+			}
+			walkJSON(child, includeKeys, fn)
 		}
 	case []interface{}:
 		for _, child := range val {
-			walkJSON(child, fn)
+			walkJSON(child, includeKeys, fn)
 		}
 	}
 }
