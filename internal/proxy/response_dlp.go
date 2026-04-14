@@ -387,7 +387,7 @@ func decodeOne(body []byte, encoding string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("gzip reader: %w", err)
 		}
-		defer zr.Close()
+		defer func() { _ = zr.Close() }()
 		return readDecodedBounded(zr)
 	case "br":
 		return readDecodedBounded(brotli.NewReader(bytes.NewReader(body)))
@@ -400,12 +400,12 @@ func decodeOne(body []byte, encoding string) ([]byte, error) {
 		if err != nil {
 			if errors.Is(err, zlib.ErrHeader) {
 				fr := flate.NewReader(bytes.NewReader(body))
-				defer fr.Close()
+				defer func() { _ = fr.Close() }()
 				return readDecodedBounded(fr)
 			}
 			return nil, fmt.Errorf("zlib reader: %w", err)
 		}
-		defer zr.Close()
+		defer func() { _ = zr.Close() }()
 		return readDecodedBounded(zr)
 	case "zstd":
 		zr, err := zstd.NewReader(bytes.NewReader(body))
