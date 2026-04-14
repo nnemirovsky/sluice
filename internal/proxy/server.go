@@ -615,6 +615,16 @@ func (s *Server) setupInjection(cfg Config, _ net.Listener) error {
 		}
 	}
 
+	// Load MITM response DLP rules from the policy engine so outbound
+	// responses are scanned for configured redact patterns from startup.
+	// SIGHUP-triggered changes flow through UpdateInspectRules.
+	// SetRedactRules no-ops on nil/empty input, so we always call it.
+	if cfg.Policy != nil {
+		if redactErr := s.addon.SetRedactRules(cfg.Policy.InspectRedactRules); redactErr != nil {
+			log.Printf("[ADDON-DLP] failed to load initial redact rules: %v", redactErr)
+		}
+	}
+
 	// Create a cert.CA adapter so go-mitmproxy uses our existing CA.
 	ca, caAdaptErr := newSluiceCA(caCert)
 	if caAdaptErr != nil {
@@ -2313,9 +2323,10 @@ func (s *Server) StoreEngine(eng *policy.Engine) {
 }
 
 // UpdateInspectRules recompiles content inspection rules from the engine and
-// atomically swaps them into the WebSocket and QUIC proxies. Call this after
-// StoreEngine so SIGHUP-reloaded block/redact patterns take effect for
-// in-flight WebSocket and QUIC connections.
+// atomically swaps them into the WebSocket and QUIC proxies and the MITM
+// response DLP scanner. Call this after StoreEngine so SIGHUP-reloaded
+// block/redact patterns take effect for in-flight WebSocket, QUIC, and HTTPS
+// responses.
 func (s *Server) UpdateInspectRules(eng *policy.Engine) {
 	var wsBlock []WSBlockRuleConfig
 	var wsRedact []WSRedactRuleConfig
@@ -2328,6 +2339,11 @@ func (s *Server) UpdateInspectRules(eng *policy.Engine) {
 	if s.addon != nil && s.addon.wsProxy != nil {
 		if err := s.addon.wsProxy.UpdateRules(wsBlock, wsRedact); err != nil {
 			log.Printf("update ws inspect rules: %v", err)
+		}
+	}
+	if s.addon != nil {
+		if err := s.addon.SetRedactRules(eng.InspectRedactRules); err != nil {
+			log.Printf("update mitm response dlp rules: %v", err)
 		}
 	}
 	if s.quicProxy != nil {
