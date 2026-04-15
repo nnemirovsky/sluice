@@ -14,7 +14,7 @@ require (
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/hashicorp/vault/api v1.23.0
 	github.com/klauspost/compress v1.17.8
-	github.com/lqqyt2423/go-mitmproxy v1.8.10
+	github.com/lqqyt2423/go-mitmproxy v1.8.11
 	github.com/oapi-codegen/runtime v1.3.1
 	github.com/quic-go/quic-go v0.59.0
 	github.com/satori/go.uuid v1.2.0
@@ -82,5 +82,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-replace github.com/lqqyt2423/go-mitmproxy => github.com/nnemirovsky/go-mitmproxy v1.8.11-0.20260413022640-c8d3fb9ddaa1
