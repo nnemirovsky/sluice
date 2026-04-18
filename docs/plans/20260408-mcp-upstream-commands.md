@@ -94,10 +94,10 @@ After this plan, Telegram will have `/mcp list`, `/mcp add`, and `/mcp remove`.
 
 ### Task 5: Verify acceptance criteria
 
-- [ ] Verify `/mcp list` in Telegram shows upstreams
-- [ ] Verify `/mcp add` creates upstream and triggers auto-injection
-- [ ] Verify `/mcp remove` removes upstream
-- [ ] Run full test suite: `go test ./... -v -timeout 30s`
+- [x] Verify `/mcp list` in Telegram shows upstreams (verified via unit tests: `TestHandleMCPListEmpty`, `TestHandleMCPListWithUpstreams`, `TestHandleMCPListEscapesHTML`, `TestHandleMessageMCPListNotDeleted`)
+- [x] Verify `/mcp add` creates upstream and triggers auto-injection (verified via unit tests: `TestHandleMCPAddStdio`, `TestHandleMCPAddWithArgsAndEnv`, `TestHandleMCPAddHTTPTransport`, `TestHandleMCPAddWebSocketTransport`, `TestHandleMCPAddTriggersReinjection`, `TestHandleMessageMCPAddDeletesMessage`)
+- [x] Verify `/mcp remove` removes upstream (verified via unit tests: `TestHandleMCPRemove`, `TestHandleMCPRemoveNotFound`, `TestHandleMCPRemoveStrayPositional`, `TestHandleMCPRemoveTriggersReinjection`)
+- [x] Run full test suite: `go test ./... -v -timeout 30s` -- all 2389 tests passing across 12 packages
 
 ### Task 6: [Final] Update documentation
 
