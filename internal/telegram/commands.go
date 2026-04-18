@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -172,6 +173,8 @@ func (h *CommandHandler) Handle(cmd *Command) string {
 		return h.handlePolicy(cmd.Args)
 	case "cred":
 		return h.handleCred(cmd.Args)
+	case "mcp":
+		return h.handleMCP(cmd.Args)
 	case "status":
 		return h.handleStatus()
 	case "audit":
@@ -658,6 +661,75 @@ func (h *CommandHandler) credMutationComplete(msg string, removedEnvVars ...stri
 		return msg + "\nWarning: failed to inject env vars: " + err.Error()
 	}
 	return msg + "\nAgent env vars updated."
+}
+
+// handleMCP dispatches /mcp subcommands.
+func (h *CommandHandler) handleMCP(args []string) string {
+	if len(args) == 0 {
+		return "Usage: /mcp list | /mcp add <name> --command <cmd> [--transport stdio|http|websocket] [--args a,b] [--env K=V,K=V] [--timeout 120] | /mcp remove <name>"
+	}
+	if h.store == nil {
+		return "MCP management is not available (policy store not configured)."
+	}
+	switch args[0] {
+	case "list":
+		return h.mcpList()
+	default:
+		return fmt.Sprintf("Unknown mcp subcommand: %s", args[0])
+	}
+}
+
+// mcpList renders all registered MCP upstreams for Telegram display.
+func (h *CommandHandler) mcpList() string {
+	upstreams, err := h.store.ListMCPUpstreams()
+	if err != nil {
+		return fmt.Sprintf("Failed to list MCP upstreams: %v", err)
+	}
+	if len(upstreams) == 0 {
+		return "No MCP upstreams registered."
+	}
+
+	var b strings.Builder
+	b.WriteString("<b>MCP upstreams</b>\n")
+	for _, u := range upstreams {
+		transport := u.Transport
+		if transport == "" {
+			transport = "stdio"
+		}
+		fmt.Fprintf(&b, "[%d] %s (%s)\n  command: %s\n",
+			u.ID, htmlEscape(u.Name), htmlEscape(transport), htmlCode(u.Command))
+		if len(u.Args) > 0 {
+			fmt.Fprintf(&b, "  args: %s\n", htmlCode(strings.Join(u.Args, " ")))
+		}
+		if len(u.Env) > 0 {
+			keys := make([]string, 0, len(u.Env))
+			for k := range u.Env {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			pairs := make([]string, 0, len(keys))
+			for _, k := range keys {
+				pairs = append(pairs, k+"="+u.Env[k])
+			}
+			fmt.Fprintf(&b, "  env: %s\n", htmlCode(strings.Join(pairs, ", ")))
+		}
+		if len(u.Headers) > 0 {
+			keys := make([]string, 0, len(u.Headers))
+			for k := range u.Headers {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			pairs := make([]string, 0, len(keys))
+			for _, k := range keys {
+				pairs = append(pairs, k+"="+u.Headers[k])
+			}
+			fmt.Fprintf(&b, "  headers: %s\n", htmlCode(strings.Join(pairs, ", ")))
+		}
+		if u.TimeoutSec != 0 && u.TimeoutSec != 120 {
+			fmt.Fprintf(&b, "  timeout: %ds\n", u.TimeoutSec)
+		}
+	}
+	return b.String()
 }
 
 func (h *CommandHandler) handleStatus() string {

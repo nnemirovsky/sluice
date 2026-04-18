@@ -49,13 +49,13 @@ After this plan, Telegram will have `/mcp list`, `/mcp add`, and `/mcp remove`.
 - Modify: `internal/telegram/commands.go`
 - Test: `internal/telegram/commands_test.go`
 
-- [ ] Add `case "mcp"` to Handle() dispatch
-- [ ] Add nil-store guard (check `h.store != nil` like handleCred does)
-- [ ] Implement `handleMCP(args)` with subcommand routing: list, add, remove
-- [ ] `/mcp list` - list registered upstreams with name, transport, command
-- [ ] Format list output for Telegram readability (not JSON)
-- [ ] Write tests for dispatch, nil-store guard, and list subcommand
-- [ ] Run tests - must pass before next task
+- [x] Add `case "mcp"` to Handle() dispatch
+- [x] Add nil-store guard (check `h.store != nil` like handleCred does)
+- [x] Implement `handleMCP(args)` with subcommand routing: list, add, remove
+- [x] `/mcp list` - list registered upstreams with name, transport, command
+- [x] Format list output for Telegram readability (not JSON)
+- [x] Write tests for dispatch, nil-store guard, and list subcommand
+- [x] Run tests - must pass before next task
 
 ### Task 2: Add /mcp add with flag parsing
 

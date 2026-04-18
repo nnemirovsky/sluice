@@ -792,6 +792,132 @@ func TestCredAddWithoutEnvVar(t *testing.T) {
 	}
 }
 
+func TestHandleMCPNoArgs(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	result := handler.Handle(&Command{Name: "mcp"})
+
+	if !strings.Contains(result, "Usage: /mcp") {
+		t.Errorf("should show usage when no args, got: %s", result)
+	}
+	if !strings.Contains(result, "list") || !strings.Contains(result, "add") || !strings.Contains(result, "remove") {
+		t.Errorf("usage should mention list/add/remove, got: %s", result)
+	}
+}
+
+func TestHandleMCPNoStore(t *testing.T) {
+	// CommandHandler without a store should report MCP management is unavailable.
+	// Build the engine from a transient store but omit SetStore on the handler.
+	s := newTestStore(t)
+	eng, err := policy.LoadFromStore(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ptr := new(atomic.Pointer[policy.Engine])
+	ptr.Store(eng)
+	handler := NewCommandHandler(ptr, new(sync.Mutex), "")
+	// Deliberately do not call SetStore.
+
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"list"}})
+	if !strings.Contains(result, "not available") {
+		t.Errorf("should report not available when store is not configured, got: %s", result)
+	}
+}
+
+func TestHandleMCPUnknownSubcommand(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"bogus"}})
+
+	if !strings.Contains(result, "Unknown mcp subcommand") {
+		t.Errorf("should report unknown subcommand, got: %s", result)
+	}
+}
+
+func TestHandleMCPListEmpty(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"list"}})
+	if !strings.Contains(result, "No MCP upstreams") {
+		t.Errorf("should report empty list, got: %s", result)
+	}
+}
+
+func TestHandleMCPListWithUpstreams(t *testing.T) {
+	s := newTestStore(t)
+	// Add a stdio upstream with args and env.
+	if _, err := s.AddMCPUpstream("github", "npx", store.MCPUpstreamOpts{
+		Args:       []string{"-y", "@modelcontextprotocol/server-github"},
+		Env:        map[string]string{"GITHUB_PAT": "vault:github_pat"},
+		TimeoutSec: 120,
+		Transport:  "stdio",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Add an http upstream with headers and a non-default timeout.
+	if _, err := s.AddMCPUpstream("notion", "https://mcp.notion.com", store.MCPUpstreamOpts{
+		Headers:    map[string]string{"Authorization": "Bearer vault:notion_token"},
+		TimeoutSec: 60,
+		Transport:  "http",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	out := handler.Handle(&Command{Name: "mcp", Args: []string{"list"}})
+
+	// Expect names, transports, and commands present.
+	must := []string{
+		"github",
+		"stdio",
+		"<code>npx</code>",
+		"notion",
+		"http",
+		"<code>https://mcp.notion.com</code>",
+		"-y @modelcontextprotocol/server-github",
+		"GITHUB_PAT=vault:github_pat",
+		"Authorization=Bearer vault:notion_token",
+		"timeout: 60s",
+	}
+	for _, want := range must {
+		if !strings.Contains(out, want) {
+			t.Errorf("mcp list output missing %q\nfull output:\n%s", want, out)
+		}
+	}
+	// Default (120s) timeout should NOT be rendered.
+	if strings.Contains(out, "timeout: 120s") {
+		t.Errorf("default 120s timeout should be omitted, got: %s", out)
+	}
+}
+
+func TestHandleMCPListEscapesHTML(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.AddMCPUpstream("my<srv>", "echo <hi>", store.MCPUpstreamOpts{
+		Transport: "stdio",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	out := handler.Handle(&Command{Name: "mcp", Args: []string{"list"}})
+
+	// Raw "<srv>" and "<hi>" must be HTML-escaped so Telegram's HTML parse
+	// mode does not try to render them as tags.
+	if strings.Contains(out, "my<srv>") {
+		t.Errorf("raw <srv> must be HTML-escaped: %s", out)
+	}
+	if !strings.Contains(out, "my&lt;srv&gt;") {
+		t.Errorf("expected my&lt;srv&gt; in output: %s", out)
+	}
+	if strings.Contains(out, "echo <hi>") {
+		t.Errorf("raw <hi> must be HTML-escaped: %s", out)
+	}
+	if !strings.Contains(out, "echo &lt;hi&gt;") {
+		t.Errorf("expected escaped echo &lt;hi&gt; in output: %s", out)
+	}
+}
+
 func TestCredAddEnvVarConsumedFromValue(t *testing.T) {
 	s := newTestStore(t)
 	handler := newTestHandlerWithStore(t, s, nil, "")
