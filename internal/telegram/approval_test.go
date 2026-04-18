@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,7 +54,7 @@ type mockTelegramAPI struct {
 	editedMsgs     []tgbotapi.EditMessageTextConfig
 	callbacks      []tgbotapi.CallbackConfig
 	deletedMsgs    []tgbotapi.DeleteMessageConfig
-	setCommandsRaw []string // raw JSON payloads received by setMyCommands
+	setCommandsRaw string // raw JSON payload from the last setMyCommands call
 
 	nextMsgID int
 	updates   chan []tgbotapi.Update
@@ -146,7 +147,7 @@ func newMockTelegramAPI(t *testing.T) *mockTelegramAPI {
 			_ = r.ParseForm()
 			raw := r.FormValue("commands")
 			m.mu.Lock()
-			m.setCommandsRaw = append(m.setCommandsRaw, raw)
+			m.setCommandsRaw = raw
 			m.mu.Unlock()
 			_ = json.NewEncoder(w).Encode(tgResponse{OK: true, Result: json.RawMessage(`true`)})
 
@@ -194,12 +195,10 @@ func (m *mockTelegramAPI) getDeletedMessages() []tgbotapi.DeleteMessageConfig {
 	return out
 }
 
-func (m *mockTelegramAPI) getSetCommandsRaw() []string {
+func (m *mockTelegramAPI) getSetCommandsRaw() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]string, len(m.setCommandsRaw))
-	copy(out, m.setCommandsRaw)
-	return out
+	return m.setCommandsRaw
 }
 
 func escapeJSON(s string) string {
@@ -564,63 +563,50 @@ func TestCancelApprovalShowsShutdownReason(t *testing.T) {
 // --- Start/Stop lifecycle tests ---
 
 // TestRegisterCommands verifies that Start registers the bot command menu
-// with the expected entries, including /mcp for MCP upstream management.
+// with the expected entries (order preserved), including /mcp for MCP
+// upstream management.
 func TestRegisterCommands(t *testing.T) {
 	mock := newMockTelegramAPI(t)
 	s := newTestStore(t)
 	tc := newTestTelegramChannel(t, mock, s)
 
+	// Start calls registerCommands synchronously before returning, so the mock
+	// payload is available immediately with no polling needed.
 	if err := tc.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(tc.Stop)
 
-	// Wait for setMyCommands to be called (happens synchronously inside Start).
-	deadline := time.After(3 * time.Second)
-	var raw []string
-	for {
-		raw = mock.getSetCommandsRaw()
-		if len(raw) > 0 {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for setMyCommands call")
-		default:
-			time.Sleep(10 * time.Millisecond)
-		}
+	raw := mock.getSetCommandsRaw()
+	if raw == "" {
+		t.Fatal("setMyCommands was not called by Start()")
 	}
 
-	// The payload is a JSON array of {command,description} objects. Parse it
-	// and verify every expected command is present.
 	var cmds []tgbotapi.BotCommand
-	if err := json.Unmarshal([]byte(raw[0]), &cmds); err != nil {
-		t.Fatalf("unmarshal commands payload: %v (raw=%q)", err, raw[0])
+	if err := json.Unmarshal([]byte(raw), &cmds); err != nil {
+		t.Fatalf("unmarshal commands payload: %v (raw=%q)", err, raw)
 	}
 
-	want := map[string]string{
-		"status": "Show proxy status",
-		"policy": "Manage policy rules",
-		"cred":   "Manage credentials",
-		"mcp":    "Manage MCP upstreams",
-		"audit":  "Show audit log entries",
-		"start":  "Show welcome message",
-		"help":   "Show available commands",
+	// Order matches the Telegram menu grouping convention: status first, then
+	// mutation groups, then meta commands.
+	want := []tgbotapi.BotCommand{
+		{Command: "status", Description: "Show proxy status"},
+		{Command: "policy", Description: "Manage policy rules"},
+		{Command: "cred", Description: "Manage credentials"},
+		{Command: "mcp", Description: "Manage MCP upstreams"},
+		{Command: "audit", Description: "Show audit log entries"},
+		{Command: "start", Description: "Show welcome message"},
+		{Command: "help", Description: "Show available commands"},
 	}
-
-	got := make(map[string]string, len(cmds))
-	for _, c := range cmds {
-		got[c.Command] = c.Description
+	if len(cmds) != len(want) {
+		t.Fatalf("got %d commands, want %d (unexpected extras?): %+v", len(cmds), len(want), cmds)
 	}
-
-	for name, desc := range want {
-		gotDesc, ok := got[name]
-		if !ok {
-			t.Errorf("missing command /%s in setMyCommands payload", name)
-			continue
+	for i, w := range want {
+		if cmds[i].Command != w.Command {
+			t.Errorf("cmds[%d].Command = %q, want %q", i, cmds[i].Command, w.Command)
 		}
-		if gotDesc != desc {
-			t.Errorf("/%s description = %q, want %q", name, gotDesc, desc)
+		if cmds[i].Description != w.Description {
+			t.Errorf("cmds[%d].Description = %q, want %q", i, cmds[i].Description, w.Description)
 		}
 	}
 }
@@ -1300,6 +1286,12 @@ func TestHandleMessageMCPAddDeletesMessage(t *testing.T) {
 	if len(mock.getDeletedMessages()) == 0 {
 		t.Error("mcp add message should be deleted for security")
 	}
+	// The plaintext --env value must not leak via the external command
+	// channel. handleMessage routes sensitive commands to the internal
+	// CommandHandler only.
+	if len(tc.cmdCh) != 0 {
+		t.Errorf("/mcp add must not forward to cmdCh (got %d entries, risks leaking --env secrets)", len(tc.cmdCh))
+	}
 }
 
 func TestHandleMessageMCPListNotDeleted(t *testing.T) {
@@ -1320,6 +1312,48 @@ func TestHandleMessageMCPListNotDeleted(t *testing.T) {
 	}
 }
 
+// TestHandleMessageMCPListTruncation seeds enough upstreams to push /mcp
+// list past the 4000-rune telegram limit and verifies the truncated
+// response keeps <code> and <b> balanced. An unbalanced tag would make
+// Telegram reject the message under HTML parse mode.
+func TestHandleMessageMCPListTruncation(t *testing.T) {
+	mock := newMockTelegramAPI(t)
+	s := newTestStore(t)
+	// Seed 200 upstreams so the output comfortably exceeds telegramMaxMessage.
+	for i := 0; i < 200; i++ {
+		name := "upstream_" + strconv.Itoa(i)
+		if _, err := s.AddMCPUpstream(name, "npx", store.MCPUpstreamOpts{
+			Transport: "stdio",
+			Args:      []string{"--arg", "padding-to-ensure-overflow"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tc := newTestTelegramChannel(t, mock, s)
+
+	tc.handleMessage(&tgbotapi.Message{
+		MessageID: 800,
+		Chat:      &tgbotapi.Chat{ID: 12345},
+		Text:      "/mcp list",
+	})
+
+	time.Sleep(100 * time.Millisecond)
+	msgs := mock.getSentMessages()
+	if len(msgs) == 0 {
+		t.Fatal("expected sendMessage to be called")
+	}
+	text := msgs[len(msgs)-1].Text
+	if !strings.Contains(text, "(truncated)") {
+		t.Errorf("expected truncation marker, got first 200 chars: %q", text[:min(200, len(text))])
+	}
+	if open, close := strings.Count(text, "<code>"), strings.Count(text, "</code>"); open != close {
+		t.Errorf("truncated output breaks <code> balance: %d open, %d close", open, close)
+	}
+	if open, close := strings.Count(text, "<b>"), strings.Count(text, "</b>"); open != close {
+		t.Errorf("truncated output breaks <b> balance: %d open, %d close", open, close)
+	}
+}
+
 func TestContainsSensitiveArgs(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1334,6 +1368,7 @@ func TestContainsSensitiveArgs(t *testing.T) {
 		{"cred remove", &Command{Name: "cred", Args: []string{"remove", "name"}}, false},
 		{"mcp add", &Command{Name: "mcp", Args: []string{"add", "name", "--command", "cmd"}}, true},
 		{"mcp list", &Command{Name: "mcp", Args: []string{"list"}}, false},
+		{"mcp remove", &Command{Name: "mcp", Args: []string{"remove", "name"}}, false},
 		{"policy show", &Command{Name: "policy", Args: []string{"show"}}, false},
 	}
 	for _, tt := range tests {
@@ -1450,7 +1485,7 @@ func TestCredAddWithContainerManager(t *testing.T) {
 	if !strings.Contains(result, "Added credential") {
 		t.Errorf("expected add confirmation, got: %s", result)
 	}
-	if mgr.injectCalled {
+	if mgr.injectCalledSafe() {
 		t.Error("InjectEnvVars should not be called when no env_var bindings exist")
 	}
 }
@@ -1478,10 +1513,10 @@ func TestCredAddWithContainerManagerAndEnvVar(t *testing.T) {
 		t.Errorf("should indicate env vars updated, got: %s", result)
 	}
 
-	if !mgr.injectCalled {
+	if !mgr.injectCalledSafe() {
 		t.Error("InjectEnvVars should have been called")
 	}
-	if _, ok := mgr.injectEnv["OPENAI_API_KEY"]; !ok {
+	if _, ok := mgr.injectEnvSafe()["OPENAI_API_KEY"]; !ok {
 		t.Error("InjectEnvVars should include OPENAI_API_KEY")
 	}
 }
@@ -1510,10 +1545,10 @@ func TestCredRemoveWithContainerManager(t *testing.T) {
 		t.Errorf("expected remove confirmation, got: %s", result)
 	}
 
-	if !mgr.injectCalled {
+	if !mgr.injectCalledSafe() {
 		t.Error("InjectEnvVars should have been called after remove")
 	}
-	if v, ok := mgr.injectEnv["TEST_API_KEY"]; !ok || v != "" {
+	if v, ok := mgr.injectEnvSafe()["TEST_API_KEY"]; !ok || v != "" {
 		t.Errorf("removed env var should be empty, got: %q (exists=%v)", v, ok)
 	}
 }
@@ -1540,7 +1575,7 @@ func TestCredRotateWithContainerManager(t *testing.T) {
 	if !strings.Contains(result, "Rotated credential") {
 		t.Errorf("expected rotate confirmation, got: %s", result)
 	}
-	if !mgr.injectCalled {
+	if !mgr.injectCalledSafe() {
 		t.Error("InjectEnvVars should have been called after rotate")
 	}
 }
@@ -1956,34 +1991,73 @@ func TestRebuildResolverEmptyBindings(t *testing.T) {
 
 // --- mockContainerMgr ---
 
+// mockContainerMgr is a concurrency-safe stub ContainerManager used by the
+// Telegram tests. All state fields are guarded by mu because command handlers
+// may run on background goroutines (e.g. the telegram update loop) while the
+// test asserts; the mutex prevents data races flagged by -race and gives tests
+// deterministic reads.
 type mockContainerMgr struct {
+	mu            sync.Mutex
 	injectCalled  bool
 	injectEnv     map[string]string
 	injectErr     error
 	restartCalled bool
 	restartErr    error
-	wireCalled    bool
-	wireName      string
-	wireURL       string
-	wireErr       error
+	// wireCalled tracks calls to WireMCPGateway. The MCP upstream mutation
+	// path must NOT invoke it (sluice URL is wired once at startup and does
+	// not change on /mcp add or /mcp remove), so tests assert wireCalled
+	// remains false after those operations.
+	wireCalled bool
 }
 
 func (m *mockContainerMgr) InjectEnvVars(_ context.Context, envMap map[string]string, _ bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.injectCalled = true
 	m.injectEnv = envMap
 	return m.injectErr
 }
 
 func (m *mockContainerMgr) RestartWithEnv(_ context.Context, _ map[string]string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.restartCalled = true
 	return m.restartErr
 }
 
-func (m *mockContainerMgr) WireMCPGateway(_ context.Context, name, url string) error {
+func (m *mockContainerMgr) WireMCPGateway(_ context.Context, _, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.wireCalled = true
-	m.wireName = name
-	m.wireURL = url
-	return m.wireErr
+	return nil
+}
+
+// injectCalledSafe, injectEnvSafe, and wireCalledSafe are read accessors that
+// lock mu so tests can observe state after handlers complete without tripping
+// the race detector.
+func (m *mockContainerMgr) injectCalledSafe() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.injectCalled
+}
+
+func (m *mockContainerMgr) injectEnvSafe() map[string]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.injectEnv == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m.injectEnv))
+	for k, v := range m.injectEnv {
+		out[k] = v
+	}
+	return out
+}
+
+func (m *mockContainerMgr) wireCalledSafe() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.wireCalled
 }
 
 func (m *mockContainerMgr) Status(_ context.Context) (container.ContainerStatus, error) {

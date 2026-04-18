@@ -858,12 +858,17 @@ func (s *Store) AddMCPUpstream(name, command string, opts MCPUpstreamOpts) (int6
 	}
 	timeoutSec := opts.TimeoutSec
 	if timeoutSec == 0 {
+		// Keep in sync with internal/mcp.DefaultTimeoutSec. We cannot import
+		// internal/mcp here because internal/mcp already imports internal/store,
+		// which would introduce a dependency cycle.
 		timeoutSec = 120
 	}
 	transport := opts.Transport
 	if transport == "" {
 		transport = "stdio"
 	}
+	// Keep the transport list in sync with internal/mcp.ValidTransport and the
+	// Telegram /mcp add handler in internal/telegram/commands.go.
 	validTransports := map[string]bool{"stdio": true, "http": true, "websocket": true}
 	if !validTransports[transport] {
 		return 0, fmt.Errorf("invalid transport %q: must be stdio, http, or websocket", transport)

@@ -285,8 +285,13 @@ Manage sluice from your phone. Approve connections and tool calls, add credentia
 | `/policy deny <dest>` | Add deny rule |
 | `/cred add <name> [--env-var VAR]` | Add credential (value sent as next message, auto-deleted) |
 | `/cred rotate <name>` | Replace credential, hot-reload OpenClaw |
+| `/mcp list` | List registered MCP upstreams |
+| `/mcp add <name> --command <cmd> [flags]` | Register a new MCP upstream (stdio/http/websocket, see `/help`; chat message auto-deleted because `--env` may carry secrets) |
+| `/mcp remove <name>` | Remove an MCP upstream |
 | `/status` | Proxy stats and pending approvals |
 | `/audit recent [N]` | Last N audit entries |
+
+`/mcp add` only writes to the SQLite store. The MCP gateway builds its upstream set at startup, so restart sluice (`docker compose restart sluice`) for a new or removed upstream to take effect. The agent's connection to `sluice:3000/mcp` survives the restart.
 
 ### HTTP Webhooks
 

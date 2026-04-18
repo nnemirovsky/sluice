@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nemirovsky/sluice/internal/mcp"
@@ -374,6 +375,56 @@ func TestHandleMCPAddInvalidName(t *testing.T) {
 	}
 }
 
+// TestHandleMCPAddInvalidTimeout verifies that --timeout <= 0 is rejected
+// rather than being silently persisted. Previously the CLI accepted any
+// integer (including 0 and negatives), but the runtime constructors fall
+// back to DefaultTimeoutSec when TimeoutSec <= 0, so the persisted store
+// value diverged from the actual runtime behavior. Telegram /mcp add has
+// always rejected these values, this test locks in symmetry.
+func TestHandleMCPAddInvalidTimeout(t *testing.T) {
+	cases := []struct {
+		name    string
+		timeout string
+	}{
+		{"zero", "0"},
+		{"negative", "-5"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			dbPath := filepath.Join(dir, "test.db")
+
+			err := handleMCPAdd([]string{
+				"--db", dbPath,
+				"--command", "server",
+				"--timeout", tc.timeout,
+				"ups",
+			})
+			if err == nil {
+				t.Fatalf("expected error for --timeout %s", tc.timeout)
+			}
+			if !strings.Contains(err.Error(), "must be a positive integer") {
+				t.Errorf("error %q should mention 'must be a positive integer'", err)
+			}
+
+			// Nothing should be persisted when validation fails.
+			db, err := store.New(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			upstreams, err := db.ListMCPUpstreams()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(upstreams) != 0 {
+				t.Errorf("expected 0 upstreams after invalid --timeout, got %d", len(upstreams))
+			}
+		})
+	}
+}
+
 // TestHandleMCPRemove verifies removing an upstream by name.
 func TestHandleMCPRemove(t *testing.T) {
 	dir := t.TempDir()
@@ -648,18 +699,41 @@ func TestHandleMCPGatewayInvalidChatID(t *testing.T) {
 }
 
 // TestHandleMCPAddEnvInvalidFormat verifies that bad env format is rejected.
+// Covers both missing "=" (BADFORMAT) and empty-key (=VALUE) cases. The CLI
+// rejects empty keys to match the Telegram handler's behavior so both entry
+// points reject the same malformed inputs.
 func TestHandleMCPAddEnvInvalidFormat(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
 
-	err := handleMCPAdd([]string{
-		"--db", dbPath,
-		"--command", "server",
-		"--env", "BADFORMAT",
-		"myserver",
-	})
-	if err == nil {
-		t.Fatal("expected error for invalid env format")
+	cases := []struct {
+		label string
+		flag  string
+		value string
+	}{
+		{"env missing equals", "--env", "BADFORMAT"},
+		{"env empty key", "--env", "=VALUE"},
+		{"header missing equals", "--header", "BADFORMAT"},
+		{"header empty key", "--header", "=VALUE"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			dbPath := filepath.Join(dir, tc.label+".db")
+			args := []string{
+				"--db", dbPath,
+				"--command", "https://example.com/mcp",
+				"--transport", "http",
+				tc.flag, tc.value,
+				"myserver",
+			}
+			// The "http" transport is set so that --header is accepted for
+			// the header cases. The env cases do not require it, but sharing
+			// one arg set keeps the table loop uniform.
+			err := handleMCPAdd(args)
+			if err == nil {
+				t.Fatalf("expected error for %s %q", tc.flag, tc.value)
+			}
+		})
 	}
 }
 

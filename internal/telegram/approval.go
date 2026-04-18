@@ -33,7 +33,6 @@ type ChannelConfig struct {
 	Vault               *vault.Store
 	ContainerMgr        container.ContainerManager
 	Store               *store.Store
-	MCPURL              string                   // external URL for sluice's MCP gateway, used to re-wire the agent's config after /mcp add|remove
 	OnEngineSwap        func(eng *policy.Engine) // called after policy mutations to update dependent state
 	OnOAuthIndexRebuild func()                   // called after credential removal to rebuild proxy OAuth index
 	APIEndpoint         string                   // custom Telegram API endpoint (for testing); empty uses default
@@ -87,9 +86,6 @@ func NewTelegramChannel(cfg ChannelConfig) (*TelegramChannel, error) {
 	}
 	if cfg.ContainerMgr != nil {
 		cmdHandler.SetContainerManager(cfg.ContainerMgr)
-	}
-	if cfg.MCPURL != "" {
-		cmdHandler.SetMCPURL(cfg.MCPURL)
 	}
 	if cfg.ResolverPtr != nil {
 		cmdHandler.SetResolverPtr(cfg.ResolverPtr)
@@ -433,6 +429,14 @@ func (tc *TelegramChannel) handleMessage(msg *tgbotapi.Message) {
 		for i := 0; i < telegramMaxMessage; i++ {
 			_, size := utf8.DecodeRuneInString(response[cut:])
 			cut += size
+		}
+		// Back up to the last newline before the cut. Every line our
+		// formatters emit is self-contained (open tags closed on the
+		// same line), so a newline boundary guarantees we don't split a
+		// <code> or <b> tag and confuse Telegram's HTML parser. Fall
+		// back to rune-level truncation when no newline exists.
+		if nl := strings.LastIndexByte(response[:cut], '\n'); nl >= 0 {
+			cut = nl
 		}
 		response = response[:cut] + "\n\n(truncated)"
 	}

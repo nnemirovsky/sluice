@@ -377,7 +377,6 @@ func main() {
 			Vault:        vaultStore,
 			ContainerMgr: containerMgr,
 			Store:        db,
-			MCPURL:       deriveMCPBaseURL(*mcpBaseURL, *healthAddr),
 			OnEngineSwap: srv.UpdateInspectRules,
 			OnOAuthIndexRebuild: func() {
 				if db == nil {

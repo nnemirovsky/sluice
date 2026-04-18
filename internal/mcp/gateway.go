@@ -64,7 +64,7 @@ func NewGateway(cfg GatewayConfig) (*Gateway, error) {
 		credResolver:  cfg.CredentialResolver,
 	}
 	if gw.timeoutSec == 0 {
-		gw.timeoutSec = 120
+		gw.timeoutSec = DefaultTimeoutSec
 	}
 	if gw.policy == nil {
 		// nil rules cannot fail compilation, so error is always nil here.

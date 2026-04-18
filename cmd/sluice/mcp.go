@@ -261,12 +261,12 @@ func handleMCPAdd(args []string) error {
 	command := fs.String("command", "", "command to run (stdio) or URL (http/websocket)")
 	argsStr := fs.String("args", "", "comma-separated arguments for the command")
 	envStr := fs.String("env", "", "comma-separated KEY=VAL environment variables (VAL may be vault:<name> for the whole value, or contain {vault:<name>} substrings for templated substitution)")
-	timeout := fs.Int("timeout", 120, "upstream timeout in seconds")
+	timeout := fs.Int("timeout", mcp.DefaultTimeoutSec, "upstream timeout in seconds")
 	transport := fs.String("transport", "stdio", "transport type: stdio, http, or websocket")
 	headers := make(map[string]string)
 	fs.Func("header", "HTTP header to send on every request to an http upstream (repeatable, format: KEY=VAL; VAL may be vault:<name> for the whole value, or contain {vault:<name>} substrings for templated substitution, e.g. \"Authorization=Bearer {vault:github_pat}\")", func(s string) error {
 		parts := strings.SplitN(s, "=", 2)
-		if len(parts) != 2 {
+		if len(parts) != 2 || parts[0] == "" {
 			return fmt.Errorf("invalid header format %q (expected KEY=VAL)", s)
 		}
 		headers[parts[0]] = parts[1]
@@ -291,6 +291,10 @@ func handleMCPAdd(args []string) error {
 		return fmt.Errorf("invalid transport %q: must be stdio, http, or websocket", *transport)
 	}
 
+	if *timeout <= 0 {
+		return fmt.Errorf("invalid --timeout %d: must be a positive integer (seconds)", *timeout)
+	}
+
 	if len(headers) > 0 && *transport != "http" {
 		return fmt.Errorf("--header is only valid for --transport http")
 	}
@@ -304,7 +308,7 @@ func handleMCPAdd(args []string) error {
 	if *envStr != "" {
 		for _, kv := range strings.Split(*envStr, ",") {
 			parts := strings.SplitN(kv, "=", 2)
-			if len(parts) != 2 {
+			if len(parts) != 2 || parts[0] == "" {
 				return fmt.Errorf("invalid env format %q (expected KEY=VAL)", kv)
 			}
 			env[parts[0]] = parts[1]
@@ -391,7 +395,7 @@ func handleMCPList(args []string) error {
 			headersStr = " headers=" + strings.Join(pairs, ",")
 		}
 		timeoutStr := ""
-		if u.TimeoutSec != 120 {
+		if u.TimeoutSec != mcp.DefaultTimeoutSec {
 			timeoutStr = fmt.Sprintf(" timeout=%ds", u.TimeoutSec)
 		}
 		fmt.Printf("[%d] %s command=%s%s%s%s%s%s\n", u.ID, u.Name, u.Command, transportStr, argsStr, envStr, headersStr, timeoutStr)

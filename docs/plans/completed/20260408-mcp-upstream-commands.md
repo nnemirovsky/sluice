@@ -77,8 +77,8 @@ After this plan, Telegram will have `/mcp list`, `/mcp add`, and `/mcp remove`.
 - Test: `internal/telegram/commands_test.go`
 
 - [x] `/mcp remove <name>` - remove upstream by name
-- [x] After add/remove: trigger MCP config re-injection into agent container. Added `mcpURL` field to `CommandHandler` with `SetMCPURL` setter and `MCPURL` in `ChannelConfig`. The `reinjectMCPConfig` helper calls `ContainerManager.WireMCPGateway(ctx, "sluice", mcpURL)` after both `/mcp add` and `/mcp remove` successes. Wired from `cmd/sluice/main.go` via `deriveMCPBaseURL(*mcpBaseURL, *healthAddr)`. (Plan referenced an older `mcpDir`/`mcp-servers.json` write path; current code uses `WireMCPGateway` WebSocket RPC instead.)
-- [x] Write tests for remove subcommand and re-injection trigger
+- [x] Re-injection via `WireMCPGateway` was implemented and then removed during iter-1 code review. Sluice multiplexes every upstream behind a single agent-side entry (`mcp.servers.sluice = {url: http://sluice:3000/mcp}`) which is wired once at sluice startup and never changes on mutation. Re-calling `WireMCPGateway("sluice", url)` after /mcp add would not surface the new upstream to the agent (the gateway reads the upstream set from SQLite at startup) but would trigger an agent gateway restart. The agreed UX is: store mutation succeeds, response instructs the operator to restart sluice, no container-side RPC is issued on /mcp add or /mcp remove.
+- [x] Write tests for remove subcommand and regression guards that `WireMCPGateway` is NOT called on /mcp add or /mcp remove (see `TestHandleMCPAddDoesNotCallContainerManager` and `TestHandleMCPRemoveDoesNotCallContainerManager`).
 - [x] Run tests - must pass before next task
 
 ### Task 4: Add /mcp to Telegram command menu
@@ -95,24 +95,24 @@ After this plan, Telegram will have `/mcp list`, `/mcp add`, and `/mcp remove`.
 ### Task 5: Verify acceptance criteria
 
 - [x] Verify `/mcp list` in Telegram shows upstreams (verified via unit tests: `TestHandleMCPListEmpty`, `TestHandleMCPListWithUpstreams`, `TestHandleMCPListEscapesHTML`, `TestHandleMessageMCPListNotDeleted`)
-- [x] Verify `/mcp add` creates upstream and triggers auto-injection (verified via unit tests: `TestHandleMCPAddStdio`, `TestHandleMCPAddWithArgsAndEnv`, `TestHandleMCPAddHTTPTransport`, `TestHandleMCPAddWebSocketTransport`, `TestHandleMCPAddTriggersReinjection`, `TestHandleMessageMCPAddDeletesMessage`)
-- [x] Verify `/mcp remove` removes upstream (verified via unit tests: `TestHandleMCPRemove`, `TestHandleMCPRemoveNotFound`, `TestHandleMCPRemoveStrayPositional`, `TestHandleMCPRemoveTriggersReinjection`)
+- [x] Verify `/mcp add` creates upstream (verified via unit tests: `TestHandleMCPAddStdio`, `TestHandleMCPAddWithArgsAndEnv`, `TestHandleMCPAddHTTPTransport`, `TestHandleMCPAddWebSocketTransport`, `TestHandleMCPAddDoesNotCallContainerManager`, `TestHandleMessageMCPAddDeletesMessage`)
+- [x] Verify `/mcp remove` removes upstream (verified via unit tests: `TestHandleMCPRemove`, `TestHandleMCPRemoveNotFound`, `TestHandleMCPRemoveStrayPositional`, `TestHandleMCPRemoveDoesNotCallContainerManager`)
 - [x] Run full test suite: `go test ./... -v -timeout 30s` -- all 2389 tests passing across 12 packages
 
 ### Task 6: [Final] Update documentation
 
-- [x] Update CLAUDE.md CLI subcommands section if needed (no update needed: CLAUDE.md has no Telegram commands listing section, and the CLI subcommands section already documents `sluice mcp add/list/remove`)
+- [x] Update CLAUDE.md: iter 2 added `--header "K=V"` to the documented `sluice mcp add` flag list (CLI Subcommands section) and expanded the MCP Gateway Setup section to cover all three management surfaces (CLI, REST, Telegram) plus the `mcp.servers.sluice={url}` wiring and the sluice-restart requirement for upstream mutations.
 - [x] Move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 
 **Manual verification:**
-- Deploy to knuth
+- Deploy to a live sluice stack
 - Add an MCP upstream via Telegram: `/mcp add test-server --command "echo hello"`
 - Verify it appears in `/mcp list`
-- Verify `mcp-servers.json` is written to shared volume
-- Verify OpenClaw discovers the new MCP server
-- Remove it: `/mcp remove test-server`
+- Restart sluice (the gateway builds its upstream set at startup)
+- Re-run an agent session and confirm the new tools are exposed under the `test-server__*` namespace
+- Remove it: `/mcp remove test-server`, restart sluice, confirm the tools are gone
 
 **Future work:**
 - Update/edit support for MCP upstreams (CLI, API, Telegram). Users can remove+add for now.

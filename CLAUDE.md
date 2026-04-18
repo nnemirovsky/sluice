@@ -88,7 +88,7 @@ sluice policy remove <id>
 sluice policy import <path.toml>    # seed DB from TOML (merge semantics)
 sluice policy export                # dump current rules as TOML
 
-sluice mcp add <name> --command <cmd> [--transport stdio|http|websocket] [--args "a,b"] [--env "K=V"] [--timeout 120]
+sluice mcp add <name> --command <cmd> [--transport stdio|http|websocket] [--args "a,b"] [--env "K=V"] [--header "K=V"] [--timeout 120]
 sluice mcp list
 sluice mcp remove <name>
 sluice mcp                          # start MCP gateway
@@ -128,7 +128,9 @@ docker exec openclaw openclaw mcp set sluice '{"url":"http://sluice:3000/mcp"}'
 
 For the hostname `sluice` to resolve inside OpenClaw, the compose file pins sluice's IP on the internal network (172.30.0.2) and adds an `extra_hosts` entry on tun2proxy (which OpenClaw shares). Docker's embedded DNS (127.0.0.11) is not reachable from OpenClaw because its DNS is routed through the TUN device. The `/etc/hosts` entry bypasses DNS entirely.
 
-When new MCP upstreams are added to sluice via `sluice mcp add`, restart sluice so the gateway picks them up. OpenClaw does not need to be restarted - its connection to sluice:3000/mcp remains valid and it re-queries the tool list on subsequent agent runs.
+MCP upstreams can be managed via `sluice mcp add|list|remove`, the REST API (`/api/mcp/upstreams`), or the Telegram bot (`/mcp add|list|remove`). All three paths write to the same SQLite store. After any addition or removal, restart sluice so the gateway re-reads the upstream set. OpenClaw does not need to be restarted: its connection to `sluice:3000/mcp` is registered once at sluice startup (via `WireMCPGateway`, which patches `mcp.servers.sluice = {url: ...}` in the agent's openclaw.json) and stays valid across sluice restarts. The agent re-queries the tool list on subsequent agent runs.
+
+The Telegram `/mcp add` path auto-deletes the chat message because `--env KEY=VAL` pairs may contain secrets (use `KEY=vault:name` to keep the plaintext out of the SQLite store and `/mcp list` output entirely).
 
 ## Policy Store
 
@@ -260,7 +262,7 @@ Action names operators commonly grep for: `tool_call` (MCP tool call policy verd
 
 ### MCP gateway
 
-Three upstream transports: stdio (child processes), Streamable HTTP, WebSocket. All satisfy `MCPUpstream` interface. Tools namespaced as `<upstream>__<tool>`. Policy evaluation: deny/allow/ask priority. `ContentInspector` blocks arguments and redacts responses using regex (JSON parsed before matching to prevent unicode escape bypass). Per-upstream timeouts (default 120s).
+Three upstream transports: stdio (child processes), Streamable HTTP, WebSocket. All satisfy `MCPUpstream` interface. Tools namespaced as `<upstream>__<tool>`. Policy evaluation: deny/allow/ask priority. `ContentInspector` blocks arguments and redacts responses using regex (JSON parsed before matching to prevent unicode escape bypass). Per-upstream timeout defaults are defined by the `mcp.DefaultTimeoutSec` constant (120s) shared across packages that need the fallback. `internal/store.AddMCPUpstream` duplicates the literal 120 because `internal/store` is imported by `internal/mcp` and cannot import it back (circular). A comment in `store.go` flags the duplicate so the two stay in sync.
 
 `MCPHTTPHandler` serves `POST /mcp` and `DELETE /mcp` on port 3000 (alongside `/healthz`). Session tracking via `Mcp-Session-Id` header. SSE response support.
 
