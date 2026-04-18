@@ -15,6 +15,7 @@ import (
 
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/container"
+	"github.com/nemirovsky/sluice/internal/mcp"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
@@ -674,9 +675,98 @@ func (h *CommandHandler) handleMCP(args []string) string {
 	switch args[0] {
 	case "list":
 		return h.mcpList()
+	case "add":
+		return h.mcpAdd(args[1:])
 	default:
 		return fmt.Sprintf("Unknown mcp subcommand: %s", args[0])
 	}
+}
+
+// mcpAddUsage is the usage string returned when /mcp add is called with
+// missing required flags or no positional name.
+const mcpAddUsage = "Usage: /mcp add <name> --command <cmd> [--transport stdio|http|websocket] [--args \"a,b\"] [--env \"K=V,K=V\"] [--timeout 120]"
+
+// mcpAdd registers a new MCP upstream from /mcp add arguments.
+func (h *CommandHandler) mcpAdd(args []string) string {
+	if len(args) == 0 {
+		return mcpAddUsage
+	}
+
+	// Extract known flags. extractFlag returns empty string when the flag is
+	// absent; the remaining slice collapses the flag/value pair out of args.
+	command, args := extractFlag(args, "--command")
+	transport, args := extractFlag(args, "--transport")
+	argsStr, args := extractFlag(args, "--args")
+	envStr, args := extractFlag(args, "--env")
+	timeoutStr, args := extractFlag(args, "--timeout")
+
+	if len(args) == 0 {
+		return mcpAddUsage
+	}
+	name := args[0]
+	// Reject stray positional args after <name> so typos like
+	// "/mcp add foo bar --command cmd" don't silently swallow "bar".
+	if len(args) > 1 {
+		return fmt.Sprintf("Unexpected argument %q.\n%s", args[1], mcpAddUsage)
+	}
+
+	if command == "" {
+		return mcpAddUsage
+	}
+
+	if err := mcp.ValidateUpstreamName(name); err != nil {
+		return fmt.Sprintf("Invalid upstream name: %v", err)
+	}
+
+	if transport == "" {
+		transport = "stdio"
+	}
+	if !mcp.ValidTransport(transport) {
+		return fmt.Sprintf("Invalid transport %q: must be stdio, http, or websocket", transport)
+	}
+
+	timeout := 120
+	if timeoutStr != "" {
+		n, err := strconv.Atoi(timeoutStr)
+		if err != nil || n <= 0 {
+			return fmt.Sprintf("Invalid --timeout %q: must be a positive integer (seconds)", timeoutStr)
+		}
+		timeout = n
+	}
+
+	var cmdArgs []string
+	if argsStr != "" {
+		cmdArgs = strings.Split(argsStr, ",")
+	}
+
+	env := make(map[string]string)
+	if envStr != "" {
+		for _, kv := range strings.Split(envStr, ",") {
+			parts := strings.SplitN(kv, "=", 2)
+			if len(parts) != 2 {
+				return fmt.Sprintf("Invalid --env %q: expected KEY=VAL[,KEY=VAL,...]", envStr)
+			}
+			env[parts[0]] = parts[1]
+		}
+	}
+
+	h.reloadMu.Lock()
+	defer h.reloadMu.Unlock()
+
+	id, err := h.store.AddMCPUpstream(name, command, store.MCPUpstreamOpts{
+		Args:       cmdArgs,
+		Env:        env,
+		TimeoutSec: timeout,
+		Transport:  transport,
+	})
+	if err != nil {
+		return fmt.Sprintf("Failed to add MCP upstream: %v", err)
+	}
+
+	return fmt.Sprintf(
+		"Added MCP upstream [%d] %s (%s)\nRestart sluice for the new upstream to take effect.",
+		id, htmlEscape(name), htmlEscape(transport),
+	)
 }
 
 // mcpList renders all registered MCP upstreams for Telegram display.

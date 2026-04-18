@@ -918,6 +918,285 @@ func TestHandleMCPListEscapesHTML(t *testing.T) {
 	}
 }
 
+func TestHandleMCPAddStdio(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command", "npx"},
+	})
+	if !strings.Contains(result, "Added MCP upstream") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+	if !strings.Contains(result, "github") || !strings.Contains(result, "stdio") {
+		t.Errorf("expected name and transport in response, got: %s", result)
+	}
+	if !strings.Contains(result, "Restart sluice") {
+		t.Errorf("expected restart notice in response, got: %s", result)
+	}
+
+	upstreams, err := s.ListMCPUpstreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upstreams) != 1 {
+		t.Fatalf("expected 1 upstream, got %d", len(upstreams))
+	}
+	u := upstreams[0]
+	if u.Name != "github" {
+		t.Errorf("name = %q, want %q", u.Name, "github")
+	}
+	if u.Command != "npx" {
+		t.Errorf("command = %q, want %q", u.Command, "npx")
+	}
+	if u.Transport != "stdio" {
+		t.Errorf("transport = %q, want stdio", u.Transport)
+	}
+	if u.TimeoutSec != 120 {
+		t.Errorf("timeout = %d, want 120", u.TimeoutSec)
+	}
+	if len(u.Args) != 0 {
+		t.Errorf("args = %v, want empty", u.Args)
+	}
+	if len(u.Env) != 0 {
+		t.Errorf("env = %v, want empty", u.Env)
+	}
+}
+
+func TestHandleMCPAddWithArgsAndEnv(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{
+			"add", "github", "--command", "npx",
+			"--args", "-y,@modelcontextprotocol/server-github",
+			"--env", "GITHUB_PAT=vault:github_pat,DEBUG=1",
+			"--timeout", "60",
+		},
+	})
+	if !strings.Contains(result, "Added MCP upstream") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+
+	upstreams, err := s.ListMCPUpstreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upstreams) != 1 {
+		t.Fatalf("expected 1 upstream, got %d", len(upstreams))
+	}
+	u := upstreams[0]
+	wantArgs := []string{"-y", "@modelcontextprotocol/server-github"}
+	if len(u.Args) != len(wantArgs) {
+		t.Fatalf("args = %v, want %v", u.Args, wantArgs)
+	}
+	for i, a := range wantArgs {
+		if u.Args[i] != a {
+			t.Errorf("args[%d] = %q, want %q", i, u.Args[i], a)
+		}
+	}
+	if u.Env["GITHUB_PAT"] != "vault:github_pat" {
+		t.Errorf("env[GITHUB_PAT] = %q, want vault:github_pat", u.Env["GITHUB_PAT"])
+	}
+	if u.Env["DEBUG"] != "1" {
+		t.Errorf("env[DEBUG] = %q, want 1", u.Env["DEBUG"])
+	}
+	if u.TimeoutSec != 60 {
+		t.Errorf("timeout = %d, want 60", u.TimeoutSec)
+	}
+}
+
+func TestHandleMCPAddHTTPTransport(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{
+			"add", "notion",
+			"--command", "https://mcp.notion.com",
+			"--transport", "http",
+		},
+	})
+	if !strings.Contains(result, "Added MCP upstream") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+
+	upstreams, err := s.ListMCPUpstreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upstreams) != 1 {
+		t.Fatalf("expected 1 upstream, got %d", len(upstreams))
+	}
+	u := upstreams[0]
+	if u.Command != "https://mcp.notion.com" {
+		t.Errorf("command = %q, want URL", u.Command)
+	}
+	if u.Transport != "http" {
+		t.Errorf("transport = %q, want http", u.Transport)
+	}
+}
+
+func TestHandleMCPAddWebSocketTransport(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{
+			"add", "realtime",
+			"--command", "wss://mcp.example.com/ws",
+			"--transport", "websocket",
+		},
+	})
+	if !strings.Contains(result, "Added MCP upstream") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+
+	upstreams, err := s.ListMCPUpstreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upstreams) != 1 || upstreams[0].Transport != "websocket" {
+		t.Errorf("expected websocket upstream, got %+v", upstreams)
+	}
+}
+
+func TestHandleMCPAddMissingCommand(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github"},
+	})
+	if !strings.Contains(result, "Usage:") {
+		t.Errorf("expected usage on missing --command, got: %s", result)
+	}
+	upstreams, _ := s.ListMCPUpstreams()
+	if len(upstreams) != 0 {
+		t.Errorf("no upstream should be created when --command is missing, got %d", len(upstreams))
+	}
+}
+
+func TestHandleMCPAddMissingName(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "--command", "npx"},
+	})
+	if !strings.Contains(result, "Usage:") {
+		t.Errorf("expected usage on missing name, got: %s", result)
+	}
+	upstreams, _ := s.ListMCPUpstreams()
+	if len(upstreams) != 0 {
+		t.Errorf("no upstream should be created without a name, got %d", len(upstreams))
+	}
+}
+
+func TestHandleMCPAddInvalidName(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	// "__" is a reserved namespace separator for the MCP gateway.
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "bad__name", "--command", "npx"},
+	})
+	if !strings.Contains(result, "Invalid upstream name") {
+		t.Errorf("expected invalid name error, got: %s", result)
+	}
+}
+
+func TestHandleMCPAddInvalidTransport(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command", "npx", "--transport", "ftp"},
+	})
+	if !strings.Contains(result, "Invalid transport") {
+		t.Errorf("expected invalid transport error, got: %s", result)
+	}
+}
+
+func TestHandleMCPAddInvalidTimeout(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	// non-numeric
+	if r := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command", "npx", "--timeout", "abc"},
+	}); !strings.Contains(r, "Invalid --timeout") {
+		t.Errorf("expected invalid timeout error, got: %s", r)
+	}
+	// zero
+	if r := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command", "npx", "--timeout", "0"},
+	}); !strings.Contains(r, "Invalid --timeout") {
+		t.Errorf("expected invalid timeout error for 0, got: %s", r)
+	}
+}
+
+func TestHandleMCPAddInvalidEnv(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	// env value missing "="
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command", "npx", "--env", "NOT_A_PAIR"},
+	})
+	if !strings.Contains(result, "Invalid --env") {
+		t.Errorf("expected invalid env error, got: %s", result)
+	}
+}
+
+func TestHandleMCPAddDuplicateName(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	if _, err := s.AddMCPUpstream("github", "npx", store.MCPUpstreamOpts{}); err != nil {
+		t.Fatal(err)
+	}
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command", "some-other"},
+	})
+	if !strings.Contains(result, "Failed to add MCP upstream") {
+		t.Errorf("expected duplicate rejection, got: %s", result)
+	}
+}
+
+func TestHandleMCPAddStrayPositional(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	// Second positional arg should be rejected to avoid silently swallowing
+	// the intended upstream name when someone types /mcp add foo bar --command cmd.
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "foo", "bar", "--command", "npx"},
+	})
+	if !strings.Contains(result, "Unexpected argument") {
+		t.Errorf("expected rejection of stray arg, got: %s", result)
+	}
+	upstreams, _ := s.ListMCPUpstreams()
+	if len(upstreams) != 0 {
+		t.Errorf("no upstream should be created on parse failure, got %d", len(upstreams))
+	}
+}
+
 func TestCredAddEnvVarConsumedFromValue(t *testing.T) {
 	s := newTestStore(t)
 	handler := newTestHandlerWithStore(t, s, nil, "")

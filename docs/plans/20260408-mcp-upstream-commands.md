@@ -63,12 +63,12 @@ After this plan, Telegram will have `/mcp list`, `/mcp add`, and `/mcp remove`.
 - Modify: `internal/telegram/commands.go`
 - Test: `internal/telegram/commands_test.go`
 
-- [ ] `/mcp add <name> --command <cmd>` - add stdio upstream (parse flags from args)
-- [ ] `/mcp add <name> --command <url> --transport http` - add HTTP/WebSocket upstream (use `--command` for URLs, matching CLI convention)
-- [ ] Support optional flags: `--transport`, `--args`, `--env`, `--timeout`
-- [ ] Note: `--env` flag may contain secrets. Delete the Telegram message after processing (same treatment as `/cred add`)
-- [ ] Write tests for add subcommand with various flag combinations
-- [ ] Run tests - must pass before next task
+- [x] `/mcp add <name> --command <cmd>` - add stdio upstream (parse flags from args)
+- [x] `/mcp add <name> --command <url> --transport http` - add HTTP/WebSocket upstream (use `--command` for URLs, matching CLI convention)
+- [x] Support optional flags: `--transport`, `--args`, `--env`, `--timeout`
+- [x] Note: `--env` flag may contain secrets. Delete the Telegram message after processing (same treatment as `/cred add`)
+- [x] Write tests for add subcommand with various flag combinations
+- [x] Run tests - must pass before next task
 
 ### Task 3: Add /mcp remove with auto-injection
 

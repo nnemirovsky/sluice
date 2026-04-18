@@ -1204,6 +1204,68 @@ func TestHandleMessageCredRotateDeletesMessage(t *testing.T) {
 	}
 }
 
+func TestHandleMessageMCPAddDeletesMessage(t *testing.T) {
+	mock := newMockTelegramAPI(t)
+	s := newTestStore(t)
+	tc := newTestTelegramChannel(t, mock, s)
+
+	// /mcp add may carry secrets via --env KEY=VAL so the chat message
+	// should be deleted the same way /cred add is.
+	tc.handleMessage(&tgbotapi.Message{
+		MessageID: 700,
+		Chat:      &tgbotapi.Chat{ID: 12345},
+		Text:      "/mcp add github --command npx --env GITHUB_PAT=super-secret",
+	})
+
+	time.Sleep(100 * time.Millisecond)
+	if len(mock.getDeletedMessages()) == 0 {
+		t.Error("mcp add message should be deleted for security")
+	}
+}
+
+func TestHandleMessageMCPListNotDeleted(t *testing.T) {
+	mock := newMockTelegramAPI(t)
+	s := newTestStore(t)
+	tc := newTestTelegramChannel(t, mock, s)
+
+	// /mcp list never carries secrets so the message should not be deleted.
+	tc.handleMessage(&tgbotapi.Message{
+		MessageID: 701,
+		Chat:      &tgbotapi.Chat{ID: 12345},
+		Text:      "/mcp list",
+	})
+
+	time.Sleep(100 * time.Millisecond)
+	if len(mock.getDeletedMessages()) != 0 {
+		t.Error("non-sensitive /mcp list message should not be deleted")
+	}
+}
+
+func TestContainsSensitiveArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  *Command
+		want bool
+	}{
+		{"nil command", nil, false},
+		{"empty args", &Command{Name: "cred"}, false},
+		{"cred add", &Command{Name: "cred", Args: []string{"add", "name", "secret"}}, true},
+		{"cred rotate", &Command{Name: "cred", Args: []string{"rotate", "name", "secret"}}, true},
+		{"cred list", &Command{Name: "cred", Args: []string{"list"}}, false},
+		{"cred remove", &Command{Name: "cred", Args: []string{"remove", "name"}}, false},
+		{"mcp add", &Command{Name: "mcp", Args: []string{"add", "name", "--command", "cmd"}}, true},
+		{"mcp list", &Command{Name: "mcp", Args: []string{"list"}}, false},
+		{"policy show", &Command{Name: "policy", Args: []string{"show"}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := containsSensitiveArgs(tt.cmd); got != tt.want {
+				t.Errorf("containsSensitiveArgs(%+v) = %v, want %v", tt.cmd, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHandleMessageForwardsToCommandChannel(t *testing.T) {
 	mock := newMockTelegramAPI(t)
 	s := newTestStore(t)
