@@ -414,6 +414,34 @@ func TestHandleHelp(t *testing.T) {
 	if !strings.Contains(result, "/audit") {
 		t.Error("help should mention /audit")
 	}
+	if !strings.Contains(result, "/mcp") {
+		t.Error("help should mention /mcp when store is configured")
+	}
+	if !strings.Contains(result, "MCP Upstreams") {
+		t.Error("help should include MCP Upstreams section when store is configured")
+	}
+}
+
+// TestHandleHelpNoStore verifies the MCP section is omitted when store is nil,
+// matching how /cred help is gated on vault availability.
+func TestHandleHelpNoStore(t *testing.T) {
+	ptr := new(atomic.Pointer[policy.Engine])
+	eng, err := policy.LoadFromBytes([]byte(`[policy]
+default = "deny"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ptr.Store(eng)
+	handler := NewCommandHandler(ptr, new(sync.Mutex), "")
+	result := handler.Handle(&Command{Name: "help"})
+
+	if strings.Contains(result, "/mcp") {
+		t.Error("help should not mention /mcp when store is nil")
+	}
+	if strings.Contains(result, "MCP Upstreams") {
+		t.Error("help should not include MCP Upstreams section when store is nil")
+	}
 }
 
 func TestHandleCredNoVault(t *testing.T) {

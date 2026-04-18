@@ -87,10 +87,10 @@ After this plan, Telegram will have `/mcp list`, `/mcp add`, and `/mcp remove`.
 - Modify: `internal/telegram/approval.go`
 - Test: `internal/telegram/approval_test.go`
 
-- [ ] Add `{Command: "mcp", Description: "Manage MCP upstreams"}` to registerCommands
-- [ ] Update help output to include MCP section
-- [ ] Write tests for updated help and command registration
-- [ ] Run tests - must pass before next task
+- [x] Add `{Command: "mcp", Description: "Manage MCP upstreams"}` to registerCommands
+- [x] Update help output to include MCP section
+- [x] Write tests for updated help and command registration
+- [x] Run tests - must pass before next task
 
 ### Task 5: Verify acceptance criteria
 

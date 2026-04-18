@@ -224,6 +224,7 @@ func (tc *TelegramChannel) registerCommands() {
 		{Command: "status", Description: "Show proxy status"},
 		{Command: "policy", Description: "Manage policy rules"},
 		{Command: "cred", Description: "Manage credentials"},
+		{Command: "mcp", Description: "Manage MCP upstreams"},
 		{Command: "audit", Description: "Show audit log entries"},
 		{Command: "start", Description: "Show welcome message"},
 		{Command: "help", Description: "Show available commands"},

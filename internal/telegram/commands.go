@@ -958,6 +958,14 @@ Credentials
 /cred rotate <name> <value> | /cred remove <name>`
 	}
 
+	if h.store != nil {
+		help += `
+
+MCP Upstreams
+/mcp list | /mcp add <name> --command <cmd> [--transport stdio|http|websocket] [--args "a,b"] [--env "K=V,K=V"] [--timeout 120]
+/mcp remove <name>`
+	}
+
 	help += `
 
 More: /start for welcome, /help for this message`

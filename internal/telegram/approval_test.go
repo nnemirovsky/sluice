@@ -48,11 +48,12 @@ type tgResponse struct {
 type mockTelegramAPI struct {
 	server *httptest.Server
 
-	mu           sync.Mutex
-	sentMessages []tgbotapi.MessageConfig
-	editedMsgs   []tgbotapi.EditMessageTextConfig
-	callbacks    []tgbotapi.CallbackConfig
-	deletedMsgs  []tgbotapi.DeleteMessageConfig
+	mu             sync.Mutex
+	sentMessages   []tgbotapi.MessageConfig
+	editedMsgs     []tgbotapi.EditMessageTextConfig
+	callbacks      []tgbotapi.CallbackConfig
+	deletedMsgs    []tgbotapi.DeleteMessageConfig
+	setCommandsRaw []string // raw JSON payloads received by setMyCommands
 
 	nextMsgID int
 	updates   chan []tgbotapi.Update
@@ -141,6 +142,14 @@ func newMockTelegramAPI(t *testing.T) *mockTelegramAPI {
 				_ = json.NewEncoder(w).Encode(tgResponse{OK: true, Result: json.RawMessage(`[]`)})
 			}
 
+		case "setMyCommands":
+			_ = r.ParseForm()
+			raw := r.FormValue("commands")
+			m.mu.Lock()
+			m.setCommandsRaw = append(m.setCommandsRaw, raw)
+			m.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(tgResponse{OK: true, Result: json.RawMessage(`true`)})
+
 		default:
 			_ = json.NewEncoder(w).Encode(tgResponse{OK: true, Result: json.RawMessage(`true`)})
 		}
@@ -182,6 +191,14 @@ func (m *mockTelegramAPI) getDeletedMessages() []tgbotapi.DeleteMessageConfig {
 	defer m.mu.Unlock()
 	out := make([]tgbotapi.DeleteMessageConfig, len(m.deletedMsgs))
 	copy(out, m.deletedMsgs)
+	return out
+}
+
+func (m *mockTelegramAPI) getSetCommandsRaw() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, len(m.setCommandsRaw))
+	copy(out, m.setCommandsRaw)
 	return out
 }
 
@@ -545,6 +562,68 @@ func TestCancelApprovalShowsShutdownReason(t *testing.T) {
 }
 
 // --- Start/Stop lifecycle tests ---
+
+// TestRegisterCommands verifies that Start registers the bot command menu
+// with the expected entries, including /mcp for MCP upstream management.
+func TestRegisterCommands(t *testing.T) {
+	mock := newMockTelegramAPI(t)
+	s := newTestStore(t)
+	tc := newTestTelegramChannel(t, mock, s)
+
+	if err := tc.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(tc.Stop)
+
+	// Wait for setMyCommands to be called (happens synchronously inside Start).
+	deadline := time.After(3 * time.Second)
+	var raw []string
+	for {
+		raw = mock.getSetCommandsRaw()
+		if len(raw) > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for setMyCommands call")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// The payload is a JSON array of {command,description} objects. Parse it
+	// and verify every expected command is present.
+	var cmds []tgbotapi.BotCommand
+	if err := json.Unmarshal([]byte(raw[0]), &cmds); err != nil {
+		t.Fatalf("unmarshal commands payload: %v (raw=%q)", err, raw[0])
+	}
+
+	want := map[string]string{
+		"status": "Show proxy status",
+		"policy": "Manage policy rules",
+		"cred":   "Manage credentials",
+		"mcp":    "Manage MCP upstreams",
+		"audit":  "Show audit log entries",
+		"start":  "Show welcome message",
+		"help":   "Show available commands",
+	}
+
+	got := make(map[string]string, len(cmds))
+	for _, c := range cmds {
+		got[c.Command] = c.Description
+	}
+
+	for name, desc := range want {
+		gotDesc, ok := got[name]
+		if !ok {
+			t.Errorf("missing command /%s in setMyCommands payload", name)
+			continue
+		}
+		if gotDesc != desc {
+			t.Errorf("/%s description = %q, want %q", name, gotDesc, desc)
+		}
+	}
+}
 
 func TestStartStop(t *testing.T) {
 	mock := newMockTelegramAPI(t)
