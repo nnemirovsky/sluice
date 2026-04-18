@@ -59,6 +59,7 @@ type CommandHandler struct {
 	vault               *vault.Store
 	containerMgr        container.ContainerManager
 	store               *store.Store
+	mcpURL              string                   // external URL for sluice's MCP gateway; empty disables re-injection
 	onEngineSwap        func(eng *policy.Engine) // called after engine swap to update dependent state
 	onOAuthIndexRebuild func()                   // called after credential removal to rebuild proxy OAuth index
 }
@@ -76,6 +77,13 @@ func (h *CommandHandler) SetContainerManager(mgr container.ContainerManager) {
 // SetStore enables persistent policy management via SQLite.
 func (h *CommandHandler) SetStore(s *store.Store) {
 	h.store = s
+}
+
+// SetMCPURL sets the external URL used to re-wire sluice's MCP gateway into
+// the agent container's config after /mcp add and /mcp remove. Empty disables
+// re-injection (which is also a no-op when no container manager is configured).
+func (h *CommandHandler) SetMCPURL(url string) {
+	h.mcpURL = url
 }
 
 // SetResolverPtr shares the proxy's binding resolver pointer so credential
@@ -677,6 +685,8 @@ func (h *CommandHandler) handleMCP(args []string) string {
 		return h.mcpList()
 	case "add":
 		return h.mcpAdd(args[1:])
+	case "remove":
+		return h.mcpRemove(args[1:])
 	default:
 		return fmt.Sprintf("Unknown mcp subcommand: %s", args[0])
 	}
@@ -763,10 +773,58 @@ func (h *CommandHandler) mcpAdd(args []string) string {
 		return fmt.Sprintf("Failed to add MCP upstream: %v", err)
 	}
 
-	return fmt.Sprintf(
+	msg := fmt.Sprintf(
 		"Added MCP upstream [%d] %s (%s)\nRestart sluice for the new upstream to take effect.",
 		id, htmlEscape(name), htmlEscape(transport),
 	)
+	return msg + h.reinjectMCPConfig()
+}
+
+// mcpRemove removes an MCP upstream by name and triggers re-injection so the
+// agent picks up the change. Returns a human-readable message for Telegram.
+func (h *CommandHandler) mcpRemove(args []string) string {
+	if len(args) == 0 {
+		return "Usage: /mcp remove <name>"
+	}
+	name := args[0]
+	if len(args) > 1 {
+		return fmt.Sprintf("Unexpected argument %q.\nUsage: /mcp remove <name>", args[1])
+	}
+
+	h.reloadMu.Lock()
+	defer h.reloadMu.Unlock()
+
+	deleted, err := h.store.RemoveMCPUpstream(name)
+	if err != nil {
+		return fmt.Sprintf("Failed to remove MCP upstream: %v", err)
+	}
+	if !deleted {
+		return fmt.Sprintf("No MCP upstream named %s", htmlCode(name))
+	}
+
+	msg := fmt.Sprintf(
+		"Removed MCP upstream %s\nRestart sluice for the removal to take effect.",
+		htmlCode(name),
+	)
+	return msg + h.reinjectMCPConfig()
+}
+
+// reinjectMCPConfig re-wires sluice's MCP gateway URL into the agent
+// container's config. Returns a trailing message suffix (prefixed with \n)
+// describing the outcome, or "" if re-injection is not configured (e.g. no
+// container manager, no MCP URL, or running without a runtime). Callers
+// append the return value to their base response.
+func (h *CommandHandler) reinjectMCPConfig() string {
+	if h.containerMgr == nil || h.mcpURL == "" {
+		return ""
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := h.containerMgr.WireMCPGateway(ctx, "sluice", h.mcpURL); err != nil {
+		return "\nWarning: failed to re-wire MCP config: " + err.Error()
+	}
+	return "\nAgent MCP config re-wired."
 }
 
 // mcpList renders all registered MCP upstreams for Telegram display.

@@ -1883,6 +1883,10 @@ type mockContainerMgr struct {
 	injectErr     error
 	restartCalled bool
 	restartErr    error
+	wireCalled    bool
+	wireName      string
+	wireURL       string
+	wireErr       error
 }
 
 func (m *mockContainerMgr) InjectEnvVars(_ context.Context, envMap map[string]string, _ bool) error {
@@ -1896,8 +1900,11 @@ func (m *mockContainerMgr) RestartWithEnv(_ context.Context, _ map[string]string
 	return m.restartErr
 }
 
-func (m *mockContainerMgr) WireMCPGateway(_ context.Context, _, _ string) error {
-	return nil
+func (m *mockContainerMgr) WireMCPGateway(_ context.Context, name, url string) error {
+	m.wireCalled = true
+	m.wireName = name
+	m.wireURL = url
+	return m.wireErr
 }
 
 func (m *mockContainerMgr) Status(_ context.Context) (container.ContainerStatus, error) {

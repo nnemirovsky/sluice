@@ -76,10 +76,10 @@ After this plan, Telegram will have `/mcp list`, `/mcp add`, and `/mcp remove`.
 - Modify: `internal/telegram/commands.go`
 - Test: `internal/telegram/commands_test.go`
 
-- [ ] `/mcp remove <name>` - remove upstream by name
-- [ ] After add/remove: trigger MCP config re-injection into agent container. Add `mcpDir` field to `CommandHandler` (or accept it via constructor) so the handler can call the same MCP config write logic used in `cmd/sluice/main.go`
-- [ ] Write tests for remove subcommand and re-injection trigger
-- [ ] Run tests - must pass before next task
+- [x] `/mcp remove <name>` - remove upstream by name
+- [x] After add/remove: trigger MCP config re-injection into agent container. Added `mcpURL` field to `CommandHandler` with `SetMCPURL` setter and `MCPURL` in `ChannelConfig`. The `reinjectMCPConfig` helper calls `ContainerManager.WireMCPGateway(ctx, "sluice", mcpURL)` after both `/mcp add` and `/mcp remove` successes. Wired from `cmd/sluice/main.go` via `deriveMCPBaseURL(*mcpBaseURL, *healthAddr)`. (Plan referenced an older `mcpDir`/`mcp-servers.json` write path; current code uses `WireMCPGateway` WebSocket RPC instead.)
+- [x] Write tests for remove subcommand and re-injection trigger
+- [x] Run tests - must pass before next task
 
 ### Task 4: Add /mcp to Telegram command menu
 

@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1225,5 +1226,225 @@ func TestCredAddEnvVarConsumedFromValue(t *testing.T) {
 	defer sb.Release()
 	if string(sb.Bytes()) != "the-secret-value" {
 		t.Errorf("expected credential value 'the-secret-value', got %q", string(sb.Bytes()))
+	}
+}
+
+func TestHandleMCPRemove(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.AddMCPUpstream("github", "npx", store.MCPUpstreamOpts{
+		Transport: "stdio",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddMCPUpstream("notion", "https://mcp.notion.com", store.MCPUpstreamOpts{
+		Transport: "http",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"remove", "github"}})
+
+	if !strings.Contains(result, "Removed MCP upstream") {
+		t.Errorf("expected removal confirmation, got: %s", result)
+	}
+	if !strings.Contains(result, "github") {
+		t.Errorf("expected removed name in response, got: %s", result)
+	}
+	if !strings.Contains(result, "Restart sluice") {
+		t.Errorf("expected restart notice, got: %s", result)
+	}
+
+	// Verify github was removed but notion remains.
+	upstreams, err := s.ListMCPUpstreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upstreams) != 1 {
+		t.Fatalf("expected 1 remaining upstream, got %d", len(upstreams))
+	}
+	if upstreams[0].Name != "notion" {
+		t.Errorf("wrong upstream remained: %q", upstreams[0].Name)
+	}
+}
+
+func TestHandleMCPRemoveMissingName(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"remove"}})
+
+	if !strings.Contains(result, "Usage: /mcp remove") {
+		t.Errorf("expected usage on missing name, got: %s", result)
+	}
+}
+
+func TestHandleMCPRemoveNotFound(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"remove", "nonexistent"}})
+
+	if !strings.Contains(result, "No MCP upstream named") {
+		t.Errorf("expected not-found message, got: %s", result)
+	}
+}
+
+func TestHandleMCPRemoveStrayPositional(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.AddMCPUpstream("github", "npx", store.MCPUpstreamOpts{Transport: "stdio"}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"remove", "github", "extra"}})
+
+	if !strings.Contains(result, "Unexpected argument") {
+		t.Errorf("expected stray arg rejection, got: %s", result)
+	}
+
+	// No-op removal: github must still exist.
+	upstreams, _ := s.ListMCPUpstreams()
+	if len(upstreams) != 1 {
+		t.Errorf("upstream should not be removed on parse failure, got %d", len(upstreams))
+	}
+}
+
+// TestHandleMCPAddTriggersReinjection verifies that /mcp add re-wires the
+// agent's MCP config via WireMCPGateway when a container manager and MCP URL
+// are configured.
+func TestHandleMCPAddTriggersReinjection(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	mgr := &mockContainerMgr{}
+	handler.SetContainerManager(mgr)
+	handler.SetMCPURL("http://sluice:3000/mcp")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command", "npx"},
+	})
+	if !strings.Contains(result, "Added MCP upstream") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+	if !mgr.wireCalled {
+		t.Errorf("WireMCPGateway should be called after /mcp add")
+	}
+	if mgr.wireName != "sluice" {
+		t.Errorf("wireName = %q, want %q", mgr.wireName, "sluice")
+	}
+	if mgr.wireURL != "http://sluice:3000/mcp" {
+		t.Errorf("wireURL = %q, want %q", mgr.wireURL, "http://sluice:3000/mcp")
+	}
+	if !strings.Contains(result, "Agent MCP config re-wired") {
+		t.Errorf("expected re-wired notice in response, got: %s", result)
+	}
+}
+
+// TestHandleMCPRemoveTriggersReinjection verifies that /mcp remove re-wires
+// the agent's MCP config via WireMCPGateway when a container manager and MCP
+// URL are configured.
+func TestHandleMCPRemoveTriggersReinjection(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.AddMCPUpstream("github", "npx", store.MCPUpstreamOpts{
+		Transport: "stdio",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	mgr := &mockContainerMgr{}
+	handler.SetContainerManager(mgr)
+	handler.SetMCPURL("http://sluice:3000/mcp")
+
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"remove", "github"}})
+	if !strings.Contains(result, "Removed MCP upstream") {
+		t.Fatalf("should confirm remove, got: %s", result)
+	}
+	if !mgr.wireCalled {
+		t.Errorf("WireMCPGateway should be called after /mcp remove")
+	}
+	if mgr.wireName != "sluice" {
+		t.Errorf("wireName = %q, want %q", mgr.wireName, "sluice")
+	}
+	if mgr.wireURL != "http://sluice:3000/mcp" {
+		t.Errorf("wireURL = %q, want %q", mgr.wireURL, "http://sluice:3000/mcp")
+	}
+	if !strings.Contains(result, "Agent MCP config re-wired") {
+		t.Errorf("expected re-wired notice in response, got: %s", result)
+	}
+}
+
+// TestHandleMCPReinjectionSkippedWithoutContainer verifies re-injection is a
+// no-op when no container manager is configured (standalone mode).
+func TestHandleMCPReinjectionSkippedWithoutContainer(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	handler.SetMCPURL("http://sluice:3000/mcp")
+	// Intentionally do not set a container manager.
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command", "npx"},
+	})
+	if !strings.Contains(result, "Added MCP upstream") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+	if strings.Contains(result, "Agent MCP config re-wired") {
+		t.Errorf("re-wired notice should not appear without container manager, got: %s", result)
+	}
+	if strings.Contains(result, "Warning") {
+		t.Errorf("no warning should appear when re-injection is simply skipped, got: %s", result)
+	}
+}
+
+// TestHandleMCPReinjectionSkippedWithoutURL verifies re-injection is a no-op
+// when no MCP URL is configured.
+func TestHandleMCPReinjectionSkippedWithoutURL(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	mgr := &mockContainerMgr{}
+	handler.SetContainerManager(mgr)
+	// Intentionally do not set an MCP URL.
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command", "npx"},
+	})
+	if !strings.Contains(result, "Added MCP upstream") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+	if mgr.wireCalled {
+		t.Errorf("WireMCPGateway should not be called without an MCP URL")
+	}
+}
+
+// TestHandleMCPReinjectionFailure verifies failures from WireMCPGateway are
+// surfaced to the Telegram response as a warning but do not fail the overall
+// add/remove operation.
+func TestHandleMCPReinjectionFailure(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	mgr := &mockContainerMgr{wireErr: fmt.Errorf("wire failed: exec timeout")}
+	handler.SetContainerManager(mgr)
+	handler.SetMCPURL("http://sluice:3000/mcp")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command", "npx"},
+	})
+	if !strings.Contains(result, "Added MCP upstream") {
+		t.Fatalf("should confirm add even when re-injection fails, got: %s", result)
+	}
+	if !strings.Contains(result, "Warning: failed to re-wire") {
+		t.Errorf("expected warning about wire failure, got: %s", result)
+	}
+
+	// The upstream should still be persisted.
+	upstreams, _ := s.ListMCPUpstreams()
+	if len(upstreams) != 1 {
+		t.Errorf("upstream should be persisted even if re-injection fails, got %d", len(upstreams))
 	}
 }

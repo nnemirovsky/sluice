@@ -33,6 +33,7 @@ type ChannelConfig struct {
 	Vault               *vault.Store
 	ContainerMgr        container.ContainerManager
 	Store               *store.Store
+	MCPURL              string                   // external URL for sluice's MCP gateway, used to re-wire the agent's config after /mcp add|remove
 	OnEngineSwap        func(eng *policy.Engine) // called after policy mutations to update dependent state
 	OnOAuthIndexRebuild func()                   // called after credential removal to rebuild proxy OAuth index
 	APIEndpoint         string                   // custom Telegram API endpoint (for testing); empty uses default
@@ -86,6 +87,9 @@ func NewTelegramChannel(cfg ChannelConfig) (*TelegramChannel, error) {
 	}
 	if cfg.ContainerMgr != nil {
 		cmdHandler.SetContainerManager(cfg.ContainerMgr)
+	}
+	if cfg.MCPURL != "" {
+		cmdHandler.SetMCPURL(cfg.MCPURL)
 	}
 	if cfg.ResolverPtr != nil {
 		cmdHandler.SetResolverPtr(cfg.ResolverPtr)
