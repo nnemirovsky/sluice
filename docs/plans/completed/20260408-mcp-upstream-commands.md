@@ -101,8 +101,8 @@ After this plan, Telegram will have `/mcp list`, `/mcp add`, and `/mcp remove`.
 
 ### Task 6: [Final] Update documentation
 
-- [ ] Update CLAUDE.md CLI subcommands section if needed
-- [ ] Move this plan to `docs/plans/completed/`
+- [x] Update CLAUDE.md CLI subcommands section if needed (no update needed: CLAUDE.md has no Telegram commands listing section, and the CLI subcommands section already documents `sluice mcp add/list/remove`)
+- [x] Move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 
