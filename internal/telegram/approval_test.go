@@ -1346,11 +1346,11 @@ func TestHandleMessageMCPListTruncation(t *testing.T) {
 	if !strings.Contains(text, "(truncated)") {
 		t.Errorf("expected truncation marker, got first 200 chars: %q", text[:min(200, len(text))])
 	}
-	if open, close := strings.Count(text, "<code>"), strings.Count(text, "</code>"); open != close {
-		t.Errorf("truncated output breaks <code> balance: %d open, %d close", open, close)
+	if opens, closes := strings.Count(text, "<code>"), strings.Count(text, "</code>"); opens != closes {
+		t.Errorf("truncated output breaks <code> balance: %d open, %d close", opens, closes)
 	}
-	if open, close := strings.Count(text, "<b>"), strings.Count(text, "</b>"); open != close {
-		t.Errorf("truncated output breaks <b> balance: %d open, %d close", open, close)
+	if opens, closes := strings.Count(text, "<b>"), strings.Count(text, "</b>"); opens != closes {
+		t.Errorf("truncated output breaks <b> balance: %d open, %d close", opens, closes)
 	}
 }
 

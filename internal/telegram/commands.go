@@ -840,7 +840,7 @@ func parseMCPAddFlags(args []string) (mcpAddOpts, string) {
 	fs.Func("header", "KEY=VAL HTTP header, repeatable (http transport only)", func(s string) error {
 		parts := strings.SplitN(s, "=", 2)
 		if len(parts) != 2 || parts[0] == "" {
-			return fmt.Errorf("Invalid --header %q: expected KEY=VAL", s)
+			return fmt.Errorf("invalid --header %q: expected KEY=VAL", s)
 		}
 		headers[parts[0]] = parts[1]
 		return nil
@@ -980,25 +980,6 @@ func (h *CommandHandler) mcpList() string {
 		}
 	}
 	return b.String()
-}
-
-// sortedKVLine renders a map as "k1=v1, k2=v2" with keys sorted so the output
-// is deterministic. Returns "" when the map is empty so callers can skip a
-// whole row instead of emitting an empty one.
-func sortedKVLine(m map[string]string) string {
-	if len(m) == 0 {
-		return ""
-	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	pairs := make([]string, 0, len(keys))
-	for _, k := range keys {
-		pairs = append(pairs, k+"="+m[k])
-	}
-	return strings.Join(pairs, ", ")
 }
 
 // sortedKVLineRedacted renders a map as "k1=v1, k2=v2" with keys sorted and
