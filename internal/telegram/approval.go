@@ -220,6 +220,7 @@ func (tc *TelegramChannel) registerCommands() {
 		{Command: "status", Description: "Show proxy status"},
 		{Command: "policy", Description: "Manage policy rules"},
 		{Command: "cred", Description: "Manage credentials"},
+		{Command: "mcp", Description: "Manage MCP upstreams"},
 		{Command: "audit", Description: "Show audit log entries"},
 		{Command: "start", Description: "Show welcome message"},
 		{Command: "help", Description: "Show available commands"},
@@ -385,22 +386,21 @@ func (tc *TelegramChannel) handleMessage(msg *tgbotapi.Message) {
 		return
 	}
 
-	// Delete messages that contain credential values before processing
-	// to minimize exposure in chat history.
-	if cmd.Name == "cred" && len(cmd.Args) >= 1 &&
-		(cmd.Args[0] == "add" || cmd.Args[0] == "rotate") {
+	// Delete messages that may contain secrets before processing to minimize
+	// exposure in chat history. /cred add and /cred rotate always carry a
+	// credential value. /mcp add may carry secrets in --env KEY=VAL pairs.
+	isSensitive := containsSensitiveArgs(cmd)
+	if isSensitive {
 		del := tgbotapi.NewDeleteMessage(msg.Chat.ID, msg.MessageID)
 		if _, err := tc.api.Request(del); err != nil {
-			log.Printf("failed to delete credential message: %s", sanitizeError(err))
+			log.Printf("failed to delete sensitive command message: %s", sanitizeError(err))
 		}
 	}
 
 	// Forward as channel.Command (non-blocking, drop if full).
-	// Skip cred add/rotate commands to avoid forwarding plaintext
-	// credential values through the command channel.
-	isSensitiveCred := cmd.Name == "cred" && len(cmd.Args) >= 1 &&
-		(cmd.Args[0] == "add" || cmd.Args[0] == "rotate")
-	if !isSensitiveCred {
+	// Skip sensitive commands to avoid forwarding plaintext secrets
+	// through the command channel.
+	if !isSensitive {
 		select {
 		case tc.cmdCh <- channel.Command{
 			Name:        cmd.Name,
@@ -430,6 +430,14 @@ func (tc *TelegramChannel) handleMessage(msg *tgbotapi.Message) {
 			_, size := utf8.DecodeRuneInString(response[cut:])
 			cut += size
 		}
+		// Back up to the last newline before the cut. Every line our
+		// formatters emit is self-contained (open tags closed on the
+		// same line), so a newline boundary guarantees we don't split a
+		// <code> or <b> tag and confuse Telegram's HTML parser. Fall
+		// back to rune-level truncation when no newline exists.
+		if nl := strings.LastIndexByte(response[:cut], '\n'); nl >= 0 {
+			cut = nl
+		}
 		response = response[:cut] + "\n\n(truncated)"
 	}
 
@@ -446,4 +454,24 @@ func (tc *TelegramChannel) handleMessage(msg *tgbotapi.Message) {
 	if _, err := tc.api.Send(reply); err != nil {
 		log.Printf("telegram send error: %s", sanitizeError(err))
 	}
+}
+
+// containsSensitiveArgs reports whether a parsed command likely contains
+// secrets in its argument list (credential values, --env KEY=VAL pairs, etc).
+// Matching commands have their chat message deleted and skip forwarding to the
+// external command channel so the plaintext never leaves the bot goroutine.
+func containsSensitiveArgs(cmd *Command) bool {
+	if cmd == nil || len(cmd.Args) == 0 {
+		return false
+	}
+	switch cmd.Name {
+	case "cred":
+		// /cred add <name> <value>... and /cred rotate <name> <value>...
+		// both carry the secret in positional args.
+		return cmd.Args[0] == "add" || cmd.Args[0] == "rotate"
+	case "mcp":
+		// /mcp add may carry secrets via --env KEY=VAL.
+		return cmd.Args[0] == "add"
+	}
+	return false
 }

@@ -22,6 +22,11 @@ const (
 	TransportWS    = "websocket" // WebSocket client
 )
 
+// DefaultTimeoutSec is the default per-call timeout (in seconds) applied when
+// an upstream entry does not specify its own. Exported so CLI and Telegram
+// handlers can stay in sync with the gateway default.
+const DefaultTimeoutSec = 120
+
 // vaultPrefix marks env values that should be resolved from the vault.
 const vaultPrefix = "vault:"
 
@@ -165,7 +170,7 @@ type Upstream struct {
 	timeout  time.Duration
 }
 
-const defaultUpstreamTimeout = 120 * time.Second
+const defaultUpstreamTimeout = DefaultTimeoutSec * time.Second
 
 var validUpstreamName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`)
 

@@ -2,10 +2,13 @@ package telegram
 
 import (
 	"context"
+	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +17,8 @@ import (
 
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/container"
+	"github.com/nemirovsky/sluice/internal/flagutil"
+	"github.com/nemirovsky/sluice/internal/mcp"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
@@ -27,13 +32,19 @@ type Command struct {
 
 // ParseCommand parses a Telegram message into a Command.
 // Returns nil if the message is not a command (doesn't start with /).
+//
+// Tokenization respects double and single quotes so operators can pass
+// values that contain spaces or commas via the documented forms such as
+// /mcp add myserver --args "a,b" --env "K=V,K=V" --header "Authorization=Bearer tok".
+// Without quote-aware splitting, the args "a,b" token would split into two
+// fields and drop the quoting, corrupting the downstream flag parse.
 func ParseCommand(text string) *Command {
 	text = strings.TrimSpace(text)
 	if !strings.HasPrefix(text, "/") {
 		return nil
 	}
-	parts := strings.Fields(text)
-	if len(parts) == 0 {
+	parts, err := tokenizeShellish(text)
+	if err != nil || len(parts) == 0 {
 		return nil
 	}
 	name := strings.TrimPrefix(parts[0], "/")
@@ -45,6 +56,69 @@ func ParseCommand(text string) *Command {
 		Name: name,
 		Args: parts[1:],
 	}
+}
+
+// tokenizeShellish splits a command-line style string into tokens, respecting
+// double and single quotes. Backslash escapes the next character inside or
+// outside double quotes. Single quotes are literal (no escapes). This mirrors
+// the subset of POSIX shell tokenization that Telegram users are likely to
+// reach for (quoted CSV values, quoted bearer tokens with spaces) without
+// pulling in a full shell parser dependency.
+//
+// Returns an error if a quote is left unterminated so ParseCommand can treat
+// malformed input as not-a-command rather than silently dropping quotes.
+func tokenizeShellish(text string) ([]string, error) {
+	var tokens []string
+	var cur strings.Builder
+	inToken := false
+	quote := byte(0) // 0 = unquoted, '"' or '\'' = inside that quote style
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if quote == 0 {
+			switch {
+			case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+				if inToken {
+					tokens = append(tokens, cur.String())
+					cur.Reset()
+					inToken = false
+				}
+			case c == '"' || c == '\'':
+				quote = c
+				inToken = true
+			case c == '\\' && i+1 < len(text):
+				i++
+				cur.WriteByte(text[i])
+				inToken = true
+			default:
+				cur.WriteByte(c)
+				inToken = true
+			}
+			continue
+		}
+		// Inside a quoted run.
+		if c == quote {
+			quote = 0
+			continue
+		}
+		if quote == '"' && c == '\\' && i+1 < len(text) {
+			next := text[i+1]
+			// Only a handful of escapes are meaningful inside double quotes
+			// (matching POSIX). For other chars the backslash is preserved.
+			if next == '"' || next == '\\' || next == '$' || next == '`' || next == '\n' {
+				i++
+				cur.WriteByte(next)
+				continue
+			}
+		}
+		cur.WriteByte(c)
+	}
+	if quote != 0 {
+		return nil, fmt.Errorf("unterminated quote %c", quote)
+	}
+	if inToken {
+		tokens = append(tokens, cur.String())
+	}
+	return tokens, nil
 }
 
 // CommandHandler holds the dependencies needed by command handlers.
@@ -172,6 +246,8 @@ func (h *CommandHandler) Handle(cmd *Command) string {
 		return h.handlePolicy(cmd.Args)
 	case "cred":
 		return h.handleCred(cmd.Args)
+	case "mcp":
+		return h.handleMCP(cmd.Args)
 	case "status":
 		return h.handleStatus()
 	case "audit":
@@ -660,6 +736,300 @@ func (h *CommandHandler) credMutationComplete(msg string, removedEnvVars ...stri
 	return msg + "\nAgent env vars updated."
 }
 
+// handleMCP dispatches /mcp subcommands.
+func (h *CommandHandler) handleMCP(args []string) string {
+	// Guard first so that when the store is not configured, operators get
+	// a clear diagnostic even if they called /mcp with no args. Emitting
+	// the usage banner in that state would advertise commands that will
+	// all subsequently fail.
+	if h.store == nil {
+		return "MCP management is not available (policy store not configured)."
+	}
+	if len(args) == 0 {
+		return "Usage: /mcp list | " + mcpAddUsage + " | /mcp remove <name>"
+	}
+	switch args[0] {
+	case "list":
+		return h.mcpList()
+	case "add":
+		return h.mcpAdd(args[1:])
+	case "remove":
+		return h.mcpRemove(args[1:])
+	default:
+		return fmt.Sprintf("Unknown mcp subcommand: %s", args[0])
+	}
+}
+
+// mcpAddUsage is the usage string returned when /mcp add is called with
+// missing required flags or no positional name.
+//
+// Limitations operators should be aware of:
+//   - --args and --env are comma-separated so individual values cannot contain
+//     commas. For env values that need commas, set them via config TOML or CLI.
+//   - --header is repeatable (pass the flag once per KEY=VAL pair) so commas
+//     in header values are not a problem.
+//   - --env values are rendered verbatim in /mcp list output. Use the vault:
+//     indirection (e.g. GITHUB_PAT=vault:github_pat) to keep secrets out of
+//     the SQLite store and list responses.
+const mcpAddUsage = "Usage: /mcp add <name> --command <cmd> [--transport stdio|http|websocket] [--args \"a,b\"] [--env \"K=V,K=V\"] [--header \"K=V\" ...] [--timeout 120]"
+
+// mcpAdd registers a new MCP upstream from /mcp add arguments.
+//
+// Adding an upstream to the store is NOT enough for the running MCP gateway to
+// pick it up: the gateway builds its upstream set at startup and does not
+// hot-reload. After /mcp add the operator must restart sluice for the new
+// upstream to take effect. The agent container's openclaw.json always points
+// at sluice-as-a-whole (mcp.servers.sluice = {url: http://sluice:3000/mcp}),
+// which is wired once at sluice startup. There is no per-upstream entry for
+// the agent to re-read, so no gateway-level RPC is issued on /mcp add.
+func (h *CommandHandler) mcpAdd(args []string) string {
+	opts, errMsg := parseMCPAddFlags(args)
+	if errMsg != "" {
+		return errMsg
+	}
+
+	// reloadMu is not held here: MCP upstream changes do not recompile the
+	// policy engine or the binding resolver, and the running gateway is not
+	// hot-reloaded (the operator must restart sluice for the new upstream to
+	// take effect, see the function doc above).
+	id, err := h.store.AddMCPUpstream(opts.name, opts.command, store.MCPUpstreamOpts{
+		Args:       opts.cmdArgs,
+		Env:        opts.env,
+		Headers:    opts.headers,
+		TimeoutSec: opts.timeout,
+		Transport:  opts.transport,
+	})
+	if err != nil {
+		return fmt.Sprintf("Failed to add MCP upstream: %v", err)
+	}
+
+	return fmt.Sprintf(
+		"Added MCP upstream [%d] %s (%s)\nRestart sluice for the new upstream to take effect.",
+		id, htmlCode(opts.name), htmlCode(opts.transport),
+	)
+}
+
+// mcpAddOpts holds the fully parsed and validated arguments for /mcp add.
+type mcpAddOpts struct {
+	name      string
+	command   string
+	transport string
+	cmdArgs   []string
+	env       map[string]string
+	headers   map[string]string
+	timeout   int
+}
+
+// parseMCPAddFlags parses /mcp add arguments into mcpAddOpts. Returns either a
+// populated mcpAddOpts with empty errMsg, or a zero mcpAddOpts and a
+// user-facing error message for Telegram.
+func parseMCPAddFlags(args []string) (mcpAddOpts, string) {
+	if len(args) == 0 {
+		return mcpAddOpts{}, mcpAddUsage
+	}
+
+	fs := flag.NewFlagSet("mcp add", flag.ContinueOnError)
+	// Suppress stdlib's default error-to-stderr: errors surface via Parse
+	// and we translate them into Telegram responses.
+	fs.SetOutput(io.Discard)
+	command := fs.String("command", "", "command or URL")
+	transport := fs.String("transport", mcp.TransportStdio, "transport type")
+	argsStr := fs.String("args", "", "comma-separated args")
+	envStr := fs.String("env", "", "comma-separated KEY=VAL env pairs")
+	headers := make(map[string]string)
+	fs.Func("header", "KEY=VAL HTTP header, repeatable (http transport only)", func(s string) error {
+		parts := strings.SplitN(s, "=", 2)
+		if len(parts) != 2 || parts[0] == "" {
+			return fmt.Errorf("invalid --header %q: expected KEY=VAL", s)
+		}
+		headers[parts[0]] = parts[1]
+		return nil
+	})
+	timeout := fs.Int("timeout", mcp.DefaultTimeoutSec, "per-call timeout in seconds")
+	if err := fs.Parse(flagutil.ReorderFlagsBeforePositional(args, fs)); err != nil {
+		return mcpAddOpts{}, fmt.Sprintf("Invalid argument: %s\n%s", err, mcpAddUsage)
+	}
+
+	positional := fs.Args()
+	if len(positional) == 0 {
+		return mcpAddOpts{}, mcpAddUsage
+	}
+	if len(positional) > 1 {
+		return mcpAddOpts{}, fmt.Sprintf("Unexpected argument %q.\n%s", positional[1], mcpAddUsage)
+	}
+	name := positional[0]
+
+	if *command == "" {
+		return mcpAddOpts{}, mcpAddUsage
+	}
+
+	if err := mcp.ValidateUpstreamName(name); err != nil {
+		return mcpAddOpts{}, fmt.Sprintf("Invalid upstream name: %v", err)
+	}
+
+	if !mcp.ValidTransport(*transport) {
+		// Keep the transport list in sync with internal/store.Store.AddMCPUpstream
+		// and internal/mcp.ValidTransport.
+		return mcpAddOpts{}, fmt.Sprintf("Invalid transport %q: must be stdio, http, or websocket", *transport)
+	}
+
+	if *timeout <= 0 {
+		return mcpAddOpts{}, fmt.Sprintf("Invalid --timeout %d: must be a positive integer (seconds)", *timeout)
+	}
+
+	var cmdArgs []string
+	if *argsStr != "" {
+		cmdArgs = strings.Split(*argsStr, ",")
+	}
+
+	env, errMsg := parseCSVKeyValues(*envStr, "--env")
+	if errMsg != "" {
+		return mcpAddOpts{}, errMsg
+	}
+
+	if len(headers) > 0 && *transport != mcp.TransportHTTP {
+		return mcpAddOpts{}, fmt.Sprintf("--header is only valid for --transport %s", mcp.TransportHTTP)
+	}
+
+	return mcpAddOpts{
+		name:      name,
+		command:   *command,
+		transport: *transport,
+		cmdArgs:   cmdArgs,
+		env:       env,
+		headers:   headers,
+		timeout:   *timeout,
+	}, ""
+}
+
+// parseCSVKeyValues parses "K=V[,K=V,...]" into a map. Returns a user-facing
+// error message via the second return (empty on success).
+func parseCSVKeyValues(csv, flagName string) (map[string]string, string) {
+	if csv == "" {
+		return nil, ""
+	}
+	out := make(map[string]string)
+	for _, kv := range strings.Split(csv, ",") {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) != 2 || parts[0] == "" {
+			return nil, fmt.Sprintf("Invalid %s %q: expected KEY=VAL[,KEY=VAL,...]", flagName, csv)
+		}
+		out[parts[0]] = parts[1]
+	}
+	return out, ""
+}
+
+// mcpRemove removes an MCP upstream by name. Returns a human-readable message
+// for Telegram. Like /mcp add, a sluice restart is required for the running
+// gateway to pick up the removal (see mcpAdd for the rationale).
+func (h *CommandHandler) mcpRemove(args []string) string {
+	if len(args) == 0 {
+		return "Usage: /mcp remove <name>"
+	}
+	name := args[0]
+	if len(args) > 1 {
+		return fmt.Sprintf("Unexpected argument %q.\nUsage: /mcp remove <name>", args[1])
+	}
+
+	// reloadMu is not held here for the same reason as mcpAdd: MCP upstream
+	// changes do not recompile the policy engine or the binding resolver.
+	deleted, err := h.store.RemoveMCPUpstream(name)
+	if err != nil {
+		return fmt.Sprintf("Failed to remove MCP upstream: %v", err)
+	}
+	if !deleted {
+		return fmt.Sprintf("No MCP upstream named %s", htmlCode(name))
+	}
+
+	return fmt.Sprintf(
+		"Removed MCP upstream %s\nRestart sluice for the removal to take effect.",
+		htmlCode(name),
+	)
+}
+
+// mcpList renders all registered MCP upstreams for Telegram display.
+func (h *CommandHandler) mcpList() string {
+	upstreams, err := h.store.ListMCPUpstreams()
+	if err != nil {
+		return fmt.Sprintf("Failed to list MCP upstreams: %v", err)
+	}
+	if len(upstreams) == 0 {
+		return "No MCP upstreams registered."
+	}
+
+	var b strings.Builder
+	b.WriteString("<b>MCP upstreams</b>\n")
+	for _, u := range upstreams {
+		transport := u.Transport
+		if transport == "" {
+			transport = mcp.TransportStdio
+		}
+		fmt.Fprintf(&b, "[%d] %s (%s)\n  command: %s\n",
+			u.ID, htmlCode(u.Name), htmlCode(transport), htmlCode(u.Command))
+		if len(u.Args) > 0 {
+			fmt.Fprintf(&b, "  args: %s\n", htmlCode(strings.Join(u.Args, " ")))
+		}
+		if line := sortedKVLineRedacted(u.Env); line != "" {
+			fmt.Fprintf(&b, "  env: %s\n", htmlCode(line))
+		}
+		if line := sortedKVLineRedacted(u.Headers); line != "" {
+			fmt.Fprintf(&b, "  headers: %s\n", htmlCode(line))
+		}
+		if u.TimeoutSec != 0 && u.TimeoutSec != mcp.DefaultTimeoutSec {
+			fmt.Fprintf(&b, "  timeout: %ds\n", u.TimeoutSec)
+		}
+	}
+	return b.String()
+}
+
+// sortedKVLineRedacted renders a map as "k1=v1, k2=v2" with keys sorted and
+// values masked unless they are whole-value vault indirections.
+//
+// Values that are exactly "vault:<name>" are safe to surface because they are
+// pointers to credentials rather than the credentials themselves. Any other
+// value is replaced with "****" so raw env values and header values added
+// through Telegram, CLI, or the REST API cannot be retrieved by reading chat
+// history. Operators who need to audit the raw stored values can query the
+// SQLite store directly.
+//
+// Template forms like "Bearer {vault:github_pat}" are also masked, because
+// the literal prefix ("Bearer ", etc.) can still carry human-chosen content
+// that the operator did not intend for chat display. The goal is to default
+// toward redaction and let vault indirection be the explicit opt-in for
+// surfacing a value.
+//
+// Returns "" when the map is empty so callers can skip the row entirely.
+func sortedKVLineRedacted(m map[string]string) string {
+	if len(m) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	pairs := make([]string, 0, len(keys))
+	for _, k := range keys {
+		pairs = append(pairs, k+"="+maskUpstreamValue(m[k]))
+	}
+	return strings.Join(pairs, ", ")
+}
+
+// maskUpstreamValue returns v when it is a whole-value vault indirection
+// ("vault:<name>" with a non-empty name) and "****" otherwise. The empty
+// string passes through unchanged so operators can distinguish "KEY=" (set
+// but empty) from "KEY=****" (set to a real, masked value).
+func maskUpstreamValue(v string) string {
+	if v == "" {
+		return ""
+	}
+	const prefix = "vault:"
+	if strings.HasPrefix(v, prefix) && len(v) > len(prefix) && !strings.ContainsAny(v[len(prefix):], " \t") {
+		return v
+	}
+	return "****"
+}
+
 func (h *CommandHandler) handleStatus() string {
 	snap := h.engine.Load().Snapshot()
 	var b strings.Builder
@@ -736,6 +1106,14 @@ Monitoring
 Credentials
 /cred list | /cred add <name> <value> [--env-var VAR]
 /cred rotate <name> <value> | /cred remove <name>`
+	}
+
+	if h.store != nil {
+		help += `
+
+MCP Upstreams
+/mcp list | /mcp add <name> --command <cmd> [--transport stdio|http|websocket] [--args "a,b"] [--env "K=V,K=V"] [--header "K=V"] [--timeout 120]
+/mcp remove <name>`
 	}
 
 	help += `

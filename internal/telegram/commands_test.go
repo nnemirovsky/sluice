@@ -58,6 +58,38 @@ func TestParseCommand(t *testing.T) {
 		{"", true, "", nil},
 		{"/help", false, "help", nil},
 		{"/policy@mybot show", false, "policy", []string{"show"}},
+
+		// Quote-aware tokenization. Documented forms like --args "a,b"
+		// must preserve the comma-separated value as a single token so
+		// downstream flag parsing sees the intended value rather than
+		// two stray positional args.
+		{
+			`/mcp add github --command npx --args "a,b"`,
+			false, "mcp",
+			[]string{"add", "github", "--command", "npx", "--args", "a,b"},
+		},
+		{
+			`/mcp add notion --command https://mcp.notion.com --env "FOO=1,BAR=2"`,
+			false, "mcp",
+			[]string{"add", "notion", "--command", "https://mcp.notion.com", "--env", "FOO=1,BAR=2"},
+		},
+		{
+			`/mcp add api --header "Authorization=Bearer tok with space"`,
+			false, "mcp",
+			[]string{"add", "api", "--header", "Authorization=Bearer tok with space"},
+		},
+		// Single quotes are literal - backslash inside does not escape.
+		{
+			`/policy allow 'host with space'`,
+			false, "policy",
+			[]string{"allow", "host with space"},
+		},
+		// Unterminated quote is treated as not-a-command rather than
+		// silently dropping the quote.
+		{
+			`/mcp add name --args "unterminated`,
+			true, "", nil,
+		},
 	}
 
 	for _, tt := range tests {
@@ -412,6 +444,34 @@ func TestHandleHelp(t *testing.T) {
 	}
 	if !strings.Contains(result, "/audit") {
 		t.Error("help should mention /audit")
+	}
+	if !strings.Contains(result, "/mcp") {
+		t.Error("help should mention /mcp when store is configured")
+	}
+	if !strings.Contains(result, "MCP Upstreams") {
+		t.Error("help should include MCP Upstreams section when store is configured")
+	}
+}
+
+// TestHandleHelpNoStore verifies the MCP section is omitted when store is nil,
+// matching how /cred help is gated on vault availability.
+func TestHandleHelpNoStore(t *testing.T) {
+	ptr := new(atomic.Pointer[policy.Engine])
+	eng, err := policy.LoadFromBytes([]byte(`[policy]
+default = "deny"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ptr.Store(eng)
+	handler := NewCommandHandler(ptr, new(sync.Mutex), "")
+	result := handler.Handle(&Command{Name: "help"})
+
+	if strings.Contains(result, "/mcp") {
+		t.Error("help should not mention /mcp when store is nil")
+	}
+	if strings.Contains(result, "MCP Upstreams") {
+		t.Error("help should not include MCP Upstreams section when store is nil")
 	}
 }
 
@@ -792,6 +852,677 @@ func TestCredAddWithoutEnvVar(t *testing.T) {
 	}
 }
 
+func TestHandleMCPNoArgs(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	result := handler.Handle(&Command{Name: "mcp"})
+
+	if !strings.Contains(result, "Usage: /mcp") {
+		t.Errorf("should show usage when no args, got: %s", result)
+	}
+	if !strings.Contains(result, "list") || !strings.Contains(result, "add") || !strings.Contains(result, "remove") {
+		t.Errorf("usage should mention list/add/remove, got: %s", result)
+	}
+}
+
+func TestHandleMCPNoStore(t *testing.T) {
+	// CommandHandler without a store should report MCP management is unavailable.
+	// Build the engine from a transient store but omit SetStore on the handler.
+	s := newTestStore(t)
+	eng, err := policy.LoadFromStore(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ptr := new(atomic.Pointer[policy.Engine])
+	ptr.Store(eng)
+	handler := NewCommandHandler(ptr, new(sync.Mutex), "")
+	// Deliberately do not call SetStore.
+
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"list"}})
+	if !strings.Contains(result, "not available") {
+		t.Errorf("should report not available when store is not configured, got: %s", result)
+	}
+
+	// Also cover the no-args path. handleMCP's store guard runs before the
+	// usage banner so operators get a clear "not available" diagnostic
+	// rather than a usage string that advertises commands they cannot use.
+	resultNoArgs := handler.Handle(&Command{Name: "mcp", Args: nil})
+	if !strings.Contains(resultNoArgs, "not available") {
+		t.Errorf("should report not available on bare /mcp when store is not configured, got: %s", resultNoArgs)
+	}
+	if strings.Contains(resultNoArgs, "Usage: /mcp") {
+		t.Errorf("store-guard must precede usage banner, got usage instead: %s", resultNoArgs)
+	}
+}
+
+func TestHandleMCPUnknownSubcommand(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"bogus"}})
+
+	if !strings.Contains(result, "Unknown mcp subcommand") {
+		t.Errorf("should report unknown subcommand, got: %s", result)
+	}
+}
+
+func TestHandleMCPListEmpty(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"list"}})
+	if !strings.Contains(result, "No MCP upstreams") {
+		t.Errorf("should report empty list, got: %s", result)
+	}
+}
+
+func TestHandleMCPListWithUpstreams(t *testing.T) {
+	s := newTestStore(t)
+	// Add a stdio upstream with args and env. The env value is a whole-value
+	// vault indirection which is safe to surface verbatim.
+	if _, err := s.AddMCPUpstream("github", "npx", store.MCPUpstreamOpts{
+		Args:       []string{"-y", "@modelcontextprotocol/server-github"},
+		Env:        map[string]string{"GITHUB_PAT": "vault:github_pat"},
+		TimeoutSec: 120,
+		Transport:  "stdio",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Add an http upstream with headers and a non-default timeout. The header
+	// value is a templated form ("Bearer vault:notion_token") which is NOT a
+	// whole-value vault pointer, so it must be masked to "****" in the
+	// rendered output.
+	if _, err := s.AddMCPUpstream("notion", "https://mcp.notion.com", store.MCPUpstreamOpts{
+		Headers:    map[string]string{"Authorization": "Bearer vault:notion_token"},
+		TimeoutSec: 60,
+		Transport:  "http",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	out := handler.Handle(&Command{Name: "mcp", Args: []string{"list"}})
+
+	// Expect names, transports, commands, and safe-to-show env/header forms.
+	must := []string{
+		"github",
+		"stdio",
+		"<code>npx</code>",
+		"notion",
+		"http",
+		"<code>https://mcp.notion.com</code>",
+		"-y @modelcontextprotocol/server-github",
+		"GITHUB_PAT=vault:github_pat", // whole-value vault pointer is safe
+		"Authorization=****",          // templated value is masked
+		"timeout: 60s",
+	}
+	for _, want := range must {
+		if !strings.Contains(out, want) {
+			t.Errorf("mcp list output missing %q\nfull output:\n%s", want, out)
+		}
+	}
+	// The raw templated header value must NOT leak into chat.
+	forbidden := []string{
+		"Bearer vault:notion_token",
+		"notion_token",
+	}
+	for _, bad := range forbidden {
+		if strings.Contains(out, bad) {
+			t.Errorf("mcp list output must not contain %q\nfull output:\n%s", bad, out)
+		}
+	}
+	// Default (120s) timeout should NOT be rendered.
+	if strings.Contains(out, "timeout: 120s") {
+		t.Errorf("default 120s timeout should be omitted, got: %s", out)
+	}
+}
+
+// TestHandleMCPListRedactsSecrets asserts that raw plaintext env values and
+// raw plaintext header values are masked out of /mcp list output. This locks
+// in the security regression guard called out by the external review: the
+// /mcp add auto-delete-on-send protection is only meaningful if the same
+// values do not later reappear in chat via /mcp list.
+func TestHandleMCPListRedactsSecrets(t *testing.T) {
+	s := newTestStore(t)
+	// Raw plaintext env value and raw plaintext header value. Neither is a
+	// whole-value vault pointer, so both must be masked in the rendered
+	// output.
+	if _, err := s.AddMCPUpstream("leaky", "https://example.com", store.MCPUpstreamOpts{
+		Transport: "http",
+		Env:       map[string]string{"SUPER_SECRET": "ghp_rawtokenvalue"},
+		Headers:   map[string]string{"Authorization": "Bearer sk-liveapikey"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	out := handler.Handle(&Command{Name: "mcp", Args: []string{"list"}})
+
+	// Masked renders must appear.
+	masked := []string{
+		"SUPER_SECRET=****",
+		"Authorization=****",
+	}
+	for _, want := range masked {
+		if !strings.Contains(out, want) {
+			t.Errorf("mcp list should mask value, missing %q\nfull output:\n%s", want, out)
+		}
+	}
+	// Raw secrets must NOT appear anywhere in the output.
+	leaked := []string{
+		"ghp_rawtokenvalue",
+		"sk-liveapikey",
+		"Bearer sk-liveapikey",
+	}
+	for _, bad := range leaked {
+		if strings.Contains(out, bad) {
+			t.Errorf("mcp list leaked plaintext %q\nfull output:\n%s", bad, out)
+		}
+	}
+}
+
+func TestHandleMCPListEscapesHTML(t *testing.T) {
+	s := newTestStore(t)
+	// An http upstream exercises the args/env/header rendering paths
+	// which use htmlCode wrapping internally. Name, command, args, and
+	// the env/header KEYS contain "<" or "&" so we can confirm none of
+	// them leak past the HTML escape. Env and header VALUES are masked
+	// to "****" (see sortedKVLineRedacted and TestHandleMCPListRedactsSecrets),
+	// so we deliberately do not assert on their escaped form. The key
+	// side of the KEY=**** pair is still a meaningful escape target.
+	if _, err := s.AddMCPUpstream("my<srv>", "https://example.com/<svc>", store.MCPUpstreamOpts{
+		Transport: "http",
+		Args:      []string{"--mode=<dev>", "&flag"},
+		Env:       map[string]string{"X<KEY>": "v&a<l>ue"},
+		Headers:   map[string]string{"X-H<dr>": "Bearer <tok>&n"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	out := handler.Handle(&Command{Name: "mcp", Args: []string{"list"}})
+
+	// Raw tags must not appear. The "<" checks catch any unescaped tag
+	// content directly. Value-side raw tags ("<l>", "<tok>") are covered
+	// here too because the redaction mask should have already replaced
+	// them, so their absence is both an escape and a redaction check.
+	badRaw := []string{"<srv>", "<svc>", "<dev>", "<KEY>", "<dr>", "<tok>", "<l>", "&flag"}
+	for _, s := range badRaw {
+		if strings.Contains(out, s) {
+			t.Errorf("unescaped substring %q in output: %s", s, out)
+		}
+	}
+	// Escaped equivalents on the key side (name, command, args, env/header
+	// keys) must appear. Value-side escapes are intentionally not asserted
+	// because the values are masked.
+	goodEsc := []string{
+		"my&lt;srv&gt;",
+		"&lt;svc&gt;",
+		"&lt;dev&gt;",
+		"X&lt;KEY&gt;",
+		"X-H&lt;dr&gt;",
+		"&amp;flag",
+	}
+	for _, s := range goodEsc {
+		if !strings.Contains(out, s) {
+			t.Errorf("expected escaped %q in output: %s", s, out)
+		}
+	}
+}
+
+func TestHandleMCPAddStdio(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command", "npx"},
+	})
+	if !strings.Contains(result, "Added MCP upstream") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+	if !strings.Contains(result, "github") || !strings.Contains(result, "stdio") {
+		t.Errorf("expected name and transport in response, got: %s", result)
+	}
+	if !strings.Contains(result, "Restart sluice") {
+		t.Errorf("expected restart notice in response, got: %s", result)
+	}
+
+	upstreams, err := s.ListMCPUpstreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upstreams) != 1 {
+		t.Fatalf("expected 1 upstream, got %d", len(upstreams))
+	}
+	u := upstreams[0]
+	if u.Name != "github" {
+		t.Errorf("name = %q, want %q", u.Name, "github")
+	}
+	if u.Command != "npx" {
+		t.Errorf("command = %q, want %q", u.Command, "npx")
+	}
+	if u.Transport != "stdio" {
+		t.Errorf("transport = %q, want stdio", u.Transport)
+	}
+	if u.TimeoutSec != 120 {
+		t.Errorf("timeout = %d, want 120", u.TimeoutSec)
+	}
+	if len(u.Args) != 0 {
+		t.Errorf("args = %v, want empty", u.Args)
+	}
+	if len(u.Env) != 0 {
+		t.Errorf("env = %v, want empty", u.Env)
+	}
+}
+
+func TestHandleMCPAddWithArgsAndEnv(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{
+			"add", "github", "--command", "npx",
+			"--args", "-y,@modelcontextprotocol/server-github",
+			"--env", "GITHUB_PAT=vault:github_pat,DEBUG=1",
+			"--timeout", "60",
+		},
+	})
+	if !strings.Contains(result, "Added MCP upstream") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+
+	upstreams, err := s.ListMCPUpstreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upstreams) != 1 {
+		t.Fatalf("expected 1 upstream, got %d", len(upstreams))
+	}
+	u := upstreams[0]
+	wantArgs := []string{"-y", "@modelcontextprotocol/server-github"}
+	if len(u.Args) != len(wantArgs) {
+		t.Fatalf("args = %v, want %v", u.Args, wantArgs)
+	}
+	for i, a := range wantArgs {
+		if u.Args[i] != a {
+			t.Errorf("args[%d] = %q, want %q", i, u.Args[i], a)
+		}
+	}
+	if u.Env["GITHUB_PAT"] != "vault:github_pat" {
+		t.Errorf("env[GITHUB_PAT] = %q, want vault:github_pat", u.Env["GITHUB_PAT"])
+	}
+	if u.Env["DEBUG"] != "1" {
+		t.Errorf("env[DEBUG] = %q, want 1", u.Env["DEBUG"])
+	}
+	if u.TimeoutSec != 60 {
+		t.Errorf("timeout = %d, want 60", u.TimeoutSec)
+	}
+}
+
+func TestHandleMCPAddHTTPTransport(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{
+			"add", "notion",
+			"--command", "https://mcp.notion.com",
+			"--transport", "http",
+		},
+	})
+	if !strings.Contains(result, "Added MCP upstream") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+
+	upstreams, err := s.ListMCPUpstreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upstreams) != 1 {
+		t.Fatalf("expected 1 upstream, got %d", len(upstreams))
+	}
+	u := upstreams[0]
+	if u.Command != "https://mcp.notion.com" {
+		t.Errorf("command = %q, want URL", u.Command)
+	}
+	if u.Transport != "http" {
+		t.Errorf("transport = %q, want http", u.Transport)
+	}
+}
+
+func TestHandleMCPAddWebSocketTransport(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{
+			"add", "realtime",
+			"--command", "wss://mcp.example.com/ws",
+			"--transport", "websocket",
+		},
+	})
+	if !strings.Contains(result, "Added MCP upstream") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+
+	upstreams, err := s.ListMCPUpstreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upstreams) != 1 || upstreams[0].Transport != "websocket" {
+		t.Errorf("expected websocket upstream, got %+v", upstreams)
+	}
+}
+
+// TestHandleMCPAddEmptyArgs covers the bare "/mcp add" branch with no flags
+// or positional arguments. The handler should return the usage banner and not
+// mutate the store.
+func TestHandleMCPAddEmptyArgs(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"add"}})
+	if !strings.Contains(result, "Usage: /mcp add") {
+		t.Errorf("expected usage banner for bare /mcp add, got: %s", result)
+	}
+	if upstreams, _ := s.ListMCPUpstreams(); len(upstreams) != 0 {
+		t.Errorf("no upstream should be created for bare /mcp add, got %d", len(upstreams))
+	}
+}
+
+// TestHandleMCPAddEnvBase64Padding verifies that --env values containing "="
+// characters (e.g. base64-padded tokens) survive parsing intact. Regression
+// to strings.Split on "=" would truncate "abc===padding" to "abc".
+func TestHandleMCPAddEnvBase64Padding(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{
+			"add", "github", "--command", "npx",
+			"--env", "TOKEN=abc===padding",
+		},
+	})
+	if !strings.Contains(result, "Added MCP upstream") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+
+	upstreams, err := s.ListMCPUpstreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upstreams) != 1 {
+		t.Fatalf("expected 1 upstream, got %d", len(upstreams))
+	}
+	if got, want := upstreams[0].Env["TOKEN"], "abc===padding"; got != want {
+		t.Errorf("env[TOKEN] = %q, want %q (strings.SplitN on '=' must keep the RHS intact)", got, want)
+	}
+}
+
+// TestHandleMCPAddHTTPHeader verifies the --header flag is parsed for http
+// upstreams so Telegram matches the CLI's --header support. --header is
+// repeatable (matches CLI); pass the flag once per KEY=VAL pair.
+func TestHandleMCPAddHTTPHeader(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{
+			"add", "notion",
+			"--command", "https://mcp.notion.com",
+			"--transport", "http",
+			"--header", "Authorization=Bearer vault:notion",
+			"--header", "X-Custom=xyz",
+		},
+	})
+	if !strings.Contains(result, "Added MCP upstream") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+
+	upstreams, err := s.ListMCPUpstreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upstreams) != 1 {
+		t.Fatalf("expected 1 upstream, got %d", len(upstreams))
+	}
+	u := upstreams[0]
+	if u.Headers["Authorization"] != "Bearer vault:notion" {
+		t.Errorf("header[Authorization] = %q, want Bearer vault:notion", u.Headers["Authorization"])
+	}
+	if u.Headers["X-Custom"] != "xyz" {
+		t.Errorf("header[X-Custom] = %q, want xyz", u.Headers["X-Custom"])
+	}
+}
+
+// TestHandleMCPAddHeaderRejectedForStdio verifies --header is rejected for
+// non-http transports to match the CLI's behavior.
+func TestHandleMCPAddHeaderRejectedForStdio(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{
+			"add", "github", "--command", "npx",
+			"--header", "Authorization=Bearer xyz",
+		},
+	})
+	if !strings.Contains(result, "--header is only valid for --transport http") {
+		t.Errorf("expected --header validation error, got: %s", result)
+	}
+	if upstreams, _ := s.ListMCPUpstreams(); len(upstreams) != 0 {
+		t.Errorf("no upstream should be created when --header is misused, got %d", len(upstreams))
+	}
+}
+
+// TestHandleMCPAddDuplicateDoesNotCallContainerManager ensures error-path
+// additions do not invoke WireMCPGateway. This guards against a regression
+// that reintroduces pre-validation container side effects.
+func TestHandleMCPAddDuplicateDoesNotCallContainerManager(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.AddMCPUpstream("github", "npx", store.MCPUpstreamOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	mgr := &mockContainerMgr{}
+	handler.SetContainerManager(mgr)
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command", "some-other"},
+	})
+	if !strings.Contains(result, "Failed to add MCP upstream") {
+		t.Errorf("expected duplicate rejection, got: %s", result)
+	}
+	if mgr.wireCalledSafe() {
+		t.Errorf("WireMCPGateway must not be called on the add error path")
+	}
+}
+
+// TestHandleMCPRemoveNotFoundDoesNotCallContainerManager mirrors the add
+// case for the remove error path.
+func TestHandleMCPRemoveNotFoundDoesNotCallContainerManager(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	mgr := &mockContainerMgr{}
+	handler.SetContainerManager(mgr)
+
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"remove", "nonexistent"}})
+	if !strings.Contains(result, "No MCP upstream named") {
+		t.Errorf("expected not-found message, got: %s", result)
+	}
+	if mgr.wireCalledSafe() {
+		t.Errorf("WireMCPGateway must not be called on the remove error path")
+	}
+}
+
+func TestHandleMCPAddMissingCommand(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github"},
+	})
+	if !strings.Contains(result, "Usage:") {
+		t.Errorf("expected usage on missing --command, got: %s", result)
+	}
+	upstreams, _ := s.ListMCPUpstreams()
+	if len(upstreams) != 0 {
+		t.Errorf("no upstream should be created when --command is missing, got %d", len(upstreams))
+	}
+}
+
+func TestHandleMCPAddMissingName(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "--command", "npx"},
+	})
+	if !strings.Contains(result, "Usage:") {
+		t.Errorf("expected usage on missing name, got: %s", result)
+	}
+	upstreams, _ := s.ListMCPUpstreams()
+	if len(upstreams) != 0 {
+		t.Errorf("no upstream should be created without a name, got %d", len(upstreams))
+	}
+}
+
+func TestHandleMCPAddInvalidName(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	// "__" is a reserved namespace separator for the MCP gateway.
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "bad__name", "--command", "npx"},
+	})
+	if !strings.Contains(result, "Invalid upstream name") {
+		t.Errorf("expected invalid name error, got: %s", result)
+	}
+}
+
+func TestHandleMCPAddInvalidTransport(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command", "npx", "--transport", "ftp"},
+	})
+	if !strings.Contains(result, "Invalid transport") {
+		t.Errorf("expected invalid transport error, got: %s", result)
+	}
+}
+
+func TestHandleMCPAddInvalidTimeout(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	// non-numeric surfaces stdlib flag.Parse error via our
+	// "Invalid argument:" wrapper.
+	if r := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command", "npx", "--timeout", "abc"},
+	}); !strings.Contains(r, "Invalid argument") || !strings.Contains(r, "timeout") {
+		t.Errorf("expected invalid timeout error, got: %s", r)
+	}
+	// zero and negative hit our own validation after flag parsing.
+	for _, tv := range []string{"0", "-5"} {
+		if r := handler.Handle(&Command{
+			Name: "mcp",
+			Args: []string{"add", "github", "--command", "npx", "--timeout", tv},
+		}); !strings.Contains(r, "Invalid --timeout") {
+			t.Errorf("expected invalid timeout error for %s, got: %s", tv, r)
+		}
+	}
+}
+
+func TestHandleMCPAddInvalidEnv(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	// env value missing "="
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command", "npx", "--env", "NOT_A_PAIR"},
+	})
+	if !strings.Contains(result, "Invalid --env") {
+		t.Errorf("expected invalid env error, got: %s", result)
+	}
+}
+
+// TestHandleMCPAddInvalidHeader is the --header analog of
+// TestHandleMCPAddInvalidEnv. The fs.Func callback for --header must
+// reject a BADFORMAT token (no "=") with a user-visible error that
+// surfaces through the "Invalid argument:" prefix produced by the
+// stdlib flag.Parse wrapper.
+func TestHandleMCPAddInvalidHeader(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{
+			"add", "github",
+			"--command", "https://api.example.com/mcp",
+			"--transport", "http",
+			"--header", "BADFORMAT",
+		},
+	})
+	if !strings.Contains(result, "Invalid argument") || !strings.Contains(result, "--header") {
+		t.Errorf("expected invalid header error mentioning --header, got: %s", result)
+	}
+	ups, _ := s.ListMCPUpstreams()
+	if len(ups) != 0 {
+		t.Errorf("no upstream should be created on parse failure, got %d", len(ups))
+	}
+}
+
+func TestHandleMCPAddDuplicateName(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	if _, err := s.AddMCPUpstream("github", "npx", store.MCPUpstreamOpts{}); err != nil {
+		t.Fatal(err)
+	}
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command", "some-other"},
+	})
+	if !strings.Contains(result, "Failed to add MCP upstream") {
+		t.Errorf("expected duplicate rejection, got: %s", result)
+	}
+}
+
+func TestHandleMCPAddStrayPositional(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	// Second positional arg should be rejected to avoid silently swallowing
+	// the intended upstream name when someone types /mcp add foo bar --command cmd.
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "foo", "bar", "--command", "npx"},
+	})
+	if !strings.Contains(result, "Unexpected argument") {
+		t.Errorf("expected rejection of stray arg, got: %s", result)
+	}
+	upstreams, _ := s.ListMCPUpstreams()
+	if len(upstreams) != 0 {
+		t.Errorf("no upstream should be created on parse failure, got %d", len(upstreams))
+	}
+}
+
 func TestCredAddEnvVarConsumedFromValue(t *testing.T) {
 	s := newTestStore(t)
 	handler := newTestHandlerWithStore(t, s, nil, "")
@@ -820,5 +1551,242 @@ func TestCredAddEnvVarConsumedFromValue(t *testing.T) {
 	defer sb.Release()
 	if string(sb.Bytes()) != "the-secret-value" {
 		t.Errorf("expected credential value 'the-secret-value', got %q", string(sb.Bytes()))
+	}
+}
+
+func TestHandleMCPRemove(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.AddMCPUpstream("github", "npx", store.MCPUpstreamOpts{
+		Transport: "stdio",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddMCPUpstream("notion", "https://mcp.notion.com", store.MCPUpstreamOpts{
+		Transport: "http",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"remove", "github"}})
+
+	if !strings.Contains(result, "Removed MCP upstream") {
+		t.Errorf("expected removal confirmation, got: %s", result)
+	}
+	if !strings.Contains(result, "github") {
+		t.Errorf("expected removed name in response, got: %s", result)
+	}
+	if !strings.Contains(result, "Restart sluice") {
+		t.Errorf("expected restart notice, got: %s", result)
+	}
+
+	// Verify github was removed but notion remains.
+	upstreams, err := s.ListMCPUpstreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upstreams) != 1 {
+		t.Fatalf("expected 1 remaining upstream, got %d", len(upstreams))
+	}
+	if upstreams[0].Name != "notion" {
+		t.Errorf("wrong upstream remained: %q", upstreams[0].Name)
+	}
+}
+
+func TestHandleMCPRemoveMissingName(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"remove"}})
+
+	if !strings.Contains(result, "Usage: /mcp remove") {
+		t.Errorf("expected usage on missing name, got: %s", result)
+	}
+}
+
+func TestHandleMCPRemoveNotFound(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"remove", "nonexistent"}})
+
+	if !strings.Contains(result, "No MCP upstream named") {
+		t.Errorf("expected not-found message, got: %s", result)
+	}
+}
+
+func TestHandleMCPRemoveStrayPositional(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.AddMCPUpstream("github", "npx", store.MCPUpstreamOpts{Transport: "stdio"}); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"remove", "github", "extra"}})
+
+	if !strings.Contains(result, "Unexpected argument") {
+		t.Errorf("expected stray arg rejection, got: %s", result)
+	}
+
+	// No-op removal: github must still exist.
+	upstreams, _ := s.ListMCPUpstreams()
+	if len(upstreams) != 1 {
+		t.Errorf("upstream should not be removed on parse failure, got %d", len(upstreams))
+	}
+}
+
+// TestHandleMCPAddDoesNotCallContainerManager verifies that /mcp add does NOT
+// invoke the ContainerManager, because sluice multiplexes all upstreams via a
+// single agent-side entry (mcp.servers.sluice) that is wired once at startup.
+// Re-invoking WireMCPGateway on every mutation would trigger an agent gateway
+// restart without changing anything meaningful. The operator-facing message
+// instructs them to restart sluice so the gateway re-reads the upstream set.
+func TestHandleMCPAddDoesNotCallContainerManager(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	mgr := &mockContainerMgr{}
+	handler.SetContainerManager(mgr)
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command", "npx"},
+	})
+	if !strings.Contains(result, "Added MCP upstream") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+	if !strings.Contains(result, "Restart sluice") {
+		t.Errorf("response should instruct operator to restart sluice, got: %s", result)
+	}
+	if mgr.wireCalledSafe() {
+		t.Errorf("WireMCPGateway must not be called on /mcp add (sluice URL is unchanged)")
+	}
+}
+
+// TestHandleMCPRemoveDoesNotCallContainerManager mirrors the add case: the
+// removal only takes effect after a sluice restart, and the agent's openclaw
+// config is not touched.
+func TestHandleMCPRemoveDoesNotCallContainerManager(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.AddMCPUpstream("github", "npx", store.MCPUpstreamOpts{Transport: "stdio"}); err != nil {
+		t.Fatal(err)
+	}
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	mgr := &mockContainerMgr{}
+	handler.SetContainerManager(mgr)
+
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"remove", "github"}})
+	if !strings.Contains(result, "Removed MCP upstream") {
+		t.Fatalf("should confirm remove, got: %s", result)
+	}
+	if !strings.Contains(result, "Restart sluice") {
+		t.Errorf("response should instruct operator to restart sluice, got: %s", result)
+	}
+	if mgr.wireCalledSafe() {
+		t.Errorf("WireMCPGateway must not be called on /mcp remove")
+	}
+}
+
+// TestHandleMCPAddEqualsFormFlag verifies that the single-token "--flag=value"
+// form is accepted alongside the two-token form. Without this, operators
+// typing `/mcp add github --command=npx` would hit the reorderer's two-token
+// assumption.
+func TestHandleMCPAddEqualsFormFlag(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command=npx", "--transport=stdio", "--timeout=45"},
+	})
+	if !strings.Contains(result, "Added MCP upstream") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+	ups, _ := s.ListMCPUpstreams()
+	if len(ups) != 1 || ups[0].Command != "npx" || ups[0].Transport != "stdio" || ups[0].TimeoutSec != 45 {
+		t.Errorf("unexpected upstream state: %+v", ups)
+	}
+}
+
+// TestHandleMCPListErrorPath exercises the ListMCPUpstreams error branch by
+// closing the store before the handler is invoked.
+func TestHandleMCPListErrorPath(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"list"}})
+	if !strings.Contains(result, "Failed to list MCP upstreams") {
+		t.Errorf("expected list error, got: %s", result)
+	}
+}
+
+// TestHandleMCPAddErrorPath exercises the AddMCPUpstream error branch by
+// closing the store before the handler is invoked. The user-facing message
+// must start with the generic "Failed to add" prefix, not a panic.
+func TestHandleMCPAddErrorPath(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{"add", "github", "--command", "npx"},
+	})
+	if !strings.Contains(result, "Failed to add MCP upstream") {
+		t.Errorf("expected add error, got: %s", result)
+	}
+}
+
+// TestHandleMCPRemoveErrorPath exercises the RemoveMCPUpstream error branch
+// by closing the store before the handler is invoked.
+func TestHandleMCPRemoveErrorPath(t *testing.T) {
+	s := newTestStore(t)
+	// Seed first so the later close-and-remove hits the DB rather than the
+	// upfront "not found" check.
+	if _, err := s.AddMCPUpstream("github", "npx", store.MCPUpstreamOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	handler := newTestHandlerWithStore(t, s, nil, "")
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	result := handler.Handle(&Command{Name: "mcp", Args: []string{"remove", "github"}})
+	if !strings.Contains(result, "Failed to remove MCP upstream") {
+		t.Errorf("expected remove error, got: %s", result)
+	}
+}
+
+// TestHandleMCPAddRepeatableHeader verifies --header can be passed multiple
+// times (matching the CLI). This is the preferred form: repeatable flags
+// keep header values that contain commas intact, which a CSV form would
+// silently split.
+func TestHandleMCPAddRepeatableHeader(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	result := handler.Handle(&Command{
+		Name: "mcp",
+		Args: []string{
+			"add", "notion",
+			"--command", "https://mcp.notion.com",
+			"--transport", "http",
+			"--header", "Authorization=Bearer xyz",
+			"--header", "X-Custom=a,b,c",
+		},
+	})
+	if !strings.Contains(result, "Added MCP upstream") {
+		t.Fatalf("should confirm add, got: %s", result)
+	}
+	ups, _ := s.ListMCPUpstreams()
+	if len(ups) != 1 {
+		t.Fatalf("expected 1 upstream, got %d", len(ups))
+	}
+	if ups[0].Headers["Authorization"] != "Bearer xyz" {
+		t.Errorf("unexpected Authorization header: %q", ups[0].Headers["Authorization"])
+	}
+	if ups[0].Headers["X-Custom"] != "a,b,c" {
+		t.Errorf("repeatable --header must keep commas intact: %q", ups[0].Headers["X-Custom"])
 	}
 }
