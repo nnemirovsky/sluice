@@ -412,7 +412,7 @@ func (q *QUICProxy) buildHandler(upstreamHost string, destPort int, checker *Req
 					log.Printf("[QUIC-MITM] credential %q lookup failed: %v", binding.Credential, err)
 				} else {
 					if binding.Header != "" {
-						r.Header.Set(binding.Header, binding.FormatValue(secret.String()))
+						r.Header.Set(binding.Header, binding.FormatValue(extractInjectableSecret(secret.String())))
 					}
 					secret.Release()
 				}

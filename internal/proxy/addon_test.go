@@ -1266,6 +1266,37 @@ func TestAddonStreamResponseModifier_HandlesNilInput(t *testing.T) {
 	}
 }
 
+func TestExtractInjectableSecret(t *testing.T) {
+	// Static credentials are stored as plain strings. The vault
+	// returns the string as-is, and the binding template substitutes
+	// {value} with that string. Pass-through.
+	if got := extractInjectableSecret("ghp_static-pat-abc123"); got != "ghp_static-pat-abc123" {
+		t.Errorf("static cred should pass through unchanged, got %q", got)
+	}
+
+	// OAuth credentials are stored as a JSON blob. The binding
+	// template wants just the access_token; without this extraction
+	// the agent would see `Bearer {"access_token":"...",...}` in
+	// the request header and the upstream would reject with 401.
+	oauthBlob := `{"access_token":"jwt-access-xyz","refresh_token":"jwt-refresh-abc","token_url":"https://auth.example.com/oauth/token"}`
+	if got := extractInjectableSecret(oauthBlob); got != "jwt-access-xyz" {
+		t.Errorf("oauth cred should yield access_token, got %q", got)
+	}
+
+	// Edge cases: empty string, JSON without access_token, malformed
+	// JSON, and JSON that opens with `{` but is not a valid OAuth
+	// envelope. None of these should panic; non-OAuth shapes pass
+	// through so a future static credential that happens to start
+	// with a brace still works.
+	cases := []string{"", `{"foo":"bar"}`, `{not-json`, `{"access_token":""}`}
+	for _, in := range cases {
+		got := extractInjectableSecret(in)
+		if got != in {
+			t.Errorf("expected pass-through for %q, got %q", in, got)
+		}
+	}
+}
+
 func TestAddonResponse_Non2xxPassesThrough(t *testing.T) {
 	oauthCred := &vault.OAuthCredential{
 		AccessToken: "old-access",

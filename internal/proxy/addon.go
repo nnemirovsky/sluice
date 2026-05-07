@@ -556,9 +556,32 @@ func (a *SluiceAddon) injectHeaders(f *mitmproxy.Flow, host string, port int) {
 	}
 	defer secret.Release()
 
-	f.Request.Header.Set(binding.Header, binding.FormatValue(secret.String()))
+	f.Request.Header.Set(binding.Header, binding.FormatValue(extractInjectableSecret(secret.String())))
 	log.Printf("[ADDON-INJECT] injected header %q for %s:%d (credential %q)",
 		binding.Header, host, port, binding.Credential)
+}
+
+// extractInjectableSecret returns the value to substitute into a binding's
+// `{value}` template. Static credentials are plain strings stored as-is in
+// the vault; the value to inject is the string itself. OAuth credentials
+// are JSON-marshalled OAuthCredential structs (access_token + refresh_token
+// + metadata); the value to inject is just the access_token, so a binding
+// like `Authorization: Bearer {value}` produces `Bearer <jwt>` rather than
+// `Bearer {"access_token":"<jwt>",...}`.
+//
+// Detection is by JSON shape: anything that parses as an OAuthCredential
+// with a non-empty access_token gets the OAuth treatment, otherwise the
+// raw secret is returned unchanged. This avoids forcing the caller to
+// thread credential metadata through every injection path.
+func extractInjectableSecret(secret string) string {
+	if len(secret) == 0 || secret[0] != '{' {
+		return secret
+	}
+	cred, err := vault.ParseOAuth([]byte(secret))
+	if err != nil || cred == nil || cred.AccessToken == "" {
+		return secret
+	}
+	return cred.AccessToken
 }
 
 // Request performs Pass 2 (scoped phantom replacement) and Pass 3 (strip
