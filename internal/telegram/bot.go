@@ -26,6 +26,24 @@ func sanitizeError(err error) string {
 // We leave a small margin for the truncation notice.
 const telegramMaxMessage = 4000
 
+// agentDisplayName is the human-readable agent label used in approval
+// messages (e.g. "OpenClaw wants to connect to..."). Set once at startup
+// from the active agent profile so the same sluice binary can serve any
+// agent without rebuilding. Defaults to "OpenClaw" for backward
+// compatibility with existing deployments that have not migrated to the
+// HermesProfile or a custom profile.
+var agentDisplayName = "OpenClaw"
+
+// SetAgentDisplayName overrides the label used in approval message
+// templates. Call once at startup with the active agent profile name
+// (e.g. "Hermes" for HermesProfile). Concurrent calls are not safe; the
+// expected usage is a single call before any approval request fires.
+func SetAgentDisplayName(name string) {
+	if name != "" {
+		agentDisplayName = name
+	}
+}
+
 // protoDisplayName returns the human-readable display name for a protocol.
 var protoDisplayName = map[string]string{
 	"http":    "HTTP",
@@ -56,8 +74,15 @@ var protoDisplayName = map[string]string{
 // to the raw string otherwise (truncated args may not be valid JSON).
 // Callers must set ParseMode to HTML when sending the message.
 func FormatApprovalMessage(req channel.ApprovalRequest) string {
+	// agentDisplayName is interpolated into a Telegram HTML message.
+	// HTML-escape it at render time so a future custom profile name
+	// containing '<', '&', etc. cannot break the message structure or
+	// inject markup. SetAgentDisplayName already filters out empty
+	// values; this is the second line of defense.
+	agentLabel := htmlEscape(agentDisplayName)
+
 	if req.Protocol == "mcp" {
-		msg := "OpenClaw wants to call tool:\n\n" + htmlCode(req.Destination)
+		msg := agentLabel + " wants to call tool:\n\n" + htmlCode(req.Destination)
 		if req.ToolArgs != "" {
 			pretty := prettyJSONOrRaw(req.ToolArgs)
 			msg += "\n\nArguments:\n<pre><code class=\"language-json\">" + htmlEscape(pretty) + "</code></pre>"
@@ -76,13 +101,15 @@ func FormatApprovalMessage(req channel.ApprovalRequest) string {
 			ver = " (" + htmlEscape(req.HTTPVersion) + ")"
 		}
 		return fmt.Sprintf(
-			"OpenClaw wants to connect to:\n\n%s %s\n%s %s%s\n\nAllow this request?",
+			"%s wants to connect to:\n\n%s %s\n%s %s%s\n\nAllow this request?",
+			agentLabel,
 			htmlEscape(display), htmlCode(destPort),
 			htmlEscape(req.Method), htmlCode(buildRequestURL(req)), ver,
 		)
 	}
 	return fmt.Sprintf(
-		"OpenClaw wants to connect to:\n\n%s %s\n\nAllow this connection?",
+		"%s wants to connect to:\n\n%s %s\n\nAllow this connection?",
+		agentLabel,
 		htmlEscape(display), htmlCode(destPort),
 	)
 }

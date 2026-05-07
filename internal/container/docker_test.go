@@ -498,8 +498,8 @@ func TestWireMCPGatewayHermesProfile(t *testing.T) {
 		t.Fatalf("expected 1 exec call, got %d", len(mc.execCalls))
 	}
 	cmd := mc.execCalls[0]
-	if cmd[0] != "python3" || cmd[1] != "-c" {
-		t.Errorf("hermes wire MCP should run python3 -c, got: %v", cmd[:2])
+	if cmd[0] != "sh" || cmd[1] != "-c" {
+		t.Errorf("hermes wire MCP should run sh -c (which activates venv then exec python3), got: %v", cmd[:2])
 	}
 	if cmd[len(cmd)-1] != "http://sluice:3000/mcp" {
 		t.Errorf("hermes wire MCP should pass url as last arg, got: %v", cmd)
@@ -584,8 +584,11 @@ func TestInjectEnvVarsSpecialCharacters(t *testing.T) {
 		}
 
 		script := mc.execCalls[0][2]
-		if !strings.Contains(script, "'\"'\"'") {
-			t.Errorf("script should contain escaped single quote, got %s", script)
+		// Single quotes in values are escaped using the dotenv idiom
+		// `'\''` (close, backslash-escaped quote, reopen) inside the
+		// `KEY='value'` block.
+		if !strings.Contains(script, `'\''`) {
+			t.Errorf("script should contain escaped single quote ('\\''), got %s", script)
 		}
 	})
 
@@ -628,11 +631,12 @@ func TestInjectEnvVarsSpecialCharacters(t *testing.T) {
 	})
 }
 
-func TestInjectEnvVarsEmptyValueDeletesLine(t *testing.T) {
+func TestInjectEnvVarsEmptyValueOmitsKey(t *testing.T) {
 	mc := &mockClient{}
 	mgr := NewDockerManager(mc, "openclaw")
 
-	// An empty value should generate a sed delete command instead of writing KEY=.
+	// An empty value should cause the key to be dropped from the rebuilt
+	// sluice-managed block, not written as KEY=.
 	err := mgr.InjectEnvVars(context.Background(), map[string]string{
 		"OLD_KEY": "",
 	}, false)
@@ -641,17 +645,17 @@ func TestInjectEnvVarsEmptyValueDeletesLine(t *testing.T) {
 	}
 
 	script := mc.execCalls[0][2]
-	// Should use sed deletion (d command), not substitution.
-	if !strings.Contains(script, "/^OLD_KEY=/d") {
-		t.Errorf("script should contain sed deletion for empty value, got %s", script)
-	}
-	// Should NOT write OLD_KEY= to the file.
 	if strings.Contains(script, "echo 'OLD_KEY=") {
 		t.Errorf("script should not write empty env var, got %s", script)
 	}
+	// The marker-block delete still runs even when the new block is empty
+	// so any previous OLD_KEY entry inside the block is removed.
+	if !strings.Contains(script, "BEGIN sluice-managed") {
+		t.Errorf("script should reference the sluice-managed block, got %s", script)
+	}
 }
 
-func TestInjectEnvVarsFullReplaceTruncatesFile(t *testing.T) {
+func TestInjectEnvVarsRebuildsSluiceManagedBlock(t *testing.T) {
 	mc := &mockClient{}
 	mgr := NewDockerManager(mc, "openclaw")
 
@@ -663,15 +667,22 @@ func TestInjectEnvVarsFullReplaceTruncatesFile(t *testing.T) {
 	}
 
 	script := mc.execCalls[0][2]
-	// Full replace should truncate the file before writing.
-	if !strings.Contains(script, ": > ") {
-		t.Errorf("fullReplace script should truncate the file, got %s", script)
+	// The rebuild semantic: delete the old marker block, append a fresh
+	// one. Foreign keys outside the block are preserved on every run, so
+	// `: > ENV_FILE` (truncate) must not be used anymore.
+	if strings.Contains(script, ": > \"$ENV_FILE\"") {
+		t.Errorf("script should no longer truncate the whole env file, got %s", script)
 	}
-	if strings.Contains(script, "touch") {
-		t.Errorf("fullReplace script should not use touch, got %s", script)
+	if !strings.Contains(script, "BEGIN sluice-managed") {
+		t.Errorf("script should reopen the sluice-managed block, got %s", script)
 	}
-	if !strings.Contains(script, "NEW_KEY") {
-		t.Errorf("script should contain env var name, got %s", script)
+	if !strings.Contains(script, "END sluice-managed") {
+		t.Errorf("script should close the sluice-managed block, got %s", script)
+	}
+	// Values are written single-quoted in the file format, so the
+	// generated heredoc body contains `NEW_KEY='phantom-value'`.
+	if !strings.Contains(script, "NEW_KEY='phantom-value'") {
+		t.Errorf("script should write NEW_KEY='phantom-value' inside the block, got %s", script)
 	}
 }
 

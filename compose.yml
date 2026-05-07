@@ -1,30 +1,48 @@
-# Production compose file. Uses pre-built image from ghcr.io.
-# For local development with build-from-source, use: docker compose -f compose.dev.yml up
+# Production compose file for the Sluice + Hermes stack.
+# Pulls pre-built images from registries; no local build required.
+# For local development with build-from-source, use:
+#   docker compose -f compose.dev.yml up --build
 #
 # Startup order is enforced via healthcheck + condition: service_healthy:
-#   sluice starts first -> tun2proxy waits for sluice /healthz -> openclaw waits for tun2proxy TUN device.
+#   sluice starts first -> tun2proxy waits for sluice /healthz -> hermes
+#   waits for tun2proxy TUN device.
 #
-# MCP wiring (one-time setup): OpenClaw connects to sluice's MCP gateway at
-# http://sluice:3000/mcp via Streamable HTTP. Configure this once in OpenClaw:
+# Migration from a prior OpenClaw deployment: see bootstrap.sh in the
+# repo root. It runs `hermes claw migrate` against the legacy openclaw
+# volume one time before the stack comes up.
 #
-#   docker exec openclaw openclaw mcp set sluice '{"url":"http://sluice:3000/mcp"}'
+# MCP wiring: Sluice's HermesProfile patches mcp_servers.sluice.url into
+# ~/.hermes/config.yaml at startup. Hermes reads that on its next launch
+# or via the /reload-mcp slash command.
 #
-# For this to work, OpenClaw must be able to resolve the "sluice" hostname.
-# Because OpenClaw shares tun2proxy's network namespace and routes DNS through
-# the TUN, Docker's embedded DNS (127.0.0.11) is not reachable. We pin
-# sluice's IP on the internal network to 172.30.0.2 and give tun2proxy an
-# extra_hosts entry pointing "sluice" at that IP. The shared /etc/hosts file
-# makes OpenClaw resolve sluice correctly. The SOCKS5 proxy's SelfBypass list
-# auto-allows connections to sluice:3000 so MCP traffic is not double-checked
-# by policy.
+# Hermes layout: HERMES_HOME is overridden to /opt/data/.hermes so that
+# sluice's HermesProfile env path (~/.hermes/.env) resolves to the same
+# file Hermes reads ($HERMES_HOME/.env). The hermes-home volume is
+# mounted at /opt/data/.hermes accordingly.
+#
+# Network: hermes shares tun2proxy's namespace via network_mode, so all
+# its outbound traffic flows through SOCKS5 -> sluice. The caddy sidecar
+# fronts the dashboard with TLS because tun0's default route breaks
+# Docker's port forwarding (replies exit via tun0 instead of eth0).
 services:
   sluice:
     image: ghcr.io/nnemirovsky/sluice:latest
     restart: unless-stopped
+    command: [
+      "-listen", "0.0.0.0:1080",
+      "-health-addr", "0.0.0.0:3000",
+      "-mcp-base-url", "http://sluice:3000",
+      "-db", "data/sluice.db",
+      "-config", "/etc/sluice/config.toml",
+      "-audit", "/var/log/sluice/audit.jsonl",
+      "-agent", "hermes",
+      "-container-name", "hermes",
+    ]
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
-      - SLUICE_AGENT_CONTAINER=openclaw
+      - SLUICE_AGENT_CONTAINER=hermes
+      - SLUICE_AGENT_PROFILE=hermes
       # Set SLUICE_API_TOKEN to enable the REST API on :3000/api/*.
       # All /api/* endpoints require this bearer token for auth.
       # If unset, the API returns 403 on all /api/* routes.
@@ -56,14 +74,11 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     command: ["--proxy", "socks5://sluice:1080", "--bypass", "127.0.0.0/8", "--bypass", "::1/128"]
-    # OpenClaw uses network_mode: "service:tun2proxy", sharing this
-    # container's network namespace. The caddy sidecar handles external
-    # access because tun0's default route breaks Docker port forwarding
-    # (routing asymmetry: replies exit via tun0 instead of eth0).
-    # extra_hosts adds a /etc/hosts entry so OpenClaw (which shares this
-    # network namespace) can resolve "sluice" to its pinned internal IP.
-    # Without this, DNS goes through the TUN and fails to resolve Docker
-    # service names.
+    # Hermes uses network_mode: "service:tun2proxy", sharing this
+    # container's network namespace. extra_hosts adds a /etc/hosts entry
+    # so Hermes (which shares this network namespace) can resolve
+    # "sluice" to its pinned internal IP. Without this, DNS goes through
+    # the TUN and fails to resolve Docker service names.
     extra_hosts:
       - "sluice:172.30.0.2"
     healthcheck:
@@ -77,38 +92,68 @@ services:
       sluice:
         condition: service_healthy
 
-  openclaw:
-    image: ghcr.io/openclaw/openclaw:latest
+  hermes:
+    image: nousresearch/hermes-agent:v2026.4.30
     restart: unless-stopped
-    container_name: openclaw
+    container_name: hermes
     network_mode: "service:tun2proxy"
-    # Source sluice-injected env vars before starting openclaw so all child
-    # processes (e.g. gemini --acp) inherit phantom tokens in their env.
-    entrypoint: ["/bin/sh", "-c", "[ -f \"$HOME/.openclaw/.env\" ] && set -a && . \"$HOME/.openclaw/.env\" && set +a; exec docker-entrypoint.sh node openclaw.mjs gateway --allow-unconfigured"]
+    # Source sluice-injected env vars before starting hermes so phantom
+    # tokens are visible to MCP subprocesses spawned by the gateway.
+    # /opt/data/.hermes/.env is where sluice's HermesProfile writes them
+    # (HERMES_HOME is overridden below to keep the path consistent).
+    entrypoint: ["/bin/sh", "-c", "[ -f /opt/data/.hermes/.env ] && set -a && . /opt/data/.hermes/.env && set +a; exec /usr/bin/tini -g -- /opt/hermes/docker/entrypoint.sh \"$@\"", "--"]
+    command: ["gateway", "run"]
     environment:
-      - HOME=/home/node
-      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-}
+      # HOME drives `$HOME` and `~` expansion inside `docker exec` commands
+      # that sluice runs to inject phantom tokens and patch config.yaml.
+      # Setting it to /opt/data so ~/.hermes/.env resolves to
+      # /opt/data/.hermes/.env, which matches HERMES_HOME below.
+      - HOME=/opt/data
+      - HERMES_HOME=/opt/data/.hermes
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
       - SSL_CERT_FILE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
       - REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
       - NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
-      # npm user-global directory for persistent CLI tool installs (e.g. gemini-cli).
-      # The openclaw-home volume is mounted at /home/node so these survive restarts.
-      - NPM_CONFIG_PREFIX=/home/node/.npm-global
-      - PATH=/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-      # Persistent V8 compile cache to speed up Node.js CLI cold starts.
-      - NODE_COMPILE_CACHE=/home/node/.node-compile-cache
     volumes:
-      - openclaw-home:/home/node
+      - hermes-home:/opt/data/.hermes
       - sluice-ca:/usr/local/share/ca-certificates/sluice:ro
     depends_on:
       tun2proxy:
         condition: service_healthy
 
-  # Reverse proxy for external HTTPS access to the OpenClaw Control UI.
-  # Terminates TLS with a Cloudflare Origin certificate and forwards to
-  # the gateway in tun2proxy's network namespace. This sidesteps the
-  # routing asymmetry that breaks Docker's built-in port forwarding when
-  # tun2proxy's TUN device captures reply packets.
+  # Dashboard sidecar - shares hermes-home with the gateway and runs in
+  # tun2proxy's network namespace so caddy can reach it at port 9119.
+  # --insecure is required when binding non-loopback; caddy fronts the
+  # TLS so the dashboard is not directly internet-facing.
+  hermes-dashboard:
+    image: nousresearch/hermes-agent:v2026.4.30
+    restart: unless-stopped
+    container_name: hermes-dashboard
+    network_mode: "service:tun2proxy"
+    entrypoint: ["/bin/sh", "-c", "exec /usr/bin/tini -g -- /opt/hermes/docker/entrypoint.sh \"$@\"", "--"]
+    command: ["dashboard", "--host", "0.0.0.0", "--port", "9119", "--no-open", "--insecure"]
+    environment:
+      - HOME=/opt/data
+      - HERMES_HOME=/opt/data/.hermes
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+      - SSL_CERT_FILE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
+      - REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
+      - NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
+    volumes:
+      - hermes-home:/opt/data/.hermes
+      - sluice-ca:/usr/local/share/ca-certificates/sluice:ro
+    depends_on:
+      hermes:
+        condition: service_started
+
+  # Reverse proxy for external HTTPS access to the Hermes dashboard.
+  # Terminates TLS with an Origin certificate (TLS-provider agnostic;
+  # standard FHS paths) and forwards to the dashboard in tun2proxy's
+  # network namespace. This sidesteps the routing asymmetry that breaks
+  # Docker's built-in port forwarding when tun2proxy's TUN device
+  # captures reply packets.
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
@@ -116,7 +161,8 @@ services:
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - /etc/cloudflare:/etc/cloudflare:ro
+      - /etc/ssl/certs/agent.pem:/etc/ssl/certs/agent.pem:ro
+      - /etc/ssl/private/agent.key:/etc/ssl/private/agent.key:ro
     networks: [internal, external]
     depends_on:
       tun2proxy:
@@ -135,4 +181,4 @@ volumes:
   sluice-vault:
   sluice-audit:
   sluice-ca:
-  openclaw-home:
+  hermes-home:

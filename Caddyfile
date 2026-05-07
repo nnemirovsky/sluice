@@ -3,7 +3,15 @@
 }
 
 :443 {
-	tls /etc/cloudflare/claw.pem /etc/cloudflare/claw.key
+	tls /etc/ssl/certs/agent.pem /etc/ssl/private/agent.key
 
-	reverse_proxy sluice-tun2proxy-1:18789
+	# Forward to the hermes-dashboard sidecar via tun2proxy. The
+	# dashboard service uses `network_mode: "service:tun2proxy"`, so
+	# it shares tun2proxy's network namespace and is reachable on
+	# tun2proxy's internal-network address (port 9119, where the
+	# dashboard binds). The hermes-dashboard service name itself has
+	# no network identity of its own. Using `tun2proxy` (the compose
+	# service name on the internal network) stays correct regardless
+	# of the compose project name or replica index.
+	reverse_proxy tun2proxy:9119
 }

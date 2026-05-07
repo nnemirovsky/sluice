@@ -1,13 +1,29 @@
 # Development compose file. Builds sluice from source.
 # Usage: docker compose -f compose.dev.yml up --build
+#
+# Mirrors compose.yml but builds the sluice image locally and omits the
+# caddy reverse-proxy / hermes-dashboard sidecar to keep the dev loop
+# fast. See compose.yml for the production stack and the full set of
+# inline rationale comments.
 services:
   sluice:
     build: .
     restart: unless-stopped
+    command: [
+      "-listen", "0.0.0.0:1080",
+      "-health-addr", "0.0.0.0:3000",
+      "-mcp-base-url", "http://sluice:3000",
+      "-db", "data/sluice.db",
+      "-config", "/etc/sluice/config.toml",
+      "-audit", "/var/log/sluice/audit.jsonl",
+      "-agent", "hermes",
+      "-container-name", "hermes",
+    ]
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
-      - SLUICE_AGENT_CONTAINER=openclaw
+      - SLUICE_AGENT_CONTAINER=hermes
+      - SLUICE_AGENT_PROFILE=hermes
     group_add:
       - "${DOCKER_GID:-0}"
     volumes:
@@ -35,7 +51,6 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     command: ["--proxy", "socks5://sluice:1080", "--bypass", "127.0.0.0/8", "--bypass", "::1/128"]
-    # See compose.yml for the full MCP wiring explanation.
     extra_hosts:
       - "sluice:172.30.0.2"
     healthcheck:
@@ -49,23 +64,23 @@ services:
       sluice:
         condition: service_healthy
 
-  openclaw:
-    image: ghcr.io/openclaw/openclaw:latest
+  hermes:
+    image: nousresearch/hermes-agent:v2026.4.30
     restart: unless-stopped
-    container_name: openclaw
+    container_name: hermes
     network_mode: "service:tun2proxy"
-    entrypoint: ["/bin/sh", "-c", "[ -f \"$HOME/.openclaw/.env\" ] && set -a && . \"$HOME/.openclaw/.env\" && set +a; exec docker-entrypoint.sh node openclaw.mjs gateway --allow-unconfigured"]
+    entrypoint: ["/bin/sh", "-c", "[ -f /opt/data/.hermes/.env ] && set -a && . /opt/data/.hermes/.env && set +a; exec /usr/bin/tini -g -- /opt/hermes/docker/entrypoint.sh \"$@\"", "--"]
+    command: ["gateway", "run"]
     environment:
-      - HOME=/home/node
-      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-}
+      - HOME=/opt/data
+      - HERMES_HOME=/opt/data/.hermes
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
       - SSL_CERT_FILE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
       - REQUESTS_CA_BUNDLE=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
       - NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/sluice/sluice-ca.crt
-      - NPM_CONFIG_PREFIX=/home/node/.npm-global
-      - PATH=/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-      - NODE_COMPILE_CACHE=/home/node/.node-compile-cache
     volumes:
-      - openclaw-home:/home/node
+      - hermes-home:/opt/data/.hermes
       - sluice-ca:/usr/local/share/ca-certificates/sluice:ro
     depends_on:
       tun2proxy:
@@ -84,4 +99,4 @@ volumes:
   sluice-vault:
   sluice-audit:
   sluice-ca:
-  openclaw-home:
+  hermes-home:

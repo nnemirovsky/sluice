@@ -237,4 +237,39 @@ func TestFormatApprovalMessage(t *testing.T) {
 			t.Errorf("expected connection wording, got: %s", msg)
 		}
 	})
+
+	t.Run("agent display name is configurable", func(t *testing.T) {
+		// Save and restore so other test cases keep their default branding.
+		prev := agentDisplayName
+		defer func() { agentDisplayName = prev }()
+
+		SetAgentDisplayName("Hermes")
+		req := channel.ApprovalRequest{
+			Destination: "example.com",
+			Port:        443,
+			Protocol:    "https",
+		}
+		msg := FormatApprovalMessage(req)
+		if !strings.Contains(msg, "Hermes wants to connect") {
+			t.Errorf("expected Hermes branding, got: %s", msg)
+		}
+		if strings.Contains(msg, "OpenClaw") {
+			t.Errorf("OpenClaw branding should be replaced, got: %s", msg)
+		}
+
+		// Empty argument should be ignored (no accidental blanking).
+		SetAgentDisplayName("")
+		if agentDisplayName != "Hermes" {
+			t.Errorf("empty SetAgentDisplayName should be a no-op, got: %q", agentDisplayName)
+		}
+
+		// MCP path also uses the override.
+		mcpMsg := FormatApprovalMessage(channel.ApprovalRequest{
+			Destination: "tool",
+			Protocol:    "mcp",
+		})
+		if !strings.Contains(mcpMsg, "Hermes wants to call tool") {
+			t.Errorf("MCP branding should also use override, got: %s", mcpMsg)
+		}
+	})
 }

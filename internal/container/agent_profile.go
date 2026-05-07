@@ -87,12 +87,28 @@ with open(cfg_path, "w") as fh:
 // MCP wiring patches config.yaml directly. Hermes picks up the change on
 // startup or via the /reload-mcp slash command (which the operator must
 // invoke from the agent UI; sluice cannot trigger it remotely).
+//
+// The wire-MCP script is invoked via a sh wrapper that activates the
+// Hermes container's bundled Python venv (/opt/hermes/.venv) when present.
+// PyYAML lives in that venv on the official nousresearch/hermes-agent
+// image but is not installed at the system Python level, so a bare
+// `python3` falls back to the Debian system interpreter that lacks yaml.
+// Native (non-container) Hermes installs do not have /opt/hermes/.venv;
+// in that case the activation step is skipped (the `[ -f ... ]` test
+// fails) and the system python3 is used directly.
 var HermesProfile = &AgentProfile{
 	Name:           "hermes",
 	EnvFileRelPath: ".hermes/.env",
 	ReloadCmd:      nil,
 	WireMCPCmd: func(name, url string) []string {
-		return []string{"python3", "-c", hermesMCPWireScript, name, url}
+		return []string{
+			"sh",
+			"-c",
+			`[ -f /opt/hermes/.venv/bin/activate ] && . /opt/hermes/.venv/bin/activate; exec python3 -c "$0" "$@"`,
+			hermesMCPWireScript,
+			name,
+			url,
+		}
 	},
 }
 

@@ -114,6 +114,7 @@ func main() {
 		log.Fatalf("invalid --agent value: %v", err)
 	}
 	log.Printf("agent profile: %s (env file ~/%s)", agentProfile.Name, agentProfile.EnvFileRelPath)
+	telegram.SetAgentDisplayName(agentDisplayName(agentProfile.Name))
 
 	// Open the SQLite store.
 	db, err := store.New(*dbPath)
@@ -461,15 +462,19 @@ func main() {
 		log.Printf("no approval channels configured (ask rules will auto-deny)")
 	}
 
-	// MCP gateway: if upstreams are configured, start the gateway and
-	// serve it via HTTP on /mcp alongside the API. The mcpHandler local
-	// is consumed by the startup goroutine below and by the HTTP API
-	// server that exposes /mcp.
+	// MCP gateway: always start (even with zero upstreams) so the
+	// /mcp endpoint is reachable for agents that register sluice as
+	// their MCP server. With zero upstreams the gateway exposes an
+	// empty tool list, which is a valid MCP response. This avoids a
+	// chicken-and-egg problem where the agent's MCP client gives up
+	// on a 404 before the operator has registered the first upstream.
 	var mcpHandler http.Handler
 	upstreamRows, mcpListErr := db.ListMCPUpstreams()
 	if mcpListErr != nil {
 		log.Printf("WARNING: failed to list MCP upstreams: %v", mcpListErr)
-	} else if len(upstreamRows) > 0 {
+		upstreamRows = nil
+	}
+	{
 		mcpUpstreams := make([]mcp.UpstreamConfig, len(upstreamRows))
 		for i, r := range upstreamRows {
 			mcpUpstreams[i] = mcp.UpstreamConfig{
@@ -546,7 +551,10 @@ func main() {
 	// API and SOCKS5 listeners come up immediately. All phases are no-ops
 	// outside a container runtime setup.
 	if containerMgr != nil && db != nil {
-		hasMCPGateway := mcpHandler != nil
+		// The MCP gateway always mounts now (even with zero upstreams).
+		// This constant is left in place so the wire-up phase below
+		// reads naturally and to make a future opt-out path obvious.
+		const hasMCPGateway = true
 		go func() {
 			// Phase 1: write .env file into the agent container with
 			// phantom tokens from bindings that declare env_var.
@@ -597,14 +605,19 @@ func main() {
 				return
 			}
 			// Phase 3: wire sluice's MCP gateway URL into the agent's
-			// openclaw.json config via WebSocket RPC. Idempotent.
+			// configuration. The exact storage and mechanism is
+			// profile-specific (openclaw patches openclaw.json via a
+			// gateway WebSocket RPC; hermes patches mcp_servers in
+			// ~/.hermes/config.yaml; future profiles plug their own
+			// AgentProfile.WireMCPCmd). Idempotent: a profile that
+			// has nothing to do here returns nil and we move on.
 			// deriveMCPBaseURL already returns a URL ending in /mcp.
 			mcpURL := deriveMCPBaseURL(*mcpBaseURL, *healthAddr)
 			wireCtx, wireCancel := context.WithTimeout(context.Background(), 15*time.Second)
 			if wireErr := containerMgr.WireMCPGateway(wireCtx, "sluice", mcpURL); wireErr != nil {
-				log.Printf("WARNING: failed to wire MCP gateway into agent config: %v", wireErr)
+				log.Printf("WARNING: failed to wire MCP gateway into agent config (%s profile): %v", agentProfile.Name, wireErr)
 			} else {
-				log.Printf("MCP gateway wired into agent config: mcp.servers.sluice.url=%s", mcpURL)
+				log.Printf("MCP gateway wired into agent config (%s profile): sluice -> %s", agentProfile.Name, mcpURL)
 			}
 			wireCancel()
 		}()
@@ -911,6 +924,24 @@ func isAppleCLIAvailable() bool {
 func isTartCLIAvailable() bool {
 	_, err := exec.LookPath("tart")
 	return err == nil
+}
+
+// agentDisplayName returns the human-readable label for an agent profile
+// name (e.g. "openclaw" -> "OpenClaw", "hermes" -> "Hermes"). Used to
+// brand approval messages with the active agent. Falls back to the input
+// string with the first letter upper-cased for unknown profiles.
+func agentDisplayName(profileName string) string {
+	switch profileName {
+	case "openclaw":
+		return "OpenClaw"
+	case "hermes":
+		return "Hermes"
+	default:
+		if profileName == "" {
+			return "agent"
+		}
+		return strings.ToUpper(profileName[:1]) + profileName[1:]
+	}
 }
 
 // startAPIServer starts the HTTP server with the generated chi router.

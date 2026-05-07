@@ -650,8 +650,18 @@ func TestCredential_SSHInjection(t *testing.T) {
 							_ = req.Reply(true, nil)
 						}
 						_, _ = ch.Write([]byte("ssh-injection-ok\n"))
-						_ = ch.CloseWrite()
+						// Order matters: send exit-status BEFORE the
+						// half-close on the data side. Sluice's jump
+						// host runs req-forwarding and data-copy in
+						// independent goroutines, so a server that
+						// closes the data direction first can race the
+						// agent into observing channel-close before
+						// exit-status (which surfaces as "session
+						// closed without exit-status"). Sending the
+						// exit-status request first keeps the wire
+						// order deterministic.
 						_, _ = ch.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{0}))
+						_ = ch.CloseWrite()
 						_ = ch.Close()
 						return
 					}
