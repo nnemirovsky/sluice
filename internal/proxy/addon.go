@@ -814,13 +814,18 @@ func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) (o
 		return out
 	}
 
-	// Buffered copy of the response body, populated by the read step
-	// further down. The deferred recover prefers this over `in` because
-	// `in` is one-shot — once io.ReadAll has drained it, falling back
-	// to `in` on a later panic would hand the agent an empty stream.
-	// Captured by closure so the read site can update it without
-	// changing the recover's logic.
-	var bufferedBody []byte
+	// Known-safe fallback for the panic recover. Set ONLY after the
+	// OAuth phantom swap has produced a clean buffer that contains
+	// no real tokens. Critically: we never assign the raw upstream
+	// bytes here, because a matched OAuth token-endpoint response
+	// contains real access and refresh tokens, and a panic between
+	// io.ReadAll and a successful swapOAuthTokens would otherwise
+	// leak those tokens straight to the agent. If the panic fires
+	// before safeFallback is set, the recover hands back http.NoBody
+	// instead. The agent sees an empty 2xx token body and surfaces
+	// the failure as a parse error, which is the strictly safer
+	// outcome compared to leaking a real bearer.
+	var safeFallback []byte
 	defer func() {
 		if r := recover(); r != nil {
 			host := "unknown"
@@ -828,15 +833,10 @@ func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) (o
 				host = f.Request.URL.Host
 			}
 			log.Printf("[ADDON] PANIC in StreamResponseModifier for %s: %v\n%s", host, r, debug.Stack())
-			// Prefer the buffered bytes if we got that far; they
-			// are the same bytes the agent would have received
-			// without the modifier. If the panic fired before the
-			// read completed, bufferedBody is still nil and we
-			// fall back to the input reader (still un-drained).
-			if bufferedBody != nil {
-				out = bytes.NewReader(bufferedBody)
+			if safeFallback != nil {
+				out = bytes.NewReader(safeFallback)
 			} else {
-				out = in
+				out = http.NoBody
 			}
 		}
 	}()
@@ -906,15 +906,12 @@ func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) (o
 	}
 
 	// Token responses are small (typically < 1 KiB). Buffer the entire
-	// body so we can parse and replace tokens atomically. Assign to
-	// bufferedBody up front so the deferred recover above has a usable
-	// fallback even if a later step panics after `in` is drained.
+	// body so we can parse and replace tokens atomically.
 	body, err := io.ReadAll(io.LimitReader(in, maxProxyBody+1))
 	if err != nil {
 		log.Printf("[ADDON-OAUTH] stream body read error for credential %q: %v", credName, err)
 		return bytes.NewReader(nil)
 	}
-	bufferedBody = body
 	if int64(len(body)) > maxProxyBody {
 		log.Printf("[ADDON-OAUTH] stream response body exceeds %d bytes for credential %q, passing through", maxProxyBody, credName)
 		return io.MultiReader(bytes.NewReader(body), in)
@@ -927,10 +924,20 @@ func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) (o
 
 	modified, err := a.swapOAuthTokens(body, contentType, credName)
 	if err != nil {
+		// The body did not parse as an OAuth token response. This is
+		// usually an HTML error page from a misconfigured token
+		// endpoint, not a credentials envelope, so passing it through
+		// is the historical behavior. We deliberately do NOT set
+		// safeFallback here: if a later panic somehow fires while
+		// returning, the recover defaults to http.NoBody rather than
+		// leaking whatever this body contains.
 		log.Printf("[ADDON-OAUTH] stream token parse error for credential %q: %v", credName, err)
 		return bytes.NewReader(body)
 	}
 
+	// Swap completed. The modified buffer is phantom-only and safe to
+	// hand back on a late panic.
+	safeFallback = modified
 	return bytes.NewReader(modified)
 }
 
