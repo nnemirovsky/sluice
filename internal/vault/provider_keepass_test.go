@@ -37,7 +37,8 @@ func createTestKDBXAt(t *testing.T, dbPath, password string, entries map[string]
 
 	for title, pw := range entries {
 		entry := gokeepasslib.NewEntry()
-		entry.Values = append(entry.Values,
+		entry.Values = append(
+			entry.Values,
 			mkValue("Title", title),
 			mkProtectedValue("Password", pw),
 		)
@@ -49,7 +50,8 @@ func createTestKDBXAt(t *testing.T, dbPath, password string, entries map[string]
 		sub.Name = groupName
 		for title, pw := range groupEntries {
 			entry := gokeepasslib.NewEntry()
-			entry.Values = append(entry.Values,
+			entry.Values = append(
+				entry.Values,
 				mkValue("Title", title),
 				mkProtectedValue("Password", pw),
 			)
@@ -260,7 +262,8 @@ func TestKeePassProviderListEmpty(t *testing.T) {
 
 func TestKeePassProviderSubGroups(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := createTestKDBXWithGroups(t, dir, "testpass",
+	dbPath := createTestKDBXWithGroups(
+		t, dir, "testpass",
 		map[string]string{"root_key": "root_val"},
 		map[string]map[string]string{
 			"APIs": {"api_key": "api_val"},
@@ -431,7 +434,8 @@ func TestKeePassProviderDuplicateTitles(t *testing.T) {
 	// Add two entries with the same title.
 	for _, pw := range []string{"first-value", "second-value"} {
 		entry := gokeepasslib.NewEntry()
-		entry.Values = append(entry.Values,
+		entry.Values = append(
+			entry.Values,
 			mkValue("Title", "dup_key"),
 			mkProtectedValue("Password", pw),
 		)

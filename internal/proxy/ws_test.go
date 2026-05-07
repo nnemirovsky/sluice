@@ -603,7 +603,8 @@ func readFrameFromConn(t *testing.T, conn net.Conn) *Frame {
 }
 
 func TestWSProxy_PhantomTokenReplacement(t *testing.T) {
-	wp := setupWSProxy(t,
+	wp := setupWSProxy(
+		t,
 		map[string]string{"api_key": "sk-real-secret-12345"},
 		[]vault.Binding{{
 			Destination: "api.example.com",
@@ -650,7 +651,8 @@ func TestWSProxy_PhantomTokenReplacement(t *testing.T) {
 
 func TestWSProxy_UnboundPhantomStripped(t *testing.T) {
 	// Credential exists but no binding for this destination.
-	wp := setupWSProxy(t,
+	wp := setupWSProxy(
+		t,
 		map[string]string{"api_key": "sk-real-secret-12345"},
 		nil, // no bindings
 		nil, nil,
@@ -687,7 +689,8 @@ func TestWSProxy_UnboundPhantomStripped(t *testing.T) {
 }
 
 func TestWSProxy_BinaryFramePassthrough(t *testing.T) {
-	wp := setupWSProxy(t,
+	wp := setupWSProxy(
+		t,
 		map[string]string{"api_key": "sk-real-secret-12345"},
 		[]vault.Binding{{
 			Destination: "api.example.com",
@@ -755,7 +758,8 @@ func TestWSProxy_ControlFramePassthrough(t *testing.T) {
 }
 
 func TestWSProxy_ContentDenyClosesConnection(t *testing.T) {
-	wp := setupWSProxy(t,
+	wp := setupWSProxy(
+		t,
 		nil, nil,
 		[]WSBlockRuleConfig{{
 			Pattern: `(?i)password\s*[:=]\s*\S+`,
@@ -804,7 +808,8 @@ func TestWSProxy_ContentDenyClosesConnection(t *testing.T) {
 }
 
 func TestWSProxy_ContentRedactInResponse(t *testing.T) {
-	wp := setupWSProxy(t,
+	wp := setupWSProxy(
+		t,
 		nil, nil, nil,
 		[]WSRedactRuleConfig{{
 			Pattern:     `sk-[a-zA-Z0-9_-]{20,}`,
@@ -847,7 +852,8 @@ func TestWSProxy_ContentRedactInResponse(t *testing.T) {
 }
 
 func TestWSProxy_ContentDenyDoesNotBlockNonMatching(t *testing.T) {
-	wp := setupWSProxy(t,
+	wp := setupWSProxy(
+		t,
 		nil, nil,
 		[]WSBlockRuleConfig{{
 			Pattern: `(?i)password\s*[:=]\s*\S+`,
@@ -886,7 +892,8 @@ func TestWSProxy_ContentDenyDoesNotBlockNonMatching(t *testing.T) {
 }
 
 func TestWSProxy_RedactDoesNotModifyBinary(t *testing.T) {
-	wp := setupWSProxy(t,
+	wp := setupWSProxy(
+		t,
 		nil, nil, nil,
 		[]WSRedactRuleConfig{{
 			Pattern:     `secret`,

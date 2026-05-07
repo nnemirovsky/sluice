@@ -420,7 +420,8 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 			// No seed credit: every HTTP request triggers its own
 			// per-request approval with method and path visible in
 			// the Telegram message.
-			checker := NewRequestPolicyChecker(r.engine, r.broker,
+			checker := NewRequestPolicyChecker(
+				r.engine, r.broker,
 				WithPersist(r.buildPersistFunc()),
 			)
 			ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
@@ -1435,7 +1436,8 @@ func (s *Server) sniPolicyCheckBeforeDial(ctx context.Context, request *socks5.R
 		} else if s.rules.broker == nil {
 			ctx = context.WithValue(ctx, ctxKeySkipPerRequest, true)
 		} else {
-			checker := NewRequestPolicyChecker(s.rules.engine, s.rules.broker,
+			checker := NewRequestPolicyChecker(
+				s.rules.engine, s.rules.broker,
 				WithPersist(s.rules.buildPersistFunc()),
 			)
 			ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
@@ -1452,7 +1454,8 @@ func (s *Server) sniPolicyCheckBeforeDial(ctx context.Context, request *socks5.R
 		// Auto-allow the connection and defer approval to per-request
 		// checks where the HTTP method and path are visible.
 		log.Printf("[SNI->DEFER] %s:%d (hostname %s: approval deferred to per-request)", ipStr, port, sni)
-		checker := NewRequestPolicyChecker(s.rules.engine, s.rules.broker,
+		checker := NewRequestPolicyChecker(
+			s.rules.engine, s.rules.broker,
 			WithPersist(s.rules.buildPersistFunc()),
 		)
 		ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
@@ -2173,7 +2176,8 @@ func (s *Server) resolveQUICPolicy(dest string, port int) (checker *RequestPolic
 		switch resp {
 		case channel.ResponseAllowOnce:
 			log.Printf("[QUIC->ALLOW] %s:%d (user approved once)", dest, port)
-			return NewRequestPolicyChecker(s.rules.engine, s.rules.broker,
+			return NewRequestPolicyChecker(
+				s.rules.engine, s.rules.broker,
 				WithPersist(s.rules.buildPersistFunc()),
 				WithSeedCredits(1),
 			), false
@@ -2203,7 +2207,8 @@ func (s *Server) resolveQUICPolicy(dest string, port int) (checker *RequestPolic
 	// re-evaluate policy. SeedCredits(1) means the first request passes
 	// without a broker call, then the checker kicks in.
 	if verdict == policy.Allow && matchSource == policy.DefaultVerdict {
-		return NewRequestPolicyChecker(s.rules.engine, s.rules.broker,
+		return NewRequestPolicyChecker(
+			s.rules.engine, s.rules.broker,
 			WithPersist(s.rules.buildPersistFunc()),
 			WithSeedCredits(1),
 		), false

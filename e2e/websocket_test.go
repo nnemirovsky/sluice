@@ -209,7 +209,8 @@ func TestWebSocket_CredentialInjectionInUpgradeHeaders(t *testing.T) {
 	_, port := splitHostPort(t, wsAddr)
 
 	// Add credential bound to the WS echo server.
-	runCredAdd(t, setup.Proc, "ws_api_key", "ws-real-secret-789",
+	runCredAdd(
+		t, setup.Proc, "ws_api_key", "ws-real-secret-789",
 		"--destination", "127.0.0.1",
 		"--ports", port,
 		"--header", "X-Ws-Key",

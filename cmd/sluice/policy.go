@@ -261,7 +261,8 @@ func handlePolicyImport(args []string) error {
 		return fmt.Errorf("import: %w", err)
 	}
 
-	fmt.Printf("imported: %d rules (%d skipped), %d bindings (%d skipped), %d upstreams (%d skipped), %d config\n",
+	fmt.Printf(
+		"imported: %d rules (%d skipped), %d bindings (%d skipped), %d upstreams (%d skipped), %d config\n",
 		result.RulesInserted, result.RulesSkipped,
 		result.BindingsInserted, result.BindingsSkipped,
 		result.UpstreamsInserted, result.UpstreamsSkipped,

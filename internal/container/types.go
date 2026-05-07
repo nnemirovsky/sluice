@@ -101,8 +101,11 @@ func ValidateEnvVarKey(key string) error {
 }
 
 // BuildEnvInjectionScript constructs a shell script that writes each key=value
-// pair from envMap into ~/.openclaw/.env inside the agent container. When
-// fullReplace is false, existing entries with the same key are updated
+// pair from envMap into the agent's env file inside the container. The path
+// defaults to ~/.openclaw/.env (OpenclawProfile); pass a different profile
+// via BuildEnvInjectionScriptForProfile to target Hermes or future agents.
+//
+// When fullReplace is false, existing entries with the same key are updated
 // in-place via sed and new entries are appended (merge semantics). When
 // fullReplace is true, the file is truncated first so that only the entries
 // in envMap remain (reconciliation semantics). The bsdSed flag controls
@@ -113,8 +116,20 @@ func ValidateEnvVarKey(key string) error {
 // internal single quotes escaped, and the sed delimiter uses ASCII 0x01
 // (SOH) to avoid conflicts with any printable character in values.
 func BuildEnvInjectionScript(envMap map[string]string, bsdSed bool, fullReplace bool) (string, error) {
+	return BuildEnvInjectionScriptForProfile(OpenclawProfile, envMap, bsdSed, fullReplace)
+}
+
+// BuildEnvInjectionScriptForProfile is like BuildEnvInjectionScript but
+// targets the env file path declared by the given AgentProfile. A nil
+// profile defaults to OpenclawProfile so existing call sites keep their
+// behavior.
+func BuildEnvInjectionScriptForProfile(profile *AgentProfile, envMap map[string]string, bsdSed bool, fullReplace bool) (string, error) {
+	p := resolveProfile(profile)
+	if err := validateEnvFileRelPath(p.EnvFileRelPath); err != nil {
+		return "", fmt.Errorf("agent profile %q: %w", p.Name, err)
+	}
 	var script strings.Builder
-	script.WriteString(`ENV_FILE="$HOME/.openclaw/.env" && mkdir -p "$(dirname "$ENV_FILE")"`)
+	script.WriteString(fmt.Sprintf(`ENV_FILE="$HOME/%s" && mkdir -p "$(dirname "$ENV_FILE")"`, p.EnvFileRelPath))
 	if fullReplace {
 		// Truncate the file so stale entries from removed bindings are cleared.
 		script.WriteString(` && : > "$ENV_FILE"`)

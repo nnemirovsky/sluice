@@ -96,7 +96,8 @@ func NewOnePasswordProvider(token, vaultName, field string) (*OnePasswordProvide
 		field = "credential"
 	}
 
-	client, err := onepassword.NewClient(context.Background(),
+	client, err := onepassword.NewClient(
+		context.Background(),
 		onepassword.WithServiceAccountToken(token),
 		onepassword.WithIntegrationInfo("Sluice", "v1.0.0"),
 	)

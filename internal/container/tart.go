@@ -222,6 +222,7 @@ type TartManager struct {
 	// startVM launches the VM in the background. Defaults to cli.StartVM.
 	// Replaceable in tests to avoid spawning real processes.
 	startVM func(TartRunConfig) (*exec.Cmd, error)
+	profile *AgentProfile
 }
 
 // TartManagerConfig holds configuration for creating a TartManager.
@@ -232,6 +233,8 @@ type TartManagerConfig struct {
 	// stores this so it can re-run the VM on restart since tart does not have
 	// an inspect command to recover the original run parameters.
 	RunConfig TartRunConfig
+	// Profile selects agent-specific conventions. Nil falls back to OpenclawProfile.
+	Profile *AgentProfile
 }
 
 // NewTartManager creates a new TartManager from the given config.
@@ -241,9 +244,10 @@ func NewTartManager(cfg TartManagerConfig) *TartManager {
 		panic("container: NewTartManager requires non-nil CLI")
 	}
 	m := &TartManager{
-		cli:    cfg.CLI,
-		vmName: cfg.VMName,
-		runCfg: cfg.RunConfig,
+		cli:     cfg.CLI,
+		vmName:  cfg.VMName,
+		runCfg:  cfg.RunConfig,
+		profile: resolveProfile(cfg.Profile),
 	}
 	m.startVM = cfg.CLI.StartVM
 	return m
@@ -260,7 +264,7 @@ func (m *TartManager) InjectEnvVars(ctx context.Context, envMap map[string]strin
 	}
 
 	// Tart VMs run macOS which uses BSD sed (requires -i '').
-	script, err := BuildEnvInjectionScript(envMap, true, fullReplace)
+	script, err := BuildEnvInjectionScriptForProfile(m.profile, envMap, true, fullReplace)
 	if err != nil {
 		return fmt.Errorf("build env injection script: %w", err)
 	}
@@ -276,16 +280,25 @@ func (m *TartManager) InjectEnvVars(ctx context.Context, envMap map[string]strin
 	return nil
 }
 
-// ReloadSecrets signals the openclaw gateway to re-read secrets via WebSocket RPC.
+// ReloadSecrets signals the agent inside the VM to re-read its env file.
+// The mechanism is profile-specific; nil ReloadCmd means no in-place reload.
 func (m *TartManager) ReloadSecrets(ctx context.Context) error {
-	_, err := m.cli.Exec(ctx, m.vmName, GatewayRPCNodeCommand("secrets.reload"))
+	if m.profile.ReloadCmd == nil {
+		log.Printf("agent profile %q has no in-place reload; new secrets take effect on next agent run", m.profile.Name)
+		return nil
+	}
+	_, err := m.cli.Exec(ctx, m.vmName, m.profile.ReloadCmd())
 	return err
 }
 
-// WireMCPGateway registers sluice's MCP gateway URL in the agent's
-// openclaw.json config via a gateway WebSocket RPC.
+// WireMCPGateway registers sluice's MCP gateway URL in the agent's config.
+// The exact storage format depends on the profile.
 func (m *TartManager) WireMCPGateway(ctx context.Context, name, sluiceURL string) error {
-	_, err := m.cli.Exec(ctx, m.vmName, GatewayRPCNodeCommand("wire-mcp", name, sluiceURL))
+	if m.profile.WireMCPCmd == nil {
+		log.Printf("agent profile %q does not support automatic MCP wiring; configure %s manually", m.profile.Name, sluiceURL)
+		return nil
+	}
+	_, err := m.cli.Exec(ctx, m.vmName, m.profile.WireMCPCmd(name, sluiceURL))
 	return err
 }
 

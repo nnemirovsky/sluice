@@ -174,7 +174,8 @@ func TestGRPC_CredentialInjectionInMetadata(t *testing.T) {
 	_, port := splitHostPort(t, h2Addr)
 
 	// Add credential with binding for the H2 server.
-	runCredAdd(t, setup.Proc, "grpc_token", "grpc-real-secret-456",
+	runCredAdd(
+		t, setup.Proc, "grpc_token", "grpc-real-secret-456",
 		"--destination", "127.0.0.1",
 		"--ports", port,
 		"--header", "Authorization",

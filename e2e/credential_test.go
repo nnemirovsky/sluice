@@ -278,7 +278,8 @@ func TestCredential_HeaderInjection(t *testing.T) {
 	_, port := mustSplitAddr(t, echo.URL)
 
 	// Add credential with binding for the echo server.
-	runCredAdd(t, setup.Proc, "test_api_key", "real-secret-value-123",
+	runCredAdd(
+		t, setup.Proc, "test_api_key", "real-secret-value-123",
 		"--destination", "127.0.0.1",
 		"--ports", port,
 		"--header", "X-Api-Key",
@@ -308,7 +309,8 @@ func TestCredential_PhantomInBody(t *testing.T) {
 	echo := startTLSEchoServerWithCA(t, setup.CA)
 	_, port := mustSplitAddr(t, echo.URL)
 
-	runCredAdd(t, setup.Proc, "body_cred", "body-secret-42",
+	runCredAdd(
+		t, setup.Proc, "body_cred", "body-secret-42",
 		"--destination", "127.0.0.1",
 		"--ports", port,
 		"--header", "Authorization",
@@ -352,7 +354,8 @@ func TestCredential_UnboundPhantomStripped(t *testing.T) {
 	_, unboundPort := mustSplitAddr(t, unboundEcho.URL)
 
 	// Add credential bound to the first echo server only.
-	runCredAdd(t, setup.Proc, "bound_cred", "bound-secret",
+	runCredAdd(
+		t, setup.Proc, "bound_cred", "bound-secret",
 		"--destination", "127.0.0.1",
 		"--ports", boundPort,
 		"--header", "X-Cred",
@@ -480,7 +483,8 @@ func TestCredential_Rotation(t *testing.T) {
 	_, port := mustSplitAddr(t, echo.URL)
 
 	// Add initial credential.
-	runCredAdd(t, setup.Proc, "rotate_key", "original-value",
+	runCredAdd(
+		t, setup.Proc, "rotate_key", "original-value",
 		"--destination", "127.0.0.1",
 		"--ports", port,
 		"--header", "X-Api-Key",
@@ -524,14 +528,16 @@ func TestCredential_MultipleDestinations(t *testing.T) {
 	_, portB := mustSplitAddr(t, echoB.URL)
 
 	// Add credential A bound to echo server A.
-	runCredAdd(t, setup.Proc, "cred_a", "secret-a",
+	runCredAdd(
+		t, setup.Proc, "cred_a", "secret-a",
 		"--destination", "127.0.0.1",
 		"--ports", portA,
 		"--header", "X-Key-A",
 	)
 
 	// Add credential B bound to echo server B.
-	runCredAdd(t, setup.Proc, "cred_b", "secret-b",
+	runCredAdd(
+		t, setup.Proc, "cred_b", "secret-b",
 		"--destination", "127.0.0.1",
 		"--ports", portB,
 		"--header", "X-Key-B",

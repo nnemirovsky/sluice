@@ -194,12 +194,15 @@ func (c *AppleCLI) List(ctx context.Context) ([]VMListEntry, error) {
 type AppleManager struct {
 	cli           *AppleCLI
 	containerName string
+	profile       *AgentProfile
 }
 
 // AppleManagerConfig holds configuration for creating an AppleManager.
 type AppleManagerConfig struct {
 	CLI           *AppleCLI
 	ContainerName string
+	// Profile selects agent-specific conventions. Nil falls back to OpenclawProfile.
+	Profile *AgentProfile
 }
 
 // NewAppleManager creates a new AppleManager from the given config.
@@ -207,6 +210,7 @@ func NewAppleManager(cfg AppleManagerConfig) *AppleManager {
 	return &AppleManager{
 		cli:           cfg.CLI,
 		containerName: cfg.ContainerName,
+		profile:       resolveProfile(cfg.Profile),
 	}
 }
 
@@ -220,7 +224,7 @@ func (m *AppleManager) InjectEnvVars(ctx context.Context, envMap map[string]stri
 		return nil
 	}
 
-	script, err := BuildEnvInjectionScript(envMap, false, fullReplace)
+	script, err := BuildEnvInjectionScriptForProfile(m.profile, envMap, false, fullReplace)
 	if err != nil {
 		return fmt.Errorf("build env injection script: %w", err)
 	}
@@ -236,16 +240,26 @@ func (m *AppleManager) InjectEnvVars(ctx context.Context, envMap map[string]stri
 	return nil
 }
 
-// ReloadSecrets signals the openclaw gateway to re-read secrets via WebSocket RPC.
+// ReloadSecrets signals the agent inside the VM to re-read its env file.
+// The mechanism is profile-specific; nil ReloadCmd means no in-place
+// reload (best-effort, logged).
 func (m *AppleManager) ReloadSecrets(ctx context.Context) error {
-	_, err := m.cli.Exec(ctx, m.containerName, GatewayRPCNodeCommand("secrets.reload"))
+	if m.profile.ReloadCmd == nil {
+		log.Printf("agent profile %q has no in-place reload; new secrets take effect on next agent run", m.profile.Name)
+		return nil
+	}
+	_, err := m.cli.Exec(ctx, m.containerName, m.profile.ReloadCmd())
 	return err
 }
 
 // WireMCPGateway registers sluice's MCP gateway URL in the agent's
-// openclaw.json config via a gateway WebSocket RPC.
+// config. The exact storage format depends on the profile.
 func (m *AppleManager) WireMCPGateway(ctx context.Context, name, sluiceURL string) error {
-	_, err := m.cli.Exec(ctx, m.containerName, GatewayRPCNodeCommand("wire-mcp", name, sluiceURL))
+	if m.profile.WireMCPCmd == nil {
+		log.Printf("agent profile %q does not support automatic MCP wiring; configure %s manually", m.profile.Name, sluiceURL)
+		return nil
+	}
+	_, err := m.cli.Exec(ctx, m.containerName, m.profile.WireMCPCmd(name, sluiceURL))
 	return err
 }
 
