@@ -116,7 +116,24 @@ Two credential types: `static` (default) for API keys and `oauth` for OAuth acce
 
 `sluice binding update --destination` also updates the paired auto-created allow rule (tagged `binding-add:<credential>` or `cred-add:<credential>`) so the new destination is not orphaned. If no paired rule exists (e.g. because it was manually removed), the binding destination is still updated and a warning is printed. No fallback rule is created so an operator's intentional removal is not silently reverted. `--env-var` on binding update can be used to change or clear the env var name after the initial binding was created.
 
-Runtime flags: `--mcp-base-url` sets the external URL the agent uses to reach sluice's MCP gateway (e.g. `http://sluice:3000`). This is added to `SelfBypass` so sluice does not policy-check its own MCP traffic. Defaults to deriving from `--health-addr`.
+Runtime flags: `--mcp-base-url` sets the external URL the agent uses to reach sluice's MCP gateway (e.g. `http://sluice:3000`). This is added to `SelfBypass` so sluice does not policy-check its own MCP traffic. Defaults to deriving from `--health-addr`. `--agent <profile>` selects an agent profile (`openclaw`, `hermes`); the profile controls the env file path inside the container, the secrets-reload mechanism, and the MCP wiring command. The default is `openclaw`. May also be set via `SLUICE_AGENT_PROFILE`.
+
+## Agent Profiles
+
+Profiles abstract per-agent runtime conventions so sluice's container managers stay agent-agnostic. Each profile carries `EnvFileRelPath` (where to write phantom-token env vars), `ReloadCmd` (argv to exec for in-place secret reload, or nil), and `WireMCPCmd` (argv to register sluice as an MCP server in the agent's config).
+
+| Profile | Env file | Reload | MCP wiring |
+|---------|----------|--------|------------|
+| `openclaw` (default) | `~/.openclaw/.env` | `node -e <gateway_rpc.js> secrets.reload` over the agent's WebSocket gateway | `node -e <gateway_rpc.js> wire-mcp <name> <url>` patches `mcp.servers.<name>` |
+| `hermes` | `~/.hermes/.env` | None — Hermes has no documented in-place reload; new env values take effect on next message / restart | `python3 -c <script> <name> <url>` patches `mcp_servers.<name>.url` in `~/.hermes/config.yaml` (idempotent; relies on PyYAML which Hermes already requires) |
+
+Adding a new profile is a single edit to `internal/container/agent_profile.go`: register a struct in `builtinProfiles`. All three container backends (Docker, Apple Container, tart) consume the profile through `BuildEnvInjectionScriptForProfile`, `profile.ReloadCmd()`, and `profile.WireMCPCmd()`, so backend code does not need to know about specific agents.
+
+Hermes-specific caveats:
+
+- `ReloadCmd` is nil; `ReloadSecrets` logs a notice and returns nil. New phantom tokens take effect on the next Hermes message or `/reload-mcp` slash command.
+- `WireMCPCmd` rewrites `~/.hermes/config.yaml` directly. Hermes picks up the change on its next startup or via `/reload-mcp` from the chat session — sluice cannot trigger that command remotely.
+- Hermes' Modal, Daytona, and Vercel Sandbox terminal backends run code on third-party infrastructure that sluice cannot intercept. The local and Docker Hermes backends are the supported targets for sluice's network-layer governance.
 
 ## MCP Gateway Setup
 
@@ -126,9 +143,11 @@ OpenClaw connects to sluice's MCP gateway via Streamable HTTP. This is a one-tim
 docker exec openclaw openclaw mcp set sluice '{"url":"http://sluice:3000/mcp"}'
 ```
 
-For the hostname `sluice` to resolve inside OpenClaw, the compose file pins sluice's IP on the internal network (172.30.0.2) and adds an `extra_hosts` entry on tun2proxy (which OpenClaw shares). Docker's embedded DNS (127.0.0.11) is not reachable from OpenClaw because its DNS is routed through the TUN device. The `/etc/hosts` entry bypasses DNS entirely.
+For Hermes, the equivalent runs once at sluice startup via `WireMCPGateway` and writes `mcp_servers.sluice.url` into `~/.hermes/config.yaml`. Trigger Hermes' `/reload-mcp` slash command (or restart Hermes) once after first wire-up so it picks up the new server.
 
-MCP upstreams can be managed via `sluice mcp add|list|remove`, the REST API (`/api/mcp/upstreams`), or the Telegram bot (`/mcp add|list|remove`). All three paths write to the same SQLite store. After any addition or removal, restart sluice so the gateway re-reads the upstream set. OpenClaw does not need to be restarted: its connection to `sluice:3000/mcp` is registered once at sluice startup (via `WireMCPGateway`, which patches `mcp.servers.sluice = {url: ...}` in the agent's openclaw.json) and stays valid across sluice restarts. The agent re-queries the tool list on subsequent agent runs.
+For the hostname `sluice` to resolve inside the agent container, the compose file pins sluice's IP on the internal network (172.30.0.2) and adds an `extra_hosts` entry on tun2proxy (which the agent shares). Docker's embedded DNS (127.0.0.11) is not reachable from the agent because its DNS is routed through the TUN device. The `/etc/hosts` entry bypasses DNS entirely.
+
+MCP upstreams can be managed via `sluice mcp add|list|remove`, the REST API (`/api/mcp/upstreams`), or the Telegram bot (`/mcp add|list|remove`). All three paths write to the same SQLite store. After any addition or removal, restart sluice so the gateway re-reads the upstream set. The agent does not need to be restarted: its connection to `sluice:3000/mcp` is registered once at sluice startup (via `WireMCPGateway`) and stays valid across sluice restarts. The agent re-queries the tool list on subsequent runs.
 
 The Telegram `/mcp add` path auto-deletes the chat message because `--env KEY=VAL` pairs may contain secrets (use `KEY=vault:name` to keep the plaintext out of the SQLite store and `/mcp list` output entirely).
 

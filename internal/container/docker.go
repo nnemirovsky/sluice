@@ -59,13 +59,23 @@ type ContainerSpec struct { //nolint:revive // stuttering accepted for clarity
 type DockerManager struct {
 	client        ContainerClient
 	containerName string
+	profile       *AgentProfile
 }
 
-// NewDockerManager creates a new Docker container manager.
+// NewDockerManager creates a new Docker container manager using the
+// default OpenclawProfile. Use NewDockerManagerForProfile to target a
+// different agent (e.g. HermesProfile).
 func NewDockerManager(client ContainerClient, containerName string) *DockerManager {
+	return NewDockerManagerForProfile(client, containerName, OpenclawProfile)
+}
+
+// NewDockerManagerForProfile creates a Docker container manager bound to
+// the supplied AgentProfile. Pass nil to fall back to OpenclawProfile.
+func NewDockerManagerForProfile(client ContainerClient, containerName string, profile *AgentProfile) *DockerManager {
 	return &DockerManager{
 		client:        client,
 		containerName: containerName,
+		profile:       resolveProfile(profile),
 	}
 }
 
@@ -79,7 +89,7 @@ func (m *DockerManager) InjectEnvVars(ctx context.Context, envMap map[string]str
 		return nil
 	}
 
-	script, err := BuildEnvInjectionScript(envMap, false, fullReplace)
+	script, err := BuildEnvInjectionScriptForProfile(m.profile, envMap, false, fullReplace)
 	if err != nil {
 		return fmt.Errorf("build env injection script: %w", err)
 	}
@@ -97,32 +107,38 @@ func (m *DockerManager) InjectEnvVars(ctx context.Context, envMap map[string]str
 	return nil
 }
 
-// ReloadSecrets signals the openclaw gateway to re-read secrets via WebSocket RPC.
-// Uses the embedded gateway_rpc.js script to do the full device-signed
-// connect handshake before invoking secrets.reload.
+// ReloadSecrets signals the agent inside the container to re-read its env
+// file. The exact mechanism is profile-specific (openclaw uses a JSON-RPC
+// over WebSocket; hermes has no in-place reload). When the profile does
+// not provide a reload command, this is a logged no-op so callers can
+// treat it as best-effort.
 func (m *DockerManager) ReloadSecrets(ctx context.Context) error {
-	return m.client.ExecInContainer(ctx, m.containerName,
-		GatewayRPCNodeCommand("secrets.reload"))
+	if m.profile.ReloadCmd == nil {
+		log.Printf("agent profile %q has no in-place reload; new secrets take effect on next agent run", m.profile.Name)
+		return nil
+	}
+	return m.client.ExecInContainer(ctx, m.containerName, m.profile.ReloadCmd())
 }
 
-// WireMCPGateway registers sluice's MCP gateway URL in the agent's
-// openclaw.json config (at mcp.servers.<name>) via a gateway WebSocket
-// RPC. This is a one-shot idempotent operation: if the entry already
-// matches, openclaw returns a noop. Call this once at sluice startup
-// after the MCP gateway is initialized.
+// WireMCPGateway registers sluice's MCP gateway URL inside the agent's
+// config so that its embedded runtime discovers sluice as an MCP server.
+// The exact storage format depends on the profile (openclaw patches its
+// JSON config via a gateway RPC; hermes patches mcp_servers in
+// ~/.hermes/config.yaml). Call this once at sluice startup after the
+// MCP gateway is initialized.
 //
-// On first wire-up the config change triggers an openclaw gateway
-// restart, which kills the docker exec we're running and reports
-// exit code 137. The config write itself has already succeeded at
-// that point, so we swallow 137 and treat it as success. Genuine
-// failures surface as non-zero exit codes other than 137 or
-// connect-time errors before the exec runs.
+// For openclaw, the config change triggers a gateway restart that kills
+// the running exec with code 137. The config write has already
+// succeeded at that point, so we swallow 137 and treat it as success.
+// Genuine failures surface as other non-zero exit codes or connect-time
+// errors before the exec runs.
 func (m *DockerManager) WireMCPGateway(ctx context.Context, name, sluiceURL string) error {
-	err := m.client.ExecInContainer(ctx, m.containerName,
-		GatewayRPCNodeCommand("wire-mcp", name, sluiceURL))
+	if m.profile.WireMCPCmd == nil {
+		log.Printf("agent profile %q does not support automatic MCP wiring; configure %s manually", m.profile.Name, sluiceURL)
+		return nil
+	}
+	err := m.client.ExecInContainer(ctx, m.containerName, m.profile.WireMCPCmd(name, sluiceURL))
 	if err != nil && strings.Contains(err.Error(), "exit") && strings.Contains(err.Error(), "137") {
-		// The config.patch response was delivered successfully; the
-		// exec was terminated by the subsequent gateway restart.
 		return nil
 	}
 	return err

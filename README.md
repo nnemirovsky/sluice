@@ -1,4 +1,4 @@
-# :shield: Sluice — Credential Governance Proxy for OpenClaw
+# :shield: Sluice — Credential Governance Proxy for AI Agents
 
 [![Tests](https://github.com/nnemirovsky/sluice/actions/workflows/test.yml/badge.svg)](https://github.com/nnemirovsky/sluice/actions/workflows/test.yml)
 [![E2E](https://github.com/nnemirovsky/sluice/actions/workflows/e2e-linux.yml/badge.svg)](https://github.com/nnemirovsky/sluice/actions/workflows/e2e-linux.yml)
@@ -13,18 +13,18 @@ Keeps real secrets out of the agent, enforces per-request policy on every connec
 
 AI agents need credentials to be useful. Giving them real credentials is dangerous.
 
-**The problem:** OpenClaw makes API calls, opens network connections, and invokes MCP tools. Without governance, it can leak secrets in tool outputs, connect to unexpected endpoints, or make destructive API calls. No existing tool combines credential isolation, human approval, all-protocol interception, and MCP-level governance in one place.
+**The problem:** Agents like [OpenClaw](https://openclaw.ai) and [Hermes](https://github.com/NousResearch/hermes-agent) make API calls, open network connections, and invoke MCP tools. Without governance, they can leak secrets in tool outputs, connect to unexpected endpoints, or make destructive API calls. No existing tool combines credential isolation, human approval, all-protocol interception, and MCP-level governance in one place.
 
-**The solution:** Sluice intercepts everything at two layers and never gives OpenClaw real credentials.
+**The solution:** Sluice intercepts everything at two layers and never gives the agent real credentials.
 
 | Layer | What it sees | What it governs |
 |-------|-------------|-----------------|
 | **MCP Gateway** | Tool names, arguments, responses | File writes, exec, deletions, any MCP tool call |
 | **SOCKS5 Proxy** | Every TCP and UDP connection | HTTP, HTTPS, WebSocket, gRPC, SSH, IMAP, SMTP, DNS, QUIC/HTTP3 |
 
-**Phantom token swap:** OpenClaw gets phantom tokens that look like real API keys, injected as environment variables via `docker exec` (no shared volume needed). Sluice's MITM proxy swaps them for real credentials in-flight. If a phantom token leaks, it is useless outside the proxy. OAuth credentials are handled bidirectionally: sluice intercepts token endpoint responses, captures real tokens, and returns phantom tokens to the agent. The entire OAuth lifecycle (initial auth, token refresh, token rotation) is transparent.
+**Phantom token swap:** the agent gets phantom tokens that look like real API keys, injected as environment variables via `docker exec` (no shared volume needed). Sluice's MITM proxy swaps them for real credentials in-flight. If a phantom token leaks, it is useless outside the proxy. OAuth credentials are handled bidirectionally: sluice intercepts token endpoint responses, captures real tokens, and returns phantom tokens to the agent. The entire OAuth lifecycle (initial auth, token refresh, token rotation) is transparent.
 
-**Human approval:** Connections and tool calls matching "ask" policy rules trigger a notification via Telegram or HTTP webhook. OpenClaw blocks until a human responds with Allow or Deny.
+**Human approval:** Connections and tool calls matching "ask" policy rules trigger a notification via Telegram or HTTP webhook. The agent blocks until a human responds with Allow or Deny.
 
 **Credential isolation:** Real secrets live in an encrypted vault (age, HashiCorp Vault, 1Password, Bitwarden, KeePass, or gopass). They are decrypted into zeroed memory only at injection time and never exposed to the agent process.
 
@@ -68,6 +68,22 @@ flowchart LR
 **Audit trail:** Every connection, tool call, approval, and denial is logged with blake3 hash chaining for tamper detection.
 
 ## Quick Start
+
+### Choosing an agent profile
+
+Sluice ships with profiles for the agents it knows about. The profile controls where credentials are written inside the container, how secret reload is signalled, and how sluice's MCP gateway is registered in the agent's config.
+
+| Profile | Env file | In-place reload | MCP wiring |
+|---------|----------|-----------------|------------|
+| `openclaw` (default) | `~/.openclaw/.env` | Gateway WebSocket RPC (`secrets.reload`) | Patches `mcp.servers.<name>` via gateway RPC |
+| `hermes` | `~/.hermes/.env` | None — picked up on next agent run | Patches `mcp_servers.<name>.url` in `~/.hermes/config.yaml` (requires `python3` + `pyyaml` in the container, both shipped with Hermes) |
+
+Select with `--agent <name>` (or `SLUICE_AGENT_PROFILE=<name>`). The default is `openclaw` so existing setups need no changes.
+
+For Hermes specifically, two follow-up notes:
+
+- Sluice cannot trigger Hermes' `/reload-mcp` slash command after wiring; either restart Hermes once after `sluice` first writes the config, or invoke `/reload-mcp` from your Hermes chat session.
+- Hermes' Modal/Daytona/Vercel Sandbox terminal backends run code on third-party infrastructure that sluice cannot intercept. Use the `local` or `docker` Hermes backend if you want sluice's network governance to apply.
 
 ### Docker (Linux)
 

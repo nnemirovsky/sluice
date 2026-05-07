@@ -88,6 +88,7 @@ func main() {
 	certDir := flag.String("cert-dir", "", "shared volume path for CA certificate (enables MITM trust injection into guest)")
 	dnsResolver := flag.String("dns-resolver", "", "upstream DNS resolver address for DNS interception (default: 8.8.8.8:53)")
 	mcpBaseURL := flag.String("mcp-base-url", "", "external base URL the agent uses to reach sluice's MCP gateway (e.g. http://sluice:3000); added to SelfBypass so sluice does not policy-check its own MCP traffic")
+	agentFlag := flag.String("agent", envDefault("SLUICE_AGENT_PROFILE", "openclaw"), "agent profile: openclaw, hermes (controls env file path, reload mechanism, MCP config wiring)")
 	flag.Parse()
 
 	// Validate --runtime flag early.
@@ -105,6 +106,14 @@ func main() {
 	if *runtimeFlag == "macos" && *vmImage == "" {
 		log.Fatalf("--runtime macos requires --vm-image (e.g. ghcr.io/cirruslabs/macos-sequoia-base:latest)")
 	}
+
+	// Resolve the agent profile early so it can be threaded into every
+	// container manager constructor below.
+	agentProfile, err := container.ProfileFromName(*agentFlag)
+	if err != nil {
+		log.Fatalf("invalid --agent value: %v", err)
+	}
+	log.Printf("agent profile: %s (env file ~/%s)", agentProfile.Name, agentProfile.EnvFileRelPath)
 
 	// Open the SQLite store.
 	db, err := store.New(*dbPath)
@@ -250,7 +259,7 @@ func main() {
 		} else {
 			if fi, statErr := os.Stat(sock); statErr == nil && fi.Mode().Type() == os.ModeSocket {
 				client := container.NewSocketClient(sock)
-				containerMgr = container.NewDockerManager(client, *containerName)
+				containerMgr = container.NewDockerManagerForProfile(client, *containerName, agentProfile)
 				log.Printf("docker manager enabled: socket=%s, container=%s", sock, *containerName)
 			} else if *runtimeFlag == "docker" {
 				log.Fatalf("--runtime docker: socket %q not found or not a socket", sock)
@@ -269,11 +278,12 @@ func main() {
 			containerMgr = container.NewAppleManager(container.AppleManagerConfig{
 				CLI:           cli,
 				ContainerName: *containerName,
+				Profile:       agentProfile,
 			})
 			log.Printf("apple container manager enabled: container=%s", *containerName)
 		}
 	case "macos":
-		tartMgr, tartRouter, containerMgr, tartVMOwned = startMacOSVM(*vmImage, *containerName, *certDir)
+		tartMgr, tartRouter, containerMgr, tartVMOwned = startMacOSVM(*vmImage, *containerName, *certDir, agentProfile)
 	case "none":
 		log.Printf("standalone mode: no container runtime (configure ALL_PROXY=socks5://%s manually)", *listenAddr)
 	case "":
@@ -1050,13 +1060,13 @@ func seedStoreFromConfig(db *store.Store, configPath string) error {
 // routing. Returns the TartManager, NetworkRouter (for shutdown cleanup),
 // the ContainerManager interface, and a boolean indicating whether sluice
 // started the VM. Calls log.Fatalf on unrecoverable errors.
-func startMacOSVM(vmImage, vmName, certDir string) (*container.TartManager, *container.NetworkRouter, container.ContainerManager, bool) {
+func startMacOSVM(vmImage, vmName, certDir string, profile *container.AgentProfile) (*container.TartManager, *container.NetworkRouter, container.ContainerManager, bool) {
 	cli, cliErr := container.NewTartCLI(nil)
 	if cliErr != nil {
 		log.Fatalf("--runtime macos: tart CLI not available: %v", cliErr)
 	}
 
-	mgr, router, owned, err := setupMacOSVM(cli, vmImage, vmName, certDir)
+	mgr, router, owned, err := setupMacOSVM(cli, vmImage, vmName, certDir, profile)
 	if err != nil {
 		log.Fatalf("--runtime macos: %v", err)
 	}
@@ -1105,7 +1115,7 @@ func waitForVMIP(ctx context.Context, cli *container.TartCLI, vmName string) (st
 // indicates whether sluice started the VM (true) or attached to an
 // already-running VM (false). Only VMs started by sluice should be
 // stopped on shutdown.
-func setupMacOSVM(cli *container.TartCLI, vmImage, vmName, certDir string) (*container.TartManager, *container.NetworkRouter, bool, error) {
+func setupMacOSVM(cli *container.TartCLI, vmImage, vmName, certDir string, profile *container.AgentProfile) (*container.TartManager, *container.NetworkRouter, bool, error) {
 	ctx := context.Background()
 
 	// Check if VM already exists.
@@ -1182,6 +1192,7 @@ func setupMacOSVM(cli *container.TartCLI, vmImage, vmName, certDir string) (*con
 		CLI:       cli,
 		VMName:    vmName,
 		RunConfig: runCfg,
+		Profile:   profile,
 	})
 
 	// Set up pf routing to redirect VM traffic through tun2proxy to SOCKS5.

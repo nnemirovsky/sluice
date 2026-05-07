@@ -447,6 +447,49 @@ func TestInjectEnvVarsWritesEnvFile(t *testing.T) {
 	}
 }
 
+func TestInjectEnvVarsHermesProfile(t *testing.T) {
+	mc := &mockClient{}
+	mgr := NewDockerManagerForProfile(mc, "hermes", HermesProfile)
+
+	err := mgr.InjectEnvVars(context.Background(), map[string]string{"OPENAI_API_KEY": "sk-phantom-xyz"}, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Hermes has no in-place reload, so we expect exactly one exec call
+	// (the env file write). ReloadSecrets logs and returns nil without
+	// invoking exec.
+	if len(mc.execCalls) != 1 {
+		t.Fatalf("expected 1 exec call (no reload for hermes), got %d", len(mc.execCalls))
+	}
+	script := mc.execCalls[0][2]
+	if !strings.Contains(script, ".hermes/.env") {
+		t.Errorf("script should target ~/.hermes/.env, got: %s", script)
+	}
+	if strings.Contains(script, ".openclaw") {
+		t.Errorf("script should not mention .openclaw under hermes profile: %s", script)
+	}
+}
+
+func TestWireMCPGatewayHermesProfile(t *testing.T) {
+	mc := &mockClient{}
+	mgr := NewDockerManagerForProfile(mc, "hermes", HermesProfile)
+
+	if err := mgr.WireMCPGateway(context.Background(), "sluice", "http://sluice:3000/mcp"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(mc.execCalls) != 1 {
+		t.Fatalf("expected 1 exec call, got %d", len(mc.execCalls))
+	}
+	cmd := mc.execCalls[0]
+	if cmd[0] != "python3" || cmd[1] != "-c" {
+		t.Errorf("hermes wire MCP should run python3 -c, got: %v", cmd[:2])
+	}
+	if cmd[len(cmd)-1] != "http://sluice:3000/mcp" {
+		t.Errorf("hermes wire MCP should pass url as last arg, got: %v", cmd)
+	}
+}
+
 func TestInjectEnvVarsEmptyMap(t *testing.T) {
 	mc := &mockClient{}
 	mgr := NewDockerManager(mc, "openclaw")
