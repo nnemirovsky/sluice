@@ -605,14 +605,19 @@ func main() {
 				return
 			}
 			// Phase 3: wire sluice's MCP gateway URL into the agent's
-			// openclaw.json config via WebSocket RPC. Idempotent.
+			// configuration. The exact storage and mechanism is
+			// profile-specific (openclaw patches openclaw.json via a
+			// gateway WebSocket RPC; hermes patches mcp_servers in
+			// ~/.hermes/config.yaml; future profiles plug their own
+			// AgentProfile.WireMCPCmd). Idempotent: a profile that
+			// has nothing to do here returns nil and we move on.
 			// deriveMCPBaseURL already returns a URL ending in /mcp.
 			mcpURL := deriveMCPBaseURL(*mcpBaseURL, *healthAddr)
 			wireCtx, wireCancel := context.WithTimeout(context.Background(), 15*time.Second)
 			if wireErr := containerMgr.WireMCPGateway(wireCtx, "sluice", mcpURL); wireErr != nil {
-				log.Printf("WARNING: failed to wire MCP gateway into agent config: %v", wireErr)
+				log.Printf("WARNING: failed to wire MCP gateway into agent config (%s profile): %v", agentProfile.Name, wireErr)
 			} else {
-				log.Printf("MCP gateway wired into agent config: mcp.servers.sluice.url=%s", mcpURL)
+				log.Printf("MCP gateway wired into agent config (%s profile): sluice -> %s", agentProfile.Name, mcpURL)
 			}
 			wireCancel()
 		}()

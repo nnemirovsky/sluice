@@ -334,18 +334,26 @@ func BuildEnvInjectionScriptForProfile(profile *AgentProfile, envMap map[string]
 // `awk -v VAR='<value>'` from inside a single-quoted shell argument.
 // We control the marker strings today, but the escape ensures any
 // future marker edit cannot break the script.
+//
+// Note that the awk script wraps the value in shell single quotes
+// (`-v B='...'`). Inside single-quoted shell strings, the only
+// metacharacter that needs handling is the single quote itself —
+// every other byte (including backslashes) is taken literally. So we
+// only need to break out and re-quote when we see an apostrophe; if
+// we also escaped backslashes here, the marker text awk sees would
+// silently differ from EnvBlockBegin / EnvBlockEnd if either ever
+// contained a backslash, and the BEGIN/END detection would stop
+// matching the actual file lines.
 func awkStringEscape(s string) string {
 	var b strings.Builder
 	for _, r := range s {
-		switch r {
-		case '\\':
-			b.WriteString(`\\`)
-		case '\'':
-			// Close single quote, emit an escaped single quote, reopen.
+		if r == '\'' {
+			// Close current single-quoted run, emit an escaped
+			// literal single quote, reopen the run.
 			b.WriteString(`'\''`)
-		default:
-			b.WriteRune(r)
+			continue
 		}
+		b.WriteRune(r)
 	}
 	return b.String()
 }
