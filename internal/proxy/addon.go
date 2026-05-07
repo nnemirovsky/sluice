@@ -805,6 +805,13 @@ func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) (o
 		return out
 	}
 
+	// Buffered copy of the response body, populated by the read step
+	// further down. The deferred recover prefers this over `in` because
+	// `in` is one-shot — once io.ReadAll has drained it, falling back
+	// to `in` on a later panic would hand the agent an empty stream.
+	// Captured by closure so the read site can update it without
+	// changing the recover's logic.
+	var bufferedBody []byte
 	defer func() {
 		if r := recover(); r != nil {
 			host := "unknown"
@@ -812,7 +819,16 @@ func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) (o
 				host = f.Request.URL.Host
 			}
 			log.Printf("[ADDON] PANIC in StreamResponseModifier for %s: %v\n%s", host, r, debug.Stack())
-			out = in
+			// Prefer the buffered bytes if we got that far; they
+			// are the same bytes the agent would have received
+			// without the modifier. If the panic fired before the
+			// read completed, bufferedBody is still nil and we
+			// fall back to the input reader (still un-drained).
+			if bufferedBody != nil {
+				out = bytes.NewReader(bufferedBody)
+			} else {
+				out = in
+			}
 		}
 	}()
 
@@ -881,12 +897,15 @@ func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) (o
 	}
 
 	// Token responses are small (typically < 1 KiB). Buffer the entire
-	// body so we can parse and replace tokens atomically.
+	// body so we can parse and replace tokens atomically. Assign to
+	// bufferedBody up front so the deferred recover above has a usable
+	// fallback even if a later step panics after `in` is drained.
 	body, err := io.ReadAll(io.LimitReader(in, maxProxyBody+1))
 	if err != nil {
 		log.Printf("[ADDON-OAUTH] stream body read error for credential %q: %v", credName, err)
 		return bytes.NewReader(nil)
 	}
+	bufferedBody = body
 	if int64(len(body)) > maxProxyBody {
 		log.Printf("[ADDON-OAUTH] stream response body exceeds %d bytes for credential %q, passing through", maxProxyBody, credName)
 		return io.MultiReader(bytes.NewReader(body), in)
