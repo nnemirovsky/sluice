@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -100,21 +101,40 @@ func ValidateEnvVarKey(key string) error {
 	return nil
 }
 
+// Sluice-managed env block markers. Sluice writes the keys it owns into a
+// single contiguous block between BEGIN/END markers and replaces only that
+// block on each injection. Anything outside the markers (keys written by
+// the agent, by `hermes claw migrate`, or by an operator) is preserved
+// across both incremental updates and full reconciliation runs.
+//
+// These constants are exported so docs and the bootstrap script can
+// reference the exact strings.
+const (
+	EnvBlockBegin = "# BEGIN sluice-managed (do not edit)"
+	EnvBlockEnd   = "# END sluice-managed"
+)
+
 // BuildEnvInjectionScript constructs a shell script that writes each key=value
 // pair from envMap into the agent's env file inside the container. The path
 // defaults to ~/.openclaw/.env (OpenclawProfile); pass a different profile
 // via BuildEnvInjectionScriptForProfile to target Hermes or future agents.
 //
-// When fullReplace is false, existing entries with the same key are updated
-// in-place via sed and new entries are appended (merge semantics). When
-// fullReplace is true, the file is truncated first so that only the entries
-// in envMap remain (reconciliation semantics). The bsdSed flag controls
-// whether to use BSD sed syntax (sed -i ”) or GNU sed syntax (sed -i).
+// Sluice writes its keys into a single fenced block (see EnvBlockBegin /
+// EnvBlockEnd). On each call the existing block is removed and a fresh
+// block is appended, so any keys outside the block are preserved
+// regardless of fullReplace. The bsdSed flag controls whether to use BSD
+// sed syntax (sed -i ”) or GNU sed syntax (sed -i).
+//
+// The fullReplace flag is retained for API compatibility but no longer
+// affects behavior: every call now reconciles the managed block, which
+// is the safe semantic for both startup and SIGHUP-triggered reloads.
+// Removing a binding's env var means it stops appearing in envMap, which
+// causes the next injection to drop it from the block.
 //
 // Both keys and values are validated/escaped to prevent shell injection:
 // keys must match [A-Za-z_][A-Za-z0-9_]*, values are single-quoted with
-// internal single quotes escaped, and the sed delimiter uses ASCII 0x01
-// (SOH) to avoid conflicts with any printable character in values.
+// internal single quotes escaped, and shell metacharacters in the marker
+// strings are not interpolated from user input.
 func BuildEnvInjectionScript(envMap map[string]string, bsdSed bool, fullReplace bool) (string, error) {
 	return BuildEnvInjectionScriptForProfile(OpenclawProfile, envMap, bsdSed, fullReplace)
 }
@@ -123,49 +143,80 @@ func BuildEnvInjectionScript(envMap map[string]string, bsdSed bool, fullReplace 
 // targets the env file path declared by the given AgentProfile. A nil
 // profile defaults to OpenclawProfile so existing call sites keep their
 // behavior.
-func BuildEnvInjectionScriptForProfile(profile *AgentProfile, envMap map[string]string, bsdSed bool, fullReplace bool) (string, error) {
+func BuildEnvInjectionScriptForProfile(profile *AgentProfile, envMap map[string]string, bsdSed bool, _ bool) (string, error) {
 	p := resolveProfile(profile)
 	if err := validateEnvFileRelPath(p.EnvFileRelPath); err != nil {
 		return "", fmt.Errorf("agent profile %q: %w", p.Name, err)
 	}
-	var script strings.Builder
-	script.WriteString(fmt.Sprintf(`ENV_FILE="$HOME/%s" && mkdir -p "$(dirname "$ENV_FILE")"`, p.EnvFileRelPath))
-	if fullReplace {
-		// Truncate the file so stale entries from removed bindings are cleared.
-		script.WriteString(` && : > "$ENV_FILE"`)
-	} else {
-		script.WriteString(` && touch "$ENV_FILE"`)
+
+	// Validate and pre-format every entry up front so a bad key fails the
+	// whole call before any side effects rather than partially writing
+	// the block.
+	keys := make([]string, 0, len(envMap))
+	for k := range envMap {
+		if err := ValidateEnvVarKey(k); err != nil {
+			return "", err
+		}
+		keys = append(keys, k)
 	}
+	// Stable order makes the file diff-friendly across runs.
+	sort.Strings(keys)
+
+	var script strings.Builder
+	script.WriteString(fmt.Sprintf(
+		`ENV_FILE="$HOME/%s" && mkdir -p "$(dirname "$ENV_FILE")" && touch "$ENV_FILE"`,
+		p.EnvFileRelPath,
+	))
 
 	sedFlag := "-i"
 	if bsdSed {
 		sedFlag = "-i ''"
 	}
 
-	for k, v := range envMap {
-		if err := ValidateEnvVarKey(k); err != nil {
-			return "", err
-		}
+	// Step 1: delete any existing sluice-managed block. The pattern is an
+	// exact match on the marker comment lines, so it never strikes a key
+	// the agent or migration wrote.
+	beginEsc := sedRegexEscape(EnvBlockBegin)
+	endEsc := sedRegexEscape(EnvBlockEnd)
+	script.WriteString(fmt.Sprintf(
+		` && sed %s '/^%s$/,/^%s$/d' "$ENV_FILE"`,
+		sedFlag, beginEsc, endEsc,
+	))
+
+	// Step 2: append a fresh block. Skip the block entirely when there is
+	// nothing to manage so we do not leave empty markers behind.
+	if len(keys) == 0 {
+		return script.String(), nil
+	}
+	script.WriteString(fmt.Sprintf(` && { echo '%s'`, EnvBlockBegin))
+	for _, k := range keys {
+		v := envMap[k]
+		// Empty value means the binding wants the key gone. The marker
+		// block is rebuilt fresh on every call, so simply omitting the
+		// key from the new block is enough to remove it from the file.
 		if v == "" {
-			// Empty value means the env var should be removed from the file.
-			// Use sed to delete the line matching ^KEY=.
-			script.WriteString(fmt.Sprintf(
-				" && sed %s '/^%s=/d' \"$ENV_FILE\"",
-				sedFlag, k,
-			))
 			continue
 		}
-		// Use single quotes around the value with proper escaping.
-		// Replace single quotes in value with '"'"' (end single-quote,
-		// double-quote a single-quote, start single-quote again).
 		escaped := strings.ReplaceAll(v, "'", "'\"'\"'")
-		// Use ASCII SOH (0x01) as sed delimiter to avoid conflicts with
-		// any printable character that might appear in phantom values.
-		script.WriteString(fmt.Sprintf(
-			" && if grep -q '^%s=' \"$ENV_FILE\"; then sed %s 's\x01^%s=.*\x01%s=%s\x01' \"$ENV_FILE\"; else echo '%s=%s' >> \"$ENV_FILE\"; fi",
-			k, sedFlag, k, k, escaped, k, escaped,
-		))
+		script.WriteString(fmt.Sprintf(`; echo '%s=%s'`, k, escaped))
 	}
+	script.WriteString(fmt.Sprintf(`; echo '%s'; } >> "$ENV_FILE"`, EnvBlockEnd))
 
 	return script.String(), nil
+}
+
+// sedRegexEscape escapes characters that have special meaning in a basic
+// sed regex anchored on a marker comment line. We control the marker
+// strings, but a brittle assumption that no future marker would contain
+// a metacharacter is the kind of cleanup people forget to do.
+func sedRegexEscape(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '/', '.', '*', '[', ']', '\\', '^', '$', '(', ')':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }

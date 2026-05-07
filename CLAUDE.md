@@ -132,8 +132,21 @@ Adding a new profile is a single edit to `internal/container/agent_profile.go`: 
 Hermes-specific caveats:
 
 - `ReloadCmd` is nil; `ReloadSecrets` logs a notice and returns nil. New phantom tokens take effect on the next Hermes message or `/reload-mcp` slash command.
-- `WireMCPCmd` rewrites `~/.hermes/config.yaml` directly. Hermes picks up the change on its next startup or via `/reload-mcp` from the chat session — sluice cannot trigger that command remotely.
+- `WireMCPCmd` rewrites `~/.hermes/config.yaml` directly via a sh wrapper that activates `/opt/hermes/.venv` (so PyYAML is on the import path inside the official Hermes Docker image). For native installs without the venv the activation is a no-op and the system `python3` is used. Hermes picks up the change on its next startup or via `/reload-mcp` from the chat session — sluice cannot trigger that command remotely.
 - Hermes' Modal, Daytona, and Vercel Sandbox terminal backends run code on third-party infrastructure that sluice cannot intercept. The local and Docker Hermes backends are the supported targets for sluice's network-layer governance.
+
+### Sluice-managed env block
+
+Sluice writes its phantom tokens into a fenced block inside the agent's env file:
+
+```
+# BEGIN sluice-managed (do not edit)
+KEY1=phantom-value-1
+KEY2=phantom-value-2
+# END sluice-managed
+```
+
+Each injection rebuilds the block: existing markers are removed and a fresh block is appended. Anything outside the markers (keys written by `hermes claw migrate`, by the agent's own auth flow, or by an operator) is preserved across both incremental updates and full reconciliation runs. The `fullReplace` flag on `BuildEnvInjectionScript` is retained for API compatibility but no longer affects file behavior — every call reconciles the managed block. Removing a binding's `env_var` simply drops the key from the new block on the next injection.
 
 ## MCP Gateway Setup
 

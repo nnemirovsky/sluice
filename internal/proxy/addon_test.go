@@ -2,12 +2,14 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1109,6 +1111,84 @@ func TestAddonResponse_OAuthPhantomSwapFormEncoded(t *testing.T) {
 	}
 
 	waitAddonPersist(t, addon)
+}
+
+func TestAddonResponse_OAuthGzipDecompression(t *testing.T) {
+	// Real symptom from a deployed Hermes container: OpenAI Codex's token
+	// endpoint returns gzip-encoded JSON. Sluice's old code parsed the
+	// raw bytes (\x1f\x8b magic) as JSON and crashed before phantom swap.
+	// This test reproduces that exact shape.
+	oauthCred := &vault.OAuthCredential{
+		AccessToken:  "old-access",
+		RefreshToken: "old-refresh",
+		TokenURL:     testOAuthTokenURL,
+	}
+	addon, _ := setupOAuthAddon(t, "gzip_oauth", oauthCred)
+	client := setupAddonConn(addon, "auth.example.com:443")
+
+	plain := mustJSON(t, map[string]interface{}{
+		"access_token":  "real-gzip-access-token-99999",
+		"refresh_token": "real-gzip-refresh-token-88888",
+		"expires_in":    3600,
+		"token_type":    "Bearer",
+	})
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(plain); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+
+	f := newTestResponseFlow(client, testOAuthTokenURL, 200, buf.Bytes(), "application/json")
+	f.Response.Header.Set("Content-Encoding", "gzip")
+	f.Response.Header.Set("Content-Length", strconv.Itoa(buf.Len()))
+
+	addon.Response(f)
+
+	body := string(f.Response.Body)
+	if strings.Contains(body, "real-gzip-access-token-99999") {
+		t.Error("real access token leaked through gzip path")
+	}
+	if strings.Contains(body, "real-gzip-refresh-token-88888") {
+		t.Error("real refresh token leaked through gzip path")
+	}
+	accessPhantom := oauthPhantomAccess("gzip_oauth")
+	if !strings.Contains(body, accessPhantom) {
+		t.Errorf("expected phantom access token after gunzip+swap, got: %q", body)
+	}
+	// After plaintext rewrite the response should not advertise itself
+	// as still-compressed; otherwise the client would try to gunzip the
+	// already-decoded JSON and fail.
+	if got := f.Response.Header.Get("Content-Encoding"); got != "" {
+		t.Errorf("Content-Encoding should be cleared after plaintext rewrite, got %q", got)
+	}
+
+	waitAddonPersist(t, addon)
+}
+
+func TestAddonResponse_OAuthMalformedBodyDoesNotPanic(t *testing.T) {
+	// Random non-JSON bytes used to crash the OAuth response handler with
+	// a nil-pointer panic that took down the proxy. The handler must
+	// surface the parse error and leave the proxy running.
+	oauthCred := &vault.OAuthCredential{
+		AccessToken: "old-access",
+		TokenURL:    testOAuthTokenURL,
+	}
+	addon, _ := setupOAuthAddon(t, "panic_oauth", oauthCred)
+	client := setupAddonConn(addon, "auth.example.com:443")
+
+	garbage := []byte{0x00, 0xff, 0xc3, 0x28, 0xa0, 0x90}
+	f := newTestResponseFlow(client, testOAuthTokenURL, 200, garbage, "application/json")
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("OAuth response handler must not panic; got: %v", r)
+		}
+	}()
+	addon.Response(f)
 }
 
 func TestAddonResponse_Non2xxPassesThrough(t *testing.T) {

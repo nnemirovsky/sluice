@@ -88,19 +88,26 @@ func TestHermesProfile_WireMCPUsesPython(t *testing.T) {
 		t.Fatal("hermes should have a wire MCP command")
 	}
 	cmd := HermesProfile.WireMCPCmd("sluice", "http://sluice:3000/mcp")
-	if cmd[0] != "python3" {
-		t.Errorf("hermes wire MCP should use python3, got: %v", cmd[:1])
+	// The wire script is invoked through a sh wrapper that activates the
+	// container's bundled venv (where PyYAML lives) before exec'ing python3.
+	if cmd[0] != "sh" || cmd[1] != "-c" {
+		t.Fatalf("hermes wire MCP should be invoked via sh -c, got: %v", cmd[:2])
 	}
-	if cmd[1] != "-c" {
-		t.Errorf("hermes wire MCP should use -c, got: %v", cmd[:2])
+	if !strings.Contains(cmd[2], "/opt/hermes/.venv/bin/activate") {
+		t.Error("hermes wire MCP wrapper should activate the bundled venv when present")
+	}
+	if !strings.Contains(cmd[2], "exec python3") {
+		t.Error("hermes wire MCP wrapper should exec python3 after optional venv activation")
 	}
 	if cmd[len(cmd)-2] != "sluice" || cmd[len(cmd)-1] != "http://sluice:3000/mcp" {
 		t.Errorf("hermes wire MCP last args should be name and url, got: %v", cmd[len(cmd)-2:])
 	}
-	if !strings.Contains(cmd[2], "mcp_servers") {
+	// The python script is the 4th positional argument (script body).
+	script := cmd[3]
+	if !strings.Contains(script, "mcp_servers") {
 		t.Error("hermes wire MCP script should target mcp_servers key")
 	}
-	if !strings.Contains(cmd[2], "yaml.safe_load") {
+	if !strings.Contains(script, "yaml.safe_load") {
 		t.Error("hermes wire MCP script should parse yaml safely")
 	}
 }
@@ -154,6 +161,62 @@ func TestBuildEnvInjectionScriptForProfile_RejectsUnsafePath(t *testing.T) {
 	_, err := BuildEnvInjectionScriptForProfile(bad, map[string]string{"K": "v"}, false, false)
 	if err == nil {
 		t.Fatal("expected error for unsafe EnvFileRelPath")
+	}
+}
+
+func TestBuildEnvInjectionScript_NeverTruncatesForeignKeys(t *testing.T) {
+	// The script must never invoke `: > "$ENV_FILE"` (full truncate).
+	// Foreign keys (set by the agent or by `hermes claw migrate`) must
+	// survive every injection. Sluice only manages the fenced block.
+	for _, full := range []bool{false, true} {
+		script, err := BuildEnvInjectionScript(map[string]string{"K": "v"}, false, full)
+		if err != nil {
+			t.Fatalf("fullReplace=%v: unexpected error: %v", full, err)
+		}
+		if strings.Contains(script, ": > \"$ENV_FILE\"") {
+			t.Errorf("fullReplace=%v: script must not truncate the file: %s", full, script)
+		}
+		if !strings.Contains(script, "BEGIN sluice-managed") || !strings.Contains(script, "END sluice-managed") {
+			t.Errorf("fullReplace=%v: script must reopen the marker block: %s", full, script)
+		}
+	}
+}
+
+func TestBuildEnvInjectionScript_EmptyMapStillRebuildsBlock(t *testing.T) {
+	// Even when there are no managed keys, the script must remove any
+	// previous sluice-managed block. Otherwise stale phantom values
+	// from the previous run would remain in the file.
+	script, err := BuildEnvInjectionScript(map[string]string{}, false, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(script, "BEGIN sluice-managed") {
+		t.Errorf("script should reference the marker even when the new block is empty: %s", script)
+	}
+	if strings.Contains(script, "echo '") && strings.Contains(script, "=") {
+		t.Errorf("empty envMap should not echo any KEY=value lines: %s", script)
+	}
+}
+
+func TestBuildEnvInjectionScript_KeysAreSorted(t *testing.T) {
+	// Stable order keeps the env file diff-friendly across runs and
+	// makes test assertions robust against Go map iteration randomness.
+	script, err := BuildEnvInjectionScript(map[string]string{
+		"ZED":    "z",
+		"ALPHA":  "a",
+		"MIDDLE": "m",
+	}, false, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	idxA := strings.Index(script, "ALPHA=")
+	idxM := strings.Index(script, "MIDDLE=")
+	idxZ := strings.Index(script, "ZED=")
+	if idxA < 0 || idxM < 0 || idxZ < 0 {
+		t.Fatalf("expected all three keys in script: %s", script)
+	}
+	if idxA >= idxM || idxM >= idxZ {
+		t.Errorf("keys should be sorted (ALPHA < MIDDLE < ZED), got positions %d %d %d", idxA, idxM, idxZ)
 	}
 }
 

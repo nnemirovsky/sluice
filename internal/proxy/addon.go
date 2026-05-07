@@ -793,7 +793,35 @@ func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) io
 // replaces real tokens with phantoms, updates the flow's response body,
 // and schedules an async vault update. Returns true if the body was
 // modified.
-func (a *SluiceAddon) processAddonOAuthResponse(f *mitmproxy.Flow, credName string) (bool, error) {
+//
+// If the response is compressed (Content-Encoding: gzip, br, deflate, zstd
+// or stacked combinations of those), the body is decoded in place via
+// safeReplaceToDecodedBody before parsing. The replacement body is written
+// back as plaintext and Content-Encoding is stripped so the client decodes
+// nothing further. The deferred recover guards against panics anywhere
+// in the rewrite path so a malformed token endpoint response cannot take
+// the proxy down.
+func (a *SluiceAddon) processAddonOAuthResponse(f *mitmproxy.Flow, credName string) (modified bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic in OAuth response handler for %q: %v", credName, r)
+			modified = false
+		}
+	}()
+
+	if f == nil || f.Response == nil {
+		return false, nil
+	}
+	if len(f.Response.Body) == 0 {
+		return false, nil
+	}
+
+	if f.Response.Header != nil && hasAnyContentEncoding(f.Response.Header) {
+		if decErr := safeReplaceToDecodedBody(f); decErr != nil {
+			return false, fmt.Errorf("decode compressed token response: %w", decErr)
+		}
+	}
+
 	body := f.Response.Body
 	if len(body) == 0 {
 		return false, nil
@@ -804,15 +832,19 @@ func (a *SluiceAddon) processAddonOAuthResponse(f *mitmproxy.Flow, credName stri
 		contentType = f.Response.Header.Get("Content-Type")
 	}
 
-	modified, err := a.swapOAuthTokens(body, contentType, credName)
+	swapped, err := a.swapOAuthTokens(body, contentType, credName)
 	if err != nil {
 		return false, err
 	}
 
-	f.Response.Body = modified
+	f.Response.Body = swapped
 	if f.Response.Header != nil {
-		f.Response.Header.Set("Content-Length", strconv.Itoa(len(modified)))
+		f.Response.Header.Set("Content-Length", strconv.Itoa(len(swapped)))
 		f.Response.Header.Del("Transfer-Encoding")
+		// Body is plaintext after safeReplaceToDecodedBody (or was already
+		// plaintext). Drop Content-Encoding so the client does not try to
+		// decode it again.
+		f.Response.Header.Del("Content-Encoding")
 	}
 
 	return true, nil
