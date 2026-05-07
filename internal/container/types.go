@@ -118,8 +118,14 @@ func ValidateEnvVarKey(key string) error {
 // silently-dropped fragment or, when sourced, an unrelated KEY=value
 // assignment). NUL bytes break dotenv parsers and shell sourcing.
 //
-// Any other byte is allowed because the value is single-quoted inside
-// the generated `echo` command, neutralizing shell metacharacters.
+// Any other byte is allowed because the generated script writes
+// values inside the quoted-tag heredoc with single-quoted values
+// (KEY=apostrophe value apostrophe). Embedded single quotes are
+// escaped via a four-character sequence: apostrophe, backslash,
+// apostrophe, apostrophe. See BuildEnvInjectionScriptForProfile for
+// the strings.ReplaceAll call that emits it. Both shell source and
+// dotenv parsers treat that format as a literal string with no
+// expansion, so $, backticks, spaces, etc. are all safe.
 func validateEnvVarValue(value string) error {
 	for i, r := range value {
 		if r == '\n' || r == '\r' {
@@ -173,13 +179,18 @@ const envHeredocTag = "__SLUICE_ENV_BLOCK_END__"
 // to drop it from the block.
 //
 // File format and quoting:
-//   - The env file is intended to be loaded both via `source` (compose
-//     uses `set -a; . file; set +a`) and via dotenv parsers
-//     (python-dotenv, hermes' env_loader). Sluice writes its keys as
-//     `KEY='value'` with single-quoted values. Embedded single quotes
-//     are escaped using the `'\”` idiom (close, escaped quote,
-//     reopen). Both shell and dotenv parse this format identically:
-//     no parameter expansion, no command substitution.
+//   - The env file is intended to be loaded both via shell source
+//     (compose uses `set -a; . file; set +a`) and via dotenv parsers
+//     (python-dotenv, hermes env_loader). Sluice writes its keys as
+//     KEY='value' with single-quoted values. Embedded single quotes
+//     are escaped via the four-character sequence: single-quote,
+//     backslash, single-quote, single-quote (close current quoted
+//     run, emit an escaped literal quote, reopen the quoted run).
+//     Both shell source and dotenv parse this format identically:
+//     no parameter expansion, no command substitution. The Go
+//     literal for that escape sequence is the raw string with
+//     contents quote-backslash-quote-quote (see the
+//     strings.ReplaceAll call on value below).
 //
 // Validation:
 //   - keys must match [A-Za-z_][A-Za-z0-9_]* (POSIX env var name).
@@ -224,19 +235,25 @@ func BuildEnvInjectionScriptForProfile(profile *AgentProfile, envMap map[string]
 		p.EnvFileRelPath,
 	))
 
-	// Step 1: delete any existing sluice-managed block. We use an awk
-	// pre-pass to delete the block ONLY when both BEGIN and END markers
-	// are present in the file. A naive `sed '/BEGIN/,/END/d'` would
-	// happily delete from BEGIN through end-of-file when END is missing
-	// (e.g. partial write, manual edit) which would silently nuke any
-	// foreign keys the new design promises to preserve.
+	// Step 1: delete any existing sluice-managed block. The awk pass
+	// removes the block ONLY when there is at least one well-formed
+	// pair where BEGIN appears before a subsequent END. Edge cases
+	// the script handles correctly:
 	//
-	// The awk script reads the file twice: once to confirm both markers
-	// exist (NR==FNR pass), once to print everything outside the marker
-	// pair (skip lines from BEGIN through END inclusive). When either
-	// marker is missing the file is rewritten unchanged. Output is
-	// staged to a sibling temp file and renamed in place so a crash
-	// mid-rewrite leaves the original env file intact.
+	//   - Either marker missing: file is rewritten unchanged.
+	//   - END appears before any BEGIN (manual hand-edit gone wrong):
+	//     no pair is well-formed, file is rewritten unchanged.
+	//   - Multiple BEGIN/END pairs: every well-formed pair is removed.
+	//   - Stray extra BEGIN with no matching END: skip turns on but
+	//     stays on through EOF — except we explicitly track whether
+	//     we've seen a matching END for THIS BEGIN, and emit any lines
+	//     following an unmatched BEGIN unchanged.
+	//
+	// A naive `sed '/BEGIN/,/END/d'` would silently nuke from BEGIN
+	// through end-of-file when END is missing, destroying foreign
+	// keys the new design promises to preserve. Output is staged to
+	// a sibling temp file and renamed in place so a crash mid-rewrite
+	// leaves the original env file intact.
 	//
 	// `bsdSed` is no longer consulted here because the awk path is
 	// portable across BSD and GNU userlands. The parameter remains in
@@ -244,14 +261,23 @@ func BuildEnvInjectionScriptForProfile(profile *AgentProfile, envMap map[string]
 	_ = bsdSed
 	awkBegin := awkStringEscape(EnvBlockBegin)
 	awkEnd := awkStringEscape(EnvBlockEnd)
+	// Pass 1: walk the file recording every well-formed BEGIN..END
+	// pair as a range to delete. `start` holds the most recent BEGIN
+	// line number; an END seen while start is set marks every line
+	// from start to the END (inclusive) for deletion and clears
+	// start. An END with no preceding BEGIN is ignored. A BEGIN with
+	// no subsequent END leaves start non-empty at EOF, no range is
+	// recorded for it, and those lines pass through unchanged so an
+	// operator can see the broken state instead of silently losing
+	// foreign keys after the unmatched BEGIN.
+	//
+	// Pass 2: print every line whose number is NOT in the delete
+	// set. Multiple BEGIN..END pairs are all removed; orphaned
+	// markers stay verbatim.
 	script.WriteString(fmt.Sprintf(
 		` && TMP="$ENV_FILE.sluice.$$" && awk -v B='%s' -v E='%s' '`+
-			`NR==FNR { if($0==B) hb=1; if($0==E) he=1; next }`+
-			` !(hb && he) { print; next }`+
-			` $0==B { skip=1; next }`+
-			` skip && $0==E { skip=0; next }`+
-			` !skip { print }'`+
-			` "$ENV_FILE" "$ENV_FILE" > "$TMP" && mv "$TMP" "$ENV_FILE"`,
+			`NR==FNR { if($0==B) start=NR; else if($0==E && start) { for(i=start;i<=NR;i++) drop[i]=1; start=0 } next }`+
+			` !drop[FNR] { print }' "$ENV_FILE" "$ENV_FILE" > "$TMP" && mv "$TMP" "$ENV_FILE"`,
 		awkBegin, awkEnd,
 	))
 
