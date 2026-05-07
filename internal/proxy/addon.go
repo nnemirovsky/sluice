@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -647,6 +648,30 @@ func (a *SluiceAddon) StreamRequestModifier(f *mitmproxy.Flow, in io.Reader) io.
 // redact patterns (see SetRedactRules) so credential strings in upstream
 // responses are scrubbed before being relayed to the agent.
 func (a *SluiceAddon) Response(f *mitmproxy.Flow) {
+	// Top-level recover so a panic inside any sub-step (OAuth swap,
+	// DLP scan, future hooks) cannot escape into go-mitmproxy's
+	// generic recover, which abandons the response body and leaves
+	// the agent reading an empty stream. We log the full stack so
+	// the underlying bug can be diagnosed later, but the response
+	// continues with whatever state f.Response was in at the time
+	// of the panic. Real tokens cannot leak: processOAuthResponseIf-
+	// Matching has its own snapshot/rollback, and any panic in DLP
+	// runs AFTER OAuth swap (so tokens are already phantoms by
+	// then).
+	defer func() {
+		if r := recover(); r != nil {
+			host := "unknown"
+			method := ""
+			if f != nil && f.Request != nil {
+				if f.Request.URL != nil {
+					host = f.Request.URL.Host
+				}
+				method = f.Request.Method
+			}
+			log.Printf("[ADDON] PANIC in Response handler for %s %s: %v\n%s", method, host, r, debug.Stack())
+		}
+	}()
+
 	if f.Response == nil || f.Request == nil {
 		return
 	}
@@ -711,9 +736,40 @@ func (a *SluiceAddon) processOAuthResponseIfMatching(f *mitmproxy.Flow) {
 // emit a single WARNING per client connection so operators notice the
 // gap without log spam from multi-chunk streams. The dedup state lives
 // on dlpStreamWarned, scoped to the client connection id.
-func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) io.Reader {
-	if f.Request == nil {
-		return in
+func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) (out io.Reader) {
+	// Default to passing the input through unchanged; named return
+	// lets the deferred recover ensure we always hand SOMETHING
+	// usable back to go-mitmproxy on a panic, instead of letting
+	// the panic escape into mitmproxy's outer recover (which
+	// abandons the response body entirely).
+	out = in
+
+	if f == nil || f.Request == nil {
+		return out
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			host := "unknown"
+			if f.Request != nil && f.Request.URL != nil {
+				host = f.Request.URL.Host
+			}
+			log.Printf("[ADDON] PANIC in StreamResponseModifier for %s: %v\n%s", host, r, debug.Stack())
+			out = in
+		}
+	}()
+
+	// Defensive nil check on the input reader. go-mitmproxy
+	// normally passes a non-nil reader (the buffered or live
+	// upstream stream), but a nil here would cause io.LimitReader
+	// + io.ReadAll below to nil-deref on the first Read call. When
+	// in is nil, return nil so reply() skips its copyStream branch
+	// and falls through to writing f.Response.Body (which the
+	// Response handler already populated with phantom-swapped
+	// bytes when applicable).
+	if in == nil {
+		out = nil
+		return out
 	}
 
 	// Warn when DLP rules are configured but the response is streamed.

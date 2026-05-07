@@ -309,7 +309,14 @@ func BuildEnvInjectionScriptForProfile(profile *AgentProfile, envMap map[string]
 	// before sluice ever exec's in. The chown is best-effort: a
 	// read-only env file still satisfies sluice's own usage, so a
 	// stat or chown failure does not abort the script.
-	const chownStep = ` && { DIR_OWNER=$(stat -c '%u:%g' "$(dirname "$ENV_FILE")" 2>/dev/null);` +
+	//
+	// Stat flag portability: GNU stat (Linux containers like
+	// alpine, debian) uses `-c`, BSD stat (macOS guests booted via
+	// the tart backend) uses `-f`. The two `stat` calls are run as
+	// fallbacks under a single subshell so whichever userland is
+	// in the agent's container resolves the directory owner.
+	const chownStep = ` && { DIR_OWNER=$(stat -c '%u:%g' "$(dirname "$ENV_FILE")" 2>/dev/null` +
+		` || stat -f '%u:%g' "$(dirname "$ENV_FILE")" 2>/dev/null);` +
 		` [ -n "$DIR_OWNER" ] && chown "$DIR_OWNER" "$ENV_FILE" 2>/dev/null;` +
 		` true; }`
 
