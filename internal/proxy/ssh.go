@@ -223,6 +223,22 @@ func sshRelayNewChannels(chans <-chan ssh.NewChannel, dst ssh.Conn) {
 // Session.Wait() blocks until it receives SSH_MSG_CHANNEL_CLOSE, not
 // just EOF. Closing prematurely would either drop exit-status or
 // deadlock the session.
+//
+// Wire-order discipline for the agent direction (src):
+//
+//	data*, exit-status (request), EOF, close
+//
+// The agent must observe exit-status BEFORE channel-close, otherwise
+// session.Wait surfaces the missing exit code as an EOF error. The
+// data-copy goroutine used to call srcChan.CloseWrite as soon as it
+// saw EOF on dstChan, which races the request-forwarder writing
+// exit-status on the same channel — depending on goroutine schedule
+// the agent could see EOF and channel-close before the request bytes
+// reached the wire. We now hold the agent-side EOF until all three
+// upstream-to-agent goroutines have drained, then issue CloseWrite
+// followed by Close. Inputs from the agent (stdin) still get EOF'd
+// to the upstream as soon as the agent closes its write side, so
+// upstream `cat`-style commands still terminate.
 func sshHandleChannel(newChan ssh.NewChannel, dst ssh.Conn) {
 	dstChan, dstReqs, err := dst.OpenChannel(newChan.ChannelType(), newChan.ExtraData())
 	if err != nil {
@@ -254,16 +270,24 @@ func sshHandleChannel(newChan ssh.NewChannel, dst ssh.Conn) {
 		upstreamDone <- struct{}{}
 	}()
 
-	// Relay stdout/stdin bidirectionally.
-	// CloseWrite signals EOF to the remote side so processes reading
-	// stdin until EOF (cat, sort, piped input) terminate properly.
+	// Relay stdin: agent -> upstream. CloseWrite tells upstream "no
+	// more stdin", which is essential for piped commands (cat, sort,
+	// xargs) to exit. Stays in the per-direction goroutine so EOF
+	// reaches the upstream as soon as the agent half-closes.
 	go func() {
 		_, _ = io.Copy(dstChan, srcChan)
 		_ = dstChan.CloseWrite()
 	}()
+
+	// Relay stdout: upstream -> agent. We do NOT call srcChan.CloseWrite
+	// here. Doing so would race the exit-status request-forwarder
+	// (above) on the same SSH channel and let the agent observe EOF
+	// before the exit-status bytes hit the wire. The deferred
+	// CloseWrite at the end of this function is the single source of
+	// truth for "agent should stop reading stdout", and it fires only
+	// after every upstream-side goroutine has drained.
 	go func() {
 		_, _ = io.Copy(srcChan, dstChan)
-		_ = srcChan.CloseWrite()
 		upstreamDone <- struct{}{}
 	}()
 
@@ -280,8 +304,11 @@ func sshHandleChannel(newChan ssh.NewChannel, dst ssh.Conn) {
 	<-upstreamDone
 	<-upstreamDone
 
-	// Close both channels. The agent's session receives the channel
-	// close and Session.Wait() can return.
+	// Now that exit-status has been forwarded (the dstReqs goroutine
+	// has finished), signal stdout EOF to the agent and close the
+	// channel. The agent's session.Wait() now sees the documented
+	// order: data, exit-status, EOF, close.
+	_ = srcChan.CloseWrite()
 	_ = srcChan.Close()
 	_ = dstChan.Close()
 }

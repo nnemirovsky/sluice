@@ -241,17 +241,26 @@ func BuildEnvInjectionScriptForProfile(profile *AgentProfile, envMap map[string]
 		awkBegin, awkEnd,
 	))
 
-	// Step 2: append a fresh block. Skip the block entirely when there is
-	// nothing to manage so we do not leave empty markers behind.
-	if len(keys) == 0 {
+	// Step 2: append a fresh block, but only when there is at least one
+	// non-empty value to write. An empty value in envMap signals "the
+	// binding wants this key gone"; the marker block is rebuilt fresh
+	// on every call, so omitting the key drops it from the file.
+	// Counting non-empty entries up front prevents emitting an empty
+	// "BEGIN ... END" pair when every key in envMap had an empty value
+	// (or when envMap itself is empty).
+	hasContent := false
+	for _, k := range keys {
+		if envMap[k] != "" {
+			hasContent = true
+			break
+		}
+	}
+	if !hasContent {
 		return script.String(), nil
 	}
 	script.WriteString(fmt.Sprintf(` && { echo '%s'`, EnvBlockBegin))
 	for _, k := range keys {
 		v := envMap[k]
-		// Empty value means the binding wants the key gone. The marker
-		// block is rebuilt fresh on every call, so simply omitting the
-		// key from the new block is enough to remove it from the file.
 		if v == "" {
 			continue
 		}
