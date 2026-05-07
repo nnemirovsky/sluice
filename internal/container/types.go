@@ -145,6 +145,13 @@ const (
 	EnvBlockEnd   = "# END sluice-managed"
 )
 
+// envHeredocTag is the unquoted heredoc terminator used when the
+// generated script appends the managed block to the env file. It must
+// not appear as a complete line inside any phantom value, which is
+// enforced by validateEnvVarValue rejecting newlines (a single value
+// can never span multiple file lines, so it can never equal the tag).
+const envHeredocTag = "__SLUICE_ENV_BLOCK_END__"
+
 // BuildEnvInjectionScript constructs a shell script that writes each key=value
 // pair from envMap into the agent's env file inside the container. The path
 // defaults to ~/.openclaw/.env (OpenclawProfile); pass a different profile
@@ -156,24 +163,31 @@ const (
 // regardless of fullReplace.
 //
 // The implementation uses awk to delete the old block (only when both
-// markers are present) and a simple appended `echo` chain to write the
-// new block. Both bsdSed and fullReplace are retained in the signature
-// for source-level compatibility with earlier callers but no longer
-// affect behavior: awk is portable across BSD and GNU userlands, and
-// every call reconciles the managed block (the safe semantic for both
+// markers are present) and a quoted-tag heredoc to write the new block.
+// Both bsdSed and fullReplace are retained in the signature for
+// source-level compatibility with earlier callers but no longer affect
+// behavior: awk is portable across BSD and GNU userlands, and every
+// call reconciles the managed block (the safe semantic for both
 // startup and SIGHUP-triggered reloads). Removing a binding's env var
 // means it stops appearing in envMap, which causes the next injection
 // to drop it from the block.
 //
+// File format and quoting:
+//   - The env file is intended to be loaded both via `source` (compose
+//     uses `set -a; . file; set +a`) and via dotenv parsers
+//     (python-dotenv, hermes' env_loader). Sluice writes its keys as
+//     `KEY='value'` with single-quoted values. Embedded single quotes
+//     are escaped using the `'\”` idiom (close, escaped quote,
+//     reopen). Both shell and dotenv parse this format identically:
+//     no parameter expansion, no command substitution.
+//
 // Validation:
 //   - keys must match [A-Za-z_][A-Za-z0-9_]* (POSIX env var name).
-//   - values must not contain newlines or NUL bytes; either would split
-//     the entry across multiple lines in the env file and inject a
-//     second KEY=value (or worse, an arbitrary shell directive when the
-//     file is sourced). Values are wrapped in single quotes inside the
-//     `echo` shell command so embedded single quotes, double quotes,
-//     spaces, $, and backticks are inert. The bytes that land in the
-//     file are the literal value with no shell interpretation.
+//   - values must not contain newlines or NUL bytes; either would
+//     split the entry across multiple lines in the env file and
+//     inject a second KEY=value (or worse, escape the heredoc). The
+//     newline rejection is also what guarantees a value can never
+//     equal envHeredocTag.
 func BuildEnvInjectionScript(envMap map[string]string, bsdSed bool, fullReplace bool) (string, error) {
 	return BuildEnvInjectionScriptForProfile(OpenclawProfile, envMap, bsdSed, fullReplace)
 }
@@ -258,16 +272,34 @@ func BuildEnvInjectionScriptForProfile(profile *AgentProfile, envMap map[string]
 	if !hasContent {
 		return script.String(), nil
 	}
-	script.WriteString(fmt.Sprintf(` && { echo '%s'`, EnvBlockBegin))
+
+	// Append the new block via a quoted-tag heredoc. The single quotes
+	// around the tag (`<<'TAG'`) tell the shell to perform NO expansion
+	// on the body — every byte we write between the heredoc start and
+	// the end tag lands in the file verbatim. That lets us emit
+	// `KEY='value'` lines whose contents are safe under both shell
+	// `source` and dotenv parsing.
+	script.WriteString(fmt.Sprintf(" && cat >> \"$ENV_FILE\" <<'%s'\n", envHeredocTag))
+	script.WriteString(EnvBlockBegin)
+	script.WriteString("\n")
 	for _, k := range keys {
 		v := envMap[k]
 		if v == "" {
 			continue
 		}
-		escaped := strings.ReplaceAll(v, "'", "'\"'\"'")
-		script.WriteString(fmt.Sprintf(`; echo '%s=%s'`, k, escaped))
+		// Escape embedded single quotes: 'value' -> 'val'\''ue'.
+		// The result, wrapped in single quotes, is one well-formed
+		// dotenv/shell string with no expansion.
+		escaped := strings.ReplaceAll(v, "'", `'\''`)
+		script.WriteString(k)
+		script.WriteString("='")
+		script.WriteString(escaped)
+		script.WriteString("'\n")
 	}
-	script.WriteString(fmt.Sprintf(`; echo '%s'; } >> "$ENV_FILE"`, EnvBlockEnd))
+	script.WriteString(EnvBlockEnd)
+	script.WriteString("\n")
+	script.WriteString(envHeredocTag)
+	script.WriteString("\n")
 
 	return script.String(), nil
 }

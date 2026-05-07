@@ -49,6 +49,13 @@ HERMES_VOLUME="${PROJECT_NAME}_hermes-home"
 HERMES_IMAGE="${HERMES_IMAGE:-nousresearch/hermes-agent:v2026.4.30}"
 BOOTSTRAP_OVERWRITE="${BOOTSTRAP_OVERWRITE:-1}"
 
+# Honor compose.yml's HERMES_UID/HERMES_GID overrides so files chowned
+# by this bootstrap stay readable when the operator pinned the runtime
+# user to a non-default UID/GID. Defaults match the hermes user baked
+# into the upstream image (UID/GID 10000).
+HERMES_UID="${HERMES_UID:-10000}"
+HERMES_GID="${HERMES_GID:-10000}"
+
 migrate_args=(
   --source /opt/data/.hermes/.migration-source
   --preset full
@@ -71,6 +78,8 @@ docker volume create "$HERMES_VOLUME" >/dev/null
 echo "==> staging legacy data (path renamed to avoid pgrep -f openclaw false-positive)"
 docker run --rm \
   --user 0:0 \
+  -e HERMES_UID="$HERMES_UID" \
+  -e HERMES_GID="$HERMES_GID" \
   -v "$LEGACY_VOLUME":/legacy:ro \
   -v "$HERMES_VOLUME":/opt/data/.hermes \
   --entrypoint /bin/bash \
@@ -78,14 +87,14 @@ docker run --rm \
     set -e
     rm -rf /opt/data/.hermes/.migration-source
     cp -a /legacy/.openclaw /opt/data/.hermes/.migration-source
-    chown -R 10000:10000 /opt/data/.hermes/.migration-source
+    chown -R "$HERMES_UID:$HERMES_GID" /opt/data/.hermes/.migration-source
   '
 
 echo "==> running hermes claw migrate (overwrite=$BOOTSTRAP_OVERWRITE)"
 docker run --rm \
   -e HERMES_HOME=/opt/data/.hermes \
-  -e HERMES_UID=10000 \
-  -e HERMES_GID=10000 \
+  -e HERMES_UID="$HERMES_UID" \
+  -e HERMES_GID="$HERMES_GID" \
   -v "$HERMES_VOLUME":/opt/data/.hermes \
   "$HERMES_IMAGE" \
   claw migrate "${migrate_args[@]}" \
@@ -94,11 +103,23 @@ docker run --rm \
 echo "==> patching mcp_servers.sluice.url into config.yaml"
 docker run --rm \
   -e HERMES_HOME=/opt/data/.hermes \
+  -e HERMES_UID="$HERMES_UID" \
+  -e HERMES_GID="$HERMES_GID" \
   -v "$HERMES_VOLUME":/opt/data/.hermes \
   --entrypoint /bin/bash \
   "$HERMES_IMAGE" -c '
     set -e
-    source /opt/hermes/.venv/bin/activate
+    # Activate the bundled venv when present (PyYAML lives there on the
+    # official Hermes image). Fall back to system python3 otherwise so
+    # this script also works against custom Hermes builds that omit the
+    # venv. Mirrors the runtime wrapper in HermesProfile.WireMCPCmd.
+    if [ -f /opt/hermes/.venv/bin/activate ]; then
+      . /opt/hermes/.venv/bin/activate
+    fi
+    if ! python3 -c "import yaml" 2>/dev/null; then
+      echo "error: python3 PyYAML is required but not available; install it or use an image that bundles it" >&2
+      exit 1
+    fi
     python3 - <<PY
 import os, yaml
 p = "/opt/data/.hermes/config.yaml"
@@ -117,7 +138,7 @@ if existing.get("url") != "http://sluice:3000/mcp":
 else:
     print("already patched")
 PY
-    chown 10000:10000 /opt/data/.hermes/config.yaml
+    chown "$HERMES_UID:$HERMES_GID" /opt/data/.hermes/config.yaml
   '
 
 echo "==> cleaning up staged migration source"

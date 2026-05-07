@@ -1,6 +1,9 @@
 package container
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -161,6 +164,81 @@ func TestBuildEnvInjectionScriptForProfile_RejectsUnsafePath(t *testing.T) {
 	_, err := BuildEnvInjectionScriptForProfile(bad, map[string]string{"K": "v"}, false, false)
 	if err == nil {
 		t.Fatal("expected error for unsafe EnvFileRelPath")
+	}
+}
+
+// TestBuildEnvInjectionScript_QuotesValuesForSourcing executes the
+// generated script against a real shell, then re-reads the resulting
+// env file via `set -a; . file; set +a` and confirms every value
+// round-trips byte-for-byte. The intent is to catch any future
+// regression where unquoted values would be subjected to shell
+// expansion (parameter, command substitution, glob) when sourced,
+// since the production deployment uses `. ~/.hermes/.env` to load
+// phantom tokens.
+func TestBuildEnvInjectionScript_QuotesValuesForSourcing(t *testing.T) {
+	tmp := t.TempDir()
+	// Use a profile whose env file lives in $HOME so the script's
+	// `$HOME/<rel>` resolves under our temp dir.
+	profile := &AgentProfile{
+		Name:           "test-quoting",
+		EnvFileRelPath: ".test-agent/.env",
+	}
+
+	// Values that would each break a different way under unquoted
+	// shell expansion if we wrote `KEY=raw-value` without quotes.
+	envMap := map[string]string{
+		"PLAIN":        "hello",
+		"WITH_SPACE":   "two words",
+		"WITH_DOLLAR":  "lit$$value$HOME$(whoami)",
+		"WITH_QUOTE":   "it's a quote",
+		"WITH_TICKS":   "back`tick`run",
+		"WITH_GLOB":    "/etc/*",
+		"WITH_NEWLINE": "no\\nnewline-but-backslash-n",
+	}
+
+	script, err := BuildEnvInjectionScriptForProfile(profile, envMap, false, true)
+	if err != nil {
+		t.Fatalf("build script: %v", err)
+	}
+
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Env = append(os.Environ(), "HOME="+tmp)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run script: %v\noutput: %s\nscript:\n%s", err, out, script)
+	}
+
+	envPath := filepath.Join(tmp, ".test-agent", ".env")
+	body, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	t.Logf("env file:\n%s", body)
+
+	// Source the file and dump every key=value pair.
+	dump := exec.Command("sh", "-c", `set -a; . "$1"; set +a; env`, "sh", envPath)
+	dumpOut, err := dump.Output()
+	if err != nil {
+		t.Fatalf("source env file: %v", err)
+	}
+
+	resolved := map[string]string{}
+	for _, line := range strings.Split(string(dumpOut), "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		resolved[k] = v
+	}
+
+	for k, want := range envMap {
+		got, ok := resolved[k]
+		if !ok {
+			t.Errorf("key %q missing after source", k)
+			continue
+		}
+		if got != want {
+			t.Errorf("key %q round-trip mismatch:\n  want: %q\n   got: %q", k, want, got)
+		}
 	}
 }
 

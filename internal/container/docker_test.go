@@ -584,8 +584,11 @@ func TestInjectEnvVarsSpecialCharacters(t *testing.T) {
 		}
 
 		script := mc.execCalls[0][2]
-		if !strings.Contains(script, "'\"'\"'") {
-			t.Errorf("script should contain escaped single quote, got %s", script)
+		// Single quotes in values are escaped using the dotenv idiom
+		// `'\''` (close, backslash-escaped quote, reopen) inside the
+		// `KEY='value'` block.
+		if !strings.Contains(script, `'\''`) {
+			t.Errorf("script should contain escaped single quote ('\\''), got %s", script)
 		}
 	})
 
@@ -676,8 +679,10 @@ func TestInjectEnvVarsRebuildsSluiceManagedBlock(t *testing.T) {
 	if !strings.Contains(script, "END sluice-managed") {
 		t.Errorf("script should close the sluice-managed block, got %s", script)
 	}
-	if !strings.Contains(script, "NEW_KEY=phantom-value") {
-		t.Errorf("script should write NEW_KEY=phantom-value inside the block, got %s", script)
+	// Values are written single-quoted in the file format, so the
+	// generated heredoc body contains `NEW_KEY='phantom-value'`.
+	if !strings.Contains(script, "NEW_KEY='phantom-value'") {
+		t.Errorf("script should write NEW_KEY='phantom-value' inside the block, got %s", script)
 	}
 }
 
