@@ -83,7 +83,7 @@ func TestHermesProfile_ReloadIsNil(t *testing.T) {
 	}
 }
 
-func TestHermesProfile_WireMCPUsesPython(t *testing.T) {
+func TestHermesProfile_WireMCPUsesVenvWrapper(t *testing.T) {
 	if HermesProfile.WireMCPCmd == nil {
 		t.Fatal("hermes should have a wire MCP command")
 	}

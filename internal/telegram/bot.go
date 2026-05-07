@@ -74,8 +74,15 @@ var protoDisplayName = map[string]string{
 // to the raw string otherwise (truncated args may not be valid JSON).
 // Callers must set ParseMode to HTML when sending the message.
 func FormatApprovalMessage(req channel.ApprovalRequest) string {
+	// agentDisplayName is interpolated into a Telegram HTML message.
+	// HTML-escape it at render time so a future custom profile name
+	// containing '<', '&', etc. cannot break the message structure or
+	// inject markup. SetAgentDisplayName already filters out empty
+	// values; this is the second line of defense.
+	agentLabel := htmlEscape(agentDisplayName)
+
 	if req.Protocol == "mcp" {
-		msg := agentDisplayName + " wants to call tool:\n\n" + htmlCode(req.Destination)
+		msg := agentLabel + " wants to call tool:\n\n" + htmlCode(req.Destination)
 		if req.ToolArgs != "" {
 			pretty := prettyJSONOrRaw(req.ToolArgs)
 			msg += "\n\nArguments:\n<pre><code class=\"language-json\">" + htmlEscape(pretty) + "</code></pre>"
@@ -95,14 +102,14 @@ func FormatApprovalMessage(req channel.ApprovalRequest) string {
 		}
 		return fmt.Sprintf(
 			"%s wants to connect to:\n\n%s %s\n%s %s%s\n\nAllow this request?",
-			agentDisplayName,
+			agentLabel,
 			htmlEscape(display), htmlCode(destPort),
 			htmlEscape(req.Method), htmlCode(buildRequestURL(req)), ver,
 		)
 	}
 	return fmt.Sprintf(
 		"%s wants to connect to:\n\n%s %s\n\nAllow this connection?",
-		agentDisplayName,
+		agentLabel,
 		htmlEscape(display), htmlCode(destPort),
 	)
 }

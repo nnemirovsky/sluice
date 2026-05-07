@@ -42,13 +42,24 @@ func (r Runtime) String() string {
 // ContainerManager abstracts container lifecycle and credential management
 // across different container runtimes (Docker, Apple Container, macOS VM).
 type ContainerManager interface { //nolint:revive // stuttering accepted for clarity
-	// InjectEnvVars writes environment variables into the agent container's
-	// env file (~/.openclaw/.env) via exec and signals the agent to reload.
-	// Each key in envMap is an env var name and the value is the phantom
-	// token value. When fullReplace is false, existing entries with the same
-	// key are updated in-place (merge semantics). When fullReplace is true,
-	// the file is truncated first so only entries in envMap remain
-	// (reconciliation semantics for startup/reload paths).
+	// InjectEnvVars writes environment variables into the agent
+	// container's env file (path determined by the active AgentProfile,
+	// e.g. ~/.openclaw/.env or ~/.hermes/.env) via exec and signals
+	// the agent to reload. Each key in envMap is an env var name and
+	// the value is the phantom token value.
+	//
+	// Sluice owns a fenced "BEGIN sluice-managed / END sluice-managed"
+	// block inside the env file. Each call rebuilds that block from
+	// envMap and leaves any keys outside the markers untouched, so
+	// secrets written by the agent itself or by a migration tool
+	// (e.g. `hermes claw migrate`) are preserved across both
+	// incremental updates and reconciliation runs.
+	//
+	// fullReplace is retained for source compatibility with earlier
+	// callers but no longer affects file behavior — the marker block
+	// is always reconciled. To remove a key sluice previously managed,
+	// simply omit it from envMap on the next call (or set its value
+	// to ""); the rebuilt block will not include it.
 	InjectEnvVars(ctx context.Context, envMap map[string]string, fullReplace bool) error
 
 	// RestartWithEnv recreates the container with updated environment variables.
@@ -168,19 +179,35 @@ func BuildEnvInjectionScriptForProfile(profile *AgentProfile, envMap map[string]
 		p.EnvFileRelPath,
 	))
 
-	sedFlag := "-i"
-	if bsdSed {
-		sedFlag = "-i ''"
-	}
-
-	// Step 1: delete any existing sluice-managed block. The pattern is an
-	// exact match on the marker comment lines, so it never strikes a key
-	// the agent or migration wrote.
-	beginEsc := sedRegexEscape(EnvBlockBegin)
-	endEsc := sedRegexEscape(EnvBlockEnd)
+	// Step 1: delete any existing sluice-managed block. We use an awk
+	// pre-pass to delete the block ONLY when both BEGIN and END markers
+	// are present in the file. A naive `sed '/BEGIN/,/END/d'` would
+	// happily delete from BEGIN through end-of-file when END is missing
+	// (e.g. partial write, manual edit) which would silently nuke any
+	// foreign keys the new design promises to preserve.
+	//
+	// The awk script reads the file twice: once to confirm both markers
+	// exist (NR==FNR pass), once to print everything outside the marker
+	// pair (skip lines from BEGIN through END inclusive). When either
+	// marker is missing the file is rewritten unchanged. Output is
+	// staged to a sibling temp file and renamed in place so a crash
+	// mid-rewrite leaves the original env file intact.
+	//
+	// `bsdSed` is no longer consulted here because the awk path is
+	// portable across BSD and GNU userlands. The parameter remains in
+	// the signature to avoid breaking existing call sites.
+	_ = bsdSed
+	awkBegin := awkStringEscape(EnvBlockBegin)
+	awkEnd := awkStringEscape(EnvBlockEnd)
 	script.WriteString(fmt.Sprintf(
-		` && sed %s '/^%s$/,/^%s$/d' "$ENV_FILE"`,
-		sedFlag, beginEsc, endEsc,
+		` && TMP="$ENV_FILE.sluice.$$" && awk -v B='%s' -v E='%s' '`+
+			`NR==FNR { if($0==B) hb=1; if($0==E) he=1; next }`+
+			` !(hb && he) { print; next }`+
+			` $0==B { skip=1; next }`+
+			` skip && $0==E { skip=0; next }`+
+			` !skip { print }'`+
+			` "$ENV_FILE" "$ENV_FILE" > "$TMP" && mv "$TMP" "$ENV_FILE"`,
+		awkBegin, awkEnd,
 	))
 
 	// Step 2: append a fresh block. Skip the block entirely when there is
@@ -205,18 +232,22 @@ func BuildEnvInjectionScriptForProfile(profile *AgentProfile, envMap map[string]
 	return script.String(), nil
 }
 
-// sedRegexEscape escapes characters that have special meaning in a basic
-// sed regex anchored on a marker comment line. We control the marker
-// strings, but a brittle assumption that no future marker would contain
-// a metacharacter is the kind of cleanup people forget to do.
-func sedRegexEscape(s string) string {
+// awkStringEscape escapes a string so it can be safely passed via
+// `awk -v VAR='<value>'` from inside a single-quoted shell argument.
+// We control the marker strings today, but the escape ensures any
+// future marker edit cannot break the script.
+func awkStringEscape(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		switch r {
-		case '/', '.', '*', '[', ']', '\\', '^', '$', '(', ')':
-			b.WriteByte('\\')
+		case '\\':
+			b.WriteString(`\\`)
+		case '\'':
+			// Close single quote, emit an escaped single quote, reopen.
+			b.WriteString(`'\''`)
+		default:
+			b.WriteRune(r)
 		}
-		b.WriteRune(r)
 	}
 	return b.String()
 }

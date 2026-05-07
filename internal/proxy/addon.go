@@ -801,14 +801,16 @@ func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) io
 // nothing further. The deferred recover guards against panics anywhere
 // in the rewrite path so a malformed token endpoint response cannot take
 // the proxy down.
+//
+// Atomic semantics around decode: a successful decompress mutates
+// f.Response.Body and the encoding/length headers. If a subsequent
+// step (swap, panic) fails, the response would otherwise be left as
+// plaintext bytes with stripped encoding headers — the client could
+// then read the still-real-tokens body unredacted. The pre-decode
+// snapshot is restored on every failure path so the flow either has a
+// fully phantom-swapped body or the original bytes with original
+// headers, never a half-modified mix.
 func (a *SluiceAddon) processAddonOAuthResponse(f *mitmproxy.Flow, credName string) (modified bool, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("panic in OAuth response handler for %q: %v", credName, r)
-			modified = false
-		}
-	}()
-
 	if f == nil || f.Response == nil {
 		return false, nil
 	}
@@ -816,14 +818,51 @@ func (a *SluiceAddon) processAddonOAuthResponse(f *mitmproxy.Flow, credName stri
 		return false, nil
 	}
 
+	// Snapshot before any mutation so we can roll back on error/panic.
+	origBody := f.Response.Body
+	var origContentEncoding, origContentLength, origTransferEncoding []string
+	if f.Response.Header != nil {
+		origContentEncoding = append([]string(nil), f.Response.Header.Values("Content-Encoding")...)
+		origContentLength = append([]string(nil), f.Response.Header.Values("Content-Length")...)
+		origTransferEncoding = append([]string(nil), f.Response.Header.Values("Transfer-Encoding")...)
+	}
+	rollback := func() {
+		f.Response.Body = origBody
+		if f.Response.Header == nil {
+			return
+		}
+		f.Response.Header.Del("Content-Encoding")
+		for _, v := range origContentEncoding {
+			f.Response.Header.Add("Content-Encoding", v)
+		}
+		f.Response.Header.Del("Content-Length")
+		for _, v := range origContentLength {
+			f.Response.Header.Add("Content-Length", v)
+		}
+		f.Response.Header.Del("Transfer-Encoding")
+		for _, v := range origTransferEncoding {
+			f.Response.Header.Add("Transfer-Encoding", v)
+		}
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			rollback()
+			err = fmt.Errorf("panic in OAuth response handler for %q: %v", credName, r)
+			modified = false
+		}
+	}()
+
 	if f.Response.Header != nil && hasAnyContentEncoding(f.Response.Header) {
 		if decErr := safeReplaceToDecodedBody(f); decErr != nil {
+			rollback()
 			return false, fmt.Errorf("decode compressed token response: %w", decErr)
 		}
 	}
 
 	body := f.Response.Body
 	if len(body) == 0 {
+		rollback()
 		return false, nil
 	}
 
@@ -834,6 +873,7 @@ func (a *SluiceAddon) processAddonOAuthResponse(f *mitmproxy.Flow, credName stri
 
 	swapped, err := a.swapOAuthTokens(body, contentType, credName)
 	if err != nil {
+		rollback()
 		return false, err
 	}
 
