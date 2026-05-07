@@ -810,6 +810,18 @@ func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) (o
 	// abandons the response body entirely).
 	out = in
 
+	// Defensive nil-input guard up front, BEFORE the flow checks
+	// below. If both `f` and `in` are nil (rare but possible in tests
+	// or on an unusual go-mitmproxy code path), the f-nil early
+	// return below would otherwise hand back a nil io.Reader, which
+	// the proxy's downstream copy would nil-deref on. http.NoBody
+	// keeps the response well-framed (zero bytes) and the panic is
+	// avoided regardless of what `f` looks like.
+	if in == nil {
+		out = http.NoBody
+		return out
+	}
+
 	if f == nil || f.Request == nil {
 		return out
 	}
@@ -840,23 +852,6 @@ func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) (o
 			}
 		}
 	}()
-
-	// Defensive nil check on the input reader. go-mitmproxy
-	// normally passes a non-nil reader (the buffered or live
-	// upstream stream), but a nil here would cause io.LimitReader
-	// + io.ReadAll below to nil-deref on the first Read call.
-	//
-	// We hit this path only with f.Stream=true (when go-mitmproxy
-	// streams the response), which means the Response addon callback
-	// did NOT run and f.Response.Body is empty. Returning an empty
-	// reader (rather than nil) keeps the response well-framed:
-	// reply() copies the empty stream and writes Content-Length: 0
-	// implicitly. The agent receives a zero-byte body instead of an
-	// undefined-length response that some HTTP clients trip on.
-	if in == nil {
-		out = http.NoBody
-		return out
-	}
 
 	// Warn when DLP rules are configured but the response is streamed.
 	// Dedupe by client connection id so we emit at most one warning per
