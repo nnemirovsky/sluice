@@ -3,7 +3,7 @@
 }
 
 :443 {
-	tls /etc/cloudflare/claw.pem /etc/cloudflare/claw.key
+	tls /etc/ssl/certs/agent.pem /etc/ssl/private/agent.key
 
-	reverse_proxy sluice-tun2proxy-1:18789
+	reverse_proxy hermes-tun2proxy-1:9119
 }
