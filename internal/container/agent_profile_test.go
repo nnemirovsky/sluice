@@ -164,6 +164,23 @@ func TestBuildEnvInjectionScriptForProfile_RejectsUnsafePath(t *testing.T) {
 	}
 }
 
+func TestBuildEnvInjectionScript_RejectsNewlineInValue(t *testing.T) {
+	// A newline in the value would split the env-file entry across two
+	// lines. The second line would either be silently lost or interpreted
+	// as a separate KEY=VALUE assignment when the file is sourced.
+	for _, bad := range []string{
+		"line1\nline2",
+		"trailing\n",
+		"carriage\rreturn",
+		"contains \x00 nul",
+	} {
+		_, err := BuildEnvInjectionScript(map[string]string{"K": bad}, false, false)
+		if err == nil {
+			t.Errorf("expected error for value %q", bad)
+		}
+	}
+}
+
 func TestBuildEnvInjectionScript_NeverTruncatesForeignKeys(t *testing.T) {
 	// The script must never invoke `: > "$ENV_FILE"` (full truncate).
 	// Foreign keys (set by the agent or by `hermes claw migrate`) must

@@ -112,6 +112,26 @@ func ValidateEnvVarKey(key string) error {
 	return nil
 }
 
+// validateEnvVarValue rejects values that cannot be safely written as a
+// single line of a dotenv-style file. Newlines would split one logical
+// entry into multiple file lines (the second line would either be a
+// silently-dropped fragment or, when sourced, an unrelated KEY=value
+// assignment). NUL bytes break dotenv parsers and shell sourcing.
+//
+// Any other byte is allowed because the value is single-quoted inside
+// the generated `echo` command, neutralizing shell metacharacters.
+func validateEnvVarValue(value string) error {
+	for i, r := range value {
+		if r == '\n' || r == '\r' {
+			return fmt.Errorf("value contains newline at byte offset %d (would split env file entry)", i)
+		}
+		if r == 0 {
+			return fmt.Errorf("value contains NUL byte at byte offset %d (breaks dotenv parsing)", i)
+		}
+	}
+	return nil
+}
+
 // Sluice-managed env block markers. Sluice writes the keys it owns into a
 // single contiguous block between BEGIN/END markers and replaces only that
 // block on each injection. Anything outside the markers (keys written by
@@ -133,19 +153,27 @@ const (
 // Sluice writes its keys into a single fenced block (see EnvBlockBegin /
 // EnvBlockEnd). On each call the existing block is removed and a fresh
 // block is appended, so any keys outside the block are preserved
-// regardless of fullReplace. The bsdSed flag controls whether to use BSD
-// sed syntax (sed -i ”) or GNU sed syntax (sed -i).
+// regardless of fullReplace.
 //
-// The fullReplace flag is retained for API compatibility but no longer
-// affects behavior: every call now reconciles the managed block, which
-// is the safe semantic for both startup and SIGHUP-triggered reloads.
-// Removing a binding's env var means it stops appearing in envMap, which
-// causes the next injection to drop it from the block.
+// The implementation uses awk to delete the old block (only when both
+// markers are present) and a simple appended `echo` chain to write the
+// new block. Both bsdSed and fullReplace are retained in the signature
+// for source-level compatibility with earlier callers but no longer
+// affect behavior: awk is portable across BSD and GNU userlands, and
+// every call reconciles the managed block (the safe semantic for both
+// startup and SIGHUP-triggered reloads). Removing a binding's env var
+// means it stops appearing in envMap, which causes the next injection
+// to drop it from the block.
 //
-// Both keys and values are validated/escaped to prevent shell injection:
-// keys must match [A-Za-z_][A-Za-z0-9_]*, values are single-quoted with
-// internal single quotes escaped, and shell metacharacters in the marker
-// strings are not interpolated from user input.
+// Validation:
+//   - keys must match [A-Za-z_][A-Za-z0-9_]* (POSIX env var name).
+//   - values must not contain newlines or NUL bytes; either would split
+//     the entry across multiple lines in the env file and inject a
+//     second KEY=value (or worse, an arbitrary shell directive when the
+//     file is sourced). Values are wrapped in single quotes inside the
+//     `echo` shell command so embedded single quotes, double quotes,
+//     spaces, $, and backticks are inert. The bytes that land in the
+//     file are the literal value with no shell interpretation.
 func BuildEnvInjectionScript(envMap map[string]string, bsdSed bool, fullReplace bool) (string, error) {
 	return BuildEnvInjectionScriptForProfile(OpenclawProfile, envMap, bsdSed, fullReplace)
 }
@@ -160,13 +188,16 @@ func BuildEnvInjectionScriptForProfile(profile *AgentProfile, envMap map[string]
 		return "", fmt.Errorf("agent profile %q: %w", p.Name, err)
 	}
 
-	// Validate and pre-format every entry up front so a bad key fails the
-	// whole call before any side effects rather than partially writing
-	// the block.
+	// Validate and pre-format every entry up front so a bad key/value
+	// fails the whole call before any side effects rather than
+	// partially writing the block.
 	keys := make([]string, 0, len(envMap))
-	for k := range envMap {
+	for k, v := range envMap {
 		if err := ValidateEnvVarKey(k); err != nil {
 			return "", err
+		}
+		if err := validateEnvVarValue(v); err != nil {
+			return "", fmt.Errorf("env var %q: %w", k, err)
 		}
 		keys = append(keys, k)
 	}
