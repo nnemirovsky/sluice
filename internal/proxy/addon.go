@@ -877,6 +877,21 @@ func (a *SluiceAddon) processAddonOAuthResponse(f *mitmproxy.Flow, credName stri
 		return false, err
 	}
 
+	// `modified` reflects whether the swap actually changed bytes. A
+	// token endpoint that echoed already-phantom tokens (e.g. on a
+	// retry where the upstream was previously rotated) would produce
+	// a byte-identical body. Reporting modified=true in that case
+	// would log a misleading "swapped to phantoms" message and bump
+	// metrics that operators read as live token leakage.
+	bodyChanged := !bytes.Equal(body, swapped)
+	if !bodyChanged {
+		// No change to commit. Roll back the decompress so the
+		// flow's encoding/length headers continue to advertise the
+		// original (still-valid) wire form.
+		rollback()
+		return false, nil
+	}
+
 	f.Response.Body = swapped
 	if f.Response.Header != nil {
 		f.Response.Header.Set("Content-Length", strconv.Itoa(len(swapped)))

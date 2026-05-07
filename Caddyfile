@@ -5,5 +5,10 @@
 :443 {
 	tls /etc/ssl/certs/agent.pem /etc/ssl/private/agent.key
 
-	reverse_proxy hermes-tun2proxy-1:9119
+	# Forward to the dashboard sidecar by its compose service name on
+	# the internal network. The dashboard binds 0.0.0.0:9119 inside
+	# tun2proxy's network namespace, so addressing tun2proxy on the
+	# internal network reaches it. Using the service name stays
+	# correct regardless of the compose project name or replica index.
+	reverse_proxy tun2proxy:9119
 }

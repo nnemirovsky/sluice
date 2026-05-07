@@ -4,10 +4,19 @@
 #
 # Run once after replacing an OpenClaw deployment with the Hermes stack
 # in compose.yml. The legacy openclaw-home volume from the previous
-# deployment is read read-only; the migration target is the new
-# hermes-home volume created by compose.yml. Idempotent: re-running
-# layers cleanly because hermes claw migrate refuses to apply on
-# conflicts unless --overwrite is passed.
+# deployment is mounted read-only; the migration target is the new
+# hermes-home volume created by compose.yml.
+#
+# Re-running this script overwrites Hermes-side files for any item that
+# would otherwise conflict, because we pass --overwrite to
+# `hermes claw migrate`. That is appropriate for the initial migration
+# (we want OpenClaw's persona, model config, and provider keys to
+# replace the bundled Hermes defaults that the entrypoint copies in on
+# first boot) but does mean a re-run will clobber edits the operator
+# made on the Hermes side after the first import. Set
+# BOOTSTRAP_OVERWRITE=0 to drop the flag for a strictly additive
+# re-run; the migrate command will then fail loudly on conflicts so
+# they can be reviewed.
 #
 # Usage:
 #   bash bootstrap.sh [project-name] [legacy-volume]
@@ -38,6 +47,18 @@ PROJECT_NAME="${1:-$(basename "$PWD")}"
 LEGACY_VOLUME="${2:-sluice_openclaw-home}"
 HERMES_VOLUME="${PROJECT_NAME}_hermes-home"
 HERMES_IMAGE="${HERMES_IMAGE:-nousresearch/hermes-agent:v2026.4.30}"
+BOOTSTRAP_OVERWRITE="${BOOTSTRAP_OVERWRITE:-1}"
+
+migrate_args=(
+  --source /opt/data/.hermes/.migration-source
+  --preset full
+  --migrate-secrets
+  --no-backup
+  --yes
+)
+if [ "$BOOTSTRAP_OVERWRITE" = "1" ]; then
+  migrate_args+=(--overwrite)
+fi
 
 if ! docker volume inspect "$LEGACY_VOLUME" >/dev/null 2>&1; then
   echo "==> legacy volume '$LEGACY_VOLUME' not found; skipping bootstrap (fresh install)"
@@ -60,21 +81,15 @@ docker run --rm \
     chown -R 10000:10000 /opt/data/.hermes/.migration-source
   '
 
-echo "==> running hermes claw migrate"
+echo "==> running hermes claw migrate (overwrite=$BOOTSTRAP_OVERWRITE)"
 docker run --rm \
   -e HERMES_HOME=/opt/data/.hermes \
   -e HERMES_UID=10000 \
   -e HERMES_GID=10000 \
   -v "$HERMES_VOLUME":/opt/data/.hermes \
   "$HERMES_IMAGE" \
-  claw migrate \
-    --source /opt/data/.hermes/.migration-source \
-    --preset full \
-    --migrate-secrets \
-    --overwrite \
-    --no-backup \
-    --yes \
-  || echo "migrate exited non-zero (non-fatal warnings) -- continuing"
+  claw migrate "${migrate_args[@]}" \
+  || echo "migrate exited non-zero (non-fatal warnings or refused on conflicts) -- continuing"
 
 echo "==> patching mcp_servers.sluice.url into config.yaml"
 docker run --rm \
