@@ -129,16 +129,17 @@ func (m *DockerManager) ReloadSecrets(ctx context.Context) error {
 //
 // For openclaw, the config change triggers a gateway restart that kills
 // the running exec with code 137. The config write has already
-// succeeded at that point, so we swallow 137 and treat it as success.
-// Genuine failures surface as other non-zero exit codes or connect-time
-// errors before the exec runs.
+// succeeded at that point, so we swallow 137 and treat it as success
+// for the openclaw profile only. Other profiles surface 137 as a real
+// error so a legitimate OOM / SIGKILL is not silently masked.
 func (m *DockerManager) WireMCPGateway(ctx context.Context, name, sluiceURL string) error {
 	if m.profile.WireMCPCmd == nil {
 		log.Printf("agent profile %q does not support automatic MCP wiring; configure %s manually", m.profile.Name, sluiceURL)
 		return nil
 	}
 	err := m.client.ExecInContainer(ctx, m.containerName, m.profile.WireMCPCmd(name, sluiceURL))
-	if err != nil && strings.Contains(err.Error(), "exit") && strings.Contains(err.Error(), "137") {
+	if err != nil && m.profile.Name == OpenclawProfile.Name &&
+		strings.Contains(err.Error(), "exit") && strings.Contains(err.Error(), "137") {
 		return nil
 	}
 	return err

@@ -594,7 +594,8 @@ func setupAddonConn(addon *SluiceAddon, addr string) *mitmproxy.ClientConn {
 }
 
 func TestRequest_PhantomSwapInBody(t *testing.T) {
-	addon := newTestAddonWithCreds(t,
+	addon := newTestAddonWithCreds(
+		t,
 		map[string]string{"api_key": "real-secret-value"},
 		[]vault.Binding{{
 			Destination: "api.example.com",
@@ -617,7 +618,8 @@ func TestRequest_PhantomSwapInBody(t *testing.T) {
 }
 
 func TestRequest_PhantomSwapInHeaders(t *testing.T) {
-	addon := newTestAddonWithCreds(t,
+	addon := newTestAddonWithCreds(
+		t,
 		map[string]string{"api_key": "real-secret-value"},
 		[]vault.Binding{{
 			Destination: "api.example.com",
@@ -640,7 +642,8 @@ func TestRequest_PhantomSwapInHeaders(t *testing.T) {
 }
 
 func TestRequest_HeaderInjection(t *testing.T) {
-	addon := newTestAddonWithCreds(t,
+	addon := newTestAddonWithCreds(
+		t,
 		map[string]string{"github_token": "ghp_realtoken123"},
 		[]vault.Binding{{
 			Destination: "api.github.com",
@@ -664,7 +667,8 @@ func TestRequest_HeaderInjection(t *testing.T) {
 }
 
 func TestRequest_HeaderInjectionNoTemplate(t *testing.T) {
-	addon := newTestAddonWithCreds(t,
+	addon := newTestAddonWithCreds(
+		t,
 		map[string]string{"raw_key": "secret123"},
 		[]vault.Binding{{
 			Destination: "api.example.com",
@@ -688,7 +692,8 @@ func TestRequest_HeaderInjectionNoTemplate(t *testing.T) {
 func TestRequest_StripUnboundPhantoms(t *testing.T) {
 	// Credential "api_key" is bound to example.com. A phantom token for
 	// "other_key" is not bound and should be stripped.
-	addon := newTestAddonWithCreds(t,
+	addon := newTestAddonWithCreds(
+		t,
 		map[string]string{
 			"api_key":   "real-secret",
 			"other_key": "other-secret",
@@ -722,7 +727,8 @@ func TestRequest_StripUnboundPhantoms(t *testing.T) {
 func TestRequest_NoBindingNoChange(t *testing.T) {
 	// No bindings configured. Body without phantom tokens should pass
 	// through unchanged.
-	addon := newTestAddonWithCreds(t,
+	addon := newTestAddonWithCreds(
+		t,
 		map[string]string{"api_key": "secret"},
 		nil,
 	)
@@ -741,7 +747,8 @@ func TestRequest_NoBindingNoChange(t *testing.T) {
 }
 
 func TestRequest_PhantomSwapInURL(t *testing.T) {
-	addon := newTestAddonWithCreds(t,
+	addon := newTestAddonWithCreds(
+		t,
 		map[string]string{"api_key": "real-secret"},
 		[]vault.Binding{{
 			Destination: "api.example.com",
@@ -782,7 +789,8 @@ func TestRequest_NilResolverNoOp(t *testing.T) {
 }
 
 func TestStreamRequestModifier_PhantomSwap(t *testing.T) {
-	addon := newTestAddonWithCreds(t,
+	addon := newTestAddonWithCreds(
+		t,
 		map[string]string{"api_key": "real-secret-value"},
 		[]vault.Binding{{
 			Destination: "api.example.com",
@@ -825,7 +833,8 @@ func TestStreamRequestModifier_NilResolverPassthrough(t *testing.T) {
 }
 
 func TestStreamRequestModifier_LargeBodySpanningReads(t *testing.T) {
-	addon := newTestAddonWithCreds(t,
+	addon := newTestAddonWithCreds(
+		t,
 		map[string]string{"api_key": "REPLACED"},
 		[]vault.Binding{{
 			Destination: "api.example.com",
@@ -862,7 +871,8 @@ func TestStreamRequestModifier_LargeBodySpanningReads(t *testing.T) {
 }
 
 func TestStreamRequestModifier_StripUnbound(t *testing.T) {
-	addon := newTestAddonWithCreds(t,
+	addon := newTestAddonWithCreds(
+		t,
 		map[string]string{
 			"bound":   "real-secret",
 			"unbound": "not-for-you",

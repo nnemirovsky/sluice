@@ -105,6 +105,58 @@ func TestHermesProfile_WireMCPUsesPython(t *testing.T) {
 	}
 }
 
+func TestProfileFromName_ErrorListsKnownSorted(t *testing.T) {
+	_, err := ProfileFromName("does-not-exist")
+	if err == nil {
+		t.Fatal("expected error for unknown profile")
+	}
+	msg := err.Error()
+	// "hermes" must appear before "openclaw" alphabetically when the list is sorted.
+	hi := strings.Index(msg, "hermes")
+	oi := strings.Index(msg, "openclaw")
+	if hi < 0 || oi < 0 || hi > oi {
+		t.Errorf("error message %q should list known profiles in sorted order (hermes before openclaw)", msg)
+	}
+}
+
+func TestValidateEnvFileRelPath(t *testing.T) {
+	good := []string{
+		".openclaw/.env",
+		".hermes/.env",
+		"home/agent/.env",
+		"a-b_c.env",
+	}
+	for _, p := range good {
+		if err := validateEnvFileRelPath(p); err != nil {
+			t.Errorf("expected %q to be accepted, got: %v", p, err)
+		}
+	}
+	bad := []string{
+		"",
+		"/abs/path",
+		"../escape",
+		"a/../b",
+		`a"; rm -rf /`,
+		"a$(whoami)",
+		"a b",
+		"a;b",
+		"a\nb",
+	}
+	for _, p := range bad {
+		if err := validateEnvFileRelPath(p); err == nil {
+			t.Errorf("expected %q to be rejected", p)
+		}
+	}
+}
+
+func TestBuildEnvInjectionScriptForProfile_RejectsUnsafePath(t *testing.T) {
+	bad := &AgentProfile{Name: "evil", EnvFileRelPath: `evil"; touch /tmp/pwned`}
+	_, err := BuildEnvInjectionScriptForProfile(bad, map[string]string{"K": "v"}, false, false)
+	if err == nil {
+		t.Fatal("expected error for unsafe EnvFileRelPath")
+	}
+}
+
 func TestResolveProfile_NilDefaultsToOpenclaw(t *testing.T) {
 	if resolveProfile(nil) != OpenclawProfile {
 		t.Error("nil profile should default to OpenclawProfile")

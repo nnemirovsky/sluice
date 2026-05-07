@@ -648,7 +648,8 @@ func TestHandleMCPGatewayNoUpstreams(t *testing.T) {
 		return
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=TestHandleMCPGatewayNoUpstreams")
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(
+		os.Environ(),
 		"TEST_MCP_SUBPROCESS=no_upstreams",
 		"TEST_DB_PATH="+dbPath,
 		"TELEGRAM_BOT_TOKEN=",
@@ -686,7 +687,8 @@ func TestHandleMCPGatewayInvalidChatID(t *testing.T) {
 		return
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=TestHandleMCPGatewayInvalidChatID")
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(
+		os.Environ(),
 		"TEST_MCP_SUBPROCESS=invalid_chat_id",
 		"TEST_DB_PATH="+dbPath,
 	)

@@ -28,7 +28,8 @@ func stripUnboundPhantomsFromProvider(data []byte, provider vault.Provider) []by
 				cred, parseErr := vault.ParseOAuth(secret.Bytes())
 				secret.Release()
 				if parseErr == nil {
-					phantoms = append(phantoms,
+					phantoms = append(
+						phantoms,
 						[]byte(oauthPhantomAccess(name, cred.AccessToken)),
 						[]byte(oauthPhantomRefresh(name, cred.RefreshToken)),
 						[]byte(PhantomToken(name)),
@@ -39,7 +40,8 @@ func stripUnboundPhantomsFromProvider(data []byte, provider vault.Provider) []by
 				secret.Release()
 			}
 		}
-		phantoms = append(phantoms,
+		phantoms = append(
+			phantoms,
 			[]byte(oauthPhantomAccess(name)),
 			[]byte(oauthPhantomRefresh(name)),
 			[]byte(PhantomToken(name)),

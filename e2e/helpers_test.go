@@ -589,7 +589,8 @@ func sluiceWithWebhook(t *testing.T, policyTOML, webhookURL string) *SluiceProce
 	}
 
 	// Add the HTTP webhook channel to the pre-seeded DB.
-	channelCmd := exec.Command(binary, "channel", "add",
+	channelCmd := exec.Command(
+		binary, "channel", "add",
 		"--type", "http",
 		"--url", webhookURL,
 		"--db", dbPath,

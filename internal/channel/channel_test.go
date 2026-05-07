@@ -397,7 +397,8 @@ func TestBrokerPendingLimitZeroMeansUnlimited(t *testing.T) {
 		}()
 	}
 
-	broker = NewBroker([]Channel{ch1},
+	broker = NewBroker(
+		[]Channel{ch1},
 		WithMaxPending(0),
 		WithDestinationRateLimit(0, 0),
 	)
@@ -429,7 +430,8 @@ func TestBrokerDestinationRateLimiting(t *testing.T) {
 		}()
 	}
 
-	broker = NewBroker([]Channel{ch1},
+	broker = NewBroker(
+		[]Channel{ch1},
 		WithMaxPending(0),
 		WithDestinationRateLimit(3, time.Minute),
 	)
@@ -477,7 +479,8 @@ func TestBrokerDestinationRateLimitDisabled(t *testing.T) {
 		}()
 	}
 
-	broker = NewBroker([]Channel{ch1},
+	broker = NewBroker(
+		[]Channel{ch1},
 		WithMaxPending(0),
 		WithDestinationRateLimit(0, 0),
 	)

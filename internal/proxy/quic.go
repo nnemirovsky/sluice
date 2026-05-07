@@ -383,7 +383,8 @@ func (q *QUICProxy) buildHandler(upstreamHost string, destPort int, checker *Req
 
 		// Per-request policy check for ask-rule sessions.
 		if checker != nil {
-			verdict, err := checker.CheckAndConsume(host, port,
+			verdict, err := checker.CheckAndConsume(
+				host, port,
 				WithRequestInfo(r.Method, r.URL.RequestURI()),
 				WithProtocol(ProtoQUIC.String()),
 				WithSkipBrokerRateLimit(),

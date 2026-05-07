@@ -471,6 +471,22 @@ func TestInjectEnvVarsHermesProfile(t *testing.T) {
 	}
 }
 
+func TestWireMCPGateway_Exit137GatedToOpenclaw(t *testing.T) {
+	// Openclaw profile: exit 137 from the gateway restart is swallowed.
+	mc := &mockClient{execErr: fmt.Errorf("exec failed: exit 137")}
+	mgr := NewDockerManagerForProfile(mc, "openclaw", OpenclawProfile)
+	if err := mgr.WireMCPGateway(context.Background(), "sluice", "http://sluice:3000/mcp"); err != nil {
+		t.Errorf("openclaw: expected exit 137 to be swallowed, got: %v", err)
+	}
+
+	// Other profiles must surface 137 so a real OOM is not masked.
+	mc2 := &mockClient{execErr: fmt.Errorf("exec failed: exit 137")}
+	mgr2 := NewDockerManagerForProfile(mc2, "hermes", HermesProfile)
+	if err := mgr2.WireMCPGateway(context.Background(), "sluice", "http://sluice:3000/mcp"); err == nil {
+		t.Error("hermes: expected exit 137 to surface as error, got nil")
+	}
+}
+
 func TestWireMCPGatewayHermesProfile(t *testing.T) {
 	mc := &mockClient{}
 	mgr := NewDockerManagerForProfile(mc, "hermes", HermesProfile)

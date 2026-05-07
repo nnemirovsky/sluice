@@ -125,12 +125,11 @@ func BuildEnvInjectionScript(envMap map[string]string, bsdSed bool, fullReplace 
 // behavior.
 func BuildEnvInjectionScriptForProfile(profile *AgentProfile, envMap map[string]string, bsdSed bool, fullReplace bool) (string, error) {
 	p := resolveProfile(profile)
-	relPath := p.EnvFileRelPath
-	if relPath == "" {
-		return "", fmt.Errorf("agent profile %q has empty EnvFileRelPath", p.Name)
+	if err := validateEnvFileRelPath(p.EnvFileRelPath); err != nil {
+		return "", fmt.Errorf("agent profile %q: %w", p.Name, err)
 	}
 	var script strings.Builder
-	script.WriteString(fmt.Sprintf(`ENV_FILE="$HOME/%s" && mkdir -p "$(dirname "$ENV_FILE")"`, relPath))
+	script.WriteString(fmt.Sprintf(`ENV_FILE="$HOME/%s" && mkdir -p "$(dirname "$ENV_FILE")"`, p.EnvFileRelPath))
 	if fullReplace {
 		// Truncate the file so stale entries from removed bindings are cleared.
 		script.WriteString(` && : > "$ENV_FILE"`)

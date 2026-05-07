@@ -407,7 +407,8 @@ func TestQUICProxy_HTTP3PhantomTokenReplacement(t *testing.T) {
 
 	// Send request with phantom token in Authorization header.
 	phantomToken := PhantomToken("test_api_key")
-	status, headers, body := doH3Request(t, qp, proxyAddr, proxyCAX509,
+	status, headers, body := doH3Request(
+		t, qp, proxyAddr, proxyCAX509,
 		"api.example.com", "POST", "/v1/test",
 		[]byte("payload with "+phantomToken+" inside"),
 		map[string]string{
@@ -465,7 +466,8 @@ func TestQUICProxy_HTTP3ContentDenyBlocks(t *testing.T) {
 	defer func() { _ = qp.Close() }()
 
 	// Request with banned content should be blocked.
-	status, _, _ := doH3Request(t, qp, proxyAddr, proxyCAX509,
+	status, _, _ := doH3Request(
+		t, qp, proxyAddr, proxyCAX509,
 		"api.example.com", "POST", "/v1/data",
 		[]byte(`{"password = hunter2"}`),
 		nil,
@@ -475,7 +477,8 @@ func TestQUICProxy_HTTP3ContentDenyBlocks(t *testing.T) {
 	}
 
 	// Request without banned content should pass.
-	status2, _, _ := doH3Request(t, qp, proxyAddr, proxyCAX509,
+	status2, _, _ := doH3Request(
+		t, qp, proxyAddr, proxyCAX509,
 		"api.example.com", "POST", "/v1/data",
 		[]byte(`{"message": "hello world"}`),
 		nil,
@@ -508,7 +511,8 @@ func TestQUICProxy_HTTP3ContentRedact(t *testing.T) {
 	proxyAddr := waitForQUICAddr(t, qp)
 	defer func() { _ = qp.Close() }()
 
-	status, _, body := doH3Request(t, qp, proxyAddr, proxyCAX509,
+	status, _, body := doH3Request(
+		t, qp, proxyAddr, proxyCAX509,
 		"api.example.com", "GET", "/v1/data",
 		nil, nil,
 	)

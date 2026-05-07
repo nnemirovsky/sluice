@@ -485,7 +485,8 @@ func (a *SluiceAddon) Requestheaders(f *mitmproxy.Flow) {
 		method = "UPGRADE"
 		httpVer = ""
 	}
-	verdict, err := checker.CheckAndConsume(connectHost, connectPort,
+	verdict, err := checker.CheckAndConsume(
+		connectHost, connectPort,
 		WithRequestInfo(method, f.Request.URL.Path),
 		WithProtocol(protoStr),
 		WithHTTPVersion(httpVer),
@@ -591,13 +592,15 @@ func (a *SluiceAddon) Request(f *mitmproxy.Flow) {
 	// Pass 2+3 on URL query.
 	if rawQ := f.Request.URL.RawQuery; bytes.Contains([]byte(rawQ), phantomPrefix) {
 		f.Request.URL.RawQuery = string(
-			a.swapPhantomBytes([]byte(rawQ), pairs, host, port, "URL query"))
+			a.swapPhantomBytes([]byte(rawQ), pairs, host, port, "URL query"),
+		)
 	}
 
 	// Pass 2+3 on URL path.
 	if rawP := f.Request.URL.Path; bytes.Contains([]byte(rawP), phantomPrefix) {
 		f.Request.URL.Path = string(
-			a.swapPhantomBytes([]byte(rawP), pairs, host, port, "URL path"))
+			a.swapPhantomBytes([]byte(rawP), pairs, host, port, "URL path"),
+		)
 		f.Request.URL.RawPath = ""
 	}
 }

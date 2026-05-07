@@ -287,7 +287,8 @@ func (e *appleEnv) startTun2proxy() {
 		e.t.Skipf("tun2proxy not in PATH: %v", err)
 	}
 
-	cmd := exec.Command(tun2proxyBin,
+	cmd := exec.Command(
+		tun2proxyBin,
 		"--proxy", "socks5://"+e.sluice.ProxyAddr,
 		"--tun", e.tunIface,
 	)
@@ -655,7 +656,8 @@ func TestAppleContainerSluiceStartsWithRuntimeFlag(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, binary,
+	cmd := exec.CommandContext(
+		ctx, binary,
 		"--runtime", "apple",
 		"--listen", fmt.Sprintf("127.0.0.1:%d", proxyPort),
 		"--db", dbPath,
