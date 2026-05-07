@@ -721,6 +721,15 @@ func (a *SluiceAddon) Response(f *mitmproxy.Flow) {
 		}
 	}()
 
+	// Nil-flow guard. The deferred recover above dereferences f to
+	// build the log line; without this early return, a nil flow
+	// (which go-mitmproxy never produces in practice but tests can)
+	// would hit the recover path on every call. Mirror what
+	// StreamResponseModifier does so both entry points handle nil
+	// flows uniformly.
+	if f == nil {
+		return
+	}
 	if f.Response == nil || f.Request == nil {
 		return
 	}
