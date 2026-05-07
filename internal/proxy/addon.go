@@ -128,6 +128,14 @@ type SluiceAddon struct {
 	// time.Sleep-based synchronization. Nil in production.
 	persistDone chan struct{}
 
+	// responsePanicHook is a test injection point for the Response
+	// handler's deferred recover. When non-nil it is invoked between
+	// the OAuth swap and the DLP scan, so a test can force the
+	// downstream-of-OAuth panic shape we observed in production
+	// without having to engineer a malformed Flow that triggers a
+	// real nil deref. Always nil in production.
+	responsePanicHook func()
+
 	// auditLog, when non-nil, receives per-request deny/inject events.
 	auditLog *audit.FileLogger
 
@@ -654,10 +662,9 @@ func (a *SluiceAddon) Response(f *mitmproxy.Flow) {
 	// the agent reading an empty stream. We log the full stack so
 	// the underlying bug can be diagnosed later, but the response
 	// continues with whatever state f.Response was in at the time
-	// of the panic. Real tokens cannot leak: processOAuthResponseIf-
-	// Matching has its own snapshot/rollback, and any panic in DLP
-	// runs AFTER OAuth swap (so tokens are already phantoms by
-	// then).
+	// of the panic. Real tokens cannot leak: processOAuthResponseIfMatching
+	// has its own snapshot/rollback, and any panic in DLP runs AFTER
+	// OAuth swap (so tokens are already phantoms by then).
 	defer func() {
 		if r := recover(); r != nil {
 			host := "unknown"
@@ -677,6 +684,14 @@ func (a *SluiceAddon) Response(f *mitmproxy.Flow) {
 	}
 
 	a.processOAuthResponseIfMatching(f)
+
+	// Test-only panic injection. Always nil in production. Lets a
+	// regression test exercise the deferred recover above without
+	// having to construct a Flow that triggers a real downstream
+	// nil deref.
+	if a.responsePanicHook != nil {
+		a.responsePanicHook()
+	}
 
 	// Outbound DLP: scan response body and headers for credential
 	// patterns that should not reach the agent. Runs after OAuth

@@ -1191,6 +1191,81 @@ func TestAddonResponse_OAuthMalformedBodyDoesNotPanic(t *testing.T) {
 	addon.Response(f)
 }
 
+// TestAddonResponse_RecoversFromDownstreamPanic verifies that the
+// top-level recover in Response catches a panic that fires AFTER the
+// OAuth swap completes (the production shape that bit us during the
+// OpenAI Codex device-code flow on the deployed proxy). The agent
+// must still receive the phantom-swapped body via f.Response.Body
+// instead of an empty stream caused by go-mitmproxy's outer recover.
+func TestAddonResponse_RecoversFromDownstreamPanic(t *testing.T) {
+	oauthCred := &vault.OAuthCredential{
+		AccessToken:  "old-access",
+		RefreshToken: "old-refresh",
+		TokenURL:     testOAuthTokenURL,
+	}
+	addon, _ := setupOAuthAddon(t, "panic_recover_oauth", oauthCred)
+	client := setupAddonConn(addon, "auth.example.com:443")
+
+	// Force a panic between the OAuth swap and the DLP scan, to
+	// reproduce the shape we observed in production where something
+	// downstream of the swap nil-derefs.
+	addon.responsePanicHook = func() {
+		var p *int
+		_ = *p // intentional nil deref
+	}
+
+	respBody := mustJSON(t, map[string]interface{}{
+		"access_token":  "real-access-recover",
+		"refresh_token": "real-refresh-recover",
+		"expires_in":    3600,
+		"token_type":    "Bearer",
+	})
+
+	f := newTestResponseFlow(client, testOAuthTokenURL, 200, respBody, "application/json")
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Response handler must not propagate panic; got: %v", r)
+		}
+	}()
+	addon.Response(f)
+
+	// Body must hold phantoms (the swap completed before the panic
+	// fired). Real tokens must not be present.
+	body := string(f.Response.Body)
+	if strings.Contains(body, "real-access-recover") || strings.Contains(body, "real-refresh-recover") {
+		t.Errorf("real tokens leaked through panic recovery path: %q", body)
+	}
+	if !strings.Contains(body, oauthPhantomAccess("panic_recover_oauth")) {
+		t.Errorf("expected phantom access token to remain in body after recover, got: %q", body)
+	}
+
+	waitAddonPersist(t, addon)
+}
+
+func TestAddonStreamResponseModifier_HandlesNilInput(t *testing.T) {
+	// go-mitmproxy normally passes a non-nil reader, but a nil here
+	// must not nil-deref. The handler should fall through cleanly.
+	oauthCred := &vault.OAuthCredential{
+		AccessToken: "old",
+		TokenURL:    testOAuthTokenURL,
+	}
+	addon, _ := setupOAuthAddon(t, "nil_input_oauth", oauthCred)
+	client := setupAddonConn(addon, "auth.example.com:443")
+
+	f := newTestResponseFlow(client, testOAuthTokenURL, 200, nil, "application/json")
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("StreamResponseModifier must not panic on nil input; got: %v", r)
+		}
+	}()
+	out := addon.StreamResponseModifier(f, nil)
+	if out != nil {
+		t.Errorf("expected nil reader for nil input, got: %T", out)
+	}
+}
+
 func TestAddonResponse_Non2xxPassesThrough(t *testing.T) {
 	oauthCred := &vault.OAuthCredential{
 		AccessToken: "old-access",
