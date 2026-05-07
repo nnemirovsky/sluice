@@ -295,37 +295,69 @@ func BuildEnvInjectionScriptForProfile(profile *AgentProfile, envMap map[string]
 			break
 		}
 	}
-	if !hasContent {
-		return script.String(), nil
-	}
 
-	// Append the new block via a quoted-tag heredoc. The single quotes
-	// around the tag (`<<'TAG'`) tell the shell to perform NO expansion
-	// on the body — every byte we write between the heredoc start and
-	// the end tag lands in the file verbatim. That lets us emit
-	// `KEY='value'` lines whose contents are safe under both shell
-	// `source` and dotenv parsing.
-	script.WriteString(fmt.Sprintf(" && cat >> \"$ENV_FILE\" <<'%s'\n", envHeredocTag))
-	script.WriteString(EnvBlockBegin)
-	script.WriteString("\n")
-	for _, k := range keys {
-		v := envMap[k]
-		if v == "" {
-			continue
+	// Match the env file's ownership to its parent directory. The
+	// docker exec runs the script as the image's USER (typically
+	// root for agent containers), so both the awk rename above and
+	// the heredoc `cat >>` leave the file root-owned. The agent
+	// runtime runs as a non-root user (UID 10000 for the upstream
+	// hermes image, configurable via HERMES_UID); a root-owned env
+	// file blocks agent-side write paths like `hermes claw migrate`
+	// or in-agent secret edits with EACCES. Inheriting the parent
+	// directory's owner is portable across agents because each
+	// agent's entrypoint chowns its data dir to its runtime user
+	// before sluice ever exec's in. The chown is best-effort: a
+	// read-only env file still satisfies sluice's own usage, so a
+	// stat or chown failure does not abort the script.
+	const chownStep = ` && { DIR_OWNER=$(stat -c '%u:%g' "$(dirname "$ENV_FILE")" 2>/dev/null);` +
+		` [ -n "$DIR_OWNER" ] && chown "$DIR_OWNER" "$ENV_FILE" 2>/dev/null;` +
+		` true; }`
+
+	if hasContent {
+		// Append the new block via a quoted-tag heredoc. The single
+		// quotes around the tag (`<<'TAG'`) tell the shell to perform
+		// NO expansion on the body. Every byte between the heredoc
+		// start and the end tag lands in the file verbatim, so we
+		// can emit KEY='value' lines whose contents are safe under
+		// both shell source and dotenv parsing.
+		//
+		// The chownStep is appended to the SAME line as the heredoc
+		// `<<` operator (before the heredoc body) because shell will
+		// not let a `&&` at the start of a new line attach to a
+		// command whose heredoc body is in between. With this
+		// placement, the parser sees one logical line:
+		//   cat >> file <<TAG && { chown ...; }
+		// whose heredoc body follows. The `&&` short-circuits if
+		// cat fails (disk full, permissions, etc.) so we do not
+		// chown a file that did not get the new managed block.
+		script.WriteString(fmt.Sprintf(" && cat >> \"$ENV_FILE\" <<'%s'%s\n", envHeredocTag, chownStep))
+		script.WriteString(EnvBlockBegin)
+		script.WriteString("\n")
+		for _, k := range keys {
+			v := envMap[k]
+			if v == "" {
+				continue
+			}
+			// Escape embedded single quotes via the four-character
+			// idiom (apostrophe, backslash, apostrophe, apostrophe).
+			// Wrapped in single quotes, the result is one
+			// well-formed dotenv/shell string with no expansion.
+			escaped := strings.ReplaceAll(v, "'", `'\''`)
+			script.WriteString(k)
+			script.WriteString("='")
+			script.WriteString(escaped)
+			script.WriteString("'\n")
 		}
-		// Escape embedded single quotes: 'value' -> 'val'\''ue'.
-		// The result, wrapped in single quotes, is one well-formed
-		// dotenv/shell string with no expansion.
-		escaped := strings.ReplaceAll(v, "'", `'\''`)
-		script.WriteString(k)
-		script.WriteString("='")
-		script.WriteString(escaped)
-		script.WriteString("'\n")
+		script.WriteString(EnvBlockEnd)
+		script.WriteString("\n")
+		script.WriteString(envHeredocTag)
+		script.WriteString("\n")
+	} else {
+		// No managed-block emission. The awk pre-pass still
+		// rewrote the file (removing any prior block), so we
+		// still want to fix ownership of the result.
+		script.WriteString(chownStep)
 	}
-	script.WriteString(EnvBlockEnd)
-	script.WriteString("\n")
-	script.WriteString(envHeredocTag)
-	script.WriteString("\n")
 
 	return script.String(), nil
 }
