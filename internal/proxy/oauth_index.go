@@ -101,3 +101,24 @@ func (idx *OAuthIndex) Len() int {
 	}
 	return len(idx.entries)
 }
+
+// Has returns true if the named credential is registered as OAuth in
+// this index (i.e. its credential_meta entry had cred_type="oauth" and
+// a usable token_url). The injection path uses this to decide whether
+// the secret returned by the vault is a JSON-marshalled OAuthCredential
+// envelope that needs access_token extraction, vs a static credential
+// whose value should be passed through to the binding template
+// verbatim. We treat credential metadata as authoritative rather than
+// inferring from the secret's shape, so a static credential whose
+// value happens to be JSON cannot be misclassified.
+func (idx *OAuthIndex) Has(credName string) bool {
+	if idx == nil {
+		return false
+	}
+	for _, e := range idx.entries {
+		if e.credential == credName {
+			return true
+		}
+	}
+	return false
+}

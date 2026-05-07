@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -126,6 +127,14 @@ type SluiceAddon struct {
 	// token persist goroutine completes. Used by tests to avoid
 	// time.Sleep-based synchronization. Nil in production.
 	persistDone chan struct{}
+
+	// responsePanicHook is a test injection point for the Response
+	// handler's deferred recover. When non-nil it is invoked between
+	// the OAuth swap and the DLP scan, so a test can force the
+	// downstream-of-OAuth panic shape we observed in production
+	// without having to engineer a malformed Flow that triggers a
+	// real nil deref. Always nil in production.
+	responsePanicHook func()
 
 	// auditLog, when non-nil, receives per-request deny/inject events.
 	auditLog *audit.FileLogger
@@ -547,9 +556,51 @@ func (a *SluiceAddon) injectHeaders(f *mitmproxy.Flow, host string, port int) {
 	}
 	defer secret.Release()
 
-	f.Request.Header.Set(binding.Header, binding.FormatValue(secret.String()))
+	f.Request.Header.Set(binding.Header, binding.FormatValue(extractInjectableSecret(a.oauthIndex.Load(), binding.Credential, secret.String())))
 	log.Printf("[ADDON-INJECT] injected header %q for %s:%d (credential %q)",
 		binding.Header, host, port, binding.Credential)
+}
+
+// extractInjectableSecret returns the value to substitute into a binding's
+// `{value}` template.
+//
+// Static credentials are plain strings stored as-is in the vault; the
+// value to inject is the string itself. OAuth credentials are
+// JSON-marshalled OAuthCredential structs (access_token + refresh_token
+// + token_url + expires_at); the value to inject is just the
+// access_token, so a binding like `Authorization: Bearer {value}`
+// produces `Bearer <jwt>` rather than `Bearer {"access_token":...}`.
+//
+// We dispatch on the credential's metadata type (looked up via the
+// supplied OAuthIndex, populated from credential_meta on startup and
+// SIGHUP) rather than inferring from the secret's JSON shape. Shape
+// inference would mis-handle a static credential whose value happens
+// to be OAuth-shaped JSON. The credential_meta table is the single
+// source of truth for cred_type elsewhere in sluice; the injection
+// path follows the same rule.
+//
+// If the metadata says oauth but parsing fails (corrupted vault
+// entry, schema drift, etc.) we fall back to the raw secret. That
+// preserves the previous behavior on broken state instead of
+// returning an empty string and silently producing `Bearer ` headers.
+//
+// A nil index (no oauth credentials registered yet, or the QUIC
+// path running before UpdateOAuthIndex fires) means every
+// credential is treated as static.
+func extractInjectableSecret(idx *OAuthIndex, credName, secret string) string {
+	if idx == nil || !idx.Has(credName) {
+		return secret
+	}
+	cred, err := vault.ParseOAuth([]byte(secret))
+	if err != nil || cred == nil || cred.AccessToken == "" {
+		// Generic [INJECT] prefix because both the HTTP/1+2 and the
+		// HTTP/3 (QUIC) header-injection paths share this helper.
+		// An [ADDON-INJECT] tag would mislead a reader who saw the
+		// line in a deployment that uses HTTP/3 exclusively.
+		log.Printf("[INJECT] credential %q registered as oauth but vault payload not parseable; injecting raw secret", credName)
+		return secret
+	}
+	return cred.AccessToken
 }
 
 // Request performs Pass 2 (scoped phantom replacement) and Pass 3 (strip
@@ -647,11 +698,51 @@ func (a *SluiceAddon) StreamRequestModifier(f *mitmproxy.Flow, in io.Reader) io.
 // redact patterns (see SetRedactRules) so credential strings in upstream
 // responses are scrubbed before being relayed to the agent.
 func (a *SluiceAddon) Response(f *mitmproxy.Flow) {
+	// Top-level recover so a panic inside any sub-step (OAuth swap,
+	// DLP scan, future hooks) cannot escape into go-mitmproxy's
+	// generic recover, which abandons the response body and leaves
+	// the agent reading an empty stream. We log the full stack so
+	// the underlying bug can be diagnosed later, but the response
+	// continues with whatever state f.Response was in at the time
+	// of the panic. Real tokens cannot leak: processOAuthResponseIfMatching
+	// has its own snapshot/rollback, and any panic in DLP runs AFTER
+	// OAuth swap (so tokens are already phantoms by then).
+	defer func() {
+		if r := recover(); r != nil {
+			host := "unknown"
+			method := ""
+			if f != nil && f.Request != nil {
+				if f.Request.URL != nil {
+					host = f.Request.URL.Host
+				}
+				method = f.Request.Method
+			}
+			log.Printf("[ADDON] PANIC in Response handler for %s %s: %v\n%s", method, host, r, debug.Stack())
+		}
+	}()
+
+	// Nil-flow guard. The deferred recover above dereferences f to
+	// build the log line; without this early return, a nil flow
+	// (which go-mitmproxy never produces in practice but tests can)
+	// would hit the recover path on every call. Mirror what
+	// StreamResponseModifier does so both entry points handle nil
+	// flows uniformly.
+	if f == nil {
+		return
+	}
 	if f.Response == nil || f.Request == nil {
 		return
 	}
 
 	a.processOAuthResponseIfMatching(f)
+
+	// Test-only panic injection. Always nil in production. Lets a
+	// regression test exercise the deferred recover above without
+	// having to construct a Flow that triggers a real downstream
+	// nil deref.
+	if a.responsePanicHook != nil {
+		a.responsePanicHook()
+	}
 
 	// Outbound DLP: scan response body and headers for credential
 	// patterns that should not reach the agent. Runs after OAuth
@@ -711,10 +802,56 @@ func (a *SluiceAddon) processOAuthResponseIfMatching(f *mitmproxy.Flow) {
 // emit a single WARNING per client connection so operators notice the
 // gap without log spam from multi-chunk streams. The dedup state lives
 // on dlpStreamWarned, scoped to the client connection id.
-func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) io.Reader {
-	if f.Request == nil {
-		return in
+func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) (out io.Reader) {
+	// Default to passing the input through unchanged; named return
+	// lets the deferred recover ensure we always hand SOMETHING
+	// usable back to go-mitmproxy on a panic, instead of letting
+	// the panic escape into mitmproxy's outer recover (which
+	// abandons the response body entirely).
+	out = in
+
+	// Defensive nil-input guard up front, BEFORE the flow checks
+	// below. If both `f` and `in` are nil (rare but possible in tests
+	// or on an unusual go-mitmproxy code path), the f-nil early
+	// return below would otherwise hand back a nil io.Reader, which
+	// the proxy's downstream copy would nil-deref on. http.NoBody
+	// keeps the response well-framed (zero bytes) and the panic is
+	// avoided regardless of what `f` looks like.
+	if in == nil {
+		out = http.NoBody
+		return out
 	}
+
+	if f == nil || f.Request == nil {
+		return out
+	}
+
+	// Known-safe fallback for the panic recover. Set ONLY after the
+	// OAuth phantom swap has produced a clean buffer that contains
+	// no real tokens. Critically: we never assign the raw upstream
+	// bytes here, because a matched OAuth token-endpoint response
+	// contains real access and refresh tokens, and a panic between
+	// io.ReadAll and a successful swapOAuthTokens would otherwise
+	// leak those tokens straight to the agent. If the panic fires
+	// before safeFallback is set, the recover hands back http.NoBody
+	// instead. The agent sees an empty 2xx token body and surfaces
+	// the failure as a parse error, which is the strictly safer
+	// outcome compared to leaking a real bearer.
+	var safeFallback []byte
+	defer func() {
+		if r := recover(); r != nil {
+			host := "unknown"
+			if f.Request != nil && f.Request.URL != nil {
+				host = f.Request.URL.Host
+			}
+			log.Printf("[ADDON] PANIC in StreamResponseModifier for %s: %v\n%s", host, r, debug.Stack())
+			if safeFallback != nil {
+				out = bytes.NewReader(safeFallback)
+			} else {
+				out = http.NoBody
+			}
+		}
+	}()
 
 	// Warn when DLP rules are configured but the response is streamed.
 	// Dedupe by client connection id so we emit at most one warning per
@@ -782,10 +919,20 @@ func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) io
 
 	modified, err := a.swapOAuthTokens(body, contentType, credName)
 	if err != nil {
+		// The body did not parse as an OAuth token response. This is
+		// usually an HTML error page from a misconfigured token
+		// endpoint, not a credentials envelope, so passing it through
+		// is the historical behavior. We deliberately do NOT set
+		// safeFallback here: if a later panic somehow fires while
+		// returning, the recover defaults to http.NoBody rather than
+		// leaking whatever this body contains.
 		log.Printf("[ADDON-OAUTH] stream token parse error for credential %q: %v", credName, err)
 		return bytes.NewReader(body)
 	}
 
+	// Swap completed. The modified buffer is phantom-only and safe to
+	// hand back on a late panic.
+	safeFallback = modified
 	return bytes.NewReader(modified)
 }
 

@@ -242,6 +242,31 @@ func TestBuildEnvInjectionScript_QuotesValuesForSourcing(t *testing.T) {
 	}
 }
 
+func TestBuildEnvInjectionScript_ChownsEnvFileToDirOwner(t *testing.T) {
+	// Sluice's docker exec runs as the image's USER (root for the
+	// upstream openclaw and hermes images), so the awk rename and
+	// heredoc append leave the file root-owned. The agent runtime
+	// runs as a non-root user, so without a chown back to the dir
+	// owner the agent cannot run `hermes claw migrate` or in-agent
+	// secret edits. Verify the script emits a chown step.
+	for _, hasValues := range []bool{true, false} {
+		envMap := map[string]string{}
+		if hasValues {
+			envMap["KEY"] = "value"
+		}
+		script, err := BuildEnvInjectionScript(envMap, false, true)
+		if err != nil {
+			t.Fatalf("hasValues=%v: build script: %v", hasValues, err)
+		}
+		if !strings.Contains(script, `stat -c '%u:%g'`) {
+			t.Errorf("hasValues=%v: script must stat the parent dir to derive owner: %s", hasValues, script)
+		}
+		if !strings.Contains(script, `chown "$DIR_OWNER" "$ENV_FILE"`) {
+			t.Errorf("hasValues=%v: script must chown the env file to dir owner: %s", hasValues, script)
+		}
+	}
+}
+
 func TestBuildEnvInjectionScript_RejectsNewlineInValue(t *testing.T) {
 	// A newline in the value would split the env-file entry across two
 	// lines. The second line would either be silently lost or interpreted

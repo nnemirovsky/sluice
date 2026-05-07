@@ -85,6 +85,19 @@ type Server struct {
 	closed         atomic.Bool
 	serving        atomic.Bool
 	activeConns    sync.WaitGroup
+
+	// oauthMetasCache holds the latest credential_meta slice the
+	// server saw via UpdateOAuthIndex. Cached so a later
+	// quicProxy initialization (or re-init) can re-apply it.
+	// Without this, an UpdateOAuthIndex call that arrived before
+	// the QUIC proxy existed would leave QUICProxy.oauthIndex nil,
+	// re-introducing the OAuth-envelope header injection bug for
+	// HTTP/3 traffic until the next SIGHUP. Guarded by
+	// oauthMetasMu because UpdateOAuthIndex can fire concurrently
+	// from the SIGHUP reload path and Telegram credential
+	// mutations.
+	oauthMetasMu    sync.Mutex
+	oauthMetasCache []store.CredentialMeta
 }
 
 type contextKey string
@@ -606,13 +619,17 @@ func (s *Server) setupInjection(cfg Config, _ net.Listener) error {
 	}
 	s.addon = NewSluiceAddon(addonOpts...)
 
-	// Populate the OAuth token URL index from credential metadata so
-	// the response handler can detect OAuth token endpoints from startup.
+	// Load credential metadata once and stash it; we cannot mirror it
+	// into the QUIC proxy yet because that proxy is initialized later
+	// in this function. The deferred apply at the bottom of the setup
+	// hits both the addon and the QUIC proxy in one Server-level call.
+	var oauthMetas []store.CredentialMeta
 	if cfg.Store != nil {
-		if metas, metaErr := cfg.Store.ListCredentialMeta(); metaErr == nil {
-			s.addon.UpdateOAuthIndex(metas)
-		} else {
+		metas, metaErr := cfg.Store.ListCredentialMeta()
+		if metaErr != nil {
 			log.Printf("[MITM-OAUTH] failed to load credential meta for index: %v", metaErr)
+		} else {
+			oauthMetas = metas
 		}
 	}
 
@@ -705,11 +722,24 @@ func (s *Server) setupInjection(cfg Config, _ net.Listener) error {
 		log.Printf("QUIC proxy disabled: %v", qpErr)
 	} else {
 		s.quicProxy = qp
+		// Re-apply any UpdateOAuthIndex that may have arrived before
+		// quicProxy was assigned. The current setupInjection path
+		// calls UpdateOAuthIndex below this block so the cache is
+		// usually empty here, but being defensive means a future
+		// reorder cannot silently drop the QUIC OAuth dispatch.
+		s.applyCachedOAuthIndexToQUIC()
 		go func() {
 			if listenErr := qp.ListenAndServe("127.0.0.1:0"); listenErr != nil {
 				log.Printf("[QUIC] listener stopped: %v", listenErr)
 			}
 		}()
+	}
+
+	// Apply the OAuth metadata to both addon and QUIC proxy now that
+	// both are initialized. UpdateOAuthIndex is idempotent and handles
+	// nil quicProxy gracefully (when QUIC failed to start).
+	if oauthMetas != nil {
+		s.UpdateOAuthIndex(oauthMetas)
 	}
 
 	log.Printf("credential injection enabled (%s)", cfg.Provider.Name())
@@ -2379,9 +2409,44 @@ func (s *Server) StoreResolver(r *vault.BindingResolver) {
 // after Telegram credential mutations so the response handler detects
 // new or removed OAuth token endpoints.
 func (s *Server) UpdateOAuthIndex(metas []store.CredentialMeta) {
+	// Cache the metas so a later quicProxy initialization can pick
+	// up the latest index. setupInjection runs UpdateOAuthIndex
+	// before quicProxy is created in some startup paths (and tests
+	// can construct a Server without a QUIC proxy entirely), so
+	// without this cache the QUIC OAuth-vs-static dispatch would
+	// silently fall back to nil and the OAuth-envelope header
+	// injection bug would re-emerge for HTTP/3 traffic until the
+	// next SIGHUP.
+	s.oauthMetasMu.Lock()
+	s.oauthMetasCache = metas
+	s.oauthMetasMu.Unlock()
 	if s.addon != nil {
 		s.addon.UpdateOAuthIndex(metas)
 	}
+	// Mirror the index into the QUIC proxy so HTTP/3 header injection
+	// follows the same OAuth-vs-static dispatch as the HTTP/1+2 path.
+	// Without this, a credential with metadata cred_type="oauth" would
+	// be injected as the full JSON envelope on QUIC requests.
+	if s.quicProxy != nil {
+		s.quicProxy.SetOAuthIndex(NewOAuthIndex(metas))
+	}
+}
+
+// applyCachedOAuthIndexToQUIC pushes the most recently cached OAuth
+// metadata into the QUIC proxy. Call this after assigning
+// s.quicProxy so a UpdateOAuthIndex that arrived earlier (before
+// quicProxy existed) is not lost.
+func (s *Server) applyCachedOAuthIndexToQUIC() {
+	if s.quicProxy == nil {
+		return
+	}
+	s.oauthMetasMu.Lock()
+	metas := s.oauthMetasCache
+	s.oauthMetasMu.Unlock()
+	if len(metas) == 0 {
+		return
+	}
+	s.quicProxy.SetOAuthIndex(NewOAuthIndex(metas))
 }
 
 // SetOnOAuthRefresh configures a callback on the addon that is invoked
