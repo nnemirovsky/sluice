@@ -593,7 +593,11 @@ func extractInjectableSecret(idx *OAuthIndex, credName, secret string) string {
 	}
 	cred, err := vault.ParseOAuth([]byte(secret))
 	if err != nil || cred == nil || cred.AccessToken == "" {
-		log.Printf("[ADDON-INJECT] credential %q registered as oauth but vault payload not parseable; injecting raw secret", credName)
+		// Generic [INJECT] prefix because both the HTTP/1+2 and the
+		// HTTP/3 (QUIC) header-injection paths share this helper.
+		// An [ADDON-INJECT] tag would mislead a reader who saw the
+		// line in a deployment that uses HTTP/3 exclusively.
+		log.Printf("[INJECT] credential %q registered as oauth but vault payload not parseable; injecting raw secret", credName)
 		return secret
 	}
 	return cred.AccessToken
@@ -815,13 +819,17 @@ func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) (o
 	// Defensive nil check on the input reader. go-mitmproxy
 	// normally passes a non-nil reader (the buffered or live
 	// upstream stream), but a nil here would cause io.LimitReader
-	// + io.ReadAll below to nil-deref on the first Read call. When
-	// in is nil, return nil so reply() skips its copyStream branch
-	// and falls through to writing f.Response.Body (which the
-	// Response handler already populated with phantom-swapped
-	// bytes when applicable).
+	// + io.ReadAll below to nil-deref on the first Read call.
+	//
+	// We hit this path only with f.Stream=true (when go-mitmproxy
+	// streams the response), which means the Response addon callback
+	// did NOT run and f.Response.Body is empty. Returning an empty
+	// reader (rather than nil) keeps the response well-framed:
+	// reply() copies the empty stream and writes Content-Length: 0
+	// implicitly. The agent receives a zero-byte body instead of an
+	// undefined-length response that some HTTP clients trip on.
 	if in == nil {
-		out = nil
+		out = http.NoBody
 		return out
 	}
 

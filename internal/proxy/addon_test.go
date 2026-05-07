@@ -1261,8 +1261,11 @@ func TestAddonStreamResponseModifier_HandlesNilInput(t *testing.T) {
 		}
 	}()
 	out := addon.StreamResponseModifier(f, nil)
-	if out != nil {
-		t.Errorf("expected nil reader for nil input, got: %T", out)
+	// http.NoBody is what we hand back for nil input — keeps the
+	// streamed response well-framed (zero bytes) instead of an
+	// undefined body that some HTTP clients trip on.
+	if out != http.NoBody {
+		t.Errorf("expected http.NoBody for nil input, got: %T", out)
 	}
 }
 
