@@ -1267,33 +1267,60 @@ func TestAddonStreamResponseModifier_HandlesNilInput(t *testing.T) {
 }
 
 func TestExtractInjectableSecret(t *testing.T) {
-	// Static credentials are stored as plain strings. The vault
-	// returns the string as-is, and the binding template substitutes
-	// {value} with that string. Pass-through.
-	if got := extractInjectableSecret("ghp_static-pat-abc123"); got != "ghp_static-pat-abc123" {
+	// Build a metadata-driven OAuth index that lists "oauth_cred"
+	// as oauth and treats any other name as static. Mirrors what
+	// Server.UpdateOAuthIndex does on startup / SIGHUP.
+	idx := NewOAuthIndex([]store.CredentialMeta{
+		{Name: "oauth_cred", CredType: "oauth", TokenURL: "https://auth.example.com/oauth/token"},
+	})
+
+	// Static credentials are stored as plain strings. With the cred
+	// name absent from the OAuth index, the value passes through.
+	if got := extractInjectableSecret(idx, "github_pat", "ghp_static-pat-abc123"); got != "ghp_static-pat-abc123" {
 		t.Errorf("static cred should pass through unchanged, got %q", got)
 	}
 
-	// OAuth credentials are stored as a JSON blob. The binding
-	// template wants just the access_token; without this extraction
-	// the agent would see `Bearer {"access_token":"...",...}` in
-	// the request header and the upstream would reject with 401.
+	// A static credential whose value happens to be OAuth-shaped
+	// JSON must NOT be misclassified. Without metadata-driven
+	// dispatch, shape inference would strip the access_token field
+	// and silently change behavior for legitimate static creds.
+	staticOAuthShape := `{"access_token":"intentional","token_url":"https://x"}`
+	if got := extractInjectableSecret(idx, "github_pat", staticOAuthShape); got != staticOAuthShape {
+		t.Errorf("static cred with oauth-shaped value must pass through, got %q", got)
+	}
+
+	// OAuth credentials registered in the index parse as JSON and
+	// yield just the access_token. The binding template wants
+	// `Bearer <jwt>`, not `Bearer {"access_token":"<jwt>",...}`.
 	oauthBlob := `{"access_token":"jwt-access-xyz","refresh_token":"jwt-refresh-abc","token_url":"https://auth.example.com/oauth/token"}`
-	if got := extractInjectableSecret(oauthBlob); got != "jwt-access-xyz" {
+	if got := extractInjectableSecret(idx, "oauth_cred", oauthBlob); got != "jwt-access-xyz" {
 		t.Errorf("oauth cred should yield access_token, got %q", got)
 	}
 
-	// Edge cases: empty string, JSON without access_token, malformed
-	// JSON, and JSON that opens with `{` but is not a valid OAuth
-	// envelope. None of these should panic; non-OAuth shapes pass
-	// through so a future static credential that happens to start
-	// with a brace still works.
-	cases := []string{"", `{"foo":"bar"}`, `{not-json`, `{"access_token":""}`}
-	for _, in := range cases {
-		got := extractInjectableSecret(in)
-		if got != in {
-			t.Errorf("expected pass-through for %q, got %q", in, got)
+	// Leading whitespace in a stored JSON envelope must not bypass
+	// extraction. json.Unmarshal accepts leading whitespace; the
+	// extractor delegates to ParseOAuth which uses the same parser.
+	leadingWS := "  \n\t" + oauthBlob
+	if got := extractInjectableSecret(idx, "oauth_cred", leadingWS); got != "jwt-access-xyz" {
+		t.Errorf("oauth cred with leading whitespace should yield access_token, got %q", got)
+	}
+
+	// OAuth credential with corrupted vault payload: parsing fails,
+	// fall back to the raw secret. Better to forward a malformed
+	// header than silently substitute an empty string and produce
+	// `Bearer ` (which would also 401 but with no diagnostic clue).
+	for _, broken := range []string{"", `{"foo":"bar"}`, `{not-json`} {
+		got := extractInjectableSecret(idx, "oauth_cred", broken)
+		if got != broken {
+			t.Errorf("broken oauth payload %q should fall back, got %q", broken, got)
 		}
+	}
+
+	// Nil index means no oauth credentials are registered yet.
+	// Every credential is treated as static. Same as the early-
+	// startup path before the first UpdateOAuthIndex fires.
+	if got := extractInjectableSecret(nil, "anything", oauthBlob); got != oauthBlob {
+		t.Errorf("nil index should pass through unchanged, got %q", got)
 	}
 }
 

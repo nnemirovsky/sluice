@@ -2382,6 +2382,13 @@ func (s *Server) UpdateOAuthIndex(metas []store.CredentialMeta) {
 	if s.addon != nil {
 		s.addon.UpdateOAuthIndex(metas)
 	}
+	// Mirror the index into the QUIC proxy so HTTP/3 header injection
+	// follows the same OAuth-vs-static dispatch as the HTTP/1+2 path.
+	// Without this, a credential with metadata cred_type="oauth" would
+	// be injected as the full JSON envelope on QUIC requests.
+	if s.quicProxy != nil {
+		s.quicProxy.SetOAuthIndex(NewOAuthIndex(metas))
+	}
 }
 
 // SetOnOAuthRefresh configures a callback on the addon that is invoked

@@ -75,6 +75,14 @@ type QUICProxy struct {
 	audit    *audit.FileLogger
 	rules    atomic.Pointer[quicInspectRules]
 
+	// oauthIndex points at the same OAuthIndex the SluiceAddon uses
+	// so QUIC/HTTP3 header injection follows the same OAuth-vs-static
+	// dispatch rules as the HTTP/1+2 path. Optional: a nil index means
+	// every credential is treated as static (the right answer when no
+	// oauth credentials are registered). Updated atomically via
+	// SetOAuthIndex from Server.UpdateOAuthIndex.
+	oauthIndex atomic.Pointer[OAuthIndex]
+
 	// upstreamTLSConfig overrides the TLS configuration for outbound HTTP/3
 	// connections to real upstreams. Nil uses system roots. Tests set this
 	// to trust the test CA.
@@ -107,6 +115,14 @@ type QUICProxy struct {
 	listener *quic.Listener
 	addr     net.Addr
 	closed   bool
+}
+
+// SetOAuthIndex atomically replaces the QUIC proxy's OAuth index. The
+// addon and the QUIC proxy each hold their own pointer so concurrent
+// header-injection paths can read without locking; both are kept in
+// sync from Server.UpdateOAuthIndex.
+func (q *QUICProxy) SetOAuthIndex(idx *OAuthIndex) {
+	q.oauthIndex.Store(idx)
 }
 
 // NewQUICProxy creates a QUIC proxy that terminates agent QUIC connections.
@@ -412,7 +428,7 @@ func (q *QUICProxy) buildHandler(upstreamHost string, destPort int, checker *Req
 					log.Printf("[QUIC-MITM] credential %q lookup failed: %v", binding.Credential, err)
 				} else {
 					if binding.Header != "" {
-						r.Header.Set(binding.Header, binding.FormatValue(extractInjectableSecret(secret.String())))
+						r.Header.Set(binding.Header, binding.FormatValue(extractInjectableSecret(q.oauthIndex.Load(), binding.Credential, secret.String())))
 					}
 					secret.Release()
 				}

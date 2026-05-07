@@ -556,29 +556,44 @@ func (a *SluiceAddon) injectHeaders(f *mitmproxy.Flow, host string, port int) {
 	}
 	defer secret.Release()
 
-	f.Request.Header.Set(binding.Header, binding.FormatValue(extractInjectableSecret(secret.String())))
+	f.Request.Header.Set(binding.Header, binding.FormatValue(extractInjectableSecret(a.oauthIndex.Load(), binding.Credential, secret.String())))
 	log.Printf("[ADDON-INJECT] injected header %q for %s:%d (credential %q)",
 		binding.Header, host, port, binding.Credential)
 }
 
 // extractInjectableSecret returns the value to substitute into a binding's
-// `{value}` template. Static credentials are plain strings stored as-is in
-// the vault; the value to inject is the string itself. OAuth credentials
-// are JSON-marshalled OAuthCredential structs (access_token + refresh_token
-// + metadata); the value to inject is just the access_token, so a binding
-// like `Authorization: Bearer {value}` produces `Bearer <jwt>` rather than
-// `Bearer {"access_token":"<jwt>",...}`.
+// `{value}` template.
 //
-// Detection is by JSON shape: anything that parses as an OAuthCredential
-// with a non-empty access_token gets the OAuth treatment, otherwise the
-// raw secret is returned unchanged. This avoids forcing the caller to
-// thread credential metadata through every injection path.
-func extractInjectableSecret(secret string) string {
-	if len(secret) == 0 || secret[0] != '{' {
+// Static credentials are plain strings stored as-is in the vault; the
+// value to inject is the string itself. OAuth credentials are
+// JSON-marshalled OAuthCredential structs (access_token + refresh_token
+// + token_url + expires_at); the value to inject is just the
+// access_token, so a binding like `Authorization: Bearer {value}`
+// produces `Bearer <jwt>` rather than `Bearer {"access_token":...}`.
+//
+// We dispatch on the credential's metadata type (looked up via the
+// supplied OAuthIndex, populated from credential_meta on startup and
+// SIGHUP) rather than inferring from the secret's JSON shape. Shape
+// inference would mis-handle a static credential whose value happens
+// to be OAuth-shaped JSON. The credential_meta table is the single
+// source of truth for cred_type elsewhere in sluice; the injection
+// path follows the same rule.
+//
+// If the metadata says oauth but parsing fails (corrupted vault
+// entry, schema drift, etc.) we fall back to the raw secret. That
+// preserves the previous behavior on broken state instead of
+// returning an empty string and silently producing `Bearer ` headers.
+//
+// A nil index (no oauth credentials registered yet, or the QUIC
+// path running before UpdateOAuthIndex fires) means every
+// credential is treated as static.
+func extractInjectableSecret(idx *OAuthIndex, credName, secret string) string {
+	if idx == nil || !idx.Has(credName) {
 		return secret
 	}
 	cred, err := vault.ParseOAuth([]byte(secret))
 	if err != nil || cred == nil || cred.AccessToken == "" {
+		log.Printf("[ADDON-INJECT] credential %q registered as oauth but vault payload not parseable; injecting raw secret", credName)
 		return secret
 	}
 	return cred.AccessToken
