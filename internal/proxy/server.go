@@ -1591,15 +1591,22 @@ func (s *Server) sniPolicyCheckBeforeDial(ctx context.Context, request *socks5.R
 func (s *Server) httpHostPolicyCheckBeforeDial(ctx context.Context, request *socks5.Request) (io.Reader, context.Context, bool) {
 	buf, host, err := peekHTTPHost(request.Reader, 8192)
 	if err != nil || host == "" {
+		// Deny when the peek fails to recover a Host. The deferral
+		// path runs only for non-Allow / non-Deny IP verdicts (i.e.
+		// Ask), so passing through with allow=true would silently
+		// upgrade Ask into an unconditional allow for any port-80
+		// traffic that does not yield a parsable Host header
+		// (binary protocols, truncated headers, peek timeout,
+		// malformed HTTP). Denying is the strict default that
+		// preserves the original Ask semantic without re-entering
+		// SOCKS5 (we already sent RepSuccess to enable the peek);
+		// the agent observes a closed connection and can retry.
 		hexPrefix := ""
 		if len(buf) >= 6 {
 			hexPrefix = fmt.Sprintf(" first6=%02x", buf[:6])
 		}
-		log.Printf("[HTTP-HOST-PEEK] no Host extracted (err=%v, bufLen=%d, host=%q%s)", err, len(buf), host, hexPrefix)
-		if len(buf) > 0 {
-			return io.MultiReader(bytes.NewReader(buf), request.Reader), ctx, true
-		}
-		return request.Reader, ctx, true
+		log.Printf("[HTTP-HOST->DENY] no Host extracted (err=%v, bufLen=%d, host=%q%s)", err, len(buf), host, hexPrefix)
+		return nil, ctx, false
 	}
 
 	host = strings.TrimRight(host, ".")
