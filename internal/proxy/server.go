@@ -108,6 +108,7 @@ const (
 	ctxKeyFallbackAddrs    contextKey = "fallbackAddrs"
 	ctxKeyFQDN             contextKey = "fqdn"
 	ctxKeySNIDeferred      contextKey = "sniDeferred"      // true when policy check deferred for SNI peeking
+	ctxKeyHTTPHostDeferred contextKey = "httpHostDeferred" // true when policy check deferred for HTTP Host peeking
 	ctxKeyPerRequestPolicy contextKey = "perRequestPolicy" // *RequestPolicyChecker for per-HTTP-request policy checks
 	ctxKeySkipPerRequest   contextKey = "skipPerRequest"   // true when connection matched an explicit allow rule
 )
@@ -132,6 +133,20 @@ func isPrivateIP(ip net.IP) bool {
 func isTLSPort(port int) bool {
 	switch port {
 	case 443, 8443, 993, 995, 465:
+		return true
+	default:
+		return false
+	}
+}
+
+// isPlainHTTPPort returns true for ports that typically carry plain
+// (non-TLS) HTTP/1.x traffic. Used to enable Host-header peeking on
+// SOCKS5 CONNECT requests that arrive with a bare IP — without the
+// peek, hostname-based allow rules cannot match the connection and
+// the operator gets a flood of IP-based Telegram approval prompts.
+func isPlainHTTPPort(port int) bool {
+	switch port {
+	case 80, 8080:
 		return true
 	default:
 		return false
@@ -308,6 +323,23 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 		ctx = context.WithValue(ctx, ctxKeyProtocol, proto)
 		ctx = context.WithValue(ctx, ctxKeyFQDN, dest)
 		ctx = context.WithValue(ctx, ctxKeySNIDeferred, true)
+		ctx = context.WithValue(ctx, ctxKeyEngine, eng)
+		return ctx, true
+	}
+
+	// HTTP Host deferral: same idea as SNI deferral but for plain HTTP.
+	// When the SOCKS5 layer received a bare IP and a hostname-based rule
+	// could plausibly match, defer the policy check until the connect
+	// handler can peek the request's Host header. Without this, every
+	// new IP behind a hostname rule (e.g. tailscale's DERP latency
+	// probes hitting dozens of derp[N].tailscale.com IPs) generates an
+	// approval prompt that can't be silenced short of allowing each IP.
+	if ipOnly && verdict != policy.Allow && verdict != policy.Deny && isPlainHTTPPort(port) {
+		log.Printf("[HTTP-HOST-DEFER] %s:%d (deferring policy for Host header peek)", dest, port)
+		proto := DetectProtocol(port)
+		ctx = context.WithValue(ctx, ctxKeyProtocol, proto)
+		ctx = context.WithValue(ctx, ctxKeyFQDN, dest)
+		ctx = context.WithValue(ctx, ctxKeyHTTPHostDeferred, true)
 		ctx = context.WithValue(ctx, ctxKeyEngine, eng)
 		return ctx, true
 	}
@@ -1342,6 +1374,39 @@ func (s *Server) handleConnect(ctx context.Context, writer io.Writer, request *s
 		return s.relayData(clientReader, writer, target)
 	}
 
+	// HTTP Host-deferred connections: peek the request's Host header
+	// (mirrors the SNI flow above but for plaintext HTTP on port 80).
+	// Hostname recovery here lets `*.tailscale.com:80` rules match the
+	// dozens of bare-IP DERP probes that would otherwise spam the
+	// approval channel.
+	if deferred, _ := ctx.Value(ctxKeyHTTPHostDeferred).(bool); deferred {
+		bindAddr := &net.TCPAddr{IP: request.DestAddr.IP, Port: request.DestAddr.Port}
+		if sendErr := socks5.SendReply(writer, statute.RepSuccess, bindAddr); sendErr != nil {
+			return fmt.Errorf("failed to send reply: %w", sendErr)
+		}
+		if conn, ok := writer.(net.Conn); ok {
+			conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
+		}
+
+		var allow bool
+		clientReader, ctx, allow = s.httpHostPolicyCheckBeforeDial(ctx, request)
+		if !allow {
+			return nil
+		}
+
+		if conn, ok := writer.(net.Conn); ok {
+			conn.SetReadDeadline(time.Time{}) //nolint:errcheck
+		}
+
+		target, err := s.dial(ctx, "tcp", request.DestAddr.String())
+		if err != nil {
+			return fmt.Errorf("connect to %v failed: %w", request.RawDestAddr, err)
+		}
+		defer target.Close() //nolint:errcheck
+
+		return s.relayData(clientReader, writer, target)
+	}
+
 	// Normal (non-deferred) path: dial first, then relay.
 	target, err := s.dial(ctx, "tcp", request.DestAddr.String())
 	if err != nil {
@@ -1492,6 +1557,81 @@ func (s *Server) sniPolicyCheckBeforeDial(ctx context.Context, request *socks5.R
 		return reader, ctx, true
 	default:
 		log.Printf("[SNI->DENY] %s:%d (hostname %s: default deny)", ipStr, port, sni)
+		return nil, ctx, false
+	}
+}
+
+// httpHostPolicyCheckBeforeDial peeks the first bytes from the client to
+// extract the HTTP/1.x Host header, re-evaluates policy with the recovered
+// hostname, and updates the context FQDN so the dial uses the hostname for
+// upstream selection. Mirrors sniPolicyCheckBeforeDial; the only differences
+// are which peek function runs and which protocol's "host pinning" semantic
+// applies to the recovered name.
+func (s *Server) httpHostPolicyCheckBeforeDial(ctx context.Context, request *socks5.Request) (io.Reader, context.Context, bool) {
+	buf, host, err := peekHTTPHost(request.Reader, 8192)
+	if err != nil || host == "" {
+		hexPrefix := ""
+		if len(buf) >= 6 {
+			hexPrefix = fmt.Sprintf(" first6=%02x", buf[:6])
+		}
+		log.Printf("[HTTP-HOST-PEEK] no Host extracted (err=%v, bufLen=%d, host=%q%s)", err, len(buf), host, hexPrefix)
+		if len(buf) > 0 {
+			return io.MultiReader(bytes.NewReader(buf), request.Reader), ctx, true
+		}
+		return request.Reader, ctx, true
+	}
+
+	host = strings.TrimRight(host, ".")
+	dest := request.DestAddr.String()
+	ipStr := strings.Split(dest, ":")[0]
+	port := request.DestAddr.Port
+
+	log.Printf("[HTTP-HOST] %s -> %s:%d (recovered hostname via HTTP Host header)", ipStr, host, port)
+
+	ctx = context.WithValue(ctx, ctxKeyFQDN, host)
+	if s.dnsInterceptor != nil {
+		s.dnsInterceptor.StoreReverse(ipStr, host)
+	}
+
+	eng, _ := ctx.Value(ctxKeyEngine).(*policy.Engine)
+	if eng == nil {
+		eng = s.rules.engine.Load()
+	}
+	verdict, matchSource := eng.EvaluateDetailed(host, port)
+	reader := io.MultiReader(bytes.NewReader(buf), request.Reader)
+
+	switch verdict {
+	case policy.Allow:
+		log.Printf("[HTTP-HOST->ALLOW] %s:%d (hostname %s matched allow rule)", ipStr, port, host)
+		if matchSource == policy.RuleMatch {
+			ctx = context.WithValue(ctx, ctxKeySkipPerRequest, true)
+		} else if s.rules.broker == nil {
+			ctx = context.WithValue(ctx, ctxKeySkipPerRequest, true)
+		} else {
+			checker := NewRequestPolicyChecker(
+				s.rules.engine, s.rules.broker,
+				WithPersist(s.rules.buildPersistFunc()),
+			)
+			ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
+		}
+		return reader, ctx, true
+	case policy.Deny:
+		log.Printf("[HTTP-HOST->DENY] %s:%d (hostname %s matched deny rule)", ipStr, port, host)
+		return nil, ctx, false
+	case policy.Ask:
+		if s.rules.broker == nil {
+			log.Printf("[HTTP-HOST->DENY] %s:%d (hostname %s: ask treated as deny, no broker)", ipStr, port, host)
+			return nil, ctx, false
+		}
+		log.Printf("[HTTP-HOST->DEFER] %s:%d (hostname %s: approval deferred to per-request)", ipStr, port, host)
+		checker := NewRequestPolicyChecker(
+			s.rules.engine, s.rules.broker,
+			WithPersist(s.rules.buildPersistFunc()),
+		)
+		ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
+		return reader, ctx, true
+	default:
+		log.Printf("[HTTP-HOST->DENY] %s:%d (hostname %s: default deny)", ipStr, port, host)
 		return nil, ctx, false
 	}
 }

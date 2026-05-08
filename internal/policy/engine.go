@@ -27,9 +27,33 @@ func isUDPFamilyProto(proto string) bool {
 }
 
 type compiledRule struct {
+	// Exactly one of glob or cidr is set per rule. cidr is set when
+	// the rule's destination is a CIDR like "192.168.1.0/24" or a
+	// bare IP-with-mask like "10.0.0.1/32"; glob is set for hostname
+	// patterns and bare IPs without a mask. The matchDestination
+	// method dispatches on which is non-nil.
 	glob      *Glob
+	cidr      *net.IPNet
 	ports     map[int]bool
 	protocols map[string]bool
+}
+
+// matchDestination reports whether dest matches this rule's destination.
+// CIDR rules use IP containment (the rule "10.0.0.0/8" matches "10.1.2.3").
+// Glob rules use the existing glob matcher. A CIDR rule matches only when
+// dest parses as an IP — a hostname like "example.com" can never match a
+// CIDR rule even if the rule's CIDR happens to cover the IP that hostname
+// resolves to elsewhere, because policy evaluation happens with the
+// destination string the SOCKS5 layer received.
+func (r compiledRule) matchDestination(dest string) bool {
+	if r.cidr != nil {
+		ip := net.ParseIP(dest)
+		if ip == nil {
+			return false
+		}
+		return r.cidr.Contains(ip)
+	}
+	return r.glob != nil && r.glob.Match(dest)
 }
 
 // portToProtocol maps well-known ports to protocol names for protocol-scoped
@@ -256,11 +280,6 @@ func compileRules(rules []Rule) ([]compiledRule, error) {
 		if r.Destination == "" {
 			return nil, fmt.Errorf("rule has empty destination")
 		}
-		dest := canonicalizeDestination(r.Destination)
-		g, err := CompileGlob(dest)
-		if err != nil {
-			return nil, fmt.Errorf("compile rule %q: %w", r.Destination, err)
-		}
 		ports := make(map[int]bool, len(r.Ports))
 		for _, p := range r.Ports {
 			if p < 1 || p > 65535 {
@@ -271,6 +290,24 @@ func compileRules(rules []Rule) ([]compiledRule, error) {
 		protocols := make(map[string]bool, len(r.Protocols))
 		for _, p := range r.Protocols {
 			protocols[p] = true
+		}
+		// A destination containing "/" is unambiguously CIDR intent.
+		// Globs and DNS hostnames do not contain forward slashes, so
+		// the slash is a clean discriminator. Use net.ParseCIDR so
+		// invalid masks fail loudly at compile time rather than
+		// silently matching nothing at runtime.
+		if strings.Contains(r.Destination, "/") {
+			_, ipnet, err := net.ParseCIDR(r.Destination)
+			if err != nil {
+				return nil, fmt.Errorf("rule %q: invalid CIDR: %w", r.Destination, err)
+			}
+			out = append(out, compiledRule{cidr: ipnet, ports: ports, protocols: protocols})
+			continue
+		}
+		dest := canonicalizeDestination(r.Destination)
+		g, err := CompileGlob(dest)
+		if err != nil {
+			return nil, fmt.Errorf("compile rule %q: %w", r.Destination, err)
 		}
 		out = append(out, compiledRule{glob: g, ports: ports, protocols: protocols})
 	}
@@ -313,7 +350,7 @@ func matchRules(rules []compiledRule, dest string, port int) bool {
 // transport-agnostic rules that TCP matches via matchRulesWithProto.
 func matchRulesStrictProto(rules []compiledRule, dest string, port int, proto string) bool {
 	for _, r := range rules {
-		if !r.glob.Match(dest) {
+		if !r.matchDestination(dest) {
 			continue
 		}
 		if len(r.ports) > 0 && !r.ports[port] {
@@ -337,7 +374,7 @@ func matchRulesStrictProto(rules []compiledRule, dest string, port int, proto st
 // and is unaffected.
 func matchRulesUnscoped(rules []compiledRule, dest string, port int) bool {
 	for _, r := range rules {
-		if !r.glob.Match(dest) {
+		if !r.matchDestination(dest) {
 			continue
 		}
 		if len(r.ports) > 0 && !r.ports[port] {
@@ -361,7 +398,7 @@ func matchRulesUnscoped(rules []compiledRule, dest string, port int) bool {
 // TCP-based connection, mirroring how EvaluateUDP/EvaluateQUIC treat "udp".
 func matchRulesWithProto(rules []compiledRule, dest string, port int, proto string) bool {
 	for _, r := range rules {
-		if !r.glob.Match(dest) {
+		if !r.matchDestination(dest) {
 			continue
 		}
 		if len(r.ports) > 0 && !r.ports[port] {
@@ -416,7 +453,7 @@ func (e *Engine) IsDeniedDomain(dest string) bool {
 		return false
 	}
 	for _, r := range e.compiled.denyRules {
-		if r.glob.Match(dest) {
+		if r.matchDestination(dest) {
 			return true
 		}
 	}
@@ -478,7 +515,7 @@ func (e *Engine) CouldBeAllowed(dest string, includeAsk bool) bool {
 	// only deny that protocol, so DNS must still be resolved for other
 	// protocols to work.
 	for _, r := range e.compiled.denyRules {
-		if len(r.ports) == 0 && len(r.protocols) == 0 && r.glob.Match(dest) {
+		if len(r.ports) == 0 && len(r.protocols) == 0 && r.matchDestination(dest) {
 			return false
 		}
 	}
@@ -486,7 +523,7 @@ func (e *Engine) CouldBeAllowed(dest string, includeAsk bool) bool {
 	// If any allow rule matches (ignoring ports), the destination
 	// might be allowed on some port.
 	for _, r := range e.compiled.allowRules {
-		if r.glob.Match(dest) {
+		if r.matchDestination(dest) {
 			return true
 		}
 	}
@@ -495,7 +532,7 @@ func (e *Engine) CouldBeAllowed(dest string, includeAsk bool) bool {
 	// but only when an approval broker is available.
 	if includeAsk {
 		for _, r := range e.compiled.askRules {
-			if r.glob.Match(dest) {
+			if r.matchDestination(dest) {
 				return true
 			}
 		}
