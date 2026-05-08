@@ -141,9 +141,10 @@ func isTLSPort(port int) bool {
 
 // isPlainHTTPPort returns true for ports that typically carry plain
 // (non-TLS) HTTP/1.x traffic. Used to enable Host-header peeking on
-// SOCKS5 CONNECT requests that arrive with a bare IP — without the
+// SOCKS5 CONNECT requests that arrive with a bare IP. Without the
 // peek, hostname-based allow rules cannot match the connection and
-// the operator gets a flood of IP-based Telegram approval prompts.
+// the policy engine resolves to its default verdict (often Ask) on
+// every distinct IP behind a hostname rule.
 func isPlainHTTPPort(port int) bool {
 	switch port {
 	case 80, 8080:
@@ -1500,8 +1501,13 @@ func (s *Server) sniPolicyCheckBeforeDial(ctx context.Context, request *socks5.R
 	}
 
 	sni = strings.TrimRight(sni, ".")
-	dest := request.DestAddr.String()
-	ipStr := strings.Split(dest, ":")[0]
+	// request.DestAddr.IP is the parsed net.IP, so .String() yields a
+	// clean address-only form without the trailing port. The previous
+	// strings.Split(dest, ":") approach mishandled IPv6 destinations:
+	// request.DestAddr.String() emits IPv6 as "[::1]:80", and splitting
+	// on ":" yields "[" or partial values that corrupt logs and the
+	// reverse-DNS cache key.
+	ipStr := request.DestAddr.IP.String()
 	port := request.DestAddr.Port
 
 	log.Printf("[SNI] %s -> %s:%d (recovered hostname via TLS ClientHello)", ipStr, sni, port)
@@ -1582,8 +1588,13 @@ func (s *Server) httpHostPolicyCheckBeforeDial(ctx context.Context, request *soc
 	}
 
 	host = strings.TrimRight(host, ".")
-	dest := request.DestAddr.String()
-	ipStr := strings.Split(dest, ":")[0]
+	// request.DestAddr.IP is the parsed net.IP, so .String() yields a
+	// clean address-only form without the trailing port. The previous
+	// strings.Split(dest, ":") approach mishandled IPv6 destinations:
+	// request.DestAddr.String() emits IPv6 as "[::1]:80", and splitting
+	// on ":" yields "[" or partial values that corrupt logs and the
+	// reverse-DNS cache key.
+	ipStr := request.DestAddr.IP.String()
 	port := request.DestAddr.Port
 
 	log.Printf("[HTTP-HOST] %s -> %s:%d (recovered hostname via HTTP Host header)", ipStr, host, port)

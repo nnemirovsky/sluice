@@ -10,8 +10,8 @@ import (
 
 // peekHTTPHost reads enough bytes from r to parse the HTTP/1.x request line
 // and Host header, returning the peeked buffer and the host. Like peekSNI
-// but for plain HTTP on port 80. The caller prepends the buffer to subsequent
-// reads so the upstream sees the full request.
+// but for plain HTTP (e.g. ports 80, 8080). The caller prepends the buffer
+// to subsequent reads so the upstream sees the full request.
 //
 // Returns an empty host when the bytes are not a valid HTTP/1.x request
 // (binary protocol, partial data, malformed). In that case the caller should
