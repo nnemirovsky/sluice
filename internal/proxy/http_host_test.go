@@ -38,6 +38,18 @@ func TestExtractHTTPHost_IPv6WithPort(t *testing.T) {
 	}
 }
 
+func TestExtractHTTPHost_UnbracketedIPv6(t *testing.T) {
+	// Bare IPv6 without brackets is invalid per RFC but seen in the
+	// wild. The previous LastIndex(":") logic chopped the final
+	// hextet as if it were a port. SplitHostPort errors on this
+	// shape, so the original host should pass through unmodified.
+	prefix := []byte("GET / HTTP/1.1\r\nHost: 2001:db8::1\r\n\r\n")
+	host, ok := extractHTTPHost(prefix)
+	if !ok || host != "2001:db8::1" {
+		t.Errorf("got %q ok=%v, want 2001:db8::1 ok=true (bare IPv6 must not be truncated)", host, ok)
+	}
+}
+
 func TestExtractHTTPHost_MissingHost(t *testing.T) {
 	// HTTP/1.0 allowed missing Host. Should return ok=false rather than
 	// silently allowing an empty hostname through to policy.

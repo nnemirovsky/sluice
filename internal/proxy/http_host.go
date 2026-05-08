@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 )
@@ -77,15 +78,16 @@ func extractHTTPHost(prefix []byte) (string, bool) {
 	if host == "" {
 		return "", false
 	}
-	// Strip port if present. IPv6 hosts in Host headers appear as
-	// "[::1]:80" so only strip the trailing :port when there is no
-	// closing bracket after the last colon.
-	if i := strings.LastIndex(host, ":"); i >= 0 {
-		if !strings.Contains(host[i:], "]") {
-			host = host[:i]
-		}
+	// net.SplitHostPort handles every shape Host can legitimately
+	// take: "example.com:80" -> ("example.com", "80"),
+	// "[::1]:80" -> ("::1", "80"), "[::1]" with no port -> error,
+	// and bare IPv6 like "2001:db8::1" -> error ("too many colons").
+	// Falling back to the trimmed host on error avoids the previous
+	// LastIndex(":") approach that mishandled bare IPv6 by stripping
+	// the final hextet as if it were a port.
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
 	}
-	// IPv6 hosts may still be wrapped in [] — strip those.
 	host = strings.TrimPrefix(host, "[")
 	host = strings.TrimSuffix(host, "]")
 	if host == "" {
