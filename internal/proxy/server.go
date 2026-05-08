@@ -98,6 +98,12 @@ type Server struct {
 	// mutations.
 	oauthMetasMu    sync.Mutex
 	oauthMetasCache []store.CredentialMeta
+
+	// lookupIP is the forward DNS lookup the HTTP Host spoofing
+	// guard uses when the reverse cache cannot attest the binding.
+	// nil means "use net.DefaultResolver.LookupIP". Tests inject a
+	// stub so the unit test does not perform a real DNS query.
+	lookupIP func(ctx context.Context, network, host string) ([]net.IP, error)
 }
 
 type contextKey string
@@ -108,6 +114,7 @@ const (
 	ctxKeyFallbackAddrs    contextKey = "fallbackAddrs"
 	ctxKeyFQDN             contextKey = "fqdn"
 	ctxKeySNIDeferred      contextKey = "sniDeferred"      // true when policy check deferred for SNI peeking
+	ctxKeyHTTPHostDeferred contextKey = "httpHostDeferred" // true when policy check deferred for HTTP Host peeking
 	ctxKeyPerRequestPolicy contextKey = "perRequestPolicy" // *RequestPolicyChecker for per-HTTP-request policy checks
 	ctxKeySkipPerRequest   contextKey = "skipPerRequest"   // true when connection matched an explicit allow rule
 )
@@ -132,6 +139,21 @@ func isPrivateIP(ip net.IP) bool {
 func isTLSPort(port int) bool {
 	switch port {
 	case 443, 8443, 993, 995, 465:
+		return true
+	default:
+		return false
+	}
+}
+
+// isPlainHTTPPort returns true for ports that typically carry plain
+// (non-TLS) HTTP/1.x traffic. Used to enable Host-header peeking on
+// SOCKS5 CONNECT requests that arrive with a bare IP. Without the
+// peek, hostname-based allow rules cannot match the connection and
+// the policy engine resolves to its default verdict (often Ask) on
+// every distinct IP behind a hostname rule.
+func isPlainHTTPPort(port int) bool {
+	switch port {
+	case 80, 8080:
 		return true
 	default:
 		return false
@@ -308,6 +330,32 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 		ctx = context.WithValue(ctx, ctxKeyProtocol, proto)
 		ctx = context.WithValue(ctx, ctxKeyFQDN, dest)
 		ctx = context.WithValue(ctx, ctxKeySNIDeferred, true)
+		ctx = context.WithValue(ctx, ctxKeyEngine, eng)
+		return ctx, true
+	}
+
+	// HTTP Host deferral: same idea as SNI deferral but for plain HTTP.
+	// When the SOCKS5 layer received a bare IP and a hostname-based rule
+	// could plausibly match, defer the policy check until the connect
+	// handler can peek the request's Host header. Without this, every
+	// new IP behind a hostname rule (e.g. tailscale's DERP latency
+	// probes hitting dozens of derp[N].tailscale.com IPs) generates an
+	// approval prompt that can't be silenced short of allowing each IP.
+	//
+	// Require a broker before deferring. The peek inside handleConnect
+	// must send SOCKS5 RepSuccess before it can read the request bytes,
+	// which means a deferred Ask-with-no-broker would manifest as
+	// success-then-reset on the client side instead of a clean
+	// RepHostUnreachable. When no broker is configured, fall through to
+	// the IP-based path so the Ask->Deny collapse happens before
+	// SOCKS5 success goes out, matching how go-socks5 reports failure
+	// for the non-deferred Ask-without-broker case.
+	if ipOnly && verdict != policy.Allow && verdict != policy.Deny && isPlainHTTPPort(port) && r.broker != nil {
+		log.Printf("[HTTP-HOST-DEFER] %s:%d (deferring policy for Host header peek)", dest, port)
+		proto := DetectProtocol(port)
+		ctx = context.WithValue(ctx, ctxKeyProtocol, proto)
+		ctx = context.WithValue(ctx, ctxKeyFQDN, dest)
+		ctx = context.WithValue(ctx, ctxKeyHTTPHostDeferred, true)
 		ctx = context.WithValue(ctx, ctxKeyEngine, eng)
 		return ctx, true
 	}
@@ -1342,6 +1390,39 @@ func (s *Server) handleConnect(ctx context.Context, writer io.Writer, request *s
 		return s.relayData(clientReader, writer, target)
 	}
 
+	// HTTP Host-deferred connections: peek the request's Host header
+	// (mirrors the SNI flow above but for plaintext HTTP on port 80).
+	// Hostname recovery here lets `*.tailscale.com:80` rules match the
+	// dozens of bare-IP DERP probes that would otherwise spam the
+	// approval channel.
+	if deferred, _ := ctx.Value(ctxKeyHTTPHostDeferred).(bool); deferred {
+		bindAddr := &net.TCPAddr{IP: request.DestAddr.IP, Port: request.DestAddr.Port}
+		if sendErr := socks5.SendReply(writer, statute.RepSuccess, bindAddr); sendErr != nil {
+			return fmt.Errorf("failed to send reply: %w", sendErr)
+		}
+		if conn, ok := writer.(net.Conn); ok {
+			conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
+		}
+
+		var allow bool
+		clientReader, ctx, allow = s.httpHostPolicyCheckBeforeDial(ctx, request)
+		if !allow {
+			return nil
+		}
+
+		if conn, ok := writer.(net.Conn); ok {
+			conn.SetReadDeadline(time.Time{}) //nolint:errcheck
+		}
+
+		target, err := s.dial(ctx, "tcp", request.DestAddr.String())
+		if err != nil {
+			return fmt.Errorf("connect to %v failed: %w", request.RawDestAddr, err)
+		}
+		defer target.Close() //nolint:errcheck
+
+		return s.relayData(clientReader, writer, target)
+	}
+
 	// Normal (non-deferred) path: dial first, then relay.
 	target, err := s.dial(ctx, "tcp", request.DestAddr.String())
 	if err != nil {
@@ -1435,8 +1516,13 @@ func (s *Server) sniPolicyCheckBeforeDial(ctx context.Context, request *socks5.R
 	}
 
 	sni = strings.TrimRight(sni, ".")
-	dest := request.DestAddr.String()
-	ipStr := strings.Split(dest, ":")[0]
+	// request.DestAddr.IP is the parsed net.IP, so .String() yields a
+	// clean address-only form without the trailing port. The previous
+	// strings.Split(dest, ":") approach mishandled IPv6 destinations:
+	// request.DestAddr.String() emits IPv6 as "[::1]:80", and splitting
+	// on ":" yields "[" or partial values that corrupt logs and the
+	// reverse-DNS cache key.
+	ipStr := request.DestAddr.IP.String()
 	port := request.DestAddr.Port
 
 	log.Printf("[SNI] %s -> %s:%d (recovered hostname via TLS ClientHello)", ipStr, sni, port)
@@ -1495,6 +1581,197 @@ func (s *Server) sniPolicyCheckBeforeDial(ctx context.Context, request *socks5.R
 		return nil, ctx, false
 	}
 }
+
+// httpHostPolicyCheckBeforeDial peeks the first bytes from the client to
+// extract the HTTP/1.x Host header, re-evaluates policy with the recovered
+// hostname, and updates the context FQDN so the dial uses the hostname for
+// upstream selection. Mirrors sniPolicyCheckBeforeDial; the only differences
+// are which peek function runs and which protocol's "host pinning" semantic
+// applies to the recovered name.
+func (s *Server) httpHostPolicyCheckBeforeDial(ctx context.Context, request *socks5.Request) (io.Reader, context.Context, bool) {
+	buf, host, err := peekHTTPHost(request.Reader, 8192)
+	if err != nil || host == "" {
+		// Peek failed: binary protocol on port 80, truncated
+		// headers, peek timeout, or otherwise unparsable HTTP. We
+		// must NOT fall through with allow=true unconditionally —
+		// the deferral path runs for Ask verdicts, so a free pass
+		// here would silently upgrade Ask into an allow. We must
+		// also NOT collapse the verdict to outright deny, because
+		// the original Ask semantic for the IP destination still
+		// needs to be honored when an operator is at the broker.
+		//
+		// Attach a per-request checker bound to the IP and return
+		// allow=true with the buffered bytes. The downstream dial
+		// step calls CheckAndConsume on the checker, which
+		// broker-prompts the operator for the bare IP. If they
+		// approve, dial proceeds; if they deny, dial fails and the
+		// connection closes. This mirrors what the non-deferred
+		// Ask-with-broker path does when an Ask verdict reaches
+		// dial — exactly the behavior we deferred away from. The
+		// deferral guard above already required broker != nil, so
+		// the checker has somewhere to send the prompt.
+		hexPrefix := ""
+		if len(buf) >= 6 {
+			hexPrefix = fmt.Sprintf(" first6=%02x", buf[:6])
+		}
+		log.Printf("[HTTP-HOST-PEEK] no Host extracted, falling back to IP-based ask flow (err=%v, bufLen=%d, host=%q%s)", err, len(buf), host, hexPrefix)
+		checker := NewRequestPolicyChecker(
+			s.rules.engine, s.rules.broker,
+			WithPersist(s.rules.buildPersistFunc()),
+		)
+		ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
+		if len(buf) > 0 {
+			return io.MultiReader(bytes.NewReader(buf), request.Reader), ctx, true
+		}
+		return request.Reader, ctx, true
+	}
+
+	host = strings.TrimRight(host, ".")
+	// request.DestAddr.IP is the parsed net.IP, so .String() yields a
+	// clean address-only form without the trailing port. The previous
+	// strings.Split(dest, ":") approach mishandled IPv6 destinations:
+	// request.DestAddr.String() emits IPv6 as "[::1]:80", and splitting
+	// on ":" yields "[" or partial values that corrupt logs and the
+	// reverse-DNS cache key.
+	ipStr := request.DestAddr.IP.String()
+	port := request.DestAddr.Port
+
+	// Evaluate policy on the recovered hostname BEFORE running the
+	// spoofing check. Two reasons:
+	//   1. If the verdict is Deny, the connection is rejected
+	//      regardless of whether the Host claim is real, and we save
+	//      a forward DNS lookup that would otherwise leak the
+	//      hostname to the resolver.
+	//   2. If the verdict is the no-broker default (Ask collapsed to
+	//      Deny), we skip the lookup for the same reason.
+	eng, _ := ctx.Value(ctxKeyEngine).(*policy.Engine)
+	if eng == nil {
+		eng = s.rules.engine.Load()
+	}
+	verdict, matchSource := eng.EvaluateDetailed(host, port)
+	reader := io.MultiReader(bytes.NewReader(buf), request.Reader)
+
+	if verdict == policy.Deny {
+		log.Printf("[HTTP-HOST->DENY] %s:%d (hostname %s matched deny rule)", ipStr, port, host)
+		return nil, ctx, false
+	}
+	if verdict == policy.Ask && s.rules.broker == nil {
+		log.Printf("[HTTP-HOST->DENY] %s:%d (hostname %s: ask treated as deny, no broker)", ipStr, port, host)
+		return nil, ctx, false
+	}
+
+	// Spoofing guard. The Host header is client-controlled and not
+	// cryptographically bound to the destination IP. With TLS, an
+	// SNI/cert mismatch fails the upstream handshake and the bypass
+	// attempt dies on its own; for plain HTTP there is no equivalent
+	// integrity check, so an agent could connect to an arbitrary IP
+	// and claim Host: <permitted-name> to slip past hostname-based
+	// policy. Forward-resolve the recovered host and require the
+	// dial target to be one of the resolved IPs before trusting the
+	// Host. On confirmed mismatch (DNS resolved but the dest IP is
+	// not in the result set) deny outright — surfacing this as Ask
+	// in the broker would just channel the spoofed hostname back to
+	// the operator, which is exactly the manipulation the attacker
+	// wanted. DNS lookup failure is also treated as deny because
+	// sluice cannot distinguish a transient resolver hiccup from a
+	// poisoned resolver, and the safer default is the strict one.
+	if !s.hostResolvesToIP(ctx, host, request.DestAddr.IP) {
+		log.Printf("[HTTP-HOST->DENY] %s:%d (Host %q does not resolve to %s; possible spoofing)", ipStr, port, host, ipStr)
+		return nil, ctx, false
+	}
+
+	log.Printf("[HTTP-HOST] %s -> %s:%d (recovered hostname via HTTP Host header)", ipStr, host, port)
+
+	ctx = context.WithValue(ctx, ctxKeyFQDN, host)
+	if s.dnsInterceptor != nil {
+		s.dnsInterceptor.StoreReverse(ipStr, host)
+	}
+
+	switch verdict {
+	case policy.Allow:
+		log.Printf("[HTTP-HOST->ALLOW] %s:%d (hostname %s matched allow rule)", ipStr, port, host)
+		if matchSource == policy.RuleMatch {
+			ctx = context.WithValue(ctx, ctxKeySkipPerRequest, true)
+		} else if s.rules.broker == nil {
+			ctx = context.WithValue(ctx, ctxKeySkipPerRequest, true)
+		} else {
+			checker := NewRequestPolicyChecker(
+				s.rules.engine, s.rules.broker,
+				WithPersist(s.rules.buildPersistFunc()),
+			)
+			ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
+		}
+		return reader, ctx, true
+	case policy.Ask:
+		// Deny + Ask-without-broker were filtered out before the
+		// spoofing check above. Reaching this branch means there is a
+		// broker, so attach a per-request checker and let the approval
+		// flow run on the first HTTP request.
+		log.Printf("[HTTP-HOST->DEFER] %s:%d (hostname %s: approval deferred to per-request)", ipStr, port, host)
+		checker := NewRequestPolicyChecker(
+			s.rules.engine, s.rules.broker,
+			WithPersist(s.rules.buildPersistFunc()),
+		)
+		ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
+		return reader, ctx, true
+	default:
+		log.Printf("[HTTP-HOST->DENY] %s:%d (hostname %s: default deny)", ipStr, port, host)
+		return nil, ctx, false
+	}
+}
+
+// attestHostFromCache reports whether sluice's DNS interceptor reverse
+// cache binds dest to host. The cache is populated when the DNS layer
+// answers a query the agent itself made, so a hit is the strongest
+// available signal that host -> dest is real and not attacker-claimed.
+// Pure-cache check; never touches the network. Returned separately
+// from hostResolvesToIP so the cache logic can be unit-tested without
+// pulling in a live resolver.
+func (s *Server) attestHostFromCache(host string, dest net.IP) bool {
+	if dest == nil || host == "" || s.dnsInterceptor == nil {
+		return false
+	}
+	cached := s.dnsInterceptor.ReverseLookup(dest.String())
+	if cached == "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimRight(cached, "."), host)
+}
+
+// hostResolvesToIP reports whether host can be attested as binding to
+// dest, either via the DNS interceptor's reverse cache or via a fresh
+// forward DNS lookup bounded by hostResolveTimeout. Used by the HTTP
+// Host peek path to defeat Host-spoofing attempts where an agent
+// connects to an arbitrary IP and claims a permitted hostname in the
+// request. Returns false on lookup error or mismatch so the caller
+// treats unverifiable Host claims as suspect rather than trusting
+// the client.
+func (s *Server) hostResolvesToIP(ctx context.Context, host string, dest net.IP) bool {
+	if dest == nil || host == "" {
+		return false
+	}
+	if s.attestHostFromCache(host, dest) {
+		return true
+	}
+	resolver := s.lookupIP
+	if resolver == nil {
+		resolver = net.DefaultResolver.LookupIP
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, hostResolveTimeout)
+	defer cancel()
+	ips, err := resolver(lookupCtx, "ip", host)
+	if err != nil {
+		return false
+	}
+	for _, ip := range ips {
+		if ip.Equal(dest) {
+			return true
+		}
+	}
+	return false
+}
+
+const hostResolveTimeout = 2 * time.Second
 
 // then dispatches datagrams to the DNSInterceptor (port 53) or UDPRelay
 // (all other ports). The handler blocks until the TCP control connection

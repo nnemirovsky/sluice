@@ -2239,3 +2239,82 @@ func TestMatchSourceString(t *testing.T) {
 		t.Errorf("MatchSource(99).String() = %q, want %q", MatchSource(99).String(), "unknown")
 	}
 }
+
+func TestCompileRules_CIDR(t *testing.T) {
+	rules := []Rule{
+		{Destination: "192.168.0.0/16", Ports: []int{443}},
+		{Destination: "10.0.0.5/32", Ports: []int{443}},
+		{Destination: "2001:db8::/32", Ports: []int{443}},
+	}
+	out, err := compileRules(rules)
+	if err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("got %d rules, want 3", len(out))
+	}
+	for i, r := range out {
+		if r.cidr == nil {
+			t.Errorf("rule %d: cidr is nil", i)
+		}
+		if r.glob != nil {
+			t.Errorf("rule %d: glob should be nil for CIDR rule", i)
+		}
+	}
+}
+
+func TestCompileRules_InvalidCIDRRejected(t *testing.T) {
+	rules := []Rule{{Destination: "10.0.0.0/99"}}
+	_, err := compileRules(rules)
+	if err == nil {
+		t.Fatal("expected error on invalid CIDR mask")
+	}
+}
+
+func TestMatchDestination_CIDRContainment(t *testing.T) {
+	rules := []Rule{
+		{Destination: "192.168.0.0/16", Ports: []int{443}},
+	}
+	out, err := compileRules(rules)
+	if err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+	r := out[0]
+	cases := []struct {
+		ip   string
+		want bool
+	}{
+		{"192.168.1.5", true},
+		{"192.168.255.255", true},
+		{"192.169.0.1", false},
+		{"10.0.0.1", false},
+		// Hostname strings never match CIDR rules even if the host
+		// would resolve to a covered IP. Policy is evaluated against
+		// the destination string the SOCKS5 layer received, and we
+		// don't perform implicit DNS at this layer.
+		{"example.com", false},
+	}
+	for _, c := range cases {
+		if got := r.matchDestination(c.ip); got != c.want {
+			t.Errorf("matchDestination(%q) = %v, want %v", c.ip, got, c.want)
+		}
+	}
+}
+
+func TestEvaluate_CIDRRule(t *testing.T) {
+	eng, err := LoadFromBytes([]byte(`
+default = "deny"
+[[allow]]
+destination = "10.0.0.0/8"
+ports = [443]
+`))
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if v := eng.Evaluate("10.5.6.7", 443); v != Allow {
+		t.Errorf("10.5.6.7:443 should be Allow, got %v", v)
+	}
+	if v := eng.Evaluate("11.5.6.7", 443); v != Deny {
+		t.Errorf("11.5.6.7:443 should be Deny (default), got %v", v)
+	}
+}
