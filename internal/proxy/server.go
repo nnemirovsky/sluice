@@ -98,6 +98,12 @@ type Server struct {
 	// mutations.
 	oauthMetasMu    sync.Mutex
 	oauthMetasCache []store.CredentialMeta
+
+	// lookupIP is the forward DNS lookup the HTTP Host spoofing
+	// guard uses when the reverse cache cannot attest the binding.
+	// nil means "use net.DefaultResolver.LookupIP". Tests inject a
+	// stub so the unit test does not perform a real DNS query.
+	lookupIP func(ctx context.Context, network, host string) ([]net.IP, error)
 }
 
 type contextKey string
@@ -335,7 +341,16 @@ func (r *policyRuleSet) Allow(ctx context.Context, req *socks5.Request) (context
 	// new IP behind a hostname rule (e.g. tailscale's DERP latency
 	// probes hitting dozens of derp[N].tailscale.com IPs) generates an
 	// approval prompt that can't be silenced short of allowing each IP.
-	if ipOnly && verdict != policy.Allow && verdict != policy.Deny && isPlainHTTPPort(port) {
+	//
+	// Require a broker before deferring. The peek inside handleConnect
+	// must send SOCKS5 RepSuccess before it can read the request bytes,
+	// which means a deferred Ask-with-no-broker would manifest as
+	// success-then-reset on the client side instead of a clean
+	// RepHostUnreachable. When no broker is configured, fall through to
+	// the IP-based path so the Ask->Deny collapse happens before
+	// SOCKS5 success goes out, matching how go-socks5 reports failure
+	// for the non-deferred Ask-without-broker case.
+	if ipOnly && verdict != policy.Allow && verdict != policy.Deny && isPlainHTTPPort(port) && r.broker != nil {
 		log.Printf("[HTTP-HOST-DEFER] %s:%d (deferring policy for Host header peek)", dest, port)
 		proto := DetectProtocol(port)
 		ctx = context.WithValue(ctx, ctxKeyProtocol, proto)
@@ -1597,6 +1612,30 @@ func (s *Server) httpHostPolicyCheckBeforeDial(ctx context.Context, request *soc
 	ipStr := request.DestAddr.IP.String()
 	port := request.DestAddr.Port
 
+	// Evaluate policy on the recovered hostname BEFORE running the
+	// spoofing check. Two reasons:
+	//   1. If the verdict is Deny, the connection is rejected
+	//      regardless of whether the Host claim is real, and we save
+	//      a forward DNS lookup that would otherwise leak the
+	//      hostname to the resolver.
+	//   2. If the verdict is the no-broker default (Ask collapsed to
+	//      Deny), we skip the lookup for the same reason.
+	eng, _ := ctx.Value(ctxKeyEngine).(*policy.Engine)
+	if eng == nil {
+		eng = s.rules.engine.Load()
+	}
+	verdict, matchSource := eng.EvaluateDetailed(host, port)
+	reader := io.MultiReader(bytes.NewReader(buf), request.Reader)
+
+	if verdict == policy.Deny {
+		log.Printf("[HTTP-HOST->DENY] %s:%d (hostname %s matched deny rule)", ipStr, port, host)
+		return nil, ctx, false
+	}
+	if verdict == policy.Ask && s.rules.broker == nil {
+		log.Printf("[HTTP-HOST->DENY] %s:%d (hostname %s: ask treated as deny, no broker)", ipStr, port, host)
+		return nil, ctx, false
+	}
+
 	// Spoofing guard. The Host header is client-controlled and not
 	// cryptographically bound to the destination IP. With TLS, an
 	// SNI/cert mismatch fails the upstream handshake and the bypass
@@ -1624,13 +1663,6 @@ func (s *Server) httpHostPolicyCheckBeforeDial(ctx context.Context, request *soc
 		s.dnsInterceptor.StoreReverse(ipStr, host)
 	}
 
-	eng, _ := ctx.Value(ctxKeyEngine).(*policy.Engine)
-	if eng == nil {
-		eng = s.rules.engine.Load()
-	}
-	verdict, matchSource := eng.EvaluateDetailed(host, port)
-	reader := io.MultiReader(bytes.NewReader(buf), request.Reader)
-
 	switch verdict {
 	case policy.Allow:
 		log.Printf("[HTTP-HOST->ALLOW] %s:%d (hostname %s matched allow rule)", ipStr, port, host)
@@ -1646,14 +1678,11 @@ func (s *Server) httpHostPolicyCheckBeforeDial(ctx context.Context, request *soc
 			ctx = context.WithValue(ctx, ctxKeyPerRequestPolicy, checker)
 		}
 		return reader, ctx, true
-	case policy.Deny:
-		log.Printf("[HTTP-HOST->DENY] %s:%d (hostname %s matched deny rule)", ipStr, port, host)
-		return nil, ctx, false
 	case policy.Ask:
-		if s.rules.broker == nil {
-			log.Printf("[HTTP-HOST->DENY] %s:%d (hostname %s: ask treated as deny, no broker)", ipStr, port, host)
-			return nil, ctx, false
-		}
+		// Deny + Ask-without-broker were filtered out before the
+		// spoofing check above. Reaching this branch means there is a
+		// broker, so attach a per-request checker and let the approval
+		// flow run on the first HTTP request.
 		log.Printf("[HTTP-HOST->DEFER] %s:%d (hostname %s: approval deferred to per-request)", ipStr, port, host)
 		checker := NewRequestPolicyChecker(
 			s.rules.engine, s.rules.broker,
@@ -1667,34 +1696,46 @@ func (s *Server) httpHostPolicyCheckBeforeDial(ctx context.Context, request *soc
 	}
 }
 
-// hostResolvesToIP reports whether forward-resolving host yields the given
-// destination IP. Used by the HTTP Host peek path to defeat Host-spoofing
-// attempts where an agent connects to an arbitrary IP and claims a
-// permitted hostname in the request. Returns false on lookup error so
-// the caller treats unverifiable Host claims as suspect rather than
-// trusting the client.
-//
-// The lookup is bounded by hostResolveTimeout. The first DNS interceptor
-// reverse cache hit short-circuits the lookup: if sluice's own DNS layer
-// previously saw a query for host that returned dest, the binding is
-// already attested and we do not need to repeat the resolve.
+// attestHostFromCache reports whether sluice's DNS interceptor reverse
+// cache binds dest to host. The cache is populated when the DNS layer
+// answers a query the agent itself made, so a hit is the strongest
+// available signal that host -> dest is real and not attacker-claimed.
+// Pure-cache check; never touches the network. Returned separately
+// from hostResolvesToIP so the cache logic can be unit-tested without
+// pulling in a live resolver.
+func (s *Server) attestHostFromCache(host string, dest net.IP) bool {
+	if dest == nil || host == "" || s.dnsInterceptor == nil {
+		return false
+	}
+	cached := s.dnsInterceptor.ReverseLookup(dest.String())
+	if cached == "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimRight(cached, "."), host)
+}
+
+// hostResolvesToIP reports whether host can be attested as binding to
+// dest, either via the DNS interceptor's reverse cache or via a fresh
+// forward DNS lookup bounded by hostResolveTimeout. Used by the HTTP
+// Host peek path to defeat Host-spoofing attempts where an agent
+// connects to an arbitrary IP and claims a permitted hostname in the
+// request. Returns false on lookup error or mismatch so the caller
+// treats unverifiable Host claims as suspect rather than trusting
+// the client.
 func (s *Server) hostResolvesToIP(ctx context.Context, host string, dest net.IP) bool {
 	if dest == nil || host == "" {
 		return false
 	}
-	// If sluice's DNS interceptor saw a prior query for this host that
-	// returned dest, the binding is already attested by an actual DNS
-	// answer the agent received and we do not need to re-resolve.
-	// The reverse cache stores IP -> hostname, so a hit on dest equals
-	// host means the agent itself just resolved host -> dest.
-	if s.dnsInterceptor != nil {
-		if cached := s.dnsInterceptor.ReverseLookup(dest.String()); cached != "" && strings.EqualFold(strings.TrimRight(cached, "."), host) {
-			return true
-		}
+	if s.attestHostFromCache(host, dest) {
+		return true
+	}
+	resolver := s.lookupIP
+	if resolver == nil {
+		resolver = net.DefaultResolver.LookupIP
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, hostResolveTimeout)
 	defer cancel()
-	ips, err := net.DefaultResolver.LookupIP(lookupCtx, "ip", host)
+	ips, err := resolver(lookupCtx, "ip", host)
 	if err != nil {
 		return false
 	}

@@ -124,40 +124,93 @@ func TestPeekHTTPHost_RespectsMaxBytes(t *testing.T) {
 	}
 }
 
-func TestHostResolvesToIP_ReverseCacheAttestation(t *testing.T) {
-	// Server with a DNS interceptor whose reverse cache has been
-	// populated for derp.tailscale.com -> 192.0.2.10. A subsequent
-	// HTTP host-peek for that exact pair should return true without
-	// hitting the resolver.
+func TestAttestHostFromCache_Match(t *testing.T) {
+	// Cache populated by a prior agent DNS query: derp.tailscale.com
+	// resolved to 192.0.2.10. Subsequent Host: derp.tailscale.com
+	// arriving on a SOCKS5 CONNECT to 192.0.2.10 is attested without
+	// any further DNS work.
 	di := NewDNSInterceptor(nil, nil, "")
 	di.StoreReverse("192.0.2.10", "derp.tailscale.com")
 	s := &Server{dnsInterceptor: di}
-	if !s.hostResolvesToIP(context.Background(), "derp.tailscale.com", net.ParseIP("192.0.2.10")) {
-		t.Fatal("attested cache hit should be accepted")
+	if !s.attestHostFromCache("derp.tailscale.com", net.ParseIP("192.0.2.10")) {
+		t.Fatal("cache hit should attest")
 	}
 }
 
-func TestHostResolvesToIP_ReverseCacheDifferentHost(t *testing.T) {
-	// Cache says 192.0.2.10 -> attacker.example.com. A spoof attempt
-	// claiming Host: bank.example.com on the same IP must NOT be
-	// accepted off the cache.
+func TestAttestHostFromCache_DifferentHost(t *testing.T) {
+	// Cache says 192.0.2.10 -> attacker.example.com. A claim of
+	// Host: bank.example.com on that IP must NOT be attested off
+	// the cache, even though the IP is in the cache.
 	di := NewDNSInterceptor(nil, nil, "")
 	di.StoreReverse("192.0.2.10", "attacker.example.com")
 	s := &Server{dnsInterceptor: di}
-	// Lookup will fail or return something that does not match
-	// 192.0.2.10 (the literal IP is unlikely to be a registered
-	// hostname). Either way the cache must NOT attest the spoof.
-	if s.hostResolvesToIP(context.Background(), "bank.example.com", net.ParseIP("192.0.2.10")) {
+	if s.attestHostFromCache("bank.example.com", net.ParseIP("192.0.2.10")) {
 		t.Fatal("cache hit for a different host must not attest a different-Host claim")
 	}
 }
 
-func TestHostResolvesToIP_NilInputs(t *testing.T) {
-	s := &Server{}
-	if s.hostResolvesToIP(context.Background(), "", net.ParseIP("1.2.3.4")) {
-		t.Error("empty host must not be considered attested")
+func TestAttestHostFromCache_NilInputs(t *testing.T) {
+	s := &Server{dnsInterceptor: NewDNSInterceptor(nil, nil, "")}
+	if s.attestHostFromCache("", net.ParseIP("1.2.3.4")) {
+		t.Error("empty host must not attest")
 	}
-	if s.hostResolvesToIP(context.Background(), "example.com", nil) {
-		t.Error("nil dest IP must not be considered attested")
+	if s.attestHostFromCache("example.com", nil) {
+		t.Error("nil dest IP must not attest")
+	}
+	emptyServer := &Server{}
+	if emptyServer.attestHostFromCache("example.com", net.ParseIP("1.2.3.4")) {
+		t.Error("nil DNS interceptor must not attest")
+	}
+}
+
+// stubLookup returns a canned result regardless of the host. Used to
+// exercise hostResolvesToIP without performing any real DNS queries.
+func stubLookup(ips ...string) func(context.Context, string, string) ([]net.IP, error) {
+	out := make([]net.IP, len(ips))
+	for i, s := range ips {
+		out[i] = net.ParseIP(s)
+	}
+	return func(_ context.Context, _, _ string) ([]net.IP, error) {
+		return out, nil
+	}
+}
+
+func TestHostResolvesToIP_LookupMatch(t *testing.T) {
+	// Cache empty, stubbed resolver returns the dest IP among the
+	// answers. Should be attested.
+	s := &Server{
+		dnsInterceptor: NewDNSInterceptor(nil, nil, ""),
+		lookupIP:       stubLookup("203.0.113.5", "192.0.2.10"),
+	}
+	if !s.hostResolvesToIP(context.Background(), "good.example.com", net.ParseIP("192.0.2.10")) {
+		t.Fatal("forward-lookup match should attest")
+	}
+}
+
+func TestHostResolvesToIP_LookupMismatch(t *testing.T) {
+	// Stub returns a result set that does NOT include the dest IP.
+	// Spoofing claim — must not attest.
+	s := &Server{
+		dnsInterceptor: NewDNSInterceptor(nil, nil, ""),
+		lookupIP:       stubLookup("203.0.113.5"),
+	}
+	if s.hostResolvesToIP(context.Background(), "spoof.example.com", net.ParseIP("192.0.2.10")) {
+		t.Fatal("forward-lookup mismatch must not attest")
+	}
+}
+
+func TestHostResolvesToIP_LookupError(t *testing.T) {
+	// Resolver returns an error (NXDOMAIN, timeout, etc). Treated
+	// as deny-equivalent — sluice cannot tell a transient failure
+	// from a poisoned resolver, so the strict default applies.
+	errResolver := func(_ context.Context, _, _ string) ([]net.IP, error) {
+		return nil, net.UnknownNetworkError("test stub error")
+	}
+	s := &Server{
+		dnsInterceptor: NewDNSInterceptor(nil, nil, ""),
+		lookupIP:       errResolver,
+	}
+	if s.hostResolvesToIP(context.Background(), "example.com", net.ParseIP("192.0.2.10")) {
+		t.Fatal("lookup error must not attest")
 	}
 }
