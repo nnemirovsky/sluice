@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
+	"net"
 	"strings"
 	"testing"
 )
@@ -119,5 +121,43 @@ func TestPeekHTTPHost_RespectsMaxBytes(t *testing.T) {
 	}
 	if len(buf) > 1024 {
 		t.Errorf("buffer exceeded maxBytes: %d", len(buf))
+	}
+}
+
+func TestHostResolvesToIP_ReverseCacheAttestation(t *testing.T) {
+	// Server with a DNS interceptor whose reverse cache has been
+	// populated for derp.tailscale.com -> 192.0.2.10. A subsequent
+	// HTTP host-peek for that exact pair should return true without
+	// hitting the resolver.
+	di := NewDNSInterceptor(nil, nil, "")
+	di.StoreReverse("192.0.2.10", "derp.tailscale.com")
+	s := &Server{dnsInterceptor: di}
+	if !s.hostResolvesToIP(context.Background(), "derp.tailscale.com", net.ParseIP("192.0.2.10")) {
+		t.Fatal("attested cache hit should be accepted")
+	}
+}
+
+func TestHostResolvesToIP_ReverseCacheDifferentHost(t *testing.T) {
+	// Cache says 192.0.2.10 -> attacker.example.com. A spoof attempt
+	// claiming Host: bank.example.com on the same IP must NOT be
+	// accepted off the cache.
+	di := NewDNSInterceptor(nil, nil, "")
+	di.StoreReverse("192.0.2.10", "attacker.example.com")
+	s := &Server{dnsInterceptor: di}
+	// Lookup will fail or return something that does not match
+	// 192.0.2.10 (the literal IP is unlikely to be a registered
+	// hostname). Either way the cache must NOT attest the spoof.
+	if s.hostResolvesToIP(context.Background(), "bank.example.com", net.ParseIP("192.0.2.10")) {
+		t.Fatal("cache hit for a different host must not attest a different-Host claim")
+	}
+}
+
+func TestHostResolvesToIP_NilInputs(t *testing.T) {
+	s := &Server{}
+	if s.hostResolvesToIP(context.Background(), "", net.ParseIP("1.2.3.4")) {
+		t.Error("empty host must not be considered attested")
+	}
+	if s.hostResolvesToIP(context.Background(), "example.com", nil) {
+		t.Error("nil dest IP must not be considered attested")
 	}
 }

@@ -1597,6 +1597,26 @@ func (s *Server) httpHostPolicyCheckBeforeDial(ctx context.Context, request *soc
 	ipStr := request.DestAddr.IP.String()
 	port := request.DestAddr.Port
 
+	// Spoofing guard. The Host header is client-controlled and not
+	// cryptographically bound to the destination IP. With TLS, an
+	// SNI/cert mismatch fails the upstream handshake and the bypass
+	// attempt dies on its own; for plain HTTP there is no equivalent
+	// integrity check, so an agent could connect to an arbitrary IP
+	// and claim Host: <permitted-name> to slip past hostname-based
+	// policy. Forward-resolve the recovered host and require the
+	// dial target to be one of the resolved IPs before trusting the
+	// Host. On confirmed mismatch (DNS resolved but the dest IP is
+	// not in the result set) deny outright — surfacing this as Ask
+	// in the broker would just channel the spoofed hostname back to
+	// the operator, which is exactly the manipulation the attacker
+	// wanted. DNS lookup failure is also treated as deny because
+	// sluice cannot distinguish a transient resolver hiccup from a
+	// poisoned resolver, and the safer default is the strict one.
+	if !s.hostResolvesToIP(ctx, host, request.DestAddr.IP) {
+		log.Printf("[HTTP-HOST->DENY] %s:%d (Host %q does not resolve to %s; possible spoofing)", ipStr, port, host, ipStr)
+		return nil, ctx, false
+	}
+
 	log.Printf("[HTTP-HOST] %s -> %s:%d (recovered hostname via HTTP Host header)", ipStr, host, port)
 
 	ctx = context.WithValue(ctx, ctxKeyFQDN, host)
@@ -1646,6 +1666,47 @@ func (s *Server) httpHostPolicyCheckBeforeDial(ctx context.Context, request *soc
 		return nil, ctx, false
 	}
 }
+
+// hostResolvesToIP reports whether forward-resolving host yields the given
+// destination IP. Used by the HTTP Host peek path to defeat Host-spoofing
+// attempts where an agent connects to an arbitrary IP and claims a
+// permitted hostname in the request. Returns false on lookup error so
+// the caller treats unverifiable Host claims as suspect rather than
+// trusting the client.
+//
+// The lookup is bounded by hostResolveTimeout. The first DNS interceptor
+// reverse cache hit short-circuits the lookup: if sluice's own DNS layer
+// previously saw a query for host that returned dest, the binding is
+// already attested and we do not need to repeat the resolve.
+func (s *Server) hostResolvesToIP(ctx context.Context, host string, dest net.IP) bool {
+	if dest == nil || host == "" {
+		return false
+	}
+	// If sluice's DNS interceptor saw a prior query for this host that
+	// returned dest, the binding is already attested by an actual DNS
+	// answer the agent received and we do not need to re-resolve.
+	// The reverse cache stores IP -> hostname, so a hit on dest equals
+	// host means the agent itself just resolved host -> dest.
+	if s.dnsInterceptor != nil {
+		if cached := s.dnsInterceptor.ReverseLookup(dest.String()); cached != "" && strings.EqualFold(strings.TrimRight(cached, "."), host) {
+			return true
+		}
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, hostResolveTimeout)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIP(lookupCtx, "ip", host)
+	if err != nil {
+		return false
+	}
+	for _, ip := range ips {
+		if ip.Equal(dest) {
+			return true
+		}
+	}
+	return false
+}
+
+const hostResolveTimeout = 2 * time.Second
 
 // then dispatches datagrams to the DNSInterceptor (port 53) or UDPRelay
 // (all other ports). The handler blocks until the TCP control connection
