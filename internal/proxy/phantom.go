@@ -16,7 +16,16 @@ var phantomPrefix = []byte("SLUICE_PHANTOM:")
 // and the upstream would receive the literal `SLUICE_PHANTOM%3A...`
 // string. The two prefixes are kept side by side rather than computed at
 // runtime so the byte scan stays a single allocation-free contains check.
-var urlEncodedPhantomPrefix = []byte("SLUICE_PHANTOM%3A")
+//
+// Percent-encoding hex digits are case-insensitive per RFC 3986 §2.1, so
+// callers may emit either %3A or %3a. Go's url.QueryEscape always produces
+// uppercase, but third-party clients can produce lowercase. The lowercase
+// variant is stored alongside the uppercase one so the prefix scan catches
+// both forms.
+var (
+	urlEncodedPhantomPrefix      = []byte("SLUICE_PHANTOM%3A")
+	urlEncodedPhantomPrefixLower = []byte("SLUICE_PHANTOM%3a")
+)
 
 // phantomStripRe is a last-resort regex for stripping phantom tokens when
 // provider.List() cannot enumerate all credential names. It matches both

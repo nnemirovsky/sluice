@@ -903,6 +903,73 @@ func TestSwapPhantomBytes_QueryUsesQueryEscape(t *testing.T) {
 	}
 }
 
+// TestRequest_PhantomSwapInFormUrlencodedBody_LowercaseHex covers the
+// case-insensitivity of percent-encoded hex (RFC 3986 §2.1). A client may
+// emit %3a instead of %3A. The scanner must still swap the phantom and
+// the upstream must receive the real secret.
+func TestRequest_PhantomSwapInFormUrlencodedBody_LowercaseHex(t *testing.T) {
+	addon := newTestAddonWithCreds(
+		t,
+		map[string]string{"api_key": "real-secret"},
+		[]vault.Binding{{
+			Destination: "api.example.com",
+			Ports:       []int{443},
+			Credential:  "api_key",
+		}},
+	)
+	client := setupAddonConn(addon, "api.example.com:443")
+
+	f := newTestFlow(client, "POST", "https://api.example.com/oauth/token")
+	f.Request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	f.Request.Body = []byte("grant_type=refresh_token&refresh_token=SLUICE_PHANTOM%3aapi_key")
+
+	addon.Requestheaders(f)
+	addon.Request(f)
+
+	body := string(f.Request.Body)
+	if !strings.Contains(body, "real-secret") {
+		t.Fatalf("body = %q, want real-secret", body)
+	}
+	if strings.Contains(body, "SLUICE_PHANTOM%3a") || strings.Contains(body, "SLUICE_PHANTOM%3A") {
+		t.Fatalf("body = %q, must not contain any encoded phantom variant", body)
+	}
+}
+
+// TestRequest_StripUnboundPhantoms_LowercaseHex asserts the unbound-strip
+// path also catches the lowercase percent-encoded variant.
+func TestRequest_StripUnboundPhantoms_LowercaseHex(t *testing.T) {
+	addon := newTestAddonWithCreds(
+		t,
+		map[string]string{
+			"api_key":   "real-secret",
+			"other_key": "other-secret",
+		},
+		[]vault.Binding{{
+			Destination: "api.example.com",
+			Ports:       []int{443},
+			Credential:  "api_key",
+		}},
+	)
+	client := setupAddonConn(addon, "api.example.com:443")
+
+	f := newTestFlow(client, "POST", "https://api.example.com/data")
+	f.Request.Body = []byte("k=SLUICE_PHANTOM%3aapi_key&u=SLUICE_PHANTOM%3aother_key")
+
+	addon.Requestheaders(f)
+	addon.Request(f)
+
+	body := string(f.Request.Body)
+	if !strings.Contains(body, "real-secret") {
+		t.Fatalf("bound phantom not swapped, body = %q", body)
+	}
+	if strings.Contains(body, "SLUICE_PHANTOM") {
+		t.Fatalf("unbound lowercase phantom not stripped, body = %q", body)
+	}
+	if strings.Contains(body, "other-secret") {
+		t.Fatalf("unbound phantom must not be replaced with real credential, body = %q", body)
+	}
+}
+
 func TestRequest_NoBindingNoChange(t *testing.T) {
 	// No bindings configured. Body without phantom tokens should pass
 	// through unchanged.

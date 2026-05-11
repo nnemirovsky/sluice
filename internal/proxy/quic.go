@@ -573,10 +573,12 @@ func (q *QUICProxy) buildPhantomPairs(host string, port int) []phantomPair {
 				continue
 			}
 			phantom := []byte(PhantomToken(name))
+			encoded := encodePhantomForPair(phantom)
 			pairs = append(pairs, phantomPair{
-				phantom:        phantom,
-				encodedPhantom: encodePhantomForPair(phantom),
-				secret:         secret,
+				phantom:             phantom,
+				encodedPhantom:      encoded,
+				encodedPhantomLower: encodePhantomLowerForPair(encoded),
+				secret:              secret,
 			})
 		}
 	}

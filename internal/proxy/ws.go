@@ -371,15 +371,23 @@ func (wp *WSProxy) UpdateRules(blockConfigs []WSBlockRuleConfig, redactConfigs [
 }
 
 // phantomPair holds a phantom token and its corresponding real credential.
-// encodedPhantom is the URL query-escaped form of phantom, precomputed once
-// per pair so the hot-path swap does not re-allocate it on every request,
-// stream chunk, or header. It is empty when QueryEscape would not change the
-// bytes (which is the case for the generic shape today, but keeping the
-// check is cheap and lets us guard against future grammar tweaks).
+// encodedPhantom is the URL query-escaped form of phantom (uppercase hex),
+// and encodedPhantomLower is the same form with the percent-encoded colon
+// in lowercase. Both are precomputed once per pair so the hot-path swap
+// does not re-allocate on every request, stream chunk, or header.
+//
+// The lowercase variant exists because percent-encoded hex digits are
+// case-insensitive per RFC 3986 §2.1: Go's url.QueryEscape always emits
+// uppercase, but third-party clients can emit lowercase, and a phantom
+// scan that only checked one casing would let `SLUICE_PHANTOM%3a...`
+// through to the upstream. The fields are nil when no encoded form would
+// differ from the literal phantom bytes, which keeps the no-encoded-form
+// branch allocation-free.
 type phantomPair struct {
-	phantom        []byte
-	encodedPhantom []byte
-	secret         vault.SecureBytes
+	phantom             []byte
+	encodedPhantom      []byte
+	encodedPhantomLower []byte
+	secret              vault.SecureBytes
 }
 
 // Relay runs bidirectional WebSocket frame forwarding between agent and
@@ -407,10 +415,12 @@ func (wp *WSProxy) Relay(agentConn, upstreamConn net.Conn, host string, port int
 				continue
 			}
 			phantom := []byte(PhantomToken(name))
+			encoded := encodePhantomForPair(phantom)
 			pairs = append(pairs, phantomPair{
-				phantom:        phantom,
-				encodedPhantom: encodePhantomForPair(phantom),
-				secret:         secret,
+				phantom:             phantom,
+				encodedPhantom:      encoded,
+				encodedPhantomLower: encodePhantomLowerForPair(encoded),
+				secret:              secret,
 			})
 		}
 	}

@@ -1189,10 +1189,12 @@ func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string) []p
 			continue
 		}
 		phantom := []byte(PhantomToken(name))
+		encoded := encodePhantomForPair(phantom)
 		pairs = append(pairs, phantomPair{
-			phantom:        phantom,
-			encodedPhantom: encodePhantomForPair(phantom),
-			secret:         secret,
+			phantom:             phantom,
+			encodedPhantom:      encoded,
+			encodedPhantomLower: encodePhantomLowerForPair(encoded),
+			secret:              secret,
 		})
 	}
 
@@ -1233,13 +1235,16 @@ func (a *SluiceAddon) hasPhantomPrefix(f *mitmproxy.Flow) bool {
 	return false
 }
 
-// bytesContainsAnyPhantomPrefix reports whether the data contains either the
-// literal or URL-encoded phantom prefix. Form-urlencoded request bodies and
-// URL query/path components percent-encode the colon in phantom tokens, so a
-// scan that only checks the literal form would miss phantoms about to leak
-// through OAuth refresh POSTs and other form-encoded paths.
+// bytesContainsAnyPhantomPrefix reports whether the data contains the
+// literal phantom prefix or either case of the URL-encoded prefix (%3A or
+// %3a). Form-urlencoded request bodies and URL query/path components
+// percent-encode the colon in phantom tokens, and RFC 3986 §2.1 makes the
+// hex digits case-insensitive, so a scan that only checks one case would
+// miss phantoms emitted by clients that lowercase their percent escapes.
 func bytesContainsAnyPhantomPrefix(data []byte) bool {
-	return bytes.Contains(data, phantomPrefix) || bytes.Contains(data, urlEncodedPhantomPrefix)
+	return bytes.Contains(data, phantomPrefix) ||
+		bytes.Contains(data, urlEncodedPhantomPrefix) ||
+		bytes.Contains(data, urlEncodedPhantomPrefixLower)
 }
 
 // swapPhantomBytes performs Pass 2 (scoped replacement) and Pass 3 (strip
@@ -1273,14 +1278,28 @@ func (a *SluiceAddon) swapPhantomBytes(data []byte, pairs []phantomPair, host st
 		if bytes.Contains(data, p.phantom) {
 			data = bytes.ReplaceAll(data, p.phantom, p.secret.Bytes())
 		}
-		if len(p.encodedPhantom) > 0 && bytes.Contains(data, p.encodedPhantom) {
-			var encodedSecret string
-			if pathContext {
-				encodedSecret = url.PathEscape(string(p.secret.Bytes()))
-			} else {
-				encodedSecret = url.QueryEscape(string(p.secret.Bytes()))
+		// Encoded swap covers both uppercase (%3A, the canonical form Go
+		// emits) and lowercase (%3a, valid per RFC 3986 §2.1). The
+		// replacement secret is escaped once on first hit and reused so
+		// the cost stays linear in number-of-encoded-forms, not pairs.
+		var encodedSecret []byte
+		ensureEncodedSecret := func() {
+			if encodedSecret != nil {
+				return
 			}
-			data = bytes.ReplaceAll(data, p.encodedPhantom, []byte(encodedSecret))
+			if pathContext {
+				encodedSecret = []byte(url.PathEscape(string(p.secret.Bytes())))
+			} else {
+				encodedSecret = []byte(url.QueryEscape(string(p.secret.Bytes())))
+			}
+		}
+		if len(p.encodedPhantom) > 0 && bytes.Contains(data, p.encodedPhantom) {
+			ensureEncodedSecret()
+			data = bytes.ReplaceAll(data, p.encodedPhantom, encodedSecret)
+		}
+		if len(p.encodedPhantomLower) > 0 && bytes.Contains(data, p.encodedPhantomLower) {
+			ensureEncodedSecret()
+			data = bytes.ReplaceAll(data, p.encodedPhantomLower, encodedSecret)
 		}
 	}
 	if bytesContainsAnyPhantomPrefix(data) {
@@ -1305,8 +1324,20 @@ func (a *SluiceAddon) swapPhantomHeaders(f *mitmproxy.Flow, pairs []phantomPair,
 					vb = bytes.ReplaceAll(vb, p.phantom, p.secret.Bytes())
 					changed = true
 				}
+				var encodedSecret []byte
+				ensureEncodedSecret := func() {
+					if encodedSecret == nil {
+						encodedSecret = []byte(url.QueryEscape(string(p.secret.Bytes())))
+					}
+				}
 				if len(p.encodedPhantom) > 0 && bytes.Contains(vb, p.encodedPhantom) {
-					vb = bytes.ReplaceAll(vb, p.encodedPhantom, []byte(url.QueryEscape(string(p.secret.Bytes()))))
+					ensureEncodedSecret()
+					vb = bytes.ReplaceAll(vb, p.encodedPhantom, encodedSecret)
+					changed = true
+				}
+				if len(p.encodedPhantomLower) > 0 && bytes.Contains(vb, p.encodedPhantomLower) {
+					ensureEncodedSecret()
+					vb = bytes.ReplaceAll(vb, p.encodedPhantomLower, encodedSecret)
 					changed = true
 				}
 			}
@@ -1354,8 +1385,13 @@ func maxPhantomLen(pairs []phantomPair) int {
 		if len(p.encodedPhantom) > m {
 			m = len(p.encodedPhantom)
 		}
+		if len(p.encodedPhantomLower) > m {
+			m = len(p.encodedPhantomLower)
+		}
 	}
-	// Also account for the generic phantom prefix pattern.
+	// Also account for the generic phantom prefix pattern. Uppercase and
+	// lowercase encoded prefixes are the same length, so either works as
+	// the lower bound.
 	if pLen := len(urlEncodedPhantomPrefix) + maxCredNameLen; pLen > m {
 		m = pLen
 	}
@@ -1403,16 +1439,28 @@ func (r *phantomSwapReader) Read(p []byte) (int, error) {
 		toProcess := r.pending[:safe]
 		r.pending = append([]byte(nil), r.pending[safe:]...)
 
-		// Pass 2: scoped replacement, in both literal and URL-encoded forms.
-		// The encoded phantom is precomputed once per pair so this hot path
-		// only allocates when an encoded phantom is actually present and we
-		// need the encoded form of the real secret.
+		// Pass 2: scoped replacement, in both literal and URL-encoded forms
+		// (both case variants of %3A). The encoded phantom is precomputed
+		// once per pair so this hot path only allocates when an encoded
+		// phantom is actually present and we need the encoded form of the
+		// real secret.
 		for _, pp := range r.pairs {
 			if bytes.Contains(toProcess, pp.phantom) {
 				toProcess = bytes.ReplaceAll(toProcess, pp.phantom, pp.secret.Bytes())
 			}
+			var encodedSecret []byte
+			ensureEncodedSecret := func() {
+				if encodedSecret == nil {
+					encodedSecret = []byte(url.QueryEscape(string(pp.secret.Bytes())))
+				}
+			}
 			if len(pp.encodedPhantom) > 0 && bytes.Contains(toProcess, pp.encodedPhantom) {
-				toProcess = bytes.ReplaceAll(toProcess, pp.encodedPhantom, []byte(url.QueryEscape(string(pp.secret.Bytes()))))
+				ensureEncodedSecret()
+				toProcess = bytes.ReplaceAll(toProcess, pp.encodedPhantom, encodedSecret)
+			}
+			if len(pp.encodedPhantomLower) > 0 && bytes.Contains(toProcess, pp.encodedPhantomLower) {
+				ensureEncodedSecret()
+				toProcess = bytes.ReplaceAll(toProcess, pp.encodedPhantomLower, encodedSecret)
 			}
 		}
 		// Pass 3: strip unbound, including URL-encoded phantoms.
