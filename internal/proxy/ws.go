@@ -371,9 +371,15 @@ func (wp *WSProxy) UpdateRules(blockConfigs []WSBlockRuleConfig, redactConfigs [
 }
 
 // phantomPair holds a phantom token and its corresponding real credential.
+// encodedPhantom is the URL query-escaped form of phantom, precomputed once
+// per pair so the hot-path swap does not re-allocate it on every request,
+// stream chunk, or header. It is empty when QueryEscape would not change the
+// bytes (which is the case for the generic shape today, but keeping the
+// check is cheap and lets us guard against future grammar tweaks).
 type phantomPair struct {
-	phantom []byte
-	secret  vault.SecureBytes
+	phantom        []byte
+	encodedPhantom []byte
+	secret         vault.SecureBytes
 }
 
 // Relay runs bidirectional WebSocket frame forwarding between agent and
@@ -400,9 +406,11 @@ func (wp *WSProxy) Relay(agentConn, upstreamConn net.Conn, host string, port int
 				pairs = append(pairs, oauthPairs...)
 				continue
 			}
+			phantom := []byte(PhantomToken(name))
 			pairs = append(pairs, phantomPair{
-				phantom: []byte(PhantomToken(name)),
-				secret:  secret,
+				phantom:        phantom,
+				encodedPhantom: encodePhantomForPair(phantom),
+				secret:         secret,
 			})
 		}
 	}

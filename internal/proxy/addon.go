@@ -1188,9 +1188,11 @@ func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string) []p
 			pairs = append(pairs, oauthPairs...)
 			continue
 		}
+		phantom := []byte(PhantomToken(name))
 		pairs = append(pairs, phantomPair{
-			phantom: []byte(PhantomToken(name)),
-			secret:  secret,
+			phantom:        phantom,
+			encodedPhantom: encodePhantomForPair(phantom),
+			secret:         secret,
 		})
 	}
 
@@ -1246,30 +1248,42 @@ func bytesContainsAnyPhantomPrefix(data []byte) bool {
 // Each pair is matched in both its literal form (`SLUICE_PHANTOM:<name>`,
 // the shape used in JSON bodies and raw header values) and its URL-encoded
 // form (`SLUICE_PHANTOM%3A<name>`, the shape used in
-// application/x-www-form-urlencoded request bodies and URL components). The
-// encoded path is what makes OAuth refresh round-trips work: refresh POSTs
-// to providers like Anthropic and Google use form-urlencoded bodies, so the
-// colon in the phantom token gets percent-encoded on the wire. Without the
-// encoded scan the upstream receives `SLUICE_PHANTOM%3A...` literally,
-// returns `invalid_grant`, and the agent falls back to a fresh interactive
-// OAuth — every time tokens expire.
+// application/x-www-form-urlencoded request bodies and URL query strings).
+// The encoded path is what makes OAuth refresh round-trips work: refresh
+// POSTs to providers like Anthropic and Google use form-urlencoded bodies,
+// so the colon in the phantom token gets percent-encoded on the wire.
+// Without the encoded scan the upstream receives `SLUICE_PHANTOM%3A...`
+// literally, returns `invalid_grant`, and the agent falls back to a fresh
+// interactive OAuth — every time tokens expire.
 //
-// The literal pass runs first so JSON request bodies (where the colon
-// survives unencoded) take the cheap exact-substring path. The encoded
-// pass then handles the form-urlencoded case. We url-encode the secret
-// before substitution so the wire body remains well-formed
-// application/x-www-form-urlencoded data.
+// The encoded phantom is precomputed once per pair (in encodePhantomForPair)
+// and stored on phantomPair.encodedPhantom so we don't re-allocate it on
+// every body, query, or header scan. The encoded secret is computed on
+// demand once per swap call, only when the encoded phantom actually appears.
+//
+// location chooses between query escaping (body, URL query, header) and
+// path escaping (URL path). The two differ in how spaces are encoded:
+// QueryEscape uses '+', PathEscape uses '%20'. Using QueryEscape for a path
+// substitution would turn a space in the secret into a literal '+' in the
+// URL path, which is interpreted as a plus character by the server, not a
+// space — corrupting the request.
 func (a *SluiceAddon) swapPhantomBytes(data []byte, pairs []phantomPair, host string, port int, location string) []byte {
+	pathContext := location == "URL path"
 	for _, p := range pairs {
 		if bytes.Contains(data, p.phantom) {
 			data = bytes.ReplaceAll(data, p.phantom, p.secret.Bytes())
 		}
-		encoded := []byte(url.QueryEscape(string(p.phantom)))
-		if !bytes.Equal(encoded, p.phantom) && bytes.Contains(data, encoded) {
-			data = bytes.ReplaceAll(data, encoded, []byte(url.QueryEscape(string(p.secret.Bytes()))))
+		if len(p.encodedPhantom) > 0 && bytes.Contains(data, p.encodedPhantom) {
+			var encodedSecret string
+			if pathContext {
+				encodedSecret = url.PathEscape(string(p.secret.Bytes()))
+			} else {
+				encodedSecret = url.QueryEscape(string(p.secret.Bytes()))
+			}
+			data = bytes.ReplaceAll(data, p.encodedPhantom, []byte(encodedSecret))
 		}
 	}
-	if bytes.Contains(data, phantomPrefix) || bytes.Contains(data, urlEncodedPhantomPrefix) {
+	if bytesContainsAnyPhantomPrefix(data) {
 		data = stripUnboundPhantomsFromProvider(data, a.provider)
 		log.Printf("[ADDON-INJECT] stripped unbound phantom token from %s for %s:%d", location, host, port)
 	}
@@ -1291,9 +1305,8 @@ func (a *SluiceAddon) swapPhantomHeaders(f *mitmproxy.Flow, pairs []phantomPair,
 					vb = bytes.ReplaceAll(vb, p.phantom, p.secret.Bytes())
 					changed = true
 				}
-				encoded := []byte(url.QueryEscape(string(p.phantom)))
-				if !bytes.Equal(encoded, p.phantom) && bytes.Contains(vb, encoded) {
-					vb = bytes.ReplaceAll(vb, encoded, []byte(url.QueryEscape(string(p.secret.Bytes()))))
+				if len(p.encodedPhantom) > 0 && bytes.Contains(vb, p.encodedPhantom) {
+					vb = bytes.ReplaceAll(vb, p.encodedPhantom, []byte(url.QueryEscape(string(p.secret.Bytes()))))
 					changed = true
 				}
 			}
@@ -1330,15 +1343,16 @@ type phantomSwapReader struct {
 // and their URL-encoded forms (SLUICE_PHANTOM%3Aname). The encoded form is
 // strictly longer because the colon expands to %3A, so a holdback sized for
 // the literal form alone would lose URL-encoded phantoms that straddle a
-// read boundary.
+// read boundary. Uses the precomputed encodedPhantom on each pair so no
+// per-chunk allocation is required.
 func maxPhantomLen(pairs []phantomPair) int {
 	m := 0
 	for _, p := range pairs {
 		if len(p.phantom) > m {
 			m = len(p.phantom)
 		}
-		if encLen := len(url.QueryEscape(string(p.phantom))); encLen > m {
-			m = encLen
+		if len(p.encodedPhantom) > m {
+			m = len(p.encodedPhantom)
 		}
 	}
 	// Also account for the generic phantom prefix pattern.
@@ -1390,13 +1404,15 @@ func (r *phantomSwapReader) Read(p []byte) (int, error) {
 		r.pending = append([]byte(nil), r.pending[safe:]...)
 
 		// Pass 2: scoped replacement, in both literal and URL-encoded forms.
+		// The encoded phantom is precomputed once per pair so this hot path
+		// only allocates when an encoded phantom is actually present and we
+		// need the encoded form of the real secret.
 		for _, pp := range r.pairs {
 			if bytes.Contains(toProcess, pp.phantom) {
 				toProcess = bytes.ReplaceAll(toProcess, pp.phantom, pp.secret.Bytes())
 			}
-			encoded := []byte(url.QueryEscape(string(pp.phantom)))
-			if !bytes.Equal(encoded, pp.phantom) && bytes.Contains(toProcess, encoded) {
-				toProcess = bytes.ReplaceAll(toProcess, encoded, []byte(url.QueryEscape(string(pp.secret.Bytes()))))
+			if len(pp.encodedPhantom) > 0 && bytes.Contains(toProcess, pp.encodedPhantom) {
+				toProcess = bytes.ReplaceAll(toProcess, pp.encodedPhantom, []byte(url.QueryEscape(string(pp.secret.Bytes()))))
 			}
 		}
 		// Pass 3: strip unbound, including URL-encoded phantoms.

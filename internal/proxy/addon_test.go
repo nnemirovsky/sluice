@@ -827,6 +827,82 @@ func TestRequest_PhantomSwapInUrlEncodedQuery(t *testing.T) {
 	}
 }
 
+// TestSwapPhantomBytes_PathUsesPathEscape exercises the URL-path branch of
+// the swap directly. A secret that contains a space must be encoded as
+// %20 (PathEscape), not '+' (QueryEscape), so the path stays semantically
+// correct. Net/url's parser normally decodes %3A in URL.Path before our
+// scan ever runs, but the swap helper is shared with QUIC and streaming
+// paths where the encoded phantom can reach it, and the encoding choice
+// must still be path-correct.
+func TestSwapPhantomBytes_PathUsesPathEscape(t *testing.T) {
+	addon := newTestAddonWithCreds(
+		t,
+		map[string]string{"api_key": "real secret"},
+		[]vault.Binding{{
+			Destination: "api.example.com",
+			Ports:       []int{443},
+			Credential:  "api_key",
+		}},
+	)
+
+	phantom := []byte(PhantomToken("api_key"))
+	pairs := []phantomPair{{
+		phantom:        phantom,
+		encodedPhantom: encodePhantomForPair(phantom),
+		secret:         vault.NewSecureBytes("real secret"),
+	}}
+	defer releasePhantomPairs(pairs)
+
+	in := []byte("/v1/SLUICE_PHANTOM%3Aapi_key/resource")
+	out := addon.swapPhantomBytes(in, pairs, "api.example.com", 443, "URL path")
+	got := string(out)
+
+	if !strings.Contains(got, "real%20secret") {
+		t.Fatalf("path swap = %q, want PathEscape (real%%20secret)", got)
+	}
+	if strings.Contains(got, "real+secret") {
+		t.Fatalf("path swap = %q, must not contain '+' for a space in a URL path", got)
+	}
+	if strings.Contains(got, "SLUICE_PHANTOM") {
+		t.Fatalf("path swap = %q, still contains phantom", got)
+	}
+}
+
+// TestSwapPhantomBytes_QueryUsesQueryEscape covers the symmetric query case:
+// the same swap helper must encode spaces as '+' for query strings and form
+// bodies so the receiving application/x-www-form-urlencoded parser sees a
+// space.
+func TestSwapPhantomBytes_QueryUsesQueryEscape(t *testing.T) {
+	addon := newTestAddonWithCreds(
+		t,
+		map[string]string{"api_key": "real secret"},
+		[]vault.Binding{{
+			Destination: "api.example.com",
+			Ports:       []int{443},
+			Credential:  "api_key",
+		}},
+	)
+
+	phantom := []byte(PhantomToken("api_key"))
+	pairs := []phantomPair{{
+		phantom:        phantom,
+		encodedPhantom: encodePhantomForPair(phantom),
+		secret:         vault.NewSecureBytes("real secret"),
+	}}
+	defer releasePhantomPairs(pairs)
+
+	in := []byte("token=SLUICE_PHANTOM%3Aapi_key")
+	out := addon.swapPhantomBytes(in, pairs, "api.example.com", 443, "URL query")
+	got := string(out)
+
+	if !strings.Contains(got, "real+secret") {
+		t.Fatalf("query swap = %q, want QueryEscape ('+' for space)", got)
+	}
+	if strings.Contains(got, "SLUICE_PHANTOM") {
+		t.Fatalf("query swap = %q, still contains phantom", got)
+	}
+}
+
 func TestRequest_NoBindingNoChange(t *testing.T) {
 	// No bindings configured. Body without phantom tokens should pass
 	// through unchanged.
