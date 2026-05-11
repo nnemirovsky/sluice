@@ -514,15 +514,33 @@ func (wp *WSProxy) relayFrames(src io.Reader, dst io.Writer, pairs []phantomPair
 					}
 				}
 
-				// Replace bound phantom tokens with real credentials.
+				// Replace bound phantom tokens with real credentials in both
+				// literal and URL-encoded forms (covers WS text frames that
+				// carry application/x-www-form-urlencoded payloads or
+				// percent-escaped query-like content).
 				for _, p := range pairs {
 					if bytes.Contains(payload, p.phantom) {
 						payload = bytes.ReplaceAll(payload, p.phantom, p.secret.Bytes())
 					}
+					var encodedSecret []byte
+					ensureEncodedSecret := func() {
+						if encodedSecret == nil {
+							encodedSecret = queryEscapeBytes(p.secret.Bytes())
+						}
+					}
+					if len(p.encodedPhantom) > 0 && bytes.Contains(payload, p.encodedPhantom) {
+						ensureEncodedSecret()
+						payload = bytes.ReplaceAll(payload, p.encodedPhantom, encodedSecret)
+					}
+					if len(p.encodedPhantomLower) > 0 && bytes.Contains(payload, p.encodedPhantomLower) {
+						ensureEncodedSecret()
+						payload = bytes.ReplaceAll(payload, p.encodedPhantomLower, encodedSecret)
+					}
 				}
 
-				// Strip any remaining unbound phantom tokens.
-				if bytes.Contains(payload, phantomPrefix) {
+				// Strip any remaining unbound phantom tokens (literal or
+				// URL-encoded, either case).
+				if bytesContainsAnyPhantomPrefix(payload) {
 					payload = wp.stripUnboundPhantoms(payload)
 					log.Printf("[WS] stripped unbound phantom token from text frame")
 				}

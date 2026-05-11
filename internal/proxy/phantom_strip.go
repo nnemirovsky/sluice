@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bytes"
-	"net/url"
 	"sort"
 
 	"github.com/nemirovsky/sluice/internal/vault"
@@ -57,8 +56,8 @@ func stripUnboundPhantomsFromProvider(data []byte, provider vault.Provider) []by
 	// already cover, so the literal scan path is not duplicated.
 	encodedPhantoms := make([][]byte, 0, len(phantoms)*2)
 	for _, p := range phantoms {
-		encoded := []byte(url.QueryEscape(string(p)))
-		if bytes.Equal(encoded, p) {
+		encoded := encodePhantomForPair(p)
+		if encoded == nil {
 			continue
 		}
 		encodedPhantoms = append(encodedPhantoms, encoded)

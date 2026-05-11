@@ -59,6 +59,90 @@ func asciiLowerHex(b byte) byte {
 	return b
 }
 
+// queryEscapeBytes is a byte-in, byte-out form-component URL encoder that
+// mirrors net/url.QueryEscape's output rules without ever materializing
+// the input as a Go string. url.QueryEscape's signature is
+// `func(string) string`, which forces callers to wrap a credential's
+// SecureBytes via `url.QueryEscape(string(secret.Bytes()))` and leaves
+// two immutable string copies of the secret on the heap that
+// SecureBytes.Release() cannot zero. Operating on []byte throughout keeps
+// the secret only in slices the caller can clear.
+//
+// The unreserved character set follows RFC 3986 §2.3 plus Go's
+// net/url-compatible additions: spaces become '+' (form encoding), and
+// everything outside the unreserved set is percent-encoded with
+// uppercase hex (the canonical form Go and most clients emit).
+func queryEscapeBytes(src []byte) []byte {
+	dst := make([]byte, 0, len(src))
+	for _, c := range src {
+		switch {
+		case c == ' ':
+			dst = append(dst, '+')
+		case shouldNotEscapeQueryComponent(c):
+			dst = append(dst, c)
+		default:
+			dst = append(dst, '%', hexUpper(c>>4), hexUpper(c&0x0F))
+		}
+	}
+	return dst
+}
+
+// pathEscapeBytes is the byte-level analogue of net/url.PathEscape. It
+// preserves URL-path semantics: spaces become %20 (not '+'), and a
+// slightly larger unreserved set is honored (sub-delims that are legal
+// in path segments are emitted verbatim).
+func pathEscapeBytes(src []byte) []byte {
+	dst := make([]byte, 0, len(src))
+	for _, c := range src {
+		if shouldNotEscapePathSegment(c) {
+			dst = append(dst, c)
+			continue
+		}
+		dst = append(dst, '%', hexUpper(c>>4), hexUpper(c&0x0F))
+	}
+	return dst
+}
+
+// shouldNotEscapeQueryComponent reports whether a byte is safe to emit
+// literally inside an application/x-www-form-urlencoded value. Matches
+// the predicate net/url applies for encodeQueryComponent: ALPHA / DIGIT
+// / '-' / '_' / '.' / '~'.
+func shouldNotEscapeQueryComponent(c byte) bool {
+	switch {
+	case c >= 'A' && c <= 'Z',
+		c >= 'a' && c <= 'z',
+		c >= '0' && c <= '9':
+		return true
+	case c == '-' || c == '_' || c == '.' || c == '~':
+		return true
+	}
+	return false
+}
+
+// shouldNotEscapePathSegment reports whether a byte is safe to emit
+// literally inside a URL path segment. Matches the predicate net/url
+// applies for encodePathSegment: unreserved + sub-delims minus the
+// segment separators '/' and '?'. Specifically: ALPHA / DIGIT /
+// '-' '_' '.' '~' '$' '&' '+' ',' ';' '=' ':' '@'.
+func shouldNotEscapePathSegment(c byte) bool {
+	if shouldNotEscapeQueryComponent(c) {
+		return true
+	}
+	switch c {
+	case '$', '&', '+', ',', ';', '=', ':', '@':
+		return true
+	}
+	return false
+}
+
+// hexUpper returns the uppercase hex digit for a nibble in 0..15.
+func hexUpper(nibble byte) byte {
+	if nibble < 10 {
+		return '0' + nibble
+	}
+	return 'A' + (nibble - 10)
+}
+
 // maxProxyBody limits the request/response body size that MITM proxies
 // (HTTPS and QUIC) read for phantom token replacement. 16 MiB is
 // sufficient for typical API traffic while preventing memory exhaustion

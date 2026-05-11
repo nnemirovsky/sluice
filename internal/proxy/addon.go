@@ -7,7 +7,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -1288,9 +1287,9 @@ func (a *SluiceAddon) swapPhantomBytes(data []byte, pairs []phantomPair, host st
 				return
 			}
 			if pathContext {
-				encodedSecret = []byte(url.PathEscape(string(p.secret.Bytes())))
+				encodedSecret = pathEscapeBytes(p.secret.Bytes())
 			} else {
-				encodedSecret = []byte(url.QueryEscape(string(p.secret.Bytes())))
+				encodedSecret = queryEscapeBytes(p.secret.Bytes())
 			}
 		}
 		if len(p.encodedPhantom) > 0 && bytes.Contains(data, p.encodedPhantom) {
@@ -1327,7 +1326,7 @@ func (a *SluiceAddon) swapPhantomHeaders(f *mitmproxy.Flow, pairs []phantomPair,
 				var encodedSecret []byte
 				ensureEncodedSecret := func() {
 					if encodedSecret == nil {
-						encodedSecret = []byte(url.QueryEscape(string(p.secret.Bytes())))
+						encodedSecret = queryEscapeBytes(p.secret.Bytes())
 					}
 				}
 				if len(p.encodedPhantom) > 0 && bytes.Contains(vb, p.encodedPhantom) {
@@ -1451,7 +1450,7 @@ func (r *phantomSwapReader) Read(p []byte) (int, error) {
 			var encodedSecret []byte
 			ensureEncodedSecret := func() {
 				if encodedSecret == nil {
-					encodedSecret = []byte(url.QueryEscape(string(pp.secret.Bytes())))
+					encodedSecret = queryEscapeBytes(pp.secret.Bytes())
 				}
 			}
 			if len(pp.encodedPhantom) > 0 && bytes.Contains(toProcess, pp.encodedPhantom) {
