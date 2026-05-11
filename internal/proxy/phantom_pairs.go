@@ -40,11 +40,13 @@ func phantomNeedsQueryEscape(phantom []byte) bool {
 // the precomputed phantom whose canonical form is %3A.
 //
 // A pre-scan returns nil before any allocation when no percent-escape
-// sequence contains an uppercase A-F hex digit. The "no allocation when
-// nothing to lower" path matters for OAuth JWT phantoms and any phantom
-// whose only escape is %3A (the encoded colon) — once we've already
-// stored the uppercase variant elsewhere on the pair, there is nothing
-// new to lower for those.
+// sequence contains an uppercase A-F hex digit. This fast path only
+// fires for phantoms whose escaped form happens to use 0-9 hex digits
+// exclusively. A phantom containing %3A (the encoded colon, which every
+// SLUICE_PHANTOM:<name> phantom has after url-encoding) still differs
+// between %3A and %3a, so the allocation still occurs in the common
+// case — the fast path is for shapes like %20%21%30 where every escape
+// is already lowercase-equivalent.
 func encodePhantomLowerForPair(encoded []byte) []byte {
 	if len(encoded) == 0 {
 		return nil
