@@ -1116,6 +1116,49 @@ func TestStreamRequestModifier_LargeBodySpanningReads(t *testing.T) {
 	}
 }
 
+// TestStreamRequestModifier_UrlEncodedPhantomSpanningReads verifies that
+// the streaming reader's holdback buffer is sized for the URL-encoded form
+// of a phantom (SLUICE_PHANTOM%3Aapi_key), not just the literal one. The
+// encoded form is two bytes longer because the colon expands to %3A, and a
+// holdback sized to the literal length alone would let an encoded phantom
+// straddling a read boundary slip through unswapped.
+func TestStreamRequestModifier_UrlEncodedPhantomSpanningReads(t *testing.T) {
+	addon := newTestAddonWithCreds(
+		t,
+		map[string]string{"api_key": "REPLACED"},
+		[]vault.Binding{{
+			Destination: "api.example.com",
+			Ports:       []int{443},
+			Credential:  "api_key",
+		}},
+	)
+	client := setupAddonConn(addon, "api.example.com:443")
+
+	prefix := bytes.Repeat([]byte("A"), 16*1024)
+	phantom := []byte("SLUICE_PHANTOM%3Aapi_key")
+	suffix := bytes.Repeat([]byte("B"), 16*1024)
+	body := make([]byte, 0, len(prefix)+len(phantom)+len(suffix))
+	body = append(body, prefix...)
+	body = append(body, phantom...)
+	body = append(body, suffix...)
+
+	f := newTestFlow(client, "POST", "https://api.example.com/oauth/token")
+	f.Request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reader := addon.StreamRequestModifier(f, bytes.NewReader(body))
+
+	out, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll failed: %v", err)
+	}
+
+	if bytes.Contains(out, []byte("SLUICE_PHANTOM%3A")) || bytes.Contains(out, []byte("SLUICE_PHANTOM%3a")) {
+		t.Fatalf("url-encoded phantom must not survive streaming swap, got: %q", out[16*1024-8:16*1024+50])
+	}
+	if !bytes.Contains(out, []byte("REPLACED")) {
+		t.Fatalf("expected real credential in streamed output")
+	}
+}
+
 func TestStreamRequestModifier_StripUnbound(t *testing.T) {
 	addon := newTestAddonWithCreds(
 		t,
