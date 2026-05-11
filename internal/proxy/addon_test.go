@@ -726,6 +726,107 @@ func TestRequest_StripUnboundPhantoms(t *testing.T) {
 	}
 }
 
+// TestRequest_PhantomSwapInFormUrlencodedBody covers the OAuth refresh path:
+// the agent posts application/x-www-form-urlencoded data and the phantom's
+// colon is percent-encoded on the wire (SLUICE_PHANTOM%3Aapi_key). The
+// scanner must recognize that form and substitute the URL-encoded secret so
+// the upstream still receives a well-formed form body.
+func TestRequest_PhantomSwapInFormUrlencodedBody(t *testing.T) {
+	addon := newTestAddonWithCreds(
+		t,
+		map[string]string{"api_key": "real value/with+special&chars"},
+		[]vault.Binding{{
+			Destination: "api.example.com",
+			Ports:       []int{443},
+			Credential:  "api_key",
+		}},
+	)
+	client := setupAddonConn(addon, "api.example.com:443")
+
+	f := newTestFlow(client, "POST", "https://api.example.com/oauth/token")
+	f.Request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	f.Request.Body = []byte("grant_type=refresh_token&refresh_token=SLUICE_PHANTOM%3Aapi_key")
+
+	addon.Requestheaders(f)
+	addon.Request(f)
+
+	body := string(f.Request.Body)
+	wantValue := "real+value%2Fwith%2Bspecial%26chars"
+	if !strings.Contains(body, wantValue) {
+		t.Fatalf("body = %q, want url-encoded secret %q", body, wantValue)
+	}
+	if strings.Contains(body, "SLUICE_PHANTOM%3A") {
+		t.Fatalf("url-encoded phantom should have been replaced, got %q", body)
+	}
+	if strings.Contains(body, "SLUICE_PHANTOM:") {
+		t.Fatalf("literal phantom should not appear in body, got %q", body)
+	}
+}
+
+// TestRequest_StripUnboundPhantoms_UrlEncoded asserts that an unbound
+// phantom in url-encoded form does not pass through to the upstream.
+func TestRequest_StripUnboundPhantoms_UrlEncoded(t *testing.T) {
+	addon := newTestAddonWithCreds(
+		t,
+		map[string]string{
+			"api_key":   "real-secret",
+			"other_key": "other-secret",
+		},
+		[]vault.Binding{{
+			Destination: "api.example.com",
+			Ports:       []int{443},
+			Credential:  "api_key",
+		}},
+	)
+	client := setupAddonConn(addon, "api.example.com:443")
+
+	f := newTestFlow(client, "POST", "https://api.example.com/data")
+	f.Request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	f.Request.Body = []byte("key=SLUICE_PHANTOM%3Aapi_key&unbound=SLUICE_PHANTOM%3Aother_key")
+
+	addon.Requestheaders(f)
+	addon.Request(f)
+
+	body := string(f.Request.Body)
+	if !strings.Contains(body, "real-secret") {
+		t.Fatalf("expected bound phantom to be replaced, got %q", body)
+	}
+	if strings.Contains(body, "SLUICE_PHANTOM%3A") {
+		t.Fatalf("expected unbound url-encoded phantom to be stripped, got %q", body)
+	}
+	if strings.Contains(body, "other-secret") {
+		t.Fatalf("unbound phantom should not be replaced with real credential, got %q", body)
+	}
+}
+
+// TestRequest_PhantomSwapInUrlEncodedQuery covers the URL query path:
+// the phantom is percent-encoded in RawQuery and must be swapped with a
+// percent-encoded real value so the resulting query string stays valid.
+func TestRequest_PhantomSwapInUrlEncodedQuery(t *testing.T) {
+	addon := newTestAddonWithCreds(
+		t,
+		map[string]string{"api_key": "real-secret"},
+		[]vault.Binding{{
+			Destination: "api.example.com",
+			Ports:       []int{443},
+			Credential:  "api_key",
+		}},
+	)
+	client := setupAddonConn(addon, "api.example.com:443")
+
+	f := newTestFlow(client, "GET", "https://api.example.com/data?token=SLUICE_PHANTOM%3Aapi_key")
+
+	addon.Requestheaders(f)
+	addon.Request(f)
+
+	if got := f.Request.URL.RawQuery; !strings.Contains(got, "real-secret") {
+		t.Fatalf("RawQuery = %q, want to contain real-secret", got)
+	}
+	if got := f.Request.URL.RawQuery; strings.Contains(got, "SLUICE_PHANTOM%3A") {
+		t.Fatalf("RawQuery still contains url-encoded phantom: %q", got)
+	}
+}
+
 func TestRequest_NoBindingNoChange(t *testing.T) {
 	// No bindings configured. Body without phantom tokens should pass
 	// through unchanged.

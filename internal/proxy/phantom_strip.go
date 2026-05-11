@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"net/url"
 	"sort"
 
 	"github.com/nemirovsky/sluice/internal/vault"
@@ -47,6 +48,19 @@ func stripUnboundPhantomsFromProvider(data []byte, provider vault.Provider) []by
 			[]byte(PhantomToken(name)),
 		)
 	}
+	// Mirror every phantom with its URL-encoded variant so phantoms carried in
+	// form-urlencoded bodies or URL components are stripped as cleanly as the
+	// literal form. The encoded variant is only added when it differs from the
+	// literal form (i.e. when QueryEscape actually rewrote something) so we
+	// don't waste a duplicate ReplaceAll on the literal scan path.
+	encodedPhantoms := make([][]byte, 0, len(phantoms))
+	for _, p := range phantoms {
+		encoded := []byte(url.QueryEscape(string(p)))
+		if !bytes.Equal(encoded, p) {
+			encodedPhantoms = append(encodedPhantoms, encoded)
+		}
+	}
+	phantoms = append(phantoms, encodedPhantoms...)
 	// Sort by token length descending so longer phantom tokens are stripped
 	// before shorter prefixes that could corrupt them via substring match.
 	sort.Slice(phantoms, func(i, j int) bool {
@@ -58,8 +72,10 @@ func stripUnboundPhantomsFromProvider(data []byte, provider vault.Provider) []by
 		}
 	}
 	// Last-resort regex strip for phantom tokens from providers that
-	// don't support List() (e.g. env provider).
-	if bytes.Contains(data, phantomPrefix) {
+	// don't support List() (e.g. env provider). The regex handles both
+	// literal (SLUICE_PHANTOM:...) and URL-encoded (SLUICE_PHANTOM%3A...)
+	// forms so unbound phantoms in form-urlencoded bodies are caught too.
+	if bytes.Contains(data, phantomPrefix) || bytes.Contains(data, urlEncodedPhantomPrefix) {
 		data = phantomStripRe.ReplaceAll(data, nil)
 	}
 	return data
