@@ -854,7 +854,7 @@ func TestSwapPhantomBytes_PathUsesPathEscape(t *testing.T) {
 	defer releasePhantomPairs(pairs)
 
 	in := []byte("/v1/SLUICE_PHANTOM%3Aapi_key/resource")
-	out := addon.swapPhantomBytes(in, pairs, "api.example.com", 443, "URL path")
+	out := addon.swapPhantomBytes(in, pairs, "api.example.com", 443, "URL path", true)
 	got := string(out)
 
 	if !strings.Contains(got, "real%20secret") {
@@ -892,7 +892,7 @@ func TestSwapPhantomBytes_QueryUsesQueryEscape(t *testing.T) {
 	defer releasePhantomPairs(pairs)
 
 	in := []byte("token=SLUICE_PHANTOM%3Aapi_key")
-	out := addon.swapPhantomBytes(in, pairs, "api.example.com", 443, "URL query")
+	out := addon.swapPhantomBytes(in, pairs, "api.example.com", 443, "URL query", false)
 	got := string(out)
 
 	if !strings.Contains(got, "real+secret") {

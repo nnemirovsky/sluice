@@ -1,9 +1,7 @@
 package proxy
 
 import (
-	"bytes"
 	"log"
-	"net/url"
 
 	"github.com/nemirovsky/sluice/internal/vault"
 )
@@ -11,13 +9,27 @@ import (
 // encodePhantomForPair returns the URL query-escaped form of a phantom
 // token, or nil when QueryEscape would leave the bytes unchanged. The
 // "nil when unchanged" convention lets the hot-path swap skip a redundant
-// bytes.Contains scan for the literal form a second time.
+// bytes.Contains scan for the literal form a second time. A pre-scan
+// returns nil before any allocation when no byte in phantom would be
+// escaped — also avoids the byte->string copy that url.QueryEscape would
+// otherwise produce for the no-op case.
 func encodePhantomForPair(phantom []byte) []byte {
-	encoded := []byte(url.QueryEscape(string(phantom)))
-	if bytes.Equal(encoded, phantom) {
+	if !phantomNeedsQueryEscape(phantom) {
 		return nil
 	}
-	return encoded
+	return queryEscapeBytes(phantom)
+}
+
+// phantomNeedsQueryEscape reports whether any byte in phantom would be
+// rewritten by queryEscapeBytes. Returns true on a space or any byte
+// outside the unreserved-for-query-component set.
+func phantomNeedsQueryEscape(phantom []byte) bool {
+	for _, c := range phantom {
+		if c == ' ' || !shouldNotEscapeQueryComponent(c) {
+			return true
+		}
+	}
+	return false
 }
 
 // encodePhantomLowerForPair returns the lowercase-hex variant of the
@@ -26,16 +38,33 @@ func encodePhantomForPair(phantom []byte) []byte {
 // hex digits A-F). RFC 3986 §2.1 makes percent-encoded hex case-
 // insensitive, so a phantom that arrives encoded as %3a must still match
 // the precomputed phantom whose canonical form is %3A.
+//
+// A pre-scan returns nil before any allocation when no percent-escape
+// sequence contains an uppercase A-F hex digit. The "no allocation when
+// nothing to lower" path matters for OAuth JWT phantoms and any phantom
+// whose only escape is %3A (the encoded colon) — once we've already
+// stored the uppercase variant elsewhere on the pair, there is nothing
+// new to lower for those.
 func encodePhantomLowerForPair(encoded []byte) []byte {
 	if len(encoded) == 0 {
+		return nil
+	}
+	hasUpperHex := false
+	for i := 0; i < len(encoded); i++ {
+		if encoded[i] != '%' || i+2 >= len(encoded) {
+			continue
+		}
+		if isASCIIUpperHex(encoded[i+1]) || isASCIIUpperHex(encoded[i+2]) {
+			hasUpperHex = true
+			break
+		}
+	}
+	if !hasUpperHex {
 		return nil
 	}
 	lower := make([]byte, len(encoded))
 	i := 0
 	for i < len(encoded) {
-		// Lowercase only the two hex digits after a %, leave everything
-		// else untouched so the credential name (which can contain
-		// upper-case letters by policy) isn't corrupted.
 		if encoded[i] == '%' && i+2 < len(encoded) {
 			lower[i] = '%'
 			lower[i+1] = asciiLowerHex(encoded[i+1])
@@ -46,10 +75,11 @@ func encodePhantomLowerForPair(encoded []byte) []byte {
 		lower[i] = encoded[i]
 		i++
 	}
-	if bytes.Equal(lower, encoded) {
-		return nil
-	}
 	return lower
+}
+
+func isASCIIUpperHex(b byte) bool {
+	return b >= 'A' && b <= 'F'
 }
 
 func asciiLowerHex(b byte) byte {

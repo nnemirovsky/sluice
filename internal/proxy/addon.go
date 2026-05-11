@@ -637,20 +637,21 @@ func (a *SluiceAddon) Request(f *mitmproxy.Flow) {
 
 	// Pass 2+3 on body.
 	if len(f.Request.Body) > 0 {
-		f.Request.Body = a.swapPhantomBytes(f.Request.Body, pairs, host, port, "body")
+		f.Request.Body = a.swapPhantomBytes(f.Request.Body, pairs, host, port, "body", false)
 	}
 
 	// Pass 2+3 on URL query.
 	if rawQ := f.Request.URL.RawQuery; bytesContainsAnyPhantomPrefix([]byte(rawQ)) {
 		f.Request.URL.RawQuery = string(
-			a.swapPhantomBytes([]byte(rawQ), pairs, host, port, "URL query"),
+			a.swapPhantomBytes([]byte(rawQ), pairs, host, port, "URL query", false),
 		)
 	}
 
-	// Pass 2+3 on URL path.
+	// Pass 2+3 on URL path. pathContext=true selects path escaping so
+	// secrets containing spaces get %20, not '+'.
 	if rawP := f.Request.URL.Path; bytesContainsAnyPhantomPrefix([]byte(rawP)) {
 		f.Request.URL.Path = string(
-			a.swapPhantomBytes([]byte(rawP), pairs, host, port, "URL path"),
+			a.swapPhantomBytes([]byte(rawP), pairs, host, port, "URL path", true),
 		)
 		f.Request.URL.RawPath = ""
 	}
@@ -1265,14 +1266,17 @@ func bytesContainsAnyPhantomPrefix(data []byte) bool {
 // every body, query, or header scan. The encoded secret is computed on
 // demand once per swap call, only when the encoded phantom actually appears.
 //
-// location chooses between query escaping (body, URL query, header) and
-// path escaping (URL path). The two differ in how spaces are encoded:
-// QueryEscape uses '+', PathEscape uses '%20'. Using QueryEscape for a path
-// substitution would turn a space in the secret into a literal '+' in the
-// URL path, which is interpreted as a plus character by the server, not a
-// space — corrupting the request.
-func (a *SluiceAddon) swapPhantomBytes(data []byte, pairs []phantomPair, host string, port int, location string) []byte {
-	pathContext := location == "URL path"
+// pathContext chooses between query escaping (false; body, URL query,
+// header) and path escaping (true; URL path). The two differ in how
+// spaces are encoded: QueryEscape uses '+', PathEscape uses '%20'. Using
+// query escaping for a path substitution would turn a space in the
+// secret into a literal '+' in the URL path, which the server reads as
+// a plus character, not a space — corrupting the request. The boolean is
+// passed in explicitly so the type system enforces the choice; callers
+// cannot accidentally pick path escaping by typo-ing the location label.
+// location is still passed for the audit log message but never drives
+// behavior.
+func (a *SluiceAddon) swapPhantomBytes(data []byte, pairs []phantomPair, host string, port int, location string, pathContext bool) []byte {
 	for _, p := range pairs {
 		if bytes.Contains(data, p.phantom) {
 			data = bytes.ReplaceAll(data, p.phantom, p.secret.Bytes())
