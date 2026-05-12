@@ -572,9 +572,13 @@ func (q *QUICProxy) buildPhantomPairs(host string, port int) []phantomPair {
 				pairs = append(pairs, oauthPairs...)
 				continue
 			}
+			phantom := []byte(PhantomToken(name))
+			encoded := encodePhantomForPair(phantom)
 			pairs = append(pairs, phantomPair{
-				phantom: []byte(PhantomToken(name)),
-				secret:  secret,
+				phantom:             phantom,
+				encodedPhantom:      encoded,
+				encodedPhantomLower: encodePhantomLowerForPair(encoded),
+				secret:              secret,
 			})
 		}
 	}
@@ -596,8 +600,24 @@ func (q *QUICProxy) replacePhantomInHeaders(r *http.Request, pairs []phantomPair
 					vb = bytes.ReplaceAll(vb, p.phantom, p.secret.Bytes())
 					changed = true
 				}
+				var encodedSecret []byte
+				ensureEncodedSecret := func() {
+					if encodedSecret == nil {
+						encodedSecret = queryEscapeBytes(p.secret.Bytes())
+					}
+				}
+				if len(p.encodedPhantom) > 0 && bytes.Contains(vb, p.encodedPhantom) {
+					ensureEncodedSecret()
+					vb = bytes.ReplaceAll(vb, p.encodedPhantom, encodedSecret)
+					changed = true
+				}
+				if len(p.encodedPhantomLower) > 0 && bytes.Contains(vb, p.encodedPhantomLower) {
+					ensureEncodedSecret()
+					vb = bytes.ReplaceAll(vb, p.encodedPhantomLower, encodedSecret)
+					changed = true
+				}
 			}
-			if bytes.Contains(vb, phantomPrefix) {
+			if bytesContainsAnyPhantomPrefix(vb) {
 				vb = q.stripUnboundPhantoms(vb)
 				changed = true
 				log.Printf("[QUIC-MITM] stripped unbound phantom from header %q for %s:%d", key, host, port)
@@ -610,14 +630,32 @@ func (q *QUICProxy) replacePhantomInHeaders(r *http.Request, pairs []phantomPair
 }
 
 // replacePhantomInBody replaces phantom tokens in a request body with real
-// credential values and strips any unbound phantom tokens.
+// credential values and strips any unbound phantom tokens. Matches both
+// the literal SLUICE_PHANTOM:<name> form and the URL-encoded
+// SLUICE_PHANTOM%3A<name> form (uppercase and lowercase hex) so that
+// HTTP/3 form-urlencoded OAuth refreshes route through the same swap as
+// HTTP/1.x and HTTP/2.
 func (q *QUICProxy) replacePhantomInBody(body []byte, pairs []phantomPair, host string, port int) []byte {
 	for _, p := range pairs {
 		if bytes.Contains(body, p.phantom) {
 			body = bytes.ReplaceAll(body, p.phantom, p.secret.Bytes())
 		}
+		var encodedSecret []byte
+		ensureEncodedSecret := func() {
+			if encodedSecret == nil {
+				encodedSecret = queryEscapeBytes(p.secret.Bytes())
+			}
+		}
+		if len(p.encodedPhantom) > 0 && bytes.Contains(body, p.encodedPhantom) {
+			ensureEncodedSecret()
+			body = bytes.ReplaceAll(body, p.encodedPhantom, encodedSecret)
+		}
+		if len(p.encodedPhantomLower) > 0 && bytes.Contains(body, p.encodedPhantomLower) {
+			ensureEncodedSecret()
+			body = bytes.ReplaceAll(body, p.encodedPhantomLower, encodedSecret)
+		}
 	}
-	if bytes.Contains(body, phantomPrefix) {
+	if bytesContainsAnyPhantomPrefix(body) {
 		body = q.stripUnboundPhantoms(body)
 		log.Printf("[QUIC-MITM] stripped unbound phantom from body for %s:%d", host, port)
 	}

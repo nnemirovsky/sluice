@@ -371,9 +371,23 @@ func (wp *WSProxy) UpdateRules(blockConfigs []WSBlockRuleConfig, redactConfigs [
 }
 
 // phantomPair holds a phantom token and its corresponding real credential.
+// encodedPhantom is the URL query-escaped form of phantom (uppercase hex),
+// and encodedPhantomLower is the same form with the percent-encoded colon
+// in lowercase. Both are precomputed once per pair so the hot-path swap
+// does not re-allocate on every request, stream chunk, or header.
+//
+// The lowercase variant exists because percent-encoded hex digits are
+// case-insensitive per RFC 3986 §2.1: Go's url.QueryEscape always emits
+// uppercase, but third-party clients can emit lowercase, and a phantom
+// scan that only checked one casing would let `SLUICE_PHANTOM%3a...`
+// through to the upstream. The fields are nil when no encoded form would
+// differ from the literal phantom bytes, which keeps the no-encoded-form
+// branch allocation-free.
 type phantomPair struct {
-	phantom []byte
-	secret  vault.SecureBytes
+	phantom             []byte
+	encodedPhantom      []byte
+	encodedPhantomLower []byte
+	secret              vault.SecureBytes
 }
 
 // Relay runs bidirectional WebSocket frame forwarding between agent and
@@ -400,9 +414,13 @@ func (wp *WSProxy) Relay(agentConn, upstreamConn net.Conn, host string, port int
 				pairs = append(pairs, oauthPairs...)
 				continue
 			}
+			phantom := []byte(PhantomToken(name))
+			encoded := encodePhantomForPair(phantom)
 			pairs = append(pairs, phantomPair{
-				phantom: []byte(PhantomToken(name)),
-				secret:  secret,
+				phantom:             phantom,
+				encodedPhantom:      encoded,
+				encodedPhantomLower: encodePhantomLowerForPair(encoded),
+				secret:              secret,
 			})
 		}
 	}
@@ -496,15 +514,33 @@ func (wp *WSProxy) relayFrames(src io.Reader, dst io.Writer, pairs []phantomPair
 					}
 				}
 
-				// Replace bound phantom tokens with real credentials.
+				// Replace bound phantom tokens with real credentials in both
+				// literal and URL-encoded forms (covers WS text frames that
+				// carry application/x-www-form-urlencoded payloads or
+				// percent-escaped query-like content).
 				for _, p := range pairs {
 					if bytes.Contains(payload, p.phantom) {
 						payload = bytes.ReplaceAll(payload, p.phantom, p.secret.Bytes())
 					}
+					var encodedSecret []byte
+					ensureEncodedSecret := func() {
+						if encodedSecret == nil {
+							encodedSecret = queryEscapeBytes(p.secret.Bytes())
+						}
+					}
+					if len(p.encodedPhantom) > 0 && bytes.Contains(payload, p.encodedPhantom) {
+						ensureEncodedSecret()
+						payload = bytes.ReplaceAll(payload, p.encodedPhantom, encodedSecret)
+					}
+					if len(p.encodedPhantomLower) > 0 && bytes.Contains(payload, p.encodedPhantomLower) {
+						ensureEncodedSecret()
+						payload = bytes.ReplaceAll(payload, p.encodedPhantomLower, encodedSecret)
+					}
 				}
 
-				// Strip any remaining unbound phantom tokens.
-				if bytes.Contains(payload, phantomPrefix) {
+				// Strip any remaining unbound phantom tokens (literal or
+				// URL-encoded, either case).
+				if bytesContainsAnyPhantomPrefix(payload) {
 					payload = wp.stripUnboundPhantoms(payload)
 					log.Printf("[WS] stripped unbound phantom token from text frame")
 				}
