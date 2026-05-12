@@ -493,9 +493,15 @@ func TestSSHJumpHost_BurstCloseDoesNotDropExecReply(t *testing.T) {
 		// Wait for HandleConnection to return so a leaked handler
 		// goroutine (or a connection that fails to teardown after
 		// close) surfaces as a test timeout rather than as silent
-		// resource exhaustion on the next iteration.
+		// resource exhaustion on the next iteration. HandleConnection
+		// returns nil on graceful agent disconnect; a non-nil error
+		// here would mean the teardown path produced an unexpected
+		// failure that a future regression could mask.
 		select {
-		case <-errCh:
+		case handlerErr := <-errCh:
+			if handlerErr != nil {
+				t.Fatalf("iter %d: HandleConnection returned error: %v", i, handlerErr)
+			}
 		case <-time.After(5 * time.Second):
 			t.Fatalf("iter %d: HandleConnection did not return within 5s after close", i)
 		}
