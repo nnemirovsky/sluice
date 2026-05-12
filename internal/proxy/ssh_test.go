@@ -406,6 +406,196 @@ func TestResolveHostKeyCallbackNoKnownHosts(t *testing.T) {
 	}
 }
 
+// TestSSHJumpHost_BurstCloseDoesNotDropExecReply is a focused regression
+// test for the race where an upstream that replies + writes data + sends
+// exit-status + closes in one burst (no sleep between exit-status and
+// close) caused sluice to close srcChan before the agent-to-upstream
+// forwarder finished writing the SUCCESS reply for the agent's
+// session.SendRequest("exec", true, ...). gossh closes ch.msg on
+// SSH_MSG_CHANNEL_CLOSE, so the blocked SendRequest returns io.EOF and
+// session.Output(...) fails with "exec command via SSH: EOF".
+//
+// startTestSSHServer (used by other tests) papers over the race with a
+// 50ms sleep before returning from the channel handler. This test
+// spins up its own burst-close server with no such sleep, so the race
+// is deterministically triggered without the inflightBarrier fix.
+func TestSSHJumpHost_BurstCloseDoesNotDropExecReply(t *testing.T) {
+	pubKey, privPEM := generateTestSSHKey(t)
+	dir := t.TempDir()
+	store, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Add("ssh_key", string(privPEM)); err != nil {
+		t.Fatal(err)
+	}
+
+	sshServer := startBurstCloseSSHServer(t, pubKey)
+	defer func() { _ = sshServer.Close() }()
+
+	proxyHostKey, err := GenerateSSHHostKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	binding := vault.Binding{
+		Credential: "ssh_key",
+		Template:   "testuser",
+		Protocols:  []string{"ssh"},
+	}
+
+	jumpHost := NewSSHJumpHost(store, proxyHostKey)
+	jumpHost.HostKeyCallback = ssh.InsecureIgnoreHostKey()
+
+	// Run the test many times in a single process to maximize the
+	// chance the close race fires if the fix regresses. Each iteration
+	// runs through a fresh proxy connection + fresh agent session.
+	const iterations = 50
+	for i := 0; i < iterations; i++ {
+		agentConn, proxyConn := tcpConnPair(t)
+
+		ready := make(chan error, 1)
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- jumpHost.HandleConnection(proxyConn, []string{sshServer.Addr().String()}, sshServer.Addr().String(), binding, ready)
+		}()
+
+		if setupErr := <-ready; setupErr != nil {
+			t.Fatalf("iter %d: handler setup: %v", i, setupErr)
+		}
+
+		agentSSH, agentChans, agentReqs, err := ssh.NewClientConn(agentConn, "proxy", &ssh.ClientConfig{
+			User:            "ignored",
+			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		})
+		if err != nil {
+			t.Fatalf("iter %d: agent SSH handshake: %v", i, err)
+		}
+
+		client := ssh.NewClient(agentSSH, agentChans, agentReqs)
+		session, err := client.NewSession()
+		if err != nil {
+			t.Fatalf("iter %d: open session: %v", i, err)
+		}
+
+		output, err := session.Output("whoami")
+		if err != nil {
+			t.Fatalf("iter %d: exec: %v (this is the EOF symptom of the close race)", i, err)
+		}
+		if string(output) != "ssh-injection-ok\n" {
+			t.Errorf("iter %d: expected 'ssh-injection-ok', got %q", i, string(output))
+		}
+		_ = session.Close()
+		_ = client.Close()
+		_ = agentSSH.Close()
+		_ = agentConn.Close()
+
+		// Wait for HandleConnection to return so a leaked handler
+		// goroutine (or a connection that fails to teardown after
+		// close) surfaces as a test timeout rather than as silent
+		// resource exhaustion on the next iteration. HandleConnection
+		// returns nil on graceful agent disconnect; a non-nil error
+		// here would mean the teardown path produced an unexpected
+		// failure that a future regression could mask.
+		select {
+		case handlerErr := <-errCh:
+			if handlerErr != nil {
+				t.Fatalf("iter %d: HandleConnection returned error: %v", i, handlerErr)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("iter %d: HandleConnection did not return within 5s after close", i)
+		}
+	}
+}
+
+// startBurstCloseSSHServer is a test SSH server that, on the first exec
+// request, replies + writes output + sends exit-status + closes the
+// channel with no delay between exit-status and Close. The lack of any
+// sleep is intentional: it deterministically triggers the close race
+// in sluice's SSH jump host when the inflightBarrier fix is absent.
+func startBurstCloseSSHServer(t *testing.T, authorizedKey ssh.PublicKey) net.Listener {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostSigner, err := ssh.NewSignerFromKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	config := &ssh.ServerConfig{
+		PublicKeyCallback: func(_ ssh.ConnMetadata, pubKey ssh.PublicKey) (*ssh.Permissions, error) {
+			if bytes.Equal(pubKey.Marshal(), authorizedKey.Marshal()) {
+				return &ssh.Permissions{}, nil
+			}
+			return nil, fmt.Errorf("unknown public key")
+		},
+	}
+	config.AddHostKey(hostSigner)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				sshConn, chans, reqs, err := ssh.NewServerConn(c, config)
+				if err != nil {
+					_ = c.Close()
+					return
+				}
+				defer func() { _ = sshConn.Close() }()
+				go ssh.DiscardRequests(reqs)
+				for newChan := range chans {
+					if newChan.ChannelType() != "session" {
+						_ = newChan.Reject(ssh.UnknownChannelType, "unsupported")
+						continue
+					}
+					ch, chReqs, err := newChan.Accept()
+					if err != nil {
+						continue
+					}
+					go func(ch ssh.Channel, reqs <-chan *ssh.Request) {
+						// Defer close so a request loop that exits without
+						// hitting the exec path (early agent close,
+						// non-exec request only) still releases the
+						// server-side channel.
+						defer func() { _ = ch.Close() }()
+						for req := range reqs {
+							if req.Type != "exec" {
+								if req.WantReply {
+									_ = req.Reply(false, nil)
+								}
+								continue
+							}
+							if req.WantReply {
+								_ = req.Reply(true, nil)
+							}
+							_, _ = ch.Write([]byte("ssh-injection-ok\n"))
+							_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
+							_ = ch.CloseWrite()
+							// NO time.Sleep here. This is the whole point of
+							// the test: close immediately after exit-status
+							// to maximally tighten the race window in
+							// sluice's sshHandleChannel.
+							return
+						}
+					}(ch, chReqs)
+				}
+			}(conn)
+		}
+	}()
+	return ln
+}
+
 // TestGenerateSSHHostKey tests SSH host key generation.
 func TestGenerateSSHHostKey(t *testing.T) {
 	signer, err := GenerateSSHHostKey()
