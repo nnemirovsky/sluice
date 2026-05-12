@@ -487,6 +487,18 @@ func TestSSHJumpHost_BurstCloseDoesNotDropExecReply(t *testing.T) {
 		}
 		_ = session.Close()
 		_ = client.Close()
+		_ = agentSSH.Close()
+		_ = agentConn.Close()
+
+		// Wait for HandleConnection to return so a leaked handler
+		// goroutine (or a connection that fails to teardown after
+		// close) surfaces as a test timeout rather than as silent
+		// resource exhaustion on the next iteration.
+		select {
+		case <-errCh:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("iter %d: HandleConnection did not return within 5s after close", i)
+		}
 	}
 }
 
@@ -546,6 +558,11 @@ func startBurstCloseSSHServer(t *testing.T, authorizedKey ssh.PublicKey) net.Lis
 						continue
 					}
 					go func(ch ssh.Channel, reqs <-chan *ssh.Request) {
+						// Defer close so a request loop that exits without
+						// hitting the exec path (early agent close,
+						// non-exec request only) still releases the
+						// server-side channel.
+						defer func() { _ = ch.Close() }()
 						for req := range reqs {
 							if req.Type != "exec" {
 								if req.WantReply {
@@ -563,7 +580,6 @@ func startBurstCloseSSHServer(t *testing.T, authorizedKey ssh.PublicKey) net.Lis
 							// the test: close immediately after exit-status
 							// to maximally tighten the race window in
 							// sluice's sshHandleChannel.
-							_ = ch.Close()
 							return
 						}
 					}(ch, chReqs)
