@@ -275,13 +275,22 @@ func sshHandleChannel(newChan ssh.NewChannel, dst ssh.Conn) {
 	// SSH_MSG_CHANNEL_CLOSE before its SendRequest("exec", true, ...)
 	// receives a SUCCESS/FAILURE on ch.msg, and the gossh client
 	// surfaces the closed ch.msg as io.EOF.
-	var inFlight sync.WaitGroup
+	//
+	// sync.WaitGroup is the wrong primitive here because Add and Wait
+	// are not safe to call concurrently when the counter is at zero
+	// (Go runtime panics with "sync: WaitGroup misuse"). The forwarder
+	// goroutine ranges over srcReqs and could enter a new iteration at
+	// any moment, racing the main goroutine's drain. We use a mutex +
+	// cond + draining flag instead: once draining is set, the forwarder
+	// rejects further requests so Wait() can converge.
+	barrier := &inflightBarrier{}
+	barrier.cond = sync.NewCond(&barrier.mu)
 
 	// Forward per-channel requests bidirectionally. The agent-to-upstream
-	// loop wraps each request in inFlight so sluice's pre-close barrier
-	// can drain them. The upstream-to-agent loop signals upstreamDone
-	// when dstReqs closes.
-	go sshForwardChannelRequestsTracked(srcReqs, dstChan, &inFlight)
+	// loop reports each request via barrier so sluice's pre-close
+	// drain knows when none are pending. The upstream-to-agent loop
+	// signals upstreamDone when dstReqs closes.
+	go sshForwardAgentRequests(srcReqs, dstChan, barrier)
 	go func() {
 		sshForwardChannelRequests(dstReqs, srcChan)
 		upstreamDone <- struct{}{}
@@ -328,7 +337,11 @@ func sshHandleChannel(newChan ssh.NewChannel, dst ssh.Conn) {
 	// agent see channel-close before the SUCCESS/FAILURE message on
 	// ch.msg, which gossh surfaces as io.EOF from
 	// session.SendRequest("exec", true, ...).
-	inFlight.Wait()
+	//
+	// Drain sets a draining flag (so the forwarder rejects any further
+	// request without bumping the counter) and waits on the cond for
+	// the current iteration, if any, to finish.
+	barrier.drain()
 
 	// Now that exit-status has been forwarded (the dstReqs goroutine
 	// has finished) and every pending agent-side reply has been
@@ -356,30 +369,94 @@ func sshForwardChannelRequests(reqs <-chan *ssh.Request, dst ssh.Channel) {
 	}
 }
 
-// sshForwardChannelRequestsTracked is the agent-to-upstream variant of
-// sshForwardChannelRequests. Each request is wrapped in the inFlight
-// WaitGroup so sshHandleChannel's pre-close barrier can wait for the
-// reply on the agent direction (req.Reply on srcChan) to be written
-// before sluice closes srcChan. Otherwise an agent that called
+// inflightBarrier serializes the agent-to-upstream request forwarder
+// with sshHandleChannel's pre-close drain. The forwarder calls enter()
+// before forwarding a request to upstream and leave() after replying to
+// the agent. sshHandleChannel calls drain() once the upstream side has
+// fully closed: drain sets the draining flag (so any further enter()
+// returns false and the forwarder rejects the request without waiting
+// on a closed upstream) and blocks until count reaches zero.
+//
+// The mutex+cond pattern avoids the Add/Wait race that a sync.WaitGroup
+// would have: with a WaitGroup the forwarder's loop could call Add(1)
+// at the same instant sshHandleChannel called Wait() with the counter
+// at zero, and the Go runtime panics on that interleaving.
+type inflightBarrier struct {
+	mu       sync.Mutex
+	cond     *sync.Cond
+	count    int
+	draining bool
+}
+
+// enter reports the start of a request handler. Returns false if drain
+// has already begun, in which case the caller must NOT proceed to
+// forward the request to a possibly-closed upstream.
+func (b *inflightBarrier) enter() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.draining {
+		return false
+	}
+	b.count++
+	return true
+}
+
+// leave matches a successful enter. When the counter reaches zero
+// during draining, the waiter is signaled.
+func (b *inflightBarrier) leave() {
+	b.mu.Lock()
+	b.count--
+	if b.count == 0 && b.draining {
+		b.cond.Broadcast()
+	}
+	b.mu.Unlock()
+}
+
+// drain sets the draining flag (locking out new enters) and blocks
+// until any currently in-flight handlers call leave.
+func (b *inflightBarrier) drain() {
+	b.mu.Lock()
+	b.draining = true
+	for b.count > 0 {
+		b.cond.Wait()
+	}
+	b.mu.Unlock()
+}
+
+// sshForwardAgentRequests is the agent-to-upstream variant of
+// sshForwardChannelRequests. It coordinates with sshHandleChannel's
+// pre-close drain via inflightBarrier so the reply on the agent
+// direction (req.Reply on srcChan) is fully written before sluice
+// closes srcChan. Otherwise an agent that called
 // session.SendRequest("exec", WantReply=true, ...) can observe
 // SSH_MSG_CHANNEL_CLOSE before its ch.msg receives the
 // CHANNEL_REQUEST_SUCCESS reply — gossh surfaces a closed ch.msg as
 // io.EOF, and `session.Output("cmd")` fails with EOF even though the
 // upstream replied successfully.
-func sshForwardChannelRequestsTracked(reqs <-chan *ssh.Request, dst ssh.Channel, inFlight *sync.WaitGroup) {
+//
+// When drain has already begun, the request is rejected without being
+// forwarded to upstream: the upstream channel is closing, so any reply
+// from upstream would never arrive. Replying false to the agent on a
+// WantReply request unblocks any caller waiting on ch.msg.
+func sshForwardAgentRequests(reqs <-chan *ssh.Request, dst ssh.Channel, barrier *inflightBarrier) {
 	for req := range reqs {
-		inFlight.Add(1)
+		if !barrier.enter() {
+			if req.WantReply {
+				_ = req.Reply(false, nil)
+			}
+			continue
+		}
 		ok, err := dst.SendRequest(req.Type, req.WantReply, req.Payload)
 		if err != nil {
 			if req.WantReply {
 				_ = req.Reply(false, nil)
 			}
-			inFlight.Done()
+			barrier.leave()
 			continue
 		}
 		if req.WantReply {
 			_ = req.Reply(ok, nil)
 		}
-		inFlight.Done()
+		barrier.leave()
 	}
 }
