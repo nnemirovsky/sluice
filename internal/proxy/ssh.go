@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/nemirovsky/sluice/internal/vault"
 	"golang.org/x/crypto/ssh"
@@ -263,8 +264,24 @@ func sshHandleChannel(newChan ssh.NewChannel, dst ssh.Conn) {
 	// from upstream finish, each signaling on this channel.
 	upstreamDone := make(chan struct{}, 3)
 
-	// Forward per-channel requests bidirectionally.
-	go sshForwardChannelRequests(srcReqs, dstChan)
+	// Track agent-to-upstream requests that are mid-flight. Each request
+	// the agent sends has to be forwarded to upstream, awaited for a
+	// reply (when WantReply is true), and replied to on the agent side
+	// before sluice may close srcChan. Without this barrier, a fast
+	// upstream that replies + writes data + sends exit-status + closes
+	// in one burst lets sluice drain all three upstream-to-agent
+	// goroutines and close srcChan while this forwarder is still
+	// mid-reply for the original exec request. The agent then observes
+	// SSH_MSG_CHANNEL_CLOSE before its SendRequest("exec", true, ...)
+	// receives a SUCCESS/FAILURE on ch.msg, and the gossh client
+	// surfaces the closed ch.msg as io.EOF.
+	var inFlight sync.WaitGroup
+
+	// Forward per-channel requests bidirectionally. The agent-to-upstream
+	// loop wraps each request in inFlight so sluice's pre-close barrier
+	// can drain them. The upstream-to-agent loop signals upstreamDone
+	// when dstReqs closes.
+	go sshForwardChannelRequestsTracked(srcReqs, dstChan, &inFlight)
 	go func() {
 		sshForwardChannelRequests(dstReqs, srcChan)
 		upstreamDone <- struct{}{}
@@ -304,10 +321,20 @@ func sshHandleChannel(newChan ssh.NewChannel, dst ssh.Conn) {
 	<-upstreamDone
 	<-upstreamDone
 
+	// Also drain any agent-to-upstream request that is mid-flight. A
+	// pending WantReply=true request is waiting on dst.SendRequest to
+	// return, after which it still has to call req.Reply on the agent
+	// side. Closing srcChan before that reply is written would let the
+	// agent see channel-close before the SUCCESS/FAILURE message on
+	// ch.msg, which gossh surfaces as io.EOF from
+	// session.SendRequest("exec", true, ...).
+	inFlight.Wait()
+
 	// Now that exit-status has been forwarded (the dstReqs goroutine
-	// has finished), signal stdout EOF to the agent and close the
-	// channel. The agent's session.Wait() now sees the documented
-	// order: data, exit-status, EOF, close.
+	// has finished) and every pending agent-side reply has been
+	// written, signal stdout EOF to the agent and close the channel.
+	// The agent's session.Wait() now sees the documented order:
+	// data, exit-status, EOF, close.
 	_ = srcChan.CloseWrite()
 	_ = srcChan.Close()
 	_ = dstChan.Close()
@@ -326,5 +353,33 @@ func sshForwardChannelRequests(reqs <-chan *ssh.Request, dst ssh.Channel) {
 		if req.WantReply {
 			_ = req.Reply(ok, nil)
 		}
+	}
+}
+
+// sshForwardChannelRequestsTracked is the agent-to-upstream variant of
+// sshForwardChannelRequests. Each request is wrapped in the inFlight
+// WaitGroup so sshHandleChannel's pre-close barrier can wait for the
+// reply on the agent direction (req.Reply on srcChan) to be written
+// before sluice closes srcChan. Otherwise an agent that called
+// session.SendRequest("exec", WantReply=true, ...) can observe
+// SSH_MSG_CHANNEL_CLOSE before its ch.msg receives the
+// CHANNEL_REQUEST_SUCCESS reply — gossh surfaces a closed ch.msg as
+// io.EOF, and `session.Output("cmd")` fails with EOF even though the
+// upstream replied successfully.
+func sshForwardChannelRequestsTracked(reqs <-chan *ssh.Request, dst ssh.Channel, inFlight *sync.WaitGroup) {
+	for req := range reqs {
+		inFlight.Add(1)
+		ok, err := dst.SendRequest(req.Type, req.WantReply, req.Payload)
+		if err != nil {
+			if req.WantReply {
+				_ = req.Reply(false, nil)
+			}
+			inFlight.Done()
+			continue
+		}
+		if req.WantReply {
+			_ = req.Reply(ok, nil)
+		}
+		inFlight.Done()
 	}
 }
