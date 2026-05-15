@@ -4587,3 +4587,84 @@ func TestAddBindingValidation(t *testing.T) {
 		t.Errorf("unexpected error for valid input: %v", err)
 	}
 }
+
+// --- HasApprovalRule (idempotent approval persistence) ---
+
+func TestHasApprovalRule(t *testing.T) {
+	s := newTestStore(t)
+
+	// No approval rule yet.
+	has, err := s.HasApprovalRule("allow", "cas.example.com", 443)
+	if err != nil {
+		t.Fatalf("HasApprovalRule: %v", err)
+	}
+	if has {
+		t.Fatal("expected no approval rule before insert")
+	}
+
+	// Insert exactly what persistApprovalRule writes.
+	if _, err := s.AddRule("allow", RuleOpts{
+		Destination: "cas.example.com", Ports: []int{443}, Source: "approval",
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	has, err = s.HasApprovalRule("allow", "cas.example.com", 443)
+	if err != nil {
+		t.Fatalf("HasApprovalRule: %v", err)
+	}
+	if !has {
+		t.Fatal("expected approval rule to be found after insert")
+	}
+
+	// Mismatches must not match.
+	cases := []struct {
+		name          string
+		verdict, dest string
+		port          int
+	}{
+		{"different verdict", "deny", "cas.example.com", 443},
+		{"different dest", "allow", "other.example.com", 443},
+		{"different port", "allow", "cas.example.com", 8443},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			has, err := s.HasApprovalRule(c.verdict, c.dest, c.port)
+			if err != nil {
+				t.Fatalf("HasApprovalRule: %v", err)
+			}
+			if has {
+				t.Errorf("expected no match for %s", c.name)
+			}
+		})
+	}
+}
+
+func TestHasApprovalRuleIgnoresNonApprovalSource(t *testing.T) {
+	s := newTestStore(t)
+
+	// A manually-added rule with the same shape must NOT be treated as an
+	// approval rule (HasApprovalRule filters source='approval').
+	if _, err := s.AddRule("allow", RuleOpts{
+		Destination: "manual.example.com", Ports: []int{443}, Source: "manual",
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	has, err := s.HasApprovalRule("allow", "manual.example.com", 443)
+	if err != nil {
+		t.Fatalf("HasApprovalRule: %v", err)
+	}
+	if has {
+		t.Error("manual-sourced rule must not satisfy HasApprovalRule")
+	}
+}
+
+func TestHasApprovalRuleValidatesInput(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.HasApprovalRule("", "x", 443); err == nil {
+		t.Error("expected error for empty verdict")
+	}
+	if _, err := s.HasApprovalRule("allow", "", 443); err == nil {
+		t.Error("expected error for empty destination")
+	}
+}

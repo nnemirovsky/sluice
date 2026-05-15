@@ -304,6 +304,37 @@ func (s *Store) RuleExists(verdict string, opts RuleExistsOpts) (bool, error) {
 	return count > 0, nil
 }
 
+// HasApprovalRule reports whether an approval-sourced rule already exists for
+// the given verdict, destination, and single port. It is a read-only SELECT
+// (no migration) used by the proxy to make approval-rule persistence
+// idempotent: when a burst of coalesced "Always Allow"/"Always Deny"
+// responses fan out, the first caller inserts the rule and the rest see it
+// already present and skip the insert + engine recompile.
+//
+// The match is intentionally narrow — source='approval', exact verdict,
+// exact destination, and exact ports JSON for the single approval port —
+// mirroring exactly what persistApprovalRule writes via AddRule. It is not a
+// general dedup for manually added rules.
+func (s *Store) HasApprovalRule(verdict, dest string, port int) (bool, error) {
+	if verdict == "" || dest == "" {
+		return false, fmt.Errorf("verdict and destination are required")
+	}
+	portsJSON := portsToJSONPtr([]int{port})
+	query := "SELECT COUNT(*) FROM rules WHERE source = 'approval' AND verdict = ? AND destination = ? AND "
+	args := []any{verdict, dest}
+	if portsJSON != nil {
+		query += "ports = ?"
+		args = append(args, *portsJSON)
+	} else {
+		query += "ports IS NULL"
+	}
+	var count int
+	if err := s.db.QueryRow(query, args...).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // --- Config ---
 
 // Config represents the typed singleton row in the config table.

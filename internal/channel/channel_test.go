@@ -3,11 +3,19 @@ package channel
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// result bundles a Broker.Request return for fan-in over a channel in
+// concurrency tests.
+type result struct {
+	resp Response
+	err  error
+}
 
 // mockChannel implements Channel for testing.
 type mockChannel struct {
@@ -353,12 +361,15 @@ func TestBrokerPendingLimitExceeded(t *testing.T) {
 	broker := NewBroker([]Channel{ch1}, WithMaxPending(3))
 
 	// Fill up the pending slots by sending requests that won't be resolved.
+	// Distinct destinations so each opens its own waiter (same-dest:port
+	// requests now coalesce onto a single waiter by design).
 	var wg sync.WaitGroup
 	for i := 0; i < 3; i++ {
+		dest := fmt.Sprintf("example-%d.com", i)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = broker.Request("example.com", 443, "", 2*time.Second)
+			_, _ = broker.Request(dest, 443, "", 2*time.Second)
 		}()
 	}
 	// Wait until all 3 are registered as waiters.
@@ -507,10 +518,13 @@ func TestBrokerCancelAllDeniesAllPending(t *testing.T) {
 	}
 	results := make(chan result, n)
 
-	// Start n requests that will block waiting for approval.
+	// Start n requests that will block waiting for approval. Distinct
+	// destinations so each registers its own waiter (same-dest:port
+	// requests now coalesce by design).
 	for i := 0; i < n; i++ {
+		dest := fmt.Sprintf("cancel-test-%d.com", i)
 		go func() {
-			resp, err := broker.Request("cancel-test.com", 443, "", 5*time.Second)
+			resp, err := broker.Request(dest, 443, "", 5*time.Second)
 			results <- result{resp, err}
 		}()
 	}
@@ -842,5 +856,446 @@ func TestBrokerChannelErrorDoesNotBlockOthers(t *testing.T) {
 	}
 	if resp != ResponseAllowOnce {
 		t.Errorf("expected AllowOnce, got %v", resp)
+	}
+}
+
+// --- Coalescing tests (broker-level dedup by dest:port) ---
+
+// fireCoalescedBurst starts n concurrent Request calls to the same
+// dest:port and waits until the broker reports all n have attached to a
+// single primary waiter. It returns the primary request ID and a channel
+// that yields each call's (resp, err) result.
+func fireCoalescedBurst(t *testing.T, broker *Broker, ch *mockChannel, dest string, port, n int, timeout time.Duration) (string, <-chan result) {
+	t.Helper()
+	type res = result
+	out := make(chan res, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			resp, err := broker.Request(dest, port, "https", timeout)
+			out <- res{resp, err}
+		}()
+	}
+	// Wait for the primary prompt to land.
+	deadline := time.After(5 * time.Second)
+	for {
+		reqs := ch.getRequests()
+		if len(reqs) >= 1 {
+			id := reqs[0].ID
+			if broker.CoalescedCount(id) >= n {
+				return id, out
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("burst did not fully coalesce: got %d requests, count=%v",
+				len(ch.getRequests()), func() int {
+					if r := ch.getRequests(); len(r) > 0 {
+						return broker.CoalescedCount(r[0].ID)
+					}
+					return 0
+				}())
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+func TestBrokerCoalesceOneBroadcastFanToAll(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const n = 8
+	primaryID, out := fireCoalescedBurst(t, broker, ch, "cas.example.com", 443, n, 5*time.Second)
+
+	// Exactly one prompt was broadcast for the whole burst.
+	if got := len(ch.getRequests()); got != 1 {
+		t.Fatalf("expected exactly 1 broadcast, got %d", got)
+	}
+	if c := broker.CoalescedCount(primaryID); c != n {
+		t.Fatalf("expected coalesced count %d, got %d", n, c)
+	}
+	if pc := broker.PendingCount(); pc != 1 {
+		t.Fatalf("expected 1 pending waiter, got %d", pc)
+	}
+
+	if !broker.Resolve(primaryID, ResponseAlwaysAllow) {
+		t.Fatal("Resolve returned false for primary")
+	}
+
+	for i := 0; i < n; i++ {
+		r := <-out
+		if r.err != nil {
+			t.Errorf("request %d: unexpected error %v", i, r.err)
+		}
+		if r.resp != ResponseAlwaysAllow {
+			t.Errorf("request %d: expected AlwaysAllow, got %v", i, r.resp)
+		}
+	}
+	// Final count retained for message-edit paths after the waiter is gone.
+	if c := broker.CoalescedCount(primaryID); c != n {
+		t.Errorf("expected retained coalesced count %d, got %d", n, c)
+	}
+}
+
+func TestBrokerCoalesceDenyFanOut(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const n = 5
+	primaryID, out := fireCoalescedBurst(t, broker, ch, "deny.example.com", 443, n, 5*time.Second)
+	broker.Resolve(primaryID, ResponseDeny)
+
+	for i := 0; i < n; i++ {
+		r := <-out
+		if r.resp != ResponseDeny {
+			t.Errorf("request %d: expected Deny, got %v", i, r.resp)
+		}
+	}
+}
+
+func TestBrokerCoalesceTimeoutFanOut(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const n = 4
+	// No resolve: the primary times out and fans the terminal Deny to
+	// every subscriber. The primary itself returns the timeout error;
+	// subscribers receive Deny via the fan-out (nil err, like any
+	// terminal resolution). Every caller must end up denied.
+	_, out := fireCoalescedBurst(t, broker, ch, "slowburst.example.com", 443, n, 80*time.Millisecond)
+
+	timeoutErrs := 0
+	for i := 0; i < n; i++ {
+		r := <-out
+		if r.resp != ResponseDeny {
+			t.Errorf("request %d: expected Deny on timeout, got %v", i, r.resp)
+		}
+		if r.err != nil {
+			timeoutErrs++
+		}
+	}
+	if timeoutErrs == 0 {
+		t.Error("expected at least the primary to report a timeout error")
+	}
+}
+
+func TestBrokerCoalesceShutdownFanOut(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const n = 6
+	_, out := fireCoalescedBurst(t, broker, ch, "shutdown.example.com", 443, n, 5*time.Second)
+	broker.CancelAll()
+
+	for i := 0; i < n; i++ {
+		r := <-out
+		if r.resp != ResponseDeny {
+			t.Errorf("request %d: expected Deny on shutdown, got %v", i, r.resp)
+		}
+	}
+}
+
+func TestBrokerCoalesceSubTimeoutDoesNotBlockFanOut(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	// Primary with a long timeout so it stays pending.
+	primaryOut := make(chan result, 1)
+	go func() {
+		resp, err := broker.Request("subtimeout.example.com", 443, "https", 5*time.Second)
+		primaryOut <- result{resp, err}
+	}()
+	var primaryID string
+	for {
+		reqs := ch.getRequests()
+		if len(reqs) == 1 {
+			primaryID = reqs[0].ID
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// A coalesced sub with a very short timeout: it detaches itself.
+	subOut := make(chan result, 1)
+	go func() {
+		resp, err := broker.Request("subtimeout.example.com", 443, "https", 30*time.Millisecond)
+		subOut <- result{resp, err}
+	}()
+	// Wait for the sub to attach (count == 2) then time out (count back
+	// near 1 once it detaches; tolerate the race by just waiting for the
+	// sub result).
+	for broker.CoalescedCount(primaryID) < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	sr := <-subOut
+	if sr.resp != ResponseDeny || sr.err == nil {
+		t.Fatalf("sub should have timed out with Deny+err, got %v / %v", sr.resp, sr.err)
+	}
+
+	// Resolving the primary must not block on the departed sub.
+	done := make(chan bool, 1)
+	go func() { done <- broker.Resolve(primaryID, ResponseAllowOnce) }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("Resolve returned false")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Resolve blocked on a detached sub")
+	}
+	pr := <-primaryOut
+	if pr.resp != ResponseAllowOnce {
+		t.Errorf("primary: expected AllowOnce, got %v", pr.resp)
+	}
+}
+
+func TestBrokerCoalesceLateAttachOpensNewPrompt(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	// First prompt for the target.
+	out1 := make(chan result, 1)
+	go func() {
+		resp, err := broker.Request("late.example.com", 443, "https", 5*time.Second)
+		out1 <- result{resp, err}
+	}()
+	var id1 string
+	for {
+		reqs := ch.getRequests()
+		if len(reqs) == 1 {
+			id1 = reqs[0].ID
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Resolve the first; dedupIndex entry is cleared in the same locked
+	// section as the waiter delete.
+	broker.Resolve(id1, ResponseAllowOnce)
+	if r := <-out1; r.resp != ResponseAllowOnce {
+		t.Fatalf("first request: expected AllowOnce, got %v", r.resp)
+	}
+
+	// A new request to the same target after resolution must NOT attach to
+	// the dead waiter — it must open a fresh prompt with a new ID.
+	out2 := make(chan result, 1)
+	go func() {
+		resp, err := broker.Request("late.example.com", 443, "https", 5*time.Second)
+		out2 <- result{resp, err}
+	}()
+	var id2 string
+	for {
+		reqs := ch.getRequests()
+		if len(reqs) == 2 {
+			id2 = reqs[1].ID
+			break
+		}
+		select {
+		case <-time.After(2 * time.Second):
+			t.Fatal("late request did not open a new prompt (attached to dead waiter)")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if id2 == id1 {
+		t.Fatalf("late request reused dead primary id %q", id1)
+	}
+	broker.Resolve(id2, ResponseDeny)
+	if r := <-out2; r.resp != ResponseDeny {
+		t.Errorf("second request: expected Deny, got %v", r.resp)
+	}
+}
+
+func TestBrokerCoalesceConcurrentResolveAndAttach(t *testing.T) {
+	// Stress the resolve/attach interleave: no sub may end up attached to
+	// a deleted waiter (which would hang forever) and none may be lost.
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const rounds = 40
+	for round := 0; round < rounds; round++ {
+		dest := fmt.Sprintf("race-%d.example.com", round)
+		out := make(chan result, 3)
+		for i := 0; i < 3; i++ {
+			go func() {
+				resp, err := broker.Request(dest, 443, "https", 3*time.Second)
+				out <- result{resp, err}
+			}()
+		}
+		// Resolve as soon as the first prompt appears, racing the other
+		// two arrivals (some attach as subs, some open fresh prompts).
+		var firstID string
+		for {
+			for _, r := range ch.getRequests() {
+				if r.Destination == dest {
+					firstID = r.ID
+					break
+				}
+			}
+			if firstID != "" {
+				break
+			}
+			time.Sleep(time.Microsecond * 200)
+		}
+		// Keep resolving every pending prompt for this dest until all
+		// three callers return. Any caller that opened its own prompt
+		// gets resolved here too.
+		got := 0
+		timeout := time.After(3 * time.Second)
+		for got < 3 {
+			for _, r := range broker.PendingRequests() {
+				if r.Destination == dest {
+					broker.Resolve(r.ID, ResponseAllowOnce)
+				}
+			}
+			select {
+			case res := <-out:
+				if res.resp != ResponseAllowOnce {
+					t.Fatalf("round %d: expected AllowOnce, got %v (err %v)", round, res.resp, res.err)
+				}
+				got++
+			case <-timeout:
+				t.Fatalf("round %d: only %d/3 callers returned (deadlock?)", round, got)
+			default:
+				time.Sleep(time.Microsecond * 200)
+			}
+		}
+	}
+}
+
+func TestBrokerDistinctDestNotCoalesced(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	out := make(chan result, 2)
+	go func() {
+		resp, err := broker.Request("a.example.com", 443, "https", 5*time.Second)
+		out <- result{resp, err}
+	}()
+	go func() {
+		resp, err := broker.Request("b.example.com", 443, "https", 5*time.Second)
+		out <- result{resp, err}
+	}()
+	// Two distinct targets -> two waiters, two broadcasts.
+	for broker.PendingCount() < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(ch.getRequests()); got != 2 {
+		t.Fatalf("expected 2 broadcasts for distinct targets, got %d", got)
+	}
+	for _, r := range broker.PendingRequests() {
+		broker.Resolve(r.ID, ResponseAllowOnce)
+	}
+	<-out
+	<-out
+}
+
+func TestBrokerSamePortDifferentDestNotCoalesced(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	out := make(chan result, 2)
+	// Same host, different port -> different dedup key, not coalesced.
+	go func() {
+		resp, err := broker.Request("svc.example.com", 443, "https", 5*time.Second)
+		out <- result{resp, err}
+	}()
+	go func() {
+		resp, err := broker.Request("svc.example.com", 8443, "https", 5*time.Second)
+		out <- result{resp, err}
+	}()
+	for broker.PendingCount() < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(ch.getRequests()); got != 2 {
+		t.Fatalf("expected 2 broadcasts for differing ports, got %d", got)
+	}
+	for _, r := range broker.PendingRequests() {
+		broker.Resolve(r.ID, ResponseAllowOnce)
+	}
+	<-out
+	<-out
+}
+
+func TestBrokerWithNoCoalesceNeverCoalesces(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const n = 4
+	out := make(chan result, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			resp, err := broker.Request("mcp-tool", 0, "mcp", 5*time.Second, WithNoCoalesce())
+			out <- result{resp, err}
+		}()
+	}
+	for broker.PendingCount() < n {
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(ch.getRequests()); got != n {
+		t.Fatalf("WithNoCoalesce: expected %d separate prompts, got %d", n, got)
+	}
+	for _, r := range broker.PendingRequests() {
+		broker.Resolve(r.ID, ResponseAllowOnce)
+	}
+	for i := 0; i < n; i++ {
+		<-out
+	}
+}
+
+func TestBrokerCoalesceCrossChannelFirstWins(t *testing.T) {
+	ch1 := newMockChannel(ChannelTelegram)
+	ch2 := newMockChannel(ChannelHTTP)
+	broker := NewBroker([]Channel{ch1, ch2}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const n = 5
+	out := make(chan result, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			resp, err := broker.Request("xchan.example.com", 443, "https", 5*time.Second)
+			out <- result{resp, err}
+		}()
+	}
+	var primaryID string
+	for {
+		reqs := ch1.getRequests()
+		if len(reqs) == 1 && broker.CoalescedCount(reqs[0].ID) >= n {
+			primaryID = reqs[0].ID
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Both channels saw exactly one prompt (the primary).
+	if len(ch1.getRequests()) != 1 || len(ch2.getRequests()) != 1 {
+		t.Fatalf("expected 1 prompt per channel, got ch1=%d ch2=%d",
+			len(ch1.getRequests()), len(ch2.getRequests()))
+	}
+	// Two channels race to resolve the same primary; first wins, and the
+	// whole coalesced burst gets that winner's response.
+	r1 := make(chan bool, 1)
+	r2 := make(chan bool, 1)
+	go func() { r1 <- broker.Resolve(primaryID, ResponseAlwaysAllow) }()
+	go func() { r2 <- broker.Resolve(primaryID, ResponseDeny) }()
+	wins := 0
+	if <-r1 {
+		wins++
+	}
+	if <-r2 {
+		wins++
+	}
+	if wins != 1 {
+		t.Fatalf("expected exactly 1 winning Resolve, got %d", wins)
+	}
+	first := result{}
+	for i := 0; i < n; i++ {
+		r := <-out
+		if i == 0 {
+			first = r
+		} else if r.resp != first.resp {
+			t.Fatalf("coalesced burst got mixed responses: %v vs %v", first.resp, r.resp)
+		}
+	}
+	if first.resp != ResponseAlwaysAllow && first.resp != ResponseDeny {
+		t.Fatalf("unexpected response %v", first.resp)
 	}
 }

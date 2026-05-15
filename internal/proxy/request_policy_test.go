@@ -20,6 +20,11 @@ type fakeChannel struct {
 	response    channel.Response
 	requests    []channel.ApprovalRequest
 	onRequestCh chan struct{}
+	// release, when non-nil, gates resolution: the resolve goroutine waits
+	// for this channel to be closed before calling broker.Resolve. Used to
+	// deterministically hold a primary prompt pending while concurrent
+	// requests to the same target coalesce onto it.
+	release chan struct{}
 }
 
 func newFakeChannel(resp channel.Response) *fakeChannel {
@@ -31,10 +36,14 @@ func (f *fakeChannel) RequestApproval(_ context.Context, req channel.ApprovalReq
 	f.requests = append(f.requests, req)
 	resp := f.response
 	broker := f.broker
+	release := f.release
 	f.mu.Unlock()
 	// Resolve asynchronously so the broker goroutine can register the
 	// waiter before we deliver the response.
 	go func() {
+		if release != nil {
+			<-release
+		}
 		broker.Resolve(req.ID, resp)
 	}()
 	select {
@@ -61,6 +70,26 @@ func (f *fakeChannel) requestCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.requests)
+}
+
+// gate installs a release channel so primary prompts stay pending until
+// releaseAll() is called. Returns the close func.
+func (f *fakeChannel) gate() func() {
+	f.mu.Lock()
+	ch := make(chan struct{})
+	f.release = ch
+	f.mu.Unlock()
+	var once sync.Once
+	return func() { once.Do(func() { close(ch) }) }
+}
+
+func (f *fakeChannel) firstReqID() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.requests) == 0 {
+		return ""
+	}
+	return f.requests[0].ID
 }
 
 // newTestChecker builds a RequestPolicyChecker wired to a fake
@@ -648,11 +677,13 @@ destination = "api.example.com"
 	}
 }
 
-func TestRequestPolicyChecker_ConcurrentAllowOnceSerializesApprovals(t *testing.T) {
+func TestRequestPolicyChecker_ConcurrentAllowOnceCoalesces(t *testing.T) {
 	// Multiple HTTP/2 streams on the same connection may invoke
-	// CheckAndConsume concurrently. Each call must be independently
-	// answered by the broker (no single-shot caching). This test
-	// confirms the contract holds up under concurrency.
+	// CheckAndConsume concurrently against the same dest:port. Broker-level
+	// coalescing collapses a concurrent burst onto ONE pending prompt: the
+	// operator taps once and every in-flight request gets that verdict.
+	// (Sequential, non-overlapping requests still each ask — coalescing
+	// only applies while a prompt is actually pending.)
 	toml := `
 [policy]
 default = "deny"
@@ -661,6 +692,10 @@ default = "deny"
 destination = "api.example.com"
 `
 	checker, fc := newTestChecker(t, toml, channel.ResponseAllowOnce)
+	// Hold the primary prompt pending so the whole burst coalesces onto it
+	// deterministically before any resolution happens.
+	releaseAll := fc.gate()
+
 	const n = 5
 	var wg sync.WaitGroup
 	results := make([]policy.Verdict, n)
@@ -675,6 +710,24 @@ destination = "api.example.com"
 			results[i] = v
 		}(i)
 	}
+
+	// Wait until exactly one prompt is broadcast and all n requests have
+	// coalesced onto it (primary + n-1 subscribers => count == n).
+	waitDeadline := time.After(3 * time.Second)
+	for {
+		id := fc.firstReqID()
+		if id != "" && checker.broker.CoalescedCount(id) >= n {
+			break
+		}
+		select {
+		case <-waitDeadline:
+			t.Fatalf("burst did not coalesce: requests=%d", fc.requestCount())
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	releaseAll()
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
 	select {
@@ -687,7 +740,73 @@ destination = "api.example.com"
 			t.Errorf("result[%d] = %v, want Allow", i, v)
 		}
 	}
-	if fc.requestCount() != n {
-		t.Errorf("broker request count = %d, want %d (every request should ask)", fc.requestCount(), n)
+	// Exactly one prompt for the whole coalesced burst.
+	if fc.requestCount() != 1 {
+		t.Errorf("broker request count = %d, want 1 (concurrent burst coalesces)", fc.requestCount())
+	}
+}
+
+// TestRequestPolicyChecker_SSHStyleConnectionLevelCoalesces confirms the
+// connection-level Ask path (no HTTP method/path, e.g. an SSH/IMAP/SMTP
+// burst to one host:port that is deferred through CheckAndConsume ->
+// resolveAsk -> broker.Request) coalesces onto a single prompt exactly like
+// HTTP per-request asks. There is no separate SSH call site and no
+// per-protocol special-casing: persistence granularity (one dest:port rule)
+// equals dedup granularity.
+func TestRequestPolicyChecker_SSHStyleConnectionLevelCoalesces(t *testing.T) {
+	toml := `
+[policy]
+default = "deny"
+
+[[ask]]
+destination = "git.example.com"
+`
+	checker, fc := newTestChecker(t, toml, channel.ResponseAllowOnce)
+	releaseAll := fc.gate()
+
+	const n = 4
+	var wg sync.WaitGroup
+	results := make([]policy.Verdict, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// No WithRequestInfo: this is the connection-level shape.
+			v, err := checker.CheckAndConsume("git.example.com", 22, WithProtocol("ssh"))
+			if err != nil {
+				t.Errorf("goroutine %d: %v", i, err)
+			}
+			results[i] = v
+		}(i)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		id := fc.firstReqID()
+		if id != "" && checker.broker.CoalescedCount(id) >= n {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("SSH-style burst did not coalesce: requests=%d", fc.requestCount())
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	releaseAll()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("connection-level CheckAndConsume did not finish in time")
+	}
+	for i, v := range results {
+		if v != policy.Allow {
+			t.Errorf("result[%d] = %v, want Allow", i, v)
+		}
+	}
+	if fc.requestCount() != 1 {
+		t.Errorf("broker request count = %d, want 1 (connection-level burst coalesces)", fc.requestCount())
 	}
 }
