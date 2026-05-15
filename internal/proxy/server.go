@@ -82,9 +82,15 @@ type Server struct {
 	dnsInterceptor *DNSInterceptor
 	quicProxy      *QUICProxy
 	resolver       atomic.Pointer[vault.BindingResolver]
-	closed         atomic.Bool
-	serving        atomic.Bool
-	activeConns    sync.WaitGroup
+	// poolResolver expands a bound pool name to its active member at
+	// injection time. Swapped atomically alongside resolver on reload;
+	// membership is immutable per instance while health is mutated in
+	// place under the resolver's own mutex (Phase 2 synchronous
+	// failover). Parallel to resolver, never gates it.
+	poolResolver atomic.Pointer[vault.PoolResolver]
+	closed       atomic.Bool
+	serving      atomic.Bool
+	activeConns  sync.WaitGroup
 
 	// oauthMetasCache holds the latest credential_meta slice the
 	// server saw via UpdateOAuthIndex. Cached so a later
@@ -659,6 +665,7 @@ func (s *Server) setupInjection(cfg Config, _ net.Listener) error {
 	// Create the SluiceAddon for go-mitmproxy.
 	addonOpts := []SluiceAddonOption{
 		WithResolver(&s.resolver),
+		WithPoolResolver(&s.poolResolver),
 		WithProvider(cfg.Provider),
 		WithWSProxy(wsProxy),
 	}
@@ -2679,6 +2686,27 @@ func (s *Server) UpdateInspectRules(eng *policy.Engine) {
 // see the updated bindings.
 func (s *Server) StoreResolver(r *vault.BindingResolver) {
 	s.resolver.Store(r)
+}
+
+// StorePool atomically stores a new credential pool resolver. The caller
+// must hold ReloadMu() when concurrent mutations are possible. The MITM
+// addon shares the same atomic pointer so the injection chokepoint and the
+// response-side failover see the same pool/health snapshot. A nil resolver
+// (no pools configured) is stored as a non-nil empty resolver so the addon
+// can call IsPool/ResolveActive without nil-checking; ResolveActive on a
+// non-pool name is an identity passthrough.
+func (s *Server) StorePool(r *vault.PoolResolver) {
+	s.poolResolver.Store(r)
+	if s.addon != nil {
+		s.addon.SetPoolResolver(&s.poolResolver)
+	}
+}
+
+// PoolResolverPtr returns the shared atomic pool resolver pointer so the
+// Telegram/REST mutation paths can keep the proxy's live pool snapshot in
+// sync with the store, mirroring ResolverPtr.
+func (s *Server) PoolResolverPtr() *atomic.Pointer[vault.PoolResolver] {
+	return &s.poolResolver
 }
 
 // UpdateOAuthIndex rebuilds the OAuth token URL index from credential
