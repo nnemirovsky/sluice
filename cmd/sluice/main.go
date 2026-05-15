@@ -70,6 +70,11 @@ func main() {
 				log.Fatalf("channel: %v", err)
 			}
 			return
+		case "pool":
+			if err := handlePoolCommand(os.Args[2:]); err != nil {
+				log.Fatalf("pool: %v", err)
+			}
+			return
 		}
 	}
 
@@ -339,6 +344,19 @@ func main() {
 		if metas, metaErr := db.ListCredentialMeta(); metaErr == nil && len(metas) > 0 {
 			srv.UpdateOAuthIndex(metas)
 			log.Printf("oauth index initialized: %d entries", len(metas))
+		}
+	}
+
+	// Populate the initial credential pool resolver at startup so pool
+	// expansion works for pools defined before the first SIGHUP. Always
+	// store a non-nil resolver (empty when no pools) so the addon never
+	// has to nil-check before ResolveActive (non-pool names passthrough).
+	if db != nil {
+		if pr, perr := loadPoolResolver(db); perr != nil {
+			log.Printf("pool resolver init failed: %v", perr)
+			srv.StorePool(vault.NewPoolResolver(nil, nil))
+		} else {
+			srv.StorePool(pr)
 		}
 	}
 
@@ -687,6 +705,17 @@ func main() {
 			log.Printf("reload oauth index failed: %v", metaErr)
 		}
 
+		// Rebuild and atomically swap the credential pool resolver.
+		// Membership changes (pool create/remove) take effect here;
+		// durable health rows are reloaded too, which only reconciles
+		// the in-memory health that Phase 2 failover already updated
+		// synchronously on the response path.
+		if pr, perr := loadPoolResolver(db); perr != nil {
+			log.Printf("reload pool resolver failed: %v", perr)
+		} else {
+			srv.StorePool(pr)
+		}
+
 		// Re-inject env vars into the agent container after binding changes.
 		if containerMgr != nil {
 			if injectErr := injectEnvVarsFromStore(db, containerMgr); injectErr != nil {
@@ -811,6 +840,23 @@ func readBindings(db *store.Store) ([]vault.Binding, error) {
 		}
 	}
 	return bindings, nil
+}
+
+// loadPoolResolver builds a vault.PoolResolver from the store's pool,
+// member, and credential-health tables. A non-nil resolver is always
+// returned on success (empty when no pools), so callers can store it
+// unconditionally and the addon never has to nil-check before
+// ResolveActive (a non-pool name is an identity passthrough).
+func loadPoolResolver(db *store.Store) (*vault.PoolResolver, error) {
+	pools, err := db.ListPools()
+	if err != nil {
+		return nil, fmt.Errorf("list pools: %w", err)
+	}
+	health, err := db.ListCredentialHealth()
+	if err != nil {
+		return nil, fmt.Errorf("list credential health: %w", err)
+	}
+	return vault.NewPoolResolver(pools, health), nil
 }
 
 // injectEnvVarsFromStore reads bindings with env_var set from the store,

@@ -84,6 +84,14 @@ type SluiceAddon struct {
 	// atomically on SIGHUP / policy mutation.
 	resolver *atomic.Pointer[vault.BindingResolver]
 
+	// poolResolver expands a bound pool name to its currently active
+	// member at the single injection chokepoint (resolvePoolMember).
+	// Swapped atomically alongside resolver on reload; may be nil when
+	// no pools are configured (treated as identity passthrough). Phase 2
+	// mutates the contained health map in place under the resolver's own
+	// mutex on the response path.
+	poolResolver *atomic.Pointer[vault.PoolResolver]
+
 	// provider retrieves real credential values from the vault.
 	provider vault.Provider
 
@@ -178,6 +186,40 @@ func WithResolver(r *atomic.Pointer[vault.BindingResolver]) SluiceAddonOption {
 // WithProvider sets the vault provider for credential injection.
 func WithProvider(p vault.Provider) SluiceAddonOption {
 	return func(a *SluiceAddon) { a.provider = p }
+}
+
+// WithPoolResolver sets the credential pool resolver pointer used by the
+// injection chokepoint to expand a bound pool name to its active member.
+func WithPoolResolver(r *atomic.Pointer[vault.PoolResolver]) SluiceAddonOption {
+	return func(a *SluiceAddon) { a.poolResolver = r }
+}
+
+// SetPoolResolver wires (or rewires) the shared pool resolver pointer. Safe
+// to call after construction; the pointer itself is stable and only its
+// contents are atomically swapped on reload.
+func (a *SluiceAddon) SetPoolResolver(r *atomic.Pointer[vault.PoolResolver]) {
+	a.poolResolver = r
+}
+
+// resolvePoolMember is the single chokepoint that expands a bound
+// credential-or-pool name to the concrete credential whose secret should be
+// injected. For a plain credential it returns the name unchanged. For a
+// pool it returns the currently active member. Every consumer that reads a
+// binding's Credential (pass-1 header inject, pass-2 phantom pairs,
+// OAuthIndex.Has gating, persist attribution) routes through here so pool
+// expansion happens in exactly one place (Important I2).
+func (a *SluiceAddon) resolvePoolMember(name string) string {
+	if a.poolResolver == nil {
+		return name
+	}
+	pr := a.poolResolver.Load()
+	if pr == nil {
+		return name
+	}
+	if member, ok := pr.ResolveActive(name); ok {
+		return member
+	}
+	return name
 }
 
 // WithAuditLogger sets the audit logger for per-request events.
