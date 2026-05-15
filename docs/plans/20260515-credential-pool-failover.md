@@ -72,7 +72,7 @@ rotate` is an operator override, not the primary mechanism.
 - [x] CLI `cmd/sluice/pool.go`: `pool create/list/status/rotate/remove`.
 - [x] Namespace mutual-exclusion (pool name vs credential name) at create time.
 - [x] `reloadAll` loads pool + health into an atomic-pointer-swapped `PoolResolver` (no injection consumption yet).
-- [ ] re-run `go test ./internal/store/... ./internal/vault/... ./cmd/...` to confirm Phase 0 still green after merge.
+- [x] re-run `go test ./internal/store/... ./internal/vault/... ./cmd/...` to confirm Phase 0 still green after merge.
 
 ### Task 2: Phase 1 — Phantom indirection (pool phantom → active member)
 
