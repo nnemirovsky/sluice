@@ -137,6 +137,14 @@ type SluiceAddon struct {
 	// container. Nil means no post-refresh action.
 	onOAuthRefresh func(credName string)
 
+	// onFailover is called after a Phase 2 pool failover has been applied
+	// in memory (the active-member switch already happened synchronously
+	// before this fires). The callback owns the durable store write
+	// (SetCredentialHealth) and the best-effort Telegram notice, and MUST
+	// NOT block the response path (it dispatches its own goroutine). Nil
+	// means failover is in-memory only (no durability, no notice).
+	onFailover func(FailoverEvent)
+
 	// persistDone is an optional channel signaled when an async OAuth
 	// token persist goroutine completes. Used by tests to avoid
 	// time.Sleep-based synchronization. Nil in production.
@@ -369,6 +377,14 @@ func (a *SluiceAddon) CancelPendingChecker(dest string) {
 // refresh is persisted to the vault.
 func (a *SluiceAddon) SetOnOAuthRefresh(fn func(credName string)) {
 	a.onOAuthRefresh = fn
+}
+
+// SetOnFailover configures the callback invoked after a pool failover has
+// been applied in memory. The callback is responsible for the durable store
+// write and the Telegram notice and must be non-blocking. Safe to leave
+// unset (in-memory-only failover).
+func (a *SluiceAddon) SetOnFailover(fn func(FailoverEvent)) {
+	a.onFailover = fn
 }
 
 // UpdateOAuthIndex rebuilds the OAuth token URL index from credential
@@ -838,6 +854,14 @@ func (a *SluiceAddon) Response(f *mitmproxy.Flow) {
 	}
 
 	a.processOAuthResponseIfMatching(f)
+
+	// Phase 2 pool auto-failover. Runs on every response (the failover
+	// triggers are non-2xx, so this cannot piggyback on the OAuth 2xx-only
+	// path). It does not mutate the response — it only updates in-memory
+	// pool health synchronously and dispatches the durable write + notice —
+	// so its position relative to OAuth swap / DLP is immaterial. It is a
+	// cheap no-op for non-pooled destinations and for non-trigger statuses.
+	a.handlePoolFailover(f)
 
 	// Test-only panic injection. Always nil in production. Lets a
 	// regression test exercise the deferred recover above without

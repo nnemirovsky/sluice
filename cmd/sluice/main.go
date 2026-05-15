@@ -462,6 +462,36 @@ func main() {
 		// Update the proxy's broker reference now that it's created.
 		srv.SetBroker(broker)
 
+		// Wire Phase 2 pool failover side effects: durable health write
+		// + best-effort Telegram notice. The in-memory active-member
+		// switch already happened synchronously on the response path
+		// before this callback fires (Risk I1); this only persists for
+		// restart durability and tells the operator. Everything here runs
+		// in a detached goroutine so the response/injection path is never
+		// blocked by a SQLite write or a Telegram round-trip.
+		failoverBroker := broker
+		srv.SetOnFailover(func(ev proxy.FailoverEvent) {
+			go func() {
+				if db != nil {
+					reason := fmt.Sprintf("failover:%s", ev.Reason)
+					if herr := db.SetCredentialHealth(ev.From, "cooldown", ev.Until, reason); herr != nil {
+						log.Printf("[POOL-FAILOVER] durable health write for %q failed: %v", ev.From, herr)
+					}
+				}
+				if failoverBroker != nil {
+					msg := fmt.Sprintf("pool `%s` failed over `%s`→`%s` (%s)",
+						ev.Pool, ev.From, ev.To, ev.Reason)
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					for _, ch := range failoverBroker.Channels() {
+						if nerr := ch.Notify(ctx, msg); nerr != nil {
+							log.Printf("[POOL-FAILOVER] notice via %s failed: %v", ch.Type(), nerr)
+						}
+					}
+				}
+			}()
+		})
+
 		// Start all channels.
 		if tgChannel != nil {
 			if err := tgChannel.Start(); err != nil {

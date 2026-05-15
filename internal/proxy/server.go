@@ -2776,6 +2776,17 @@ func (s *Server) SetOnOAuthRefresh(fn func(credName string)) {
 	}
 }
 
+// SetOnFailover configures a callback on the addon that is invoked after a
+// pool failover has been applied in memory. The active-member switch has
+// already happened synchronously by the time this fires; the callback owns
+// the durable SetCredentialHealth store write and the best-effort Telegram
+// notice, and must not block the response path.
+func (s *Server) SetOnFailover(fn func(FailoverEvent)) {
+	if s.addon != nil {
+		s.addon.SetOnFailover(fn)
+	}
+}
+
 // EnginePtr returns the shared atomic engine pointer. The Telegram command
 // handler uses this to read and mutate the same engine as the proxy, avoiding
 // split-brain windows during SIGHUP reloads.

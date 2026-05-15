@@ -92,12 +92,12 @@ rotate` is an operator override, not the primary mechanism.
 
 **Files:** `internal/proxy/addon.go`, `internal/vault/pool.go`, audit logger, telegram + tests
 
-- [ ] Failure classification in `SluiceAddon.Response` for pooled destinations: 429 or 403+`insufficient_quota` → rate-limited; 401 or token-body `invalid_grant`/`invalid_token` → auth-failure; 5xx/other → no-op.
-- [ ] Prompt failover: synchronously update in-memory `PoolResolver` health BEFORE the response returns (documented locking discipline); also `SetCredentialHealth(member,'cooldown',now+ttl,reason)` for durability (2s watcher only reconciles). Cooldown TTL consts: rate-limit 60s, auth-fail 300s; lazy recovery in `ResolveActive`.
-- [ ] Audit `cred_failover` with `Reason = "<pool>:<from>-><to>:<429|403|401|invalid_grant>"`.
-- [ ] Telegram best-effort non-blocking notice "pool `<name>` failed over `<a>`→`<b>` (<reason>)".
-- [ ] No in-flight retry (documented); next request uses new member.
-- [ ] Unit tests for classification + synchronous health swap + cooldown TTL/lazy recovery; `go test ./... -timeout 120s` green; build clean; gofumpt.
+- [x] Failure classification in `SluiceAddon.Response` for pooled destinations: 429 or 403+`insufficient_quota` → rate-limited; 401 or token-body `invalid_grant`/`invalid_token` → auth-failure; 5xx/other → no-op. (`classifyFailover` in `internal/proxy/pool_failover.go`; token-endpoint body only trusted when the request URL matched the OAuth index.)
+- [x] Prompt failover: synchronously update in-memory `PoolResolver` health BEFORE the response returns (documented locking discipline — `MarkCooldown` takes the resolver write lock, `ResolveActive` the read lock); also `SetCredentialHealth(member,'cooldown',now+ttl,reason)` for durability via the detached `onFailover` callback (2s watcher only reconciles, I1). Cooldown TTL consts `vault.RateLimitCooldown` 60s / `vault.AuthFailCooldown` 300s; lazy recovery verified in `ResolveActive` (no scheduler).
+- [x] Audit `cred_failover` with `Reason = "<pool>:<from>-><to>:<429|403|401|invalid_grant>"`. (Emitted synchronously in `handlePoolFailover` via the addon `auditLog` when configured — Action `cred_failover`, Verdict `failover`, Credential = the cooled-down member; covered by `TestFailoverAuditEvent`.)
+- [x] Telegram best-effort non-blocking notice "pool `<name>` failed over `<a>`→`<b>` (<reason>)". (Wired in `cmd/sluice/main.go`; the callback detaches the store write + every broker channel `Notify` into its own goroutine so the response path never blocks.)
+- [x] No in-flight retry (documented in `handlePoolFailover` doc comment); next request uses new member.
+- [x] Unit tests for classification + synchronous health swap + cooldown TTL/lazy recovery + non-blocking notice (`internal/proxy/pool_failover_test.go`); `go test ./... -timeout 120s` green (13/13 ok); build clean; gofumpt clean.
 
 ### Task 4: Verify acceptance + docs
 
