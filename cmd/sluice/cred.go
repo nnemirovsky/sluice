@@ -227,6 +227,15 @@ func handleCredAdd(args []string) error {
 	}
 	defer func() { _ = db.Close() }()
 
+	// Namespace mutual-exclusion: a credential must not shadow a pool. Pool
+	// and credential names share one namespace so a bound destination
+	// resolves unambiguously to either a pool or a plain credential.
+	if exists, perr := db.PoolExists(name); perr != nil {
+		return fmt.Errorf("check pool name collision: %w", perr)
+	} else if exists {
+		return fmt.Errorf("name %q is already a credential pool; pool and credential names share one namespace", name)
+	}
+
 	// Inputs validated and DB is open. Now persist the credential.
 	vs, err := openVaultStore(*dbPath)
 	if err != nil {
@@ -552,6 +561,27 @@ func handleCredRemove(args []string) error {
 		return fmt.Errorf("usage: sluice cred remove <name>")
 	}
 	name := fs.Arg(0)
+
+	// Block removing a credential that is still a live pool member so no
+	// dangling member rows are left behind. The operator must remove it
+	// from the pool first. This check runs before the vault delete so a
+	// blocked removal does not destroy the secret. Only consult the DB if
+	// it already exists (do not create it as a side effect of a removal).
+	if _, statErr := os.Stat(*dbPath); statErr == nil {
+		guardDB, gerr := store.New(*dbPath)
+		if gerr != nil {
+			log.Printf("warning: could not open database %q to check pool membership: %v", *dbPath, gerr)
+		} else {
+			pools, perr := guardDB.PoolsForMember(name)
+			_ = guardDB.Close()
+			if perr != nil {
+				return fmt.Errorf("check pool membership for %q: %w", name, perr)
+			}
+			if len(pools) > 0 {
+				return fmt.Errorf("credential %q is a member of pool(s) %s; remove it from the pool first (sluice pool remove <p>, or recreate the pool without it)", name, strings.Join(pools, ", "))
+			}
+		}
+	}
 
 	vs, err := openVaultStore(*dbPath)
 	if err != nil {
