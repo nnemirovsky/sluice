@@ -33,6 +33,44 @@ func oauthPhantomAccess(credName string, realToken ...string) string {
 	return "SLUICE_PHANTOM:" + credName + ".access"
 }
 
+// poolStablePhantomAccess returns the pool-keyed phantom access token for a
+// pooled OAuth credential (Risk R3). resignJWT is deterministic per *real*
+// token, so a naive phantom would change every time sluice fails over to a
+// different pool member — the agent would see its access token mutate
+// underneath it and the "agent never notices" guarantee would break.
+//
+// Instead we synthesize a structurally valid JWT from a deterministic
+// payload keyed on the POOL NAME (stable sub/iss, far-future exp), HMAC'd
+// with the same fixed phantomSigningKey. The result is byte-identical for a
+// given pool regardless of which member is currently active, so a
+// cross-member refresh never changes the token the agent holds.
+//
+// Static-form fallback: if the consuming agent is verified to treat the
+// access token as opaque (never parses it client-side), emitting the plain
+// "SLUICE_PHANTOM:<pool>.access" string is equally pool-stable and simpler.
+// The synthetic-JWT path is primary because resignJWT exists specifically
+// because *something* (OpenAI Codex / Hermes) parses the JWT client-side, so
+// we must not assume opacity.
+func poolStablePhantomAccess(poolName string) string {
+	// Header: {"alg":"HS256","typ":"JWT"} — fixed, no per-pool variation.
+	header := base64.RawURLEncoding.EncodeToString(
+		[]byte(`{"alg":"HS256","typ":"JWT"}`),
+	)
+	// Payload: deterministic, keyed on the pool name. exp is a far-future
+	// fixed timestamp (2100-01-01T00:00:00Z = 4102444800) so client-side
+	// expiry checks treat it as valid; iat is intentionally omitted so the
+	// payload is a pure function of the pool name (an iat would make the
+	// phantom time-varying and break byte-identity).
+	payload := base64.RawURLEncoding.EncodeToString([]byte(
+		`{"sub":"sluice-pool:` + poolName + `","iss":"sluice-phantom","exp":4102444800}`,
+	))
+	signingInput := header + "." + payload
+	mac := hmac.New(sha256.New, phantomSigningKey)
+	mac.Write([]byte(signingInput))
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return signingInput + "." + sig
+}
+
 // oauthPhantomRefresh returns a phantom for an OAuth refresh token.
 func oauthPhantomRefresh(credName string, realToken ...string) string {
 	if len(realToken) > 0 && realToken[0] != "" {
@@ -66,6 +104,38 @@ func resignJWT(token string) string {
 	newSig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 
 	return signingInput + "." + newSig
+}
+
+// extractRequestRefreshToken pulls the `refresh_token` value out of an
+// outbound OAuth token-endpoint request body. By the time the Response
+// addon runs, pass-2 has already swapped sluice's phantom for the active
+// member's REAL refresh token, so this returns the real token value — the
+// Risk R1 join key. RFC 6749 §6 mandates application/x-www-form-urlencoded
+// for the refresh grant; some non-conformant endpoints accept JSON, so both
+// are parsed (form first, JSON fallback). Returns "" when no refresh_token
+// field is present (e.g. an authorization_code grant), which the caller
+// treats as "not a refresh round-trip, nothing to attribute".
+func extractRequestRefreshToken(body []byte, contentType string) string {
+	if len(body) == 0 {
+		return ""
+	}
+	ct := strings.ToLower(contentType)
+	if strings.Contains(ct, "application/x-www-form-urlencoded") || !strings.Contains(ct, "json") {
+		if vals, err := url.ParseQuery(string(body)); err == nil {
+			if rt := vals.Get("refresh_token"); rt != "" {
+				return rt
+			}
+		}
+	}
+	if strings.Contains(ct, "json") || strings.HasPrefix(strings.TrimSpace(string(body)), "{") {
+		var probe struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		if err := json.Unmarshal(body, &probe); err == nil && probe.RefreshToken != "" {
+			return probe.RefreshToken
+		}
+	}
+	return ""
 }
 
 // tokenResponse is the parsed result from an OAuth token endpoint. Fields

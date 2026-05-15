@@ -78,15 +78,15 @@ rotate` is an operator override, not the primary mechanism.
 
 **Files:** `internal/vault/pool.go`, `internal/proxy/addon.go`, `internal/proxy/oauth_response.go`, `internal/proxy/oauth_index.go`, `cmd/sluice/main.go` + tests
 
-- [ ] `PoolResolver.IsPool(name)` + `ResolveActive(name)` (healthy/expired-cooldown first by position; all-in-cooldown → soonest-recovering + WARNING; plain cred returned unchanged).
-- [ ] Route EVERY `binding.Credential` / `OAuthIndex.Has` / `extractInjectableSecret` / `findAdder`/persist consumer through `ResolveActive` at one chokepoint (grep `binding.Credential`, `\.Has(`, `extractInjectableSecret`; do not scatter `IsPool` checks).
-- [ ] Injection (`addon.go` pass-1 header + pass-2 phantom swap) injects the active member's real value while matching/replacing the pool-scoped phantom string.
-- [ ] R1 per-request member tag: record `realRefreshToken → member` (short-TTL map) when pass-2 swaps `SLUICE_PHANTOM:<pool>.refresh`; on token-endpoint response recover member by that real refresh token; persist to that member (`persistAddonOAuthTokens(member,...)`, singleflight `"persist:"+member`).
-- [ ] R1 fail-closed: if member unrecoverable, do NOT guess, do NOT fall back to `OAuthIndex.Match` for pooled token URLs — WARNING + skip vault write.
-- [ ] R1 dedicated unit test: two members, same token URL — B-refresh never overwrites A; missing tag → zero writes.
-- [ ] R3 pool-stable phantom: pooled OAuth `oauthPhantomAccess`/`resignJWT` build the JWT from a deterministic synthetic payload keyed on the pool name (byte-identical across member switch). Unit test asserts byte-identity across a switch; document static-form fallback.
-- [ ] `cmd/sluice/main.go:reloadAll` builds & swaps `PoolResolver` + health snapshot alongside existing swaps.
-- [ ] `go test ./... -timeout 120s` green; build clean; gofumpt.
+- [x] `PoolResolver.IsPool(name)` + `ResolveActive(name)` (healthy/expired-cooldown first by position; all-in-cooldown → soonest-recovering + WARNING; plain cred returned unchanged). (Implemented in Phase 0; verified + covered by `internal/vault/pool_test.go`.)
+- [x] Route EVERY `binding.Credential` / `OAuthIndex.Has` / `extractInjectableSecret` / `findAdder`/persist consumer through `ResolveActive` at one chokepoint (grep `binding.Credential`, `\.Has(`, `extractInjectableSecret`; do not scatter `IsPool` checks). (HTTP/HTTPS OAuth path — Task 2's file scope — routed through `resolveInjectionTarget` (pass-1, pass-2) and `resolveOAuthResponseAttribution` (response/persist). `idx.Has` is called with the resolved member name, never the pool. SSH/mail/QUIC paths are non-OAuth/out of Task 2 file scope and unchanged.)
+- [x] Injection (`addon.go` pass-1 header + pass-2 phantom swap) injects the active member's real value while matching/replacing the pool-scoped phantom string.
+- [x] R1 per-request member tag: record `realRefreshToken → member` (short-TTL map) when pass-2 swaps `SLUICE_PHANTOM:<pool>.refresh`; on token-endpoint response recover member by that real refresh token; persist to that member (`persistAddonOAuthTokens(member,...)`, singleflight `"persist:"+member`).
+- [x] R1 fail-closed: if member unrecoverable, do NOT guess, do NOT fall back to `OAuthIndex.Match` for pooled token URLs — WARNING + skip vault write.
+- [x] R1 dedicated unit test: two members, same token URL — B-refresh never overwrites A; missing tag → zero writes.
+- [x] R3 pool-stable phantom: pooled OAuth `oauthPhantomAccess`/`resignJWT` build the JWT from a deterministic synthetic payload keyed on the pool name (byte-identical across member switch). Unit test asserts byte-identity across a switch; document static-form fallback.
+- [x] `cmd/sluice/main.go:reloadAll` builds & swaps `PoolResolver` + health snapshot alongside existing swaps. (Wired in Phase 0; verified — `reloadAll` calls `loadPoolResolver` + `srv.StorePool`, and `StorePool` rewires the addon pointer via `SetPoolResolver`.)
+- [x] `go test ./... -timeout 120s` green; build clean; gofumpt.
 
 ### Task 3: Phase 2 — Auto-failover on 429 / 401
 

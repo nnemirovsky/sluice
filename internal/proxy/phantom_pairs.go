@@ -214,3 +214,56 @@ func buildOAuthPhantomPairs(name string, secret vault.SecureBytes, logPrefix str
 	}
 	return pairs, nil
 }
+
+// buildPooledOAuthPhantomPairs builds phantom pairs for a pooled OAuth
+// credential. The phantom strings are keyed on the POOL name so they are
+// byte-identical across member switches (Risk R3): the access phantom is
+// the pool-stable synthetic JWT, the refresh phantom is the deterministic
+// static `SLUICE_PHANTOM:<pool>.refresh` string. The injected secrets are
+// the ACTIVE MEMBER's real tokens.
+//
+// onRefreshInject, when non-nil, is called with the member's real refresh
+// token so the caller can record the realRefreshToken -> member tag (the
+// Risk R1 join key) before the swap injects that token into the outbound
+// refresh-grant request body. The caller's raw secret is released before
+// returning. On parse failure the secret is released and an error returned.
+func buildPooledOAuthPhantomPairs(poolName, member string, secret vault.SecureBytes, logPrefix string, onRefreshInject func(realRefresh string)) ([]phantomPair, error) {
+	cred, err := vault.ParseOAuth(secret.Bytes())
+	secret.Release()
+	if err != nil {
+		log.Printf("[%s] parse pooled oauth member %q (pool %q) failed: %v", logPrefix, member, poolName, err)
+		return nil, err
+	}
+	accessSecret := vault.NewSecureBytes(cred.AccessToken)
+	accessPhantom := []byte(poolStablePhantomAccess(poolName))
+	accessEncoded := encodePhantomForPair(accessPhantom)
+	pairs := []phantomPair{{
+		phantom:             accessPhantom,
+		encodedPhantom:      accessEncoded,
+		encodedPhantomLower: encodePhantomLowerForPair(accessEncoded),
+		secret:              accessSecret,
+	}}
+	if cred.RefreshToken != "" {
+		// Record the precise R1 join: this exact real refresh token is
+		// about to be injected into the outbound refresh-grant request
+		// for `member`. The token-endpoint response is attributed back
+		// to `member` by recovering this value from the request body.
+		if onRefreshInject != nil {
+			onRefreshInject(cred.RefreshToken)
+		}
+		refreshSecret := vault.NewSecureBytes(cred.RefreshToken)
+		// Pool-stable static refresh phantom (not resignJWT, which would
+		// be per-real-token and change on every member switch). Refresh
+		// tokens travel in request bodies, not parsed client-side, so the
+		// static form is sufficient and inherently pool-stable.
+		refreshPhantom := []byte("SLUICE_PHANTOM:" + poolName + ".refresh")
+		refreshEncoded := encodePhantomForPair(refreshPhantom)
+		pairs = append(pairs, phantomPair{
+			phantom:             refreshPhantom,
+			encodedPhantom:      refreshEncoded,
+			encodedPhantomLower: encodePhantomLowerForPair(refreshEncoded),
+			secret:              refreshSecret,
+		})
+	}
+	return pairs, nil
+}
