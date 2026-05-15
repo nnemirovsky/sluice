@@ -512,6 +512,18 @@ func (r *policyRuleSet) persistApprovalRule(verdict, dest string, port int) bool
 		log.Printf("[WARN] always-%s for %s:%d not persisted (no store)", verdict, dest, port)
 		return false
 	}
+	// Idempotent under coalesced approval fan-out: a burst of "Always
+	// Allow"/"Always Deny" responses for one target serializes here on
+	// reloadMu. The first caller inserts the rule; the rest see it already
+	// present and skip the redundant AddRule + engine recompile. The
+	// returned bool stays true so every caller treats the decision as
+	// persisted.
+	if exists, existsErr := r.store.HasApprovalRule(verdict, dest, port); existsErr != nil {
+		log.Printf("[WARN] failed to check existing %s rule for %s:%d: %v", verdict, dest, port, existsErr)
+	} else if exists {
+		log.Printf("[approval] %s rule for %s:%d already present; skipping duplicate persist", verdict, dest, port)
+		return true
+	}
 	if _, storeErr := r.store.AddRule(verdict, store.RuleOpts{Destination: dest, Ports: []int{port}, Source: "approval"}); storeErr != nil {
 		log.Printf("[WARN] failed to persist %s rule for %s:%d: %v", verdict, dest, port, storeErr)
 		return false

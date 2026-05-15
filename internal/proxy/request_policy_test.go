@@ -20,6 +20,11 @@ type fakeChannel struct {
 	response    channel.Response
 	requests    []channel.ApprovalRequest
 	onRequestCh chan struct{}
+	// release, when non-nil, gates resolution: the resolve goroutine waits
+	// for this channel to be closed before calling broker.Resolve. Used to
+	// deterministically hold a primary prompt pending while concurrent
+	// requests to the same target coalesce onto it.
+	release chan struct{}
 }
 
 func newFakeChannel(resp channel.Response) *fakeChannel {
@@ -31,10 +36,14 @@ func (f *fakeChannel) RequestApproval(_ context.Context, req channel.ApprovalReq
 	f.requests = append(f.requests, req)
 	resp := f.response
 	broker := f.broker
+	release := f.release
 	f.mu.Unlock()
 	// Resolve asynchronously so the broker goroutine can register the
 	// waiter before we deliver the response.
 	go func() {
+		if release != nil {
+			<-release
+		}
 		broker.Resolve(req.ID, resp)
 	}()
 	select {
@@ -61,6 +70,26 @@ func (f *fakeChannel) requestCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.requests)
+}
+
+// gate installs a release channel so primary prompts stay pending until
+// releaseAll() is called. Returns the close func.
+func (f *fakeChannel) gate() func() {
+	f.mu.Lock()
+	ch := make(chan struct{})
+	f.release = ch
+	f.mu.Unlock()
+	var once sync.Once
+	return func() { once.Do(func() { close(ch) }) }
+}
+
+func (f *fakeChannel) firstReqID() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.requests) == 0 {
+		return ""
+	}
+	return f.requests[0].ID
 }
 
 // newTestChecker builds a RequestPolicyChecker wired to a fake

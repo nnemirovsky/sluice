@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -4956,5 +4957,89 @@ func TestQUICSNIAccumulatorTTLCleanup(t *testing.T) {
 	}
 	if _, exists := accumulators["fresh"]; !exists {
 		t.Error("fresh accumulator should still be present")
+	}
+}
+
+// TestPersistApprovalRuleIdempotentUnderConcurrency exercises the
+// persist-once path: a burst of coalesced "Always Allow" responses for one
+// target must serialize on reloadMu and produce exactly one stored rule
+// (first inserts, the rest see HasApprovalRule==true and no-op), while every
+// caller still observes success.
+func TestPersistApprovalRuleIdempotentUnderConcurrency(t *testing.T) {
+	st, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	eng, err := policy.LoadFromStore(st)
+	if err != nil {
+		t.Fatalf("LoadFromStore: %v", err)
+	}
+	engPtr := new(atomic.Pointer[policy.Engine])
+	engPtr.Store(eng)
+	var reloadMu sync.Mutex
+	r := &policyRuleSet{engine: engPtr, reloadMu: &reloadMu, store: st}
+
+	const m = 16
+	var wg sync.WaitGroup
+	for i := 0; i < m; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if !r.persistApprovalRule("allow", "cas.example.com", 443) {
+				t.Error("persistApprovalRule returned false")
+			}
+		}()
+	}
+	wg.Wait()
+
+	rules, err := st.ListRules(store.RuleFilter{})
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
+	matches := 0
+	for _, ru := range rules {
+		if ru.Destination == "cas.example.com" && ru.Source == "approval" {
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("expected exactly 1 persisted approval rule, got %d", matches)
+	}
+}
+
+// TestPersistApprovalRuleSinglePersistUnchanged guards the non-coalesced
+// path: a single Always-Allow still writes exactly one rule and recompiles
+// the engine.
+func TestPersistApprovalRuleSinglePersistUnchanged(t *testing.T) {
+	st, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	eng, err := policy.LoadFromStore(st)
+	if err != nil {
+		t.Fatalf("LoadFromStore: %v", err)
+	}
+	engPtr := new(atomic.Pointer[policy.Engine])
+	engPtr.Store(eng)
+	var reloadMu sync.Mutex
+	r := &policyRuleSet{engine: engPtr, reloadMu: &reloadMu, store: st}
+
+	if !r.persistApprovalRule("deny", "blocked.example.com", 443) {
+		t.Fatal("persistApprovalRule returned false")
+	}
+	has, err := st.HasApprovalRule("deny", "blocked.example.com", 443)
+	if err != nil {
+		t.Fatalf("HasApprovalRule: %v", err)
+	}
+	if !has {
+		t.Fatal("expected the rule to be persisted")
+	}
+	// The freshly compiled engine must be installed (pointer swapped).
+	if engPtr.Load() == eng {
+		t.Error("expected engine pointer to be swapped after persist")
 	}
 }
