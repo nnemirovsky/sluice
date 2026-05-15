@@ -7,11 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	mitmproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 	"github.com/nemirovsky/sluice/internal/audit"
+	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
 	uuid "github.com/satori/go.uuid"
 )
@@ -226,7 +228,19 @@ func TestFailoverNonPooledDestinationIgnored(t *testing.T) {
 	called := false
 	addon.SetOnFailover(func(FailoverEvent) { called = true })
 
-	f := newPoolRespFlow(client, 429, nil)
+	// Request URL is a plain API endpoint on an unrelated host: it neither
+	// has a pooled CONNECT binding NOR matches any pooled member's OAuth
+	// token URL, so poolForResponse must return ok=false and no failover
+	// fires. (newPoolRespFlow points the request at the token URL, which
+	// WOULD legitimately match a pooled member via the CRITICAL-2 token-URL
+	// path, so it must not be used here.)
+	u, _ := url.Parse("https://unrelated.example.com/v1/data")
+	f := &mitmproxy.Flow{
+		Id:          uuid.NewV4(),
+		ConnContext: &mitmproxy.ConnContext{ClientConn: client},
+		Request:     &mitmproxy.Request{Method: "GET", URL: u, Header: make(http.Header)},
+		Response:    &mitmproxy.Response{StatusCode: 429, Header: make(http.Header)},
+	}
 	addon.Response(f)
 	if called {
 		t.Fatal("onFailover invoked for a non-pooled destination")
@@ -302,5 +316,113 @@ func TestPoolForResponseResolvesActiveMember(t *testing.T) {
 	}
 	if pr != prPtr.Load() {
 		t.Fatal("poolForResponse returned a different resolver than the live one")
+	}
+}
+
+// setupPoolAddonSplitHost is like setupPoolAddon but the pool binding lives on
+// the API host (api.example.com) while the OAuth token URL is on a DIFFERENT
+// host (auth.example.com). This mirrors the real Codex deployment: the pool
+// binding is on api.openai.com, the OAuth refresh hits auth.openai.com. The
+// CONNECT-host reverse mapping in poolForResponse therefore CANNOT match a
+// token-endpoint response — only the token-URL-index path can.
+func setupPoolAddonSplitHost(t *testing.T, poolName, memberA, memberB string) (*SluiceAddon, *atomic.Pointer[vault.PoolResolver]) {
+	t.Helper()
+
+	provider := &addonWritableProvider{
+		creds: map[string]string{
+			memberA: poolMemberCred(t, "A-access-old", "A-refresh-old"),
+			memberB: poolMemberCred(t, "B-access-old", "B-refresh-old"),
+		},
+	}
+
+	// Pool binding is on the API host, NOT the token-URL host.
+	bindings := []vault.Binding{{
+		Destination: "api.example.com",
+		Ports:       []int{443},
+		Credential:  poolName,
+	}}
+	resolver, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatalf("NewBindingResolver: %v", err)
+	}
+	var resolverPtr atomic.Pointer[vault.BindingResolver]
+	resolverPtr.Store(resolver)
+
+	addon := NewSluiceAddon(WithResolver(&resolverPtr), WithProvider(provider))
+	addon.persistDone = make(chan struct{}, 10)
+
+	// testOAuthTokenURL is https://auth.example.com/oauth/token — a different
+	// host from the api.example.com pool binding above.
+	metas := []store.CredentialMeta{
+		{Name: memberA, CredType: "oauth", TokenURL: testOAuthTokenURL},
+		{Name: memberB, CredType: "oauth", TokenURL: testOAuthTokenURL},
+	}
+	addon.UpdateOAuthIndex(metas)
+
+	pool := store.Pool{Name: poolName, Strategy: store.PoolStrategyFailover}
+	pool.Members = []store.PoolMember{
+		{Credential: memberA, Position: 0},
+		{Credential: memberB, Position: 1},
+	}
+	var prPtr atomic.Pointer[vault.PoolResolver]
+	prPtr.Store(vault.NewPoolResolver([]store.Pool{pool}, nil))
+	addon.SetPoolResolver(&prPtr)
+
+	return addon, &prPtr
+}
+
+// TestTokenEndpointHostFailoverOnPooledMember is the CRITICAL-2 regression.
+// The OAuth refresh hits the token-URL host (auth.example.com), which has NO
+// pool binding (the binding is on api.example.com). Without the token-URL
+// index path in poolForResponse, the token-endpoint 401/invalid_grant
+// classification is dead code: poolForResponse returns ok=false and the
+// member is never cooled down. The fix recognizes the pooled member via
+// idx.Match(f.Request.URL) -> PoolForMember.
+func TestTokenEndpointHostFailoverOnPooledMember(t *testing.T) {
+	addon, prPtr := setupPoolAddonSplitHost(t, "codex_pool", "memA", "memB")
+	// CONNECT target is the TOKEN-URL host, which has no pool binding.
+	client := setupAddonConn(addon, "auth.example.com:443")
+
+	pr := prPtr.Load()
+	if got, _ := pr.ResolveActive("codex_pool"); got != "memA" {
+		t.Fatalf("pre-failover active = %q, want memA", got)
+	}
+
+	// Sanity: the CONNECT-host reverse mapping alone must NOT match here
+	// (this is exactly the gap CRITICAL-2 describes). poolForResponse must
+	// still succeed via the token-URL index path.
+	f := newPoolRespFlow(client, 400, []byte(`{"error":"invalid_grant"}`))
+	pool, member, _, ok := addon.poolForResponse(f)
+	if !ok {
+		t.Fatal("poolForResponse: token-endpoint response on a pooled member must be attributed (CRITICAL-2 fix); got ok=false")
+	}
+	if pool != "codex_pool" || member != "memA" {
+		t.Fatalf("got pool=%q member=%q, want codex_pool/memA", pool, member)
+	}
+
+	var got FailoverEvent
+	gotCalled := make(chan struct{}, 1)
+	addon.SetOnFailover(func(ev FailoverEvent) {
+		got = ev
+		gotCalled <- struct{}{}
+	})
+
+	// A token-endpoint invalid_grant must cool memA and switch to memB.
+	addon.Response(newPoolRespFlow(client, 400, []byte(`{"error":"invalid_grant"}`)))
+
+	if active, _ := pr.ResolveActive("codex_pool"); active != "memB" {
+		t.Fatalf("post-failover active = %q, want memB (token-endpoint auth failure must fail over)", active)
+	}
+
+	select {
+	case <-gotCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("onFailover callback not invoked for token-endpoint failover")
+	}
+	if got.Pool != "codex_pool" || got.From != "memA" || got.To != "memB" || got.Reason != "invalid_grant" {
+		t.Fatalf("FailoverEvent = %+v, want pool=codex_pool from=memA to=memB reason=invalid_grant", got)
+	}
+	if got.Class != failoverAuthFailure {
+		t.Fatalf("class = %v, want auth-failure", got.Class)
 	}
 }

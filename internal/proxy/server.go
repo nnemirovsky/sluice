@@ -2708,6 +2708,19 @@ func (s *Server) StoreResolver(r *vault.BindingResolver) {
 // can call IsPool/ResolveActive without nil-checking; ResolveActive on a
 // non-pool name is an identity passthrough.
 func (s *Server) StorePool(r *vault.PoolResolver) {
+	// Carry forward still-active in-memory cooldowns from the resolver being
+	// replaced. Phase 2 failover records cooldowns synchronously in memory and
+	// only persists them to the store from a detached best-effort goroutine, so
+	// rebuilding from store rows alone (NewPoolResolver, called by any reload —
+	// SIGHUP or the 2s data_version watcher on any unrelated DB write) would
+	// otherwise resurrect a just-cooled member for the full cooldown TTL, or
+	// permanently if the async store write failed. The merge is monotonic: a
+	// live cooldown is never shortened or erased by an unrelated reload.
+	if r != nil {
+		if prev := s.poolResolver.Load(); prev != nil {
+			r.MergeLiveCooldowns(prev)
+		}
+	}
 	s.poolResolver.Store(r)
 	if s.addon != nil {
 		s.addon.SetPoolResolver(&s.poolResolver)

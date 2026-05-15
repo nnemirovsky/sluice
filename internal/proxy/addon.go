@@ -85,7 +85,7 @@ type SluiceAddon struct {
 	resolver *atomic.Pointer[vault.BindingResolver]
 
 	// poolResolver expands a bound pool name to its currently active
-	// member at the single injection chokepoint (resolvePoolMember).
+	// member at the single injection chokepoint (resolveInjectionTarget).
 	// Swapped atomically alongside resolver on reload; may be nil when
 	// no pools are configured (treated as identity passthrough). Phase 2
 	// mutates the contained health map in place under the resolver's own
@@ -214,27 +214,6 @@ func WithPoolResolver(r *atomic.Pointer[vault.PoolResolver]) SluiceAddonOption {
 // contents are atomically swapped on reload.
 func (a *SluiceAddon) SetPoolResolver(r *atomic.Pointer[vault.PoolResolver]) {
 	a.poolResolver = r
-}
-
-// resolvePoolMember is the single chokepoint that expands a bound
-// credential-or-pool name to the concrete credential whose secret should be
-// injected. For a plain credential it returns the name unchanged. For a
-// pool it returns the currently active member. Every consumer that reads a
-// binding's Credential (pass-1 header inject, pass-2 phantom pairs,
-// OAuthIndex.Has gating, persist attribution) routes through here so pool
-// expansion happens in exactly one place (Important I2).
-func (a *SluiceAddon) resolvePoolMember(name string) string {
-	if a.poolResolver == nil {
-		return name
-	}
-	pr := a.poolResolver.Load()
-	if pr == nil {
-		return name
-	}
-	if member, ok := pr.ResolveActive(name); ok {
-		return member
-	}
-	return name
 }
 
 // injectionTarget is the result of expanding a bound credential-or-pool

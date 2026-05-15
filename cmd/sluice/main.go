@@ -479,7 +479,9 @@ func main() {
 					}
 				}
 				if failoverBroker != nil {
-					msg := fmt.Sprintf("pool `%s` failed over `%s`→`%s` (%s)",
+					// Plain text: TelegramChannel.Notify sends with no parse
+					// mode, so markdown backticks would render literally.
+					msg := fmt.Sprintf("pool %s failed over %s -> %s (%s)",
 						ev.Pool, ev.From, ev.To, ev.Reason)
 					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 					defer cancel()

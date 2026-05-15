@@ -250,9 +250,7 @@ func (b *Broker) Request(dest string, port int, protocol string, timeout time.Du
 				w.subs = append(w.subs, subCh)
 				w.count++
 				b.waiters[primaryID] = w
-				count := w.count
 				b.mu.Unlock()
-				b.notifyCoalesced(primaryID, count)
 				return b.waitSub(primaryID, subCh, deadline.C, timeout)
 			}
 		}
@@ -453,12 +451,6 @@ func (b *Broker) CoalescedCount(id string) int {
 	}
 	return 1
 }
-
-// notifyCoalesced is the Phase 1 no-op hook for live mid-burst "+N pending"
-// indicators. Phase 2 fills this in to best-effort call channels that
-// implement a CoalesceNotifier interface. Keeping the call site here means
-// Phase 2 is a localized change with no churn to Request.
-func (b *Broker) notifyCoalesced(_ string, _ int) {}
 
 // broadcast sends the approval request to all channels. Errors and panics
 // from individual channels are logged but do not prevent other channels from

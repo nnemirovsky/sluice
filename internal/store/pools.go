@@ -317,7 +317,10 @@ func (s *Store) SetCredentialHealth(credential, status string, cooldownUntil tim
 }
 
 // GetCredentialHealth returns the health row for a credential, or nil if no
-// row exists (which callers treat as healthy).
+// row exists (which callers treat as healthy). This is an intentional
+// single-row introspection surface (tests, and a targeted lookup the
+// failover/reconcile paths can use instead of scanning ListCredentialHealth);
+// it is not currently on a hot path.
 func (s *Store) GetCredentialHealth(credential string) (*CredentialHealth, error) {
 	var h CredentialHealth
 	var cu, reason sql.NullString

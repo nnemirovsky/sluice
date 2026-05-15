@@ -116,6 +116,76 @@ func TestPoolForMemberAndMembers(t *testing.T) {
 	}
 }
 
+// TestMergeLiveCooldownsSurvivesUnrelatedReload is the CRITICAL-1 regression:
+// an unrelated reload rebuilds the resolver from store rows alone (no cooldown
+// row, because the durable SetCredentialHealth write is detached/best-effort
+// and may not have landed). Without MergeLiveCooldowns the freshly built
+// resolver would resurrect member "a" — defeating the I1 synchronous-failover
+// guarantee. With the merge, "a" stays cooled and ResolveActive picks "b".
+func TestMergeLiveCooldownsSurvivesUnrelatedReload(t *testing.T) {
+	// Live resolver: member "a" failed over and was cooled down in memory.
+	prev := NewPoolResolver([]store.Pool{mkPool("pool", "a", "b")}, nil)
+	prev.MarkCooldown("a", time.Now().Add(60*time.Second), "429")
+	if got, _ := prev.ResolveActive("pool"); got != "b" {
+		t.Fatalf("precondition: live resolver active = %q; want b", got)
+	}
+
+	// Unrelated reload: store has NO credential_health row (async write not
+	// yet persisted), so NewPoolResolver seeds an empty health map.
+	fresh := NewPoolResolver([]store.Pool{mkPool("pool", "a", "b")}, nil)
+	if got, _ := fresh.ResolveActive("pool"); got != "a" {
+		t.Fatalf("sanity: fresh resolver without merge resurrects to %q; want a (proves the bug exists without the fix)", got)
+	}
+
+	// The fix: StorePool calls MergeLiveCooldowns before the atomic swap.
+	fresh.MergeLiveCooldowns(prev)
+
+	if got, ok := fresh.ResolveActive("pool"); !ok || got != "b" {
+		t.Errorf("after merge ResolveActive(pool) = %q,%v; want b,true (cooled member must NOT be resurrected by an unrelated reload)", got, ok)
+	}
+	if until, cooling := fresh.CooldownUntil("a"); !cooling || until.IsZero() {
+		t.Errorf("after merge member a should still be cooling down; got until=%v cooling=%v", until, cooling)
+	}
+}
+
+// TestMergeLiveCooldownsIsMonotonic: a store-seeded cooldown that is later
+// than the in-memory one is kept (never shortened), and an expired in-memory
+// cooldown is not carried.
+func TestMergeLiveCooldownsIsMonotonic(t *testing.T) {
+	storeLater := time.Now().Add(300 * time.Second)
+	fresh := NewPoolResolver([]store.Pool{mkPool("pool", "a", "b")},
+		[]store.CredentialHealth{{Credential: "a", Status: "cooldown", CooldownUntil: storeLater, LastFailureReason: "401"}})
+
+	prev := NewPoolResolver([]store.Pool{mkPool("pool", "a", "b")}, nil)
+	prev.MarkCooldown("a", time.Now().Add(10*time.Second), "429")   // earlier than store
+	prev.MarkCooldown("b", time.Now().Add(-1*time.Second), "stale") // already expired
+
+	fresh.MergeLiveCooldowns(prev)
+
+	until, cooling := fresh.CooldownUntil("a")
+	if !cooling || until.Before(storeLater.Add(-time.Second)) {
+		t.Errorf("merge must not shorten a longer store cooldown: got %v, want ~%v", until, storeLater)
+	}
+	if _, cooling := fresh.CooldownUntil("b"); cooling {
+		t.Error("expired in-memory cooldown for b must not be carried forward")
+	}
+}
+
+// TestMergeLiveCooldownsDropsRemovedMember: a cooldown for a credential no
+// longer in any pool (membership change) is not carried.
+func TestMergeLiveCooldownsDropsRemovedMember(t *testing.T) {
+	prev := NewPoolResolver([]store.Pool{mkPool("pool", "a", "b")}, nil)
+	prev.MarkCooldown("b", time.Now().Add(60*time.Second), "429")
+
+	// New membership: "b" was removed from the pool.
+	fresh := NewPoolResolver([]store.Pool{mkPool("pool", "a")}, nil)
+	fresh.MergeLiveCooldowns(prev)
+
+	if _, cooling := fresh.CooldownUntil("b"); cooling {
+		t.Error("cooldown for a removed member must be dropped, not carried")
+	}
+}
+
 func TestNilPoolResolverSafe(t *testing.T) {
 	var pr *PoolResolver
 	if got, ok := pr.ResolveActive("x"); !ok || got != "x" {

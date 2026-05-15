@@ -161,6 +161,23 @@ func (a *SluiceAddon) poolForResponse(f *mitmproxy.Flow) (pool, activeMember str
 		}
 		return boundName, member, pr, true
 	}
+
+	// Token-endpoint path. An OAuth refresh hits the credential's token-URL
+	// host (e.g. auth.openai.com), which has no pool binding — the pool
+	// binding lives on the API host (e.g. api.openai.com). Without this the
+	// token-endpoint 401 / invalid_grant classification is dead code for the
+	// primary Codex deployment (only the 429/403 API-host path would ever
+	// fire). When the request URL matches the OAuth token-URL index for a
+	// credential that is a pool member, attribute the response to that pool
+	// and that exact member (idx.Match is strict 1:1 token_url->credential,
+	// so the member is the one whose refresh token sluice injected).
+	if idx := a.oauthIndex.Load(); idx != nil && f.Request != nil {
+		if matched, mok := idx.Match(f.Request.URL); mok && matched != "" {
+			if pool := pr.PoolForMember(matched); pool != "" {
+				return pool, matched, pr, true
+			}
+		}
+	}
 	return "", "", nil, false
 }
 

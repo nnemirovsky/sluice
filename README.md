@@ -286,6 +286,31 @@ github_pat       static  api.github.com
 
 **Supported response formats:** Both `application/json` and `application/x-www-form-urlencoded` token responses per RFC 6749.
 
+## Credential Pools
+
+A credential pool lets a single phantom identity the agent sees be backed by **N real OAuth credentials**, with sluice auto-failing-over to the next member when the upstream rejects the active one. Primary use case: two OpenAI Codex OAuth accounts driven by one agent, so quota exhaustion on one account transparently rolls onto the other. The agent always holds one pool-scoped phantom pair (`SLUICE_PHANTOM:<pool>.access` / `.refresh`); sluice maps it to the currently active member's real token at injection time and persists refreshed tokens back to the member that issued them.
+
+```bash
+sluice pool create <name> --members credA,credB[,credC] [--strategy failover]
+sluice pool list
+sluice pool status <name>
+sluice pool rotate <name>     # operator override: force next member
+sluice pool remove <name>
+```
+
+Members are existing OAuth credentials (static credentials are rejected). Member order is the failover order.
+
+**Auto-failover behavior:**
+
+- HTTP 429, or 403 with a quota-exhaustion body -> the active member is rate-limited; cooled down for **60s**.
+- HTTP 401, or a token-endpoint body of `invalid_grant` / `invalid_token` -> the active member's token is rejected; cooled down for **300s**.
+- 2xx, 5xx, and any other status -> no-op (a server-side error is not evidence the account is exhausted).
+- The active-member switch is **synchronous**: the cooldown is recorded in memory before the response returns, so the very next request injects the next member. The durable store write only reconciles for restarts.
+- **No in-flight retry**: the triggering request still returns its own upstream error to the agent; the agent's own retry resolves to the freshly-activated next member.
+- Every failover emits a `cred_failover` audit event (`Reason = "<pool>:<from>-><to>:<tag>"`) and a best-effort Telegram notice.
+
+The phantom access token is **byte-identical across a member switch** (pooled OAuth credentials use a pool-keyed synthetic JWT resign), so the agent never observes the rollover.
+
 ## Approval Channels
 
 Sluice broadcasts "ask" verdicts to all configured approval channels. The first channel to respond wins. Other channels get a cancellation notice.

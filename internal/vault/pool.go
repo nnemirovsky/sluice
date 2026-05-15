@@ -101,7 +101,9 @@ func (pr *PoolResolver) PoolForMember(credential string) string {
 	return ""
 }
 
-// Members returns the ordered member list for a pool (copy), or nil.
+// Members returns the ordered member list for a pool (copy), or nil. Exposed
+// as an introspection surface for tests and potential future `pool status`
+// detail output; not on any hot path.
 func (pr *PoolResolver) Members(pool string) []string {
 	if pr == nil {
 		return nil
@@ -174,8 +176,60 @@ func (pr *PoolResolver) MarkCooldown(credential string, until time.Time, reason 
 	pr.health[credential] = memberHealth{cooldownUntil: until, reason: reason}
 }
 
+// MergeLiveCooldowns carries forward still-active in-memory cooldowns from a
+// previous resolver into this freshly built one. It MUST be called before the
+// new resolver is atomically swapped in.
+//
+// Why this exists: Phase 2 failover records the active member's cooldown
+// synchronously in the in-memory health map (MarkCooldown) and only persists
+// SetCredentialHealth to the store from a detached best-effort goroutine. Any
+// reload (SIGHUP, or the 2s data_version watcher firing on ANY unrelated DB
+// write — a policy add, a cred update, an audit row) rebuilds the resolver
+// from store rows alone via NewPoolResolver. Without this merge, a reload that
+// races ahead of (or outlives a failed) durable write would seed health only
+// from the store and silently resurrect a member that was just cooled down in
+// memory, defeating the I1 synchronous-failover guarantee for the full
+// cooldown TTL (60s/300s) — or permanently if the async store write failed.
+//
+// Merge policy: for every member that this resolver still knows about (so a
+// cooldown for a credential removed from all pools is correctly dropped), the
+// later of the store-seeded expiry and the previous in-memory expiry wins.
+// Expired cooldowns on either side are not carried. This is monotonic: a live
+// cooldown can never be shortened or erased by an unrelated reload.
+func (pr *PoolResolver) MergeLiveCooldowns(prev *PoolResolver) {
+	if pr == nil || prev == nil {
+		return
+	}
+	now := time.Now()
+	prev.mu.RLock()
+	prevHealth := make(map[string]memberHealth, len(prev.health))
+	for k, v := range prev.health {
+		prevHealth[k] = v
+	}
+	prev.mu.RUnlock()
+
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	for cred, ph := range prevHealth {
+		if ph.cooldownUntil.IsZero() || !ph.cooldownUntil.After(now) {
+			continue // expired in the old resolver; nothing to carry
+		}
+		// Only carry cooldowns for credentials this resolver still tracks as a
+		// pool member; an orphaned cooldown for a removed member is dropped.
+		if _, stillMember := pr.memberOf[cred]; !stillMember {
+			continue
+		}
+		existing, ok := pr.health[cred]
+		if !ok || ph.cooldownUntil.After(existing.cooldownUntil) {
+			pr.health[cred] = ph
+		}
+	}
+}
+
 // CooldownUntil returns the in-memory cooldown expiry for a credential and
-// whether it is currently cooling down (future expiry).
+// whether it is currently cooling down (future expiry). Exposed as an
+// introspection surface for tests and potential future `pool status`
+// detail output; not on any hot path.
 func (pr *PoolResolver) CooldownUntil(credential string) (time.Time, bool) {
 	if pr == nil {
 		return time.Time{}, false
