@@ -71,10 +71,10 @@ Verified against the working tree on `main` (tip `20cc367`):
 
 **Files:** Modify `internal/store/store.go`; Modify `internal/proxy/server.go`; Modify `internal/store/store_test.go`
 
-- [ ] Verify/complete `Store.HasApprovalRule(verdict, dest string, port int) (bool, error)` — plain SELECT against `rules` where `source='approval'` AND verdict/destination/port match. No migration.
-- [ ] Verify/complete `persistApprovalRule` (`server.go`): under `reloadMu`, call `HasApprovalRule` first and skip `AddRule` + engine recompile if present.
-- [ ] write/verify tests: M concurrent persists → exactly one row; existing single-persist path unchanged.
-- [ ] run `go test ./internal/store/... ./internal/proxy/...` — must pass before Task 3.
+- [x] Verify/complete `Store.HasApprovalRule(verdict, dest string, port int) (bool, error)` — plain SELECT against `rules` where `source='approval'` AND verdict/destination/port match. No migration.
+- [x] Verify/complete `persistApprovalRule` (`server.go`): under `reloadMu`, call `HasApprovalRule` first and skip `AddRule` + engine recompile if present.
+- [x] write/verify tests: M concurrent persists → exactly one row; existing single-persist path unchanged.
+- [x] run `go test ./internal/store/... ./internal/proxy/...` — must pass before Task 3.
 
 ### Task 3: Route call sites; MCP opt-out
 
