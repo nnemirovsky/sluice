@@ -65,7 +65,7 @@ Verified against the working tree on `main` (tip `20cc367`):
 - [x] `Resolve(id,resp)`: snapshot waiter+subs and delete `waiters[id]`+`dedupIndex[w.dedupKey]` in the same locked section; fan resp to `w.ch` + all snapshot subs after unlock; `cancelOnChannels`.
 - [x] Timeout/done/shutdown of primary: fan terminal response to all snapshot subs, clear `dedupIndex` under lock.
 - [x] write tests: concurrent dedup → one broadcast; fan-out to all N; late-attach interleave; sub-timeout-detach non-blocking; deny/timeout/shutdown fan-out; distinct dest:port; `WithNoCoalesce`; cross-channel first-wins.
-- [ ] verify `go test ./internal/channel/...` passes (re-run to confirm Task 1 still green after merge).
+- [x] verify `go test ./internal/channel/...` passes (re-run to confirm Task 1 still green after merge).
 
 ### Task 2: Persist-once (idempotent approval rule)
 
