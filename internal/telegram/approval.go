@@ -191,6 +191,13 @@ func (tc *TelegramChannel) CancelApproval(id string) error {
 	} else if tc.broker != nil && tc.broker.IsClosed() {
 		reason = "(proxy shutting down)"
 	}
+	// Fold the final coalesced count into the one edit that already
+	// happens here — zero extra Telegram API calls.
+	if tc.broker != nil {
+		if c := tc.broker.CoalescedCount(id); c > 1 {
+			reason += fmt.Sprintf(" — applied to %d requests", c)
+		}
+	}
 	edit := tgbotapi.NewEditMessageText(tc.chatID, am.messageID,
 		FormatApprovalMessage(am.req)+"\n\n"+reason)
 	edit.ParseMode = tgbotapi.ModeHTML
@@ -330,6 +337,16 @@ func (tc *TelegramChannel) handleCallback(cq *tgbotapi.CallbackQuery) {
 	}
 
 	if resolved {
+		// Resolve has run, so the broker has recorded the final coalesced
+		// count for this primary. Fold it into the single resolve edit
+		// (no extra Send): one tap dismissed the whole burst.
+		labelText := label
+		if tc.broker != nil {
+			if c := tc.broker.CoalescedCount(reqID); c > 1 {
+				labelText = fmt.Sprintf("%s — applied to %d requests", label, c)
+			}
+		}
+
 		callback := tgbotapi.NewCallback(cq.ID, label)
 		_, _ = tc.api.Request(callback)
 
