@@ -65,49 +65,45 @@ rotate` is an operator override, not the primary mechanism.
 
 ## Phases
 
-### Phase 0 — Data model + CLI (no runtime behavior change)
+### Task 1: Phase 0 — Data model + CLI (no runtime behavior change)
 
-1. **Migration** `internal/store/migrations/000006_credential_pools.up.sql` (+`.down.sql`):
-   - `credential_pools(name TEXT PRIMARY KEY, strategy TEXT NOT NULL DEFAULT 'failover' CHECK(strategy IN ('failover')), created_at TEXT)`.
-   - `credential_pool_members(pool TEXT, credential TEXT, position INTEGER NOT NULL, PRIMARY KEY(pool,credential), FOREIGN KEY(pool) REFERENCES credential_pools(name) ON DELETE CASCADE)`.
-   - `credential_health(credential TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'healthy' CHECK(status IN ('healthy','cooldown')), cooldown_until TEXT, last_failure_reason TEXT, updated_at TEXT)`.
-2. **Store API** `internal/store/store.go`: `CreatePool`, `AddPoolMember`, `ListPools`, `GetPool` (members ordered by `position`), `RemovePool`; `SetCredentialHealth`, `GetCredentialHealth`, `ListCredentialHealth`. App-layer CHECK: a member must be an existing `oauth` cred with non-empty `token_url`; reject `static`.
-   - **Orphan-member cleanup**: `cred remove <c>` of a pooled member must either cascade-remove the member row or mark it missing. Decision: `cred remove` errors if the credential is a live pool member ("remove it from pool `<p>` first"); document in CLI help. (No silent dangling rows.)
-3. **CLI** `cmd/sluice/cred.go` new `pool` subtree: `pool create <name> --members a,b[,c] [--strategy failover]`, `pool list`, `pool status <name>` (member order + health + active), `pool rotate <name>` (manual override), `pool remove <name>`.
-4. **Namespace**: pool names and credential names share one namespace. `pool create` rejects a name that collides with an existing credential; `cred add` rejects a name colliding with an existing pool. Bind a pool via `sluice binding add <pool> --destination <host>` (pool name stored verbatim in `bindings.credential`).
+- [x] Migration `internal/store/migrations/000006_credential_pools.{up,down}.sql`: `credential_pools`, `credential_pool_members`, `credential_health` tables with the documented CHECK constraints.
+- [x] Store API `internal/store/store.go`/`pools.go`: pool CRUD + member ordering + `Set/Get/ListCredentialHealth`; reject `static` members; `cred remove` errors on a live pool member.
+- [x] CLI `cmd/sluice/pool.go`: `pool create/list/status/rotate/remove`.
+- [x] Namespace mutual-exclusion (pool name vs credential name) at create time.
+- [x] `reloadAll` loads pool + health into an atomic-pointer-swapped `PoolResolver` (no injection consumption yet).
+- [ ] re-run `go test ./internal/store/... ./internal/vault/... ./cmd/...` to confirm Phase 0 still green after merge.
 
-Phase 0 exit: pools definable/inspectable; `reloadAll` loads pool + health tables into a new in-memory `PoolResolver` (atomic-pointer-swapped, parallel to `StoreResolver`), but injection does not consult it.
+### Task 2: Phase 1 — Phantom indirection (pool phantom → active member)
 
-### Phase 1 — Phantom indirection (pool phantom → active member)
+**Files:** `internal/vault/pool.go`, `internal/proxy/addon.go`, `internal/proxy/oauth_response.go`, `internal/proxy/oauth_index.go`, `cmd/sluice/main.go` + tests
 
-Active member changes only via `pool rotate` in this phase.
+- [ ] `PoolResolver.IsPool(name)` + `ResolveActive(name)` (healthy/expired-cooldown first by position; all-in-cooldown → soonest-recovering + WARNING; plain cred returned unchanged).
+- [ ] Route EVERY `binding.Credential` / `OAuthIndex.Has` / `extractInjectableSecret` / `findAdder`/persist consumer through `ResolveActive` at one chokepoint (grep `binding.Credential`, `\.Has(`, `extractInjectableSecret`; do not scatter `IsPool` checks).
+- [ ] Injection (`addon.go` pass-1 header + pass-2 phantom swap) injects the active member's real value while matching/replacing the pool-scoped phantom string.
+- [ ] R1 per-request member tag: record `realRefreshToken → member` (short-TTL map) when pass-2 swaps `SLUICE_PHANTOM:<pool>.refresh`; on token-endpoint response recover member by that real refresh token; persist to that member (`persistAddonOAuthTokens(member,...)`, singleflight `"persist:"+member`).
+- [ ] R1 fail-closed: if member unrecoverable, do NOT guess, do NOT fall back to `OAuthIndex.Match` for pooled token URLs — WARNING + skip vault write.
+- [ ] R1 dedicated unit test: two members, same token URL — B-refresh never overwrites A; missing tag → zero writes.
+- [ ] R3 pool-stable phantom: pooled OAuth `oauthPhantomAccess`/`resignJWT` build the JWT from a deterministic synthetic payload keyed on the pool name (byte-identical across member switch). Unit test asserts byte-identity across a switch; document static-form fallback.
+- [ ] `cmd/sluice/main.go:reloadAll` builds & swaps `PoolResolver` + health snapshot alongside existing swaps.
+- [ ] `go test ./... -timeout 120s` green; build clean; gofumpt.
 
-1. **Single chokepoint for pool→member expansion** `internal/vault/pool.go` (new):
-   - `PoolResolver.IsPool(name) bool`; `ResolveActive(name) (member string, ok bool)` — if `name` is a pool, first member whose health is `healthy` or whose `cooldown_until <= now`, in `position` order; if all in cooldown, return the soonest-recovering member and log a WARNING. If `name` is a plain credential, return it unchanged.
-   - **Mandatory task: enumerate and route every `binding.Credential` / `OAuthIndex.Has` / `extractInjectableSecret` / `findAdder`/persist consumer through `ResolveActive` at one chokepoint** (grep `binding.Credential`, `\.Has(`, `extractInjectableSecret`). Do **not** scatter `IsPool` checks across pass-1/pass-2 only — that was the original gap.
-2. **Injection** `internal/proxy/addon.go`: pass-1 header and pass-2 phantom swap call the chokepoint so the *real* value injected is the active member's, while the agent's pool-scoped phantom string is what gets matched/replaced.
-3. **Per-request member tag — precise join key** (resolves Risk R1):
-   - When pass-2 swaps the agent's `SLUICE_PHANTOM:<pool>.refresh` to a real refresh token in an outbound token-endpoint request, sluice **records `realRefreshToken → member`** in a short-TTL map (the refresh token value is sluice's own injected bytes, unique per member, and is the field actually present in an RFC-6749 refresh-grant body — *not* the access token, which a refresh POST need not carry). `connState` keyed by `ClientConn.Id` is insufficient (one client conn multiplexes both members' h2 streams), so the join key is the real refresh-token value, not the connection.
-   - On the token-endpoint **response**, the handler recovers `member` from that map by the real refresh token sluice sent in the matching request. Persist refreshed tokens to *that member* (`persistAddonOAuthTokens(member,...)`, singleflight `"persist:"+member`).
-   - **Fail-closed (mandatory enumerated task + unit test):** if the member cannot be recovered, do **not** guess and do **not** fall back to `OAuthIndex.Match` for pooled token URLs — log a WARNING and skip the vault write so the next refresh retries. Dedicated unit test: two members, same token URL, assert a B-refresh never overwrites A's vault entry, and a missing tag results in zero writes.
-4. **Pool-stable phantom** (resolves Risk R3): for pooled OAuth creds, `oauthPhantomAccess`/`resignJWT` produce a JWT from a deterministic synthetic payload keyed on the **pool name** (not the member's real token), so it is byte-identical across member switches. Enumerated unit test asserts byte-identity across a switch. Document the static-form fallback and the reason it is not the default.
-5. `cmd/sluice/main.go:reloadAll` builds & swaps `PoolResolver` + health snapshot alongside the existing swaps.
+### Task 3: Phase 2 — Auto-failover on 429 / 401
 
-Phase 1 exit: `pool rotate` flips the backing account; agent's phantom unchanged byte-for-byte; refreshes attributed correctly; fail-closed proven by test.
+**Files:** `internal/proxy/addon.go`, `internal/vault/pool.go`, audit logger, telegram + tests
 
-### Phase 2 — Auto-failover on 429 / 401
+- [ ] Failure classification in `SluiceAddon.Response` for pooled destinations: 429 or 403+`insufficient_quota` → rate-limited; 401 or token-body `invalid_grant`/`invalid_token` → auth-failure; 5xx/other → no-op.
+- [ ] Prompt failover: synchronously update in-memory `PoolResolver` health BEFORE the response returns (documented locking discipline); also `SetCredentialHealth(member,'cooldown',now+ttl,reason)` for durability (2s watcher only reconciles). Cooldown TTL consts: rate-limit 60s, auth-fail 300s; lazy recovery in `ResolveActive`.
+- [ ] Audit `cred_failover` with `Reason = "<pool>:<from>-><to>:<429|403|401|invalid_grant>"`.
+- [ ] Telegram best-effort non-blocking notice "pool `<name>` failed over `<a>`→`<b>` (<reason>)".
+- [ ] No in-flight retry (documented); next request uses new member.
+- [ ] Unit tests for classification + synchronous health swap + cooldown TTL/lazy recovery; `go test ./... -timeout 120s` green; build clean; gofumpt.
 
-1. **Failure classification** in `SluiceAddon.Response` for pooled destinations:
-   - `429`, or `403` with body error `insufficient_quota`/quota-exhaustion → rate-limited.
-   - `401`, or token-endpoint body `invalid_grant`/`invalid_token` → auth-failure.
-   - `5xx` and everything else → no-op (upstream-side; failing over would thrash both accounts — documented choice).
-2. **Prompt failover (resolves Important I1):** on classification, update the in-memory `PoolResolver` health **synchronously before the response returns** (atomic-pointer swap or dedicated mutex on the health map — call out the locking discipline), so the *very next* request injects the new active member. Also write `SetCredentialHealth(member, 'cooldown', now+ttl, reason)` to the store for durability; the 2s data-version watcher then merely reconciles. Do **not** rely on the 2s watcher for the active-member change — that lag was an error amplifier.
-   - Cooldown TTLs as named consts in `internal/vault/pool.go`: rate-limit 60s, auth-fail 300s (a broken refresh token will not self-heal quickly). Lazy recovery: `ResolveActive` treats expired cooldown as eligible — no scheduler.
-3. **Audit**: emit `cred_failover` with `Reason = "<pool>:<from>-><to>:<429|403|401|invalid_grant>"`.
-4. **Telegram notify** (best-effort, non-blocking, never blocks injection): one-line "pool `<name>` failed over `<a>`→`<b>` (<reason>)".
-5. **No in-flight retry** of the triggering request in Phase 2 (it returns its error; the next request uses the new member). Transparent retry is out of scope (needs body buffering; unsafe for non-idempotent calls).
+### Task 4: Verify acceptance + docs
 
-Phase 2 exit: e2e proves A 429 → next request uses B → B's refresh persists to B → phantom byte-unchanged.
+- [ ] full `go test ./... -timeout 120s`; e2e `go test -tags=e2e ./e2e/ -count=1 -timeout=300s` (if e2e cannot run here, state so explicitly in the progress file, do not silently skip).
+- [ ] update CLAUDE.md credential-pool/failover notes.
+- [ ] move plan to `docs/plans/completed/`.
 
 ## Out of scope / future work
 
