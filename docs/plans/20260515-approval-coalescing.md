@@ -84,7 +84,7 @@ Verified against the working tree on `main` (tip `20cc367`):
 - [x] `mcp/gateway.go`: pass `WithNoCoalesce()` — distinct `ToolArgs` are semantically distinct.
 - [x] QUIC: untouched.
 - [x] write tests: MCP calls with differing `ToolArgs` not coalesced; SSH-style connection-level Ask to same dest:port coalesces.
-- [ ] run `go test ./...` — must pass before Task 4 (re-confirm after merge).
+- [x] run `go test ./...` — must pass before Task 4 (re-confirm after merge).
 
 ### Task 4: Final count on the existing resolve/cancel edit
 
