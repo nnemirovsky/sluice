@@ -359,10 +359,10 @@ func (tc *TelegramChannel) handleCallback(cq *tgbotapi.CallbackQuery) {
 		var body string
 		if haveAM {
 			body = fmt.Sprintf("%s\n\n%s at %s",
-				FormatApprovalMessage(am.req), label, time.Now().UTC().Format("15:04:05"))
+				FormatApprovalMessage(am.req), labelText, time.Now().UTC().Format("15:04:05"))
 		} else {
 			body = fmt.Sprintf("%s\n\n%s at %s",
-				cq.Message.Text, label, time.Now().UTC().Format("15:04:05"))
+				cq.Message.Text, labelText, time.Now().UTC().Format("15:04:05"))
 		}
 		edit := tgbotapi.NewEditMessageText(tc.chatID, cq.Message.MessageID, body)
 		edit.ParseMode = tgbotapi.ModeHTML
