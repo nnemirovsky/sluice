@@ -90,10 +90,10 @@ Verified against the working tree on `main` (tip `20cc367`):
 
 **Files:** Modify `internal/telegram/approval.go`; Modify `internal/channel/broker.go` (expose final `count` on resolve); Modify `internal/telegram/approval_test.go`
 
-- [ ] Verify/complete: broker passes final coalesced `count` to channels on cancel/resolve (no new Telegram Send).
-- [ ] Verify/complete Telegram resolve edit / cancel edit: when `count > 1`, render "… — applied to N requests at HH:MM:SS"; zero extra API calls.
-- [ ] write/verify tests: count rendered for count==1 and count>1; no additional `Send` beyond the existing single edit.
-- [ ] run `go test ./internal/telegram/...` — must pass.
+- [x] Verify/complete: broker passes final coalesced `count` to channels on cancel/resolve (no new Telegram Send). (resolve/timeout already recorded the final count; added missing `recordCoalescedLocked` to the broker shutdown branch so the shutdown CancelApproval edit can also render the count.)
+- [x] Verify/complete Telegram resolve edit / cancel edit: when `count > 1`, render "… — applied to N requests at HH:MM:SS"; zero extra API calls. (resolve at approval.go:343-348, cancel at approval.go:194-200 — both pre-existing from wip 185a382 + fix a3602d6, verified correct.)
+- [x] write/verify tests: count rendered for count==1 and count>1; no additional `Send` beyond the existing single edit. (TestHandleCallbackRendersCoalescedCount, TestHandleCallbackSingleRequestNoCount, TestCancelApprovalRendersCoalescedCount, TestCancelApprovalSingleRequestNoCount — assert exactly one prompt send + exactly one resolve/cancel edit, count rendering adds zero API calls.)
+- [x] run `go test ./internal/telegram/...` — must pass. (230 passed across telegram + channel.)
 
 ### Task 5: Verify acceptance + docs
 

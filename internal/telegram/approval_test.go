@@ -2094,3 +2094,215 @@ func waitForPending(t *testing.T, broker *channel.Broker, n int) { //nolint:unpa
 		}
 	}
 }
+
+// fireCoalescedBurstTG starts the primary request, waits for it to register,
+// then fires n-1 more concurrent requests to the same dest:port so they
+// coalesce onto the primary waiter. It returns the primary request ID and a
+// channel that receives all n responses.
+func fireCoalescedBurstTG(t *testing.T, broker *channel.Broker, dest string, port, n int) (string, chan channel.Response) {
+	t.Helper()
+	out := make(chan channel.Response, n)
+
+	go func() {
+		resp, _ := broker.Request(dest, port, "https", 5*time.Second)
+		out <- resp
+	}()
+	waitForPending(t, broker, 1)
+	reqID := broker.PendingRequests()[0].ID
+
+	for i := 0; i < n-1; i++ {
+		go func() {
+			resp, _ := broker.Request(dest, port, "https", 5*time.Second)
+			out <- resp
+		}()
+	}
+
+	deadline := time.After(3 * time.Second)
+	for broker.CoalescedCount(reqID) < n {
+		select {
+		case <-deadline:
+			t.Fatalf("burst did not coalesce: count=%d want %d", broker.CoalescedCount(reqID), n)
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	return reqID, out
+}
+
+// TestHandleCallbackRendersCoalescedCount verifies that a coalesced burst
+// resolved via one inline-keyboard tap folds the final count into the single
+// resolve edit ("applied to N requests") with zero extra Telegram Sends
+// beyond that one edit.
+func TestHandleCallbackRendersCoalescedCount(t *testing.T) {
+	mock := newMockTelegramAPI(t)
+	s := newTestStore(t)
+	tc := newTestTelegramChannel(t, mock, s)
+
+	broker := channel.NewBroker([]channel.Channel{tc})
+	tc.SetBroker(broker)
+
+	const n = 5
+	reqID, out := fireCoalescedBurstTG(t, broker, "burst.example.com", 443, n)
+
+	tc.handleCallback(&tgbotapi.CallbackQuery{
+		ID: "cb_coalesce",
+		Message: &tgbotapi.Message{
+			MessageID: 300,
+			Chat:      &tgbotapi.Chat{ID: 12345},
+			Text:      "burst message",
+		},
+		Data: reqID + "|allow_once",
+	})
+
+	// All n waiters must receive the response from the single tap.
+	for i := 0; i < n; i++ {
+		select {
+		case resp := <-out:
+			if resp != channel.ResponseAllowOnce {
+				t.Fatalf("waiter %d got %v, want AllowOnce", i, resp)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("only %d/%d waiters received the fanned response", i, n)
+		}
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	edits := mock.getEditedMessages()
+	if len(edits) != 1 {
+		t.Fatalf("expected exactly 1 edit (the resolve edit), got %d: %+v", len(edits), edits)
+	}
+	want := fmt.Sprintf("applied to %d requests", n)
+	if !strings.Contains(edits[0].Text, want) {
+		t.Errorf("resolve edit should contain %q, got: %s", want, edits[0].Text)
+	}
+
+	// Baseline only: exactly one initial prompt sendMessage for the whole
+	// coalesced burst (one broadcast) and the single resolve edit above.
+	// Count rendering must add zero extra API calls.
+	if sent := mock.getSentMessages(); len(sent) != 1 {
+		t.Errorf("expected exactly 1 prompt send (no extra Send beyond the single edit), got %d: %+v", len(sent), sent)
+	}
+}
+
+// TestHandleCallbackSingleRequestNoCount verifies a lone (count==1) request
+// renders the plain label with no "applied to" suffix, still one edit only.
+func TestHandleCallbackSingleRequestNoCount(t *testing.T) {
+	mock := newMockTelegramAPI(t)
+	s := newTestStore(t)
+	tc := newTestTelegramChannel(t, mock, s)
+
+	broker := channel.NewBroker([]channel.Channel{tc})
+	tc.SetBroker(broker)
+
+	done := make(chan channel.Response, 1)
+	go func() {
+		resp, _ := broker.Request("solo.example.com", 443, "https", 5*time.Second)
+		done <- resp
+	}()
+	waitForPending(t, broker, 1)
+	reqID := broker.PendingRequests()[0].ID
+
+	tc.handleCallback(&tgbotapi.CallbackQuery{
+		ID: "cb_solo",
+		Message: &tgbotapi.Message{
+			MessageID: 301,
+			Chat:      &tgbotapi.Chat{ID: 12345},
+			Text:      "solo message",
+		},
+		Data: reqID + "|allow_once",
+	})
+
+	if resp := <-done; resp != channel.ResponseAllowOnce {
+		t.Fatalf("got %v, want AllowOnce", resp)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	edits := mock.getEditedMessages()
+	if len(edits) != 1 {
+		t.Fatalf("expected exactly 1 edit, got %d", len(edits))
+	}
+	if strings.Contains(edits[0].Text, "applied to") {
+		t.Errorf("single request must not render an 'applied to N' suffix, got: %s", edits[0].Text)
+	}
+	// Baseline only: one prompt send + the single resolve edit, nothing more.
+	if sent := mock.getSentMessages(); len(sent) != 1 {
+		t.Errorf("expected exactly 1 prompt send (no extra Send beyond the single edit), got %d", len(sent))
+	}
+}
+
+// TestCancelApprovalRendersCoalescedCount verifies the cancel path (used for
+// timeout / shutdown / resolved-via-another-channel) also folds the final
+// coalesced count into its single edit.
+func TestCancelApprovalRendersCoalescedCount(t *testing.T) {
+	mock := newMockTelegramAPI(t)
+	s := newTestStore(t)
+	tc := newTestTelegramChannel(t, mock, s)
+
+	broker := channel.NewBroker([]channel.Channel{tc})
+	tc.SetBroker(broker)
+
+	const n = 4
+	reqID, out := fireCoalescedBurstTG(t, broker, "cancel.example.com", 443, n)
+
+	// Resolve via the broker directly (simulating another channel) so the
+	// final count is recorded, then drive the Telegram cleanup edit.
+	if !broker.Resolve(reqID, channel.ResponseDeny) {
+		t.Fatalf("Resolve returned false")
+	}
+	for i := 0; i < n; i++ {
+		select {
+		case <-out:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("only %d/%d waiters received the response", i, n)
+		}
+	}
+
+	if err := tc.CancelApproval(reqID); err != nil {
+		t.Fatalf("CancelApproval: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	edits := mock.getEditedMessages()
+	if len(edits) != 1 {
+		t.Fatalf("expected exactly 1 cancel edit, got %d", len(edits))
+	}
+	want := fmt.Sprintf("applied to %d requests", n)
+	if !strings.Contains(edits[0].Text, want) {
+		t.Errorf("cancel edit should contain %q, got: %s", want, edits[0].Text)
+	}
+	// Baseline only: one prompt send for the burst + the single cancel edit.
+	if sent := mock.getSentMessages(); len(sent) != 1 {
+		t.Errorf("expected exactly 1 prompt send (no extra Send beyond the single edit), got %d", len(sent))
+	}
+}
+
+// TestCancelApprovalSingleRequestNoCount verifies the cancel path renders the
+// plain reason with no "applied to" suffix for a lone request.
+func TestCancelApprovalSingleRequestNoCount(t *testing.T) {
+	mock := newMockTelegramAPI(t)
+	s := newTestStore(t)
+	tc := newTestTelegramChannel(t, mock, s)
+
+	broker := channel.NewBroker([]channel.Channel{tc})
+	tc.SetBroker(broker)
+
+	tc.msgMap.Store("req_solo_cancel", approvalMsg{
+		messageID: 44,
+		req:       channel.ApprovalRequest{ID: "req_solo_cancel", Destination: "solo.example.com", Port: 443, Protocol: "https"},
+	})
+
+	if err := tc.CancelApproval("req_solo_cancel"); err != nil {
+		t.Fatalf("CancelApproval: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	edits := mock.getEditedMessages()
+	if len(edits) != 1 {
+		t.Fatalf("expected exactly 1 cancel edit, got %d", len(edits))
+	}
+	if strings.Contains(edits[0].Text, "applied to") {
+		t.Errorf("single request cancel must not render 'applied to N', got: %s", edits[0].Text)
+	}
+}

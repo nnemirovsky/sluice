@@ -327,6 +327,10 @@ func (b *Broker) Request(dest string, port int, protocol string, timeout time.Du
 			if w.dedupKey != "" {
 				delete(b.dedupIndex, w.dedupKey)
 			}
+			// Retain the final coalesced count so the shutdown
+			// CancelApproval edit can still render "applied to N
+			// requests" for a burst that was pending at shutdown.
+			b.recordCoalescedLocked(id, w.count)
 		}
 		b.mu.Unlock()
 		// Fan the terminal deny to any coalesced subscribers (buffered
