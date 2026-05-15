@@ -677,11 +677,13 @@ destination = "api.example.com"
 	}
 }
 
-func TestRequestPolicyChecker_ConcurrentAllowOnceSerializesApprovals(t *testing.T) {
+func TestRequestPolicyChecker_ConcurrentAllowOnceCoalesces(t *testing.T) {
 	// Multiple HTTP/2 streams on the same connection may invoke
-	// CheckAndConsume concurrently. Each call must be independently
-	// answered by the broker (no single-shot caching). This test
-	// confirms the contract holds up under concurrency.
+	// CheckAndConsume concurrently against the same dest:port. Broker-level
+	// coalescing collapses a concurrent burst onto ONE pending prompt: the
+	// operator taps once and every in-flight request gets that verdict.
+	// (Sequential, non-overlapping requests still each ask — coalescing
+	// only applies while a prompt is actually pending.)
 	toml := `
 [policy]
 default = "deny"
@@ -690,6 +692,10 @@ default = "deny"
 destination = "api.example.com"
 `
 	checker, fc := newTestChecker(t, toml, channel.ResponseAllowOnce)
+	// Hold the primary prompt pending so the whole burst coalesces onto it
+	// deterministically before any resolution happens.
+	releaseAll := fc.gate()
+
 	const n = 5
 	var wg sync.WaitGroup
 	results := make([]policy.Verdict, n)
@@ -704,6 +710,24 @@ destination = "api.example.com"
 			results[i] = v
 		}(i)
 	}
+
+	// Wait until exactly one prompt is broadcast and all n requests have
+	// coalesced onto it (primary + n-1 subscribers => count == n).
+	waitDeadline := time.After(3 * time.Second)
+	for {
+		id := fc.firstReqID()
+		if id != "" && checker.broker.CoalescedCount(id) >= n {
+			break
+		}
+		select {
+		case <-waitDeadline:
+			t.Fatalf("burst did not coalesce: requests=%d", fc.requestCount())
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	releaseAll()
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
 	select {
@@ -716,7 +740,8 @@ destination = "api.example.com"
 			t.Errorf("result[%d] = %v, want Allow", i, v)
 		}
 	}
-	if fc.requestCount() != n {
-		t.Errorf("broker request count = %d, want %d (every request should ask)", fc.requestCount(), n)
+	// Exactly one prompt for the whole coalesced burst.
+	if fc.requestCount() != 1 {
+		t.Errorf("broker request count = %d, want 1 (concurrent burst coalesces)", fc.requestCount())
 	}
 }
