@@ -745,3 +745,68 @@ destination = "api.example.com"
 		t.Errorf("broker request count = %d, want 1 (concurrent burst coalesces)", fc.requestCount())
 	}
 }
+
+// TestRequestPolicyChecker_SSHStyleConnectionLevelCoalesces confirms the
+// connection-level Ask path (no HTTP method/path, e.g. an SSH/IMAP/SMTP
+// burst to one host:port that is deferred through CheckAndConsume ->
+// resolveAsk -> broker.Request) coalesces onto a single prompt exactly like
+// HTTP per-request asks. There is no separate SSH call site and no
+// per-protocol special-casing: persistence granularity (one dest:port rule)
+// equals dedup granularity.
+func TestRequestPolicyChecker_SSHStyleConnectionLevelCoalesces(t *testing.T) {
+	toml := `
+[policy]
+default = "deny"
+
+[[ask]]
+destination = "git.example.com"
+`
+	checker, fc := newTestChecker(t, toml, channel.ResponseAllowOnce)
+	releaseAll := fc.gate()
+
+	const n = 4
+	var wg sync.WaitGroup
+	results := make([]policy.Verdict, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// No WithRequestInfo: this is the connection-level shape.
+			v, err := checker.CheckAndConsume("git.example.com", 22, WithProtocol("ssh"))
+			if err != nil {
+				t.Errorf("goroutine %d: %v", i, err)
+			}
+			results[i] = v
+		}(i)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		id := fc.firstReqID()
+		if id != "" && checker.broker.CoalescedCount(id) >= n {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("SSH-style burst did not coalesce: requests=%d", fc.requestCount())
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	releaseAll()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("connection-level CheckAndConsume did not finish in time")
+	}
+	for i, v := range results {
+		if v != policy.Allow {
+			t.Errorf("result[%d] = %v, want Allow", i, v)
+		}
+	}
+	if fc.requestCount() != 1 {
+		t.Errorf("broker request count = %d, want 1 (connection-level burst coalesces)", fc.requestCount())
+	}
+}

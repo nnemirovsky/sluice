@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1551,5 +1552,101 @@ func TestGatewayToolNamespacePreventsCollision(t *testing.T) {
 	}
 	if result2.IsError {
 		t.Errorf("expected success, got error: %s", result2.Content[0].Text)
+	}
+}
+
+// gatingRecordChannel records every approval request and holds resolution
+// until release is closed. Used to prove MCP tool calls do NOT coalesce.
+type gatingRecordChannel struct {
+	mu       sync.Mutex
+	broker   *channel.Broker
+	requests []channel.ApprovalRequest
+	release  chan struct{}
+	resp     channel.Response
+}
+
+func (c *gatingRecordChannel) RequestApproval(_ context.Context, req channel.ApprovalRequest) error {
+	c.mu.Lock()
+	c.requests = append(c.requests, req)
+	rel := c.release
+	br := c.broker
+	resp := c.resp
+	c.mu.Unlock()
+	go func() {
+		<-rel
+		br.Resolve(req.ID, resp)
+	}()
+	return nil
+}
+func (c *gatingRecordChannel) CancelApproval(_ string) error            { return nil }
+func (c *gatingRecordChannel) Commands() <-chan channel.Command         { return nil }
+func (c *gatingRecordChannel) Notify(_ context.Context, _ string) error { return nil }
+func (c *gatingRecordChannel) Start() error                             { return nil }
+func (c *gatingRecordChannel) Stop()                                    {}
+func (c *gatingRecordChannel) Type() channel.ChannelType                { return channel.ChannelTelegram }
+
+func (c *gatingRecordChannel) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.requests)
+}
+
+// TestGatewayToolCallAskNotCoalesced verifies the gateway passes
+// WithNoCoalesce: two concurrent calls to the same tool with different
+// ToolArgs must each produce their own prompt (they are semantically
+// distinct and feed arg-sensitive inspection), never collapsing onto one.
+func TestGatewayToolCallAskNotCoalesced(t *testing.T) {
+	script := writeMockServer(t)
+	tp, err := NewToolPolicy([]policy.ToolRule{
+		{Tool: "test__greet", Verdict: "ask"},
+	}, policy.Allow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := &gatingRecordChannel{release: make(chan struct{}), resp: channel.ResponseAllowOnce}
+	broker := channel.NewBroker([]channel.Channel{ch})
+	ch.broker = broker
+
+	gw := newGatewayForTest(t, GatewayConfig{
+		Upstreams: []UpstreamConfig{{
+			Name:    "test",
+			Command: "bash",
+			Args:    []string{script},
+		}},
+		ToolPolicy: tp,
+		Broker:     broker,
+		TimeoutSec: 5,
+	})
+
+	var wg sync.WaitGroup
+	for i, args := range []string{`{"a":1}`, `{"a":2}`} {
+		wg.Add(1)
+		go func(i int, a string) {
+			defer wg.Done()
+			if _, err := gw.HandleToolCall(CallToolParams{
+				Name:      "test__greet",
+				Arguments: json.RawMessage(a),
+			}); err != nil {
+				t.Errorf("call %d: %v", i, err)
+			}
+		}(i, args)
+	}
+
+	// Wait until both prompts have been delivered (no coalescing). If the
+	// gateway wrongly coalesced, only one prompt would ever arrive and
+	// this would time out.
+	deadline := time.After(3 * time.Second)
+	for ch.count() < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("expected 2 distinct MCP prompts, got %d (wrongly coalesced)", ch.count())
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	close(ch.release)
+	wg.Wait()
+	if ch.count() != 2 {
+		t.Errorf("expected exactly 2 prompts, got %d", ch.count())
 	}
 }
