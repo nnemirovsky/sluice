@@ -212,6 +212,40 @@ Extends phantom swap to handle OAuth credentials bidirectionally. Static credent
 - `internal/store/migrations/000002_credential_meta.up.sql` -- Schema for credential metadata
 - `internal/store/migrations/000003_binding_env_var.up.sql` -- `env_var` column on bindings
 
+### Credential pools and auto-failover
+
+A **credential pool** lets one phantom identity the agent sees be backed by **N real OAuth credentials**. The agent always holds a single pool-scoped phantom pair (`SLUICE_PHANTOM:<pool>.access` / `SLUICE_PHANTOM:<pool>.refresh`); sluice maps it to the *currently active member's* real tokens at injection time and persists refreshed tokens back to the member that issued them. Primary use case: two OpenAI Codex OAuth accounts behind one agent so quota exhaustion on one account transparently rolls onto the other. Pool members must be `oauth` credentials — `static` members are rejected. `cred remove` errors on a credential that is a live pool member.
+
+**CLI:**
+
+```
+sluice pool create <name> --member <cred> [--member <cred> ...]   # ordered members; rejects static; namespace must not collide with a credential name
+sluice pool list
+sluice pool status <name>     # active member, per-member health (healthy / cooldown + recover-at + reason)
+sluice pool rotate <name>     # operator override: advance the active member manually
+sluice pool remove <name>
+```
+
+Auto-failover on 429/401 is the primary mechanism; `pool rotate` is an operator override. Pool and credential namespaces are mutually exclusive at create time.
+
+**Data model (migration `000006_credential_pools`):** three tables — `credential_pools` (pool name, strategy reserved `failover`), `credential_pool_members` (ordered membership, pool→credential FK), `credential_health` (per-member state `healthy|cooldown`, `recover_at`, reason) — with CHECK constraints. Store API lives in `internal/store/pools.go`. `reloadAll` loads pool + health into an atomic-pointer-swapped `PoolResolver` (`internal/vault/pool.go`), rewired into the addon via `srv.StorePool`/`SetPoolResolver` on SIGHUP and the 2s data-version watcher.
+
+**Phase 1 — phantom indirection (pool phantom → active member):**
+
+- **Single chokepoint (I2):** every `binding.Credential` / `OAuthIndex.Has` / `extractInjectableSecret` / persist consumer on the HTTP/HTTPS OAuth path routes through `PoolResolver.ResolveActive` (`resolveInjectionTarget` for pass-1 header + pass-2 phantom swap; `resolveOAuthResponseAttribution` for the response/persist path). `idx.Has` is always called with the resolved member name, never the pool. Plain (non-pool) credentials pass through `ResolveActive` unchanged. SSH/mail/QUIC are non-OAuth and out of scope.
+- **Active-member selection:** healthy or expired-cooldown members first, by configured position; if all members are in cooldown, the soonest-recovering member is returned with a WARNING (degrade, never hard-fail). Recovery is lazy — evaluated in `ResolveActive`, no scheduler.
+- **R1 refresh-token attribution / fail-closed:** when pass-2 swaps `SLUICE_PHANTOM:<pool>.refresh`, sluice records `realRefreshToken → member` in a short-TTL map. On the token-endpoint response it recovers the member by that real refresh token and persists to that member (`persistAddonOAuthTokens(member, ...)`, singleflight key `"persist:"+member`). The join key is the real **refresh** token sluice injected — never the access token, the client connection, or `OAuthIndex.Match` (two pooled members share `auth.openai.com`'s token URL and collide there). If the member is unrecoverable: WARNING + skip the vault write, never guess. Rotating refresh tokens are single-use, so a mis-attributed write would brick both accounts — fail-closed is mandatory.
+- **R3 pool-stable phantom JWT:** Codex access tokens are JWTs and the per-real-token `resignJWT` would emit a *different* phantom after every cross-member refresh, breaking the "agent never notices" guarantee. Pooled OAuth `oauthPhantomAccess`/`resignJWT` instead build the phantom JWT from a deterministic synthetic payload keyed on the **pool name** (stable `sub`/`iss`, far-future `exp`), HMAC'd with the existing fixed key — byte-identical across member switches while still a structurally valid JWT. Static-form fallback (`SLUICE_PHANTOM:<pool>.access`) is documented for the case where the agent is verified to treat the access token as opaque.
+
+**Phase 2 — auto-failover on 429 / 401:**
+
+- **Classification** (`classifyFailover` in `internal/proxy/pool_failover.go`, called from `SluiceAddon.Response` for pooled destinations): `429` or `403 + insufficient_quota` → rate-limited; `401` or token-body `invalid_grant` / `invalid_token` → auth-failure; `5xx` / other → no-op. The token-endpoint body is only trusted when the request URL matched the OAuth index.
+- **Synchronous in-memory failover (I1):** health is updated in-process *before* the response returns — `MarkCooldown` takes the resolver write lock, `ResolveActive` the read lock — so the active-member switch never waits on the 2s data-version watcher (which only reconciles). A detached `onFailover` callback also writes `SetCredentialHealth(member, 'cooldown', now+ttl, reason)` for durability. Cooldown TTLs: `vault.RateLimitCooldown` = 60s, `vault.AuthFailCooldown` = 300s. No in-flight retry — the next request uses the new member.
+- **Audit:** a `cred_failover` event (Verdict `failover`, Credential = the cooled-down member) with `Reason = "<pool>:<from>-><to>:<429|403|401|invalid_grant>"`, emitted synchronously in `handlePoolFailover`.
+- **Telegram:** a best-effort non-blocking notice "pool `<name>` failed over `<a>`→`<b>` (<reason>)"; the store write and every broker channel `Notify` are detached into their own goroutine so the response path never blocks.
+
+**Key files:** `internal/store/migrations/000006_credential_pools.{up,down}.sql`, `internal/store/pools.go`, `internal/vault/pool.go`, `internal/proxy/pool_failover.go`, `cmd/sluice/pool.go`, plus the pool routing in `internal/proxy/addon.go` / `internal/proxy/oauth_response.go`.
+
 ### Protocol-specific handling
 
 | Protocol | Credential injection | Content inspection | Policy granularity |

@@ -101,9 +101,11 @@ rotate` is an operator override, not the primary mechanism.
 
 ### Task 4: Verify acceptance + docs
 
-- [ ] full `go test ./... -timeout 120s`; e2e `go test -tags=e2e ./e2e/ -count=1 -timeout=300s` (if e2e cannot run here, state so explicitly in the progress file, do not silently skip).
-- [ ] update CLAUDE.md credential-pool/failover notes.
-- [ ] move plan to `docs/plans/completed/`.
+- [x] full `go test ./... -timeout 120s` — 2548 tests passed, 13/13 packages `ok`, 0 FAIL/panic. e2e `go test -tags=e2e ./e2e/ -count=1 -timeout=300s` — 64 e2e tests passed (68 RUN incl. subtests, 66 PASS lines), 0 FAIL/panic, ~130s. Container tags (`e2e && linux/darwin`) skipped: no local Docker Compose / Apple Container harness in this validation step; CI runs them via the dedicated e2e workflows.
+- [x] update CLAUDE.md credential-pool/failover notes — added `### Credential pools and auto-failover` (pool concept, `sluice pool` CLI, migration 000006 tables, Phase 1 chokepoint + R1 fail-closed attribution + R3 pool-stable JWT, Phase 2 classification + synchronous failover + `cred_failover` audit + Telegram notice + cooldown TTLs).
+- [x] move plan to `docs/plans/completed/`.
+
+> **E2e gap (Testing Strategy item, honestly noted):** the dedicated two-fake-OAuth-upstreams pool-failover e2e (assert A used until 429 → switch to B → B's refreshed tokens land in B's vault not A's → phantom access JWT byte-identical across failover) was **not added**. Standing up a full e2e harness with JWT-issuing fake token endpoints, pool wiring through SOCKS5 + MITM, and 429-then-switch assertions is a substantial new harness beyond the reasonable scope of this verify+docs task. The failover behavior it would cover is already exercised by unit tests added in Tasks 2 & 3 (`internal/vault/pool_test.go`, `internal/proxy/pool_failover_test.go`): R1 collision/fail-closed, R3 phantom byte-identity, classification, synchronous health swap, cooldown TTL/lazy recovery, non-blocking notice. The existing non-container e2e suite was run in full (64 tests, all passing). Recommend tracking the pool-failover e2e as follow-up future work.
 
 ## Out of scope / future work
 
