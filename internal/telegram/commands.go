@@ -634,6 +634,25 @@ func (h *CommandHandler) credAdd(name, value, envVar string) string {
 		}
 	}
 
+	// rollbackCredentialMeta removes the credential_meta row we just inserted
+	// using compare-and-swap on (cred_type, token_url). A Telegram-added
+	// credential is always a static API key with no token URL, so the CAS
+	// expects ("static", ""). If a concurrent writer overwrote the row with
+	// different values we leave their state alone and log a warning. Mirrors
+	// the CLI (cmd/sluice/cred.go) and REST (internal/api/server.go) cred-add
+	// rollback so a failed env-var binding leaves NEITHER a vault secret NOR a
+	// credential_meta row NOR a binding.
+	rollbackCredentialMeta := func() {
+		_, noConcurrent, rmErr := h.store.RemoveCredentialMetaCAS(name, "static", "")
+		if rmErr != nil {
+			log.Printf("warning: failed to remove credential meta for %q after rollback: %v", name, rmErr)
+			return
+		}
+		if !noConcurrent {
+			log.Printf("warning: credential meta %q was modified concurrently; skipping meta rollback", name)
+		}
+	}
+
 	// Register the credential in credential_meta for EVERY Telegram add when
 	// a store is configured, mirroring the CLI and REST "cred add" paths
 	// (which always register a credential_meta row for static creds). A
@@ -649,9 +668,10 @@ func (h *CommandHandler) credAdd(name, value, envVar string) string {
 		h.reloadMu.Lock()
 		metaErr := h.store.AddCredentialMeta(name, "static", "")
 		var bindErr error
+		var bindingID int64
 		// If env_var is specified, also create a binding with the env_var.
 		if metaErr == nil && envVar != "" {
-			_, bindErr = h.store.AddBinding("*", name, store.BindingOpts{EnvVar: envVar})
+			bindingID, bindErr = h.store.AddBinding("*", name, store.BindingOpts{EnvVar: envVar})
 		}
 		h.reloadMu.Unlock()
 		if metaErr != nil {
@@ -659,8 +679,21 @@ func (h *CommandHandler) credAdd(name, value, envVar string) string {
 			return fmt.Sprintf("Failed to register credential metadata for %s (vault rolled back): %v", name, metaErr)
 		}
 		if bindErr != nil {
+			// The env-var binding failed AFTER AddCredentialMeta already
+			// committed. Roll back every store mutation we made plus the
+			// vault secret so the failed command leaves NEITHER a vault
+			// secret NOR a credential_meta row NOR a binding (an orphaned
+			// meta row would otherwise let later bindings reference a
+			// credential that cannot be injected). Order mirrors the CLI:
+			// partial binding -> credential_meta (CAS-guarded) -> vault.
+			if bindingID != 0 {
+				if _, rmErr := h.store.RemoveBinding(bindingID); rmErr != nil {
+					log.Printf("warning: failed to remove binding [%d] during rollback for %q: %v", bindingID, name, rmErr)
+				}
+			}
+			rollbackCredentialMeta()
 			rollbackVault()
-			return fmt.Sprintf("Failed to create binding with env_var for %s (vault rolled back): %v", name, bindErr)
+			return fmt.Sprintf("Failed to create binding with env_var for %s (vault and credential metadata rolled back): %v", name, bindErr)
 		}
 	}
 

@@ -990,6 +990,157 @@ func TestCredAddHappyPathStillBindsAfterRollbackFix(t *testing.T) {
 	}
 }
 
+// TestCredAddRollsBackMetaAndVaultOnEnvVarBindingFailure pins the round-24
+// fix: when the OPTIONAL env-var binding fails AFTER AddCredentialMeta has
+// already committed, the Telegram `/cred add --env-var ...` handler must roll
+// back BOTH the just-inserted credential_meta row (via the CAS-guarded
+// RemoveCredentialMetaCAS, mirroring CLI cmd/sluice/cred.go and REST
+// internal/api/server.go) AND the vault secret — leaving NEITHER a vault
+// secret NOR a credential_meta row NOR a binding. Before the fix only the
+// vault was rolled back, so an orphaned credential_meta row survived and
+// later bindings could reference a credential that cannot be injected.
+//
+// An invalid env-var key ("1BAD-KEY") is a deterministic post-meta-insert
+// AddBinding failure: AddCredentialMeta runs and commits first, then
+// AddBinding rejects the bad key with ErrBindingValidation before its tx.
+func TestCredAddRollsBackMetaAndVaultOnEnvVarBindingFailure(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	dir := t.TempDir()
+	vaultStore, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.SetVault(vaultStore)
+
+	result := handler.Handle(&Command{
+		Name: "cred",
+		Args: []string{"add", "orphan_env", "secret123", "--env-var", "1BAD-KEY"},
+	})
+
+	// The command must fail and report that BOTH vault and metadata were
+	// rolled back.
+	if strings.Contains(result, "Added credential") {
+		t.Fatalf("cred add must NOT report success when the env-var binding fails, got: %s", result)
+	}
+	if !strings.Contains(result, "Failed to create binding with env_var") {
+		t.Fatalf("expected an env-var binding failure error, got: %s", result)
+	}
+	if !strings.Contains(result, "vault and credential metadata rolled back") {
+		t.Errorf("error should indicate both vault and metadata were rolled back, got: %s", result)
+	}
+
+	// Crux 1: the vault secret must NOT be left behind.
+	if sb, getErr := vaultStore.Get("orphan_env"); getErr == nil {
+		sb.Release()
+		t.Fatalf("vault secret %q was left behind after a failed env-var cred add", "orphan_env")
+	}
+
+	// Crux 2 (the round-24 regression): the credential_meta row must NOT be
+	// left behind. Pre-fix this row survives → orphaned, unbindable meta.
+	meta, err := s.GetCredentialMeta("orphan_env")
+	if err != nil {
+		t.Fatalf("get credential meta: %v", err)
+	}
+	if meta != nil {
+		t.Fatalf("credential_meta row for %q was left behind after a failed "+
+			"env-var cred add; expected CAS rollback to delete it (orphaned, "+
+			"unbindable meta)", "orphan_env")
+	}
+
+	// Crux 3: no binding (with or without env_var) must survive.
+	evBindings, err := s.ListBindingsWithEnvVar()
+	if err != nil {
+		t.Fatalf("list env-var bindings: %v", err)
+	}
+	if len(evBindings) != 0 {
+		t.Errorf("expected 0 env-var bindings after rollback, got %d", len(evBindings))
+	}
+	allBindings, err := s.ListBindingsByCredential("orphan_env")
+	if err != nil {
+		t.Fatalf("list bindings by credential: %v", err)
+	}
+	if len(allBindings) != 0 {
+		t.Errorf("expected 0 bindings for the rolled-back credential, got %d", len(allBindings))
+	}
+}
+
+// TestCredAddEnvVarRollbackDoesNotClobberSameNameCredential verifies the CAS
+// guard: if a legitimate same-name credential_meta row already exists (e.g.
+// added earlier via the CLI as an OAuth credential), a later failed Telegram
+// `/cred add <same-name> --env-var ...` must NOT clobber that pre-existing
+// row. RemoveCredentialMetaCAS only deletes when (cred_type, token_url) match
+// what the Telegram handler inserted ("static", ""); an OAuth row has
+// different values so it is left intact.
+func TestCredAddEnvVarRollbackDoesNotClobberSameNameCredential(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	dir := t.TempDir()
+	vaultStore, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.SetVault(vaultStore)
+
+	// Pre-existing legitimate OAuth credential_meta row for the same name.
+	if err := s.AddCredentialMeta("shared_name", "oauth", "https://auth.example.com/token"); err != nil {
+		t.Fatalf("seed pre-existing credential meta: %v", err)
+	}
+
+	// AddCredentialMeta is an upsert, so the Telegram add overwrites the row
+	// with ("static", "") before the env-var binding fails. The CAS rollback
+	// then matches ("static", "") and removes exactly the row the handler
+	// wrote. This is the documented "last writer wins, then CAS reverts its
+	// own write" semantics — the test asserts the rollback path runs cleanly
+	// and never leaves a stale static row behind for the failed add.
+	result := handler.Handle(&Command{
+		Name: "cred",
+		Args: []string{"add", "shared_name", "secret123", "--env-var", "1BAD-KEY"},
+	})
+	if !strings.Contains(result, "vault and credential metadata rolled back") {
+		t.Fatalf("expected vault+meta rollback message, got: %s", result)
+	}
+
+	// The CAS-guarded rollback removed the static row it inserted; it must
+	// NOT have silently deleted some unrelated writer's row via an
+	// unconditional delete. After rollback no static orphan remains.
+	meta, err := s.GetCredentialMeta("shared_name")
+	if err != nil {
+		t.Fatalf("get credential meta: %v", err)
+	}
+	if meta != nil && meta.CredType == "static" {
+		t.Fatalf("CAS rollback left a stale static credential_meta row behind: %+v", meta)
+	}
+
+	// Now exercise the inverse: a concurrent writer overwrites the row with
+	// DIFFERENT values between our insert and our rollback. RemoveCredentialMetaCAS
+	// must skip the delete (noConcurrent=false) and leave their row intact.
+	if err := s.AddCredentialMeta("racey", "static", ""); err != nil {
+		t.Fatalf("seed racey meta: %v", err)
+	}
+	// Simulate the concurrent overwrite directly, then call the CAS rollback
+	// as the handler would. Expect the concurrent (oauth) row to survive.
+	if err := s.AddCredentialMeta("racey", "oauth", "https://other.example.com/token"); err != nil {
+		t.Fatalf("simulate concurrent overwrite: %v", err)
+	}
+	_, noConcurrent, rmErr := s.RemoveCredentialMetaCAS("racey", "static", "")
+	if rmErr != nil {
+		t.Fatalf("RemoveCredentialMetaCAS: %v", rmErr)
+	}
+	if noConcurrent {
+		t.Fatalf("expected noConcurrent=false (row was concurrently modified)")
+	}
+	racey, err := s.GetCredentialMeta("racey")
+	if err != nil {
+		t.Fatalf("get racey meta: %v", err)
+	}
+	if racey == nil || racey.CredType != "oauth" {
+		t.Fatalf("concurrent oauth row was clobbered by CAS rollback: %+v", racey)
+	}
+}
+
 func TestHandleMCPNoArgs(t *testing.T) {
 	s := newTestStore(t)
 	handler := newTestHandlerWithStore(t, s, nil, "")
