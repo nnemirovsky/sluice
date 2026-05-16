@@ -261,6 +261,22 @@ func (pr *PoolResolver) MarkCooldown(credential string, until time.Time, reason 
 		delete(pr.health.health, credential)
 		return
 	}
+	// Monotonic extend: a member parked for an auth failure (300s) that
+	// subsequently trips a rate-limit (60s) must NOT have its cooldown
+	// shortened — a known-bad credential would become eligible far too
+	// early. Keep the LATER of the existing future cooldown and the new
+	// one. This is ONLY the extend path: an explicit clear/recover (the
+	// zero/past `until` branch above, and SetCredentialHealth "healthy"
+	// on the durable side) still shortens/clears, and a strictly later
+	// `until` still extends. Lazy expiry in ResolveActive/CooldownUntil
+	// is unaffected because an expired existing cooldown is in the past
+	// and `until.After(existing.cooldownUntil)` is true, so the fresh
+	// future cooldown wins.
+	if existing, ok := pr.health.health[credential]; ok &&
+		existing.cooldownUntil.After(time.Now()) &&
+		!until.After(existing.cooldownUntil) {
+		return
+	}
 	pr.health.health[credential] = memberHealth{cooldownUntil: until, reason: reason}
 }
 

@@ -103,6 +103,55 @@ func TestMarkCooldownSynchronousFlip(t *testing.T) {
 	}
 }
 
+func TestMarkCooldownMonotonicExtend(t *testing.T) {
+	pr := NewPoolResolver([]store.Pool{mkPool("pool", "a", "b")}, nil)
+
+	// Park "a" for an auth failure (300s).
+	authUntil := time.Now().Add(AuthFailCooldown)
+	pr.MarkCooldown("a", authUntil, "401")
+	got, ok := pr.CooldownUntil("a")
+	if !ok || !got.Equal(authUntil) {
+		t.Fatalf("after auth-fail cooldown = %v,%v; want %v,true", got, ok, authUntil)
+	}
+
+	// A subsequent shorter rate-limit cooldown (60s) must NOT shorten it:
+	// the credential is known-bad for 300s and must not be eligible early.
+	rlUntil := time.Now().Add(RateLimitCooldown)
+	pr.MarkCooldown("a", rlUntil, "429")
+	got, ok = pr.CooldownUntil("a")
+	if !ok || !got.Equal(authUntil) {
+		t.Errorf("after shorter rate-limit cooldown = %v,%v; want %v,true (NOT shortened to %v)",
+			got, ok, authUntil, rlUntil)
+	}
+
+	// A strictly LATER cooldown does extend.
+	laterUntil := authUntil.Add(120 * time.Second)
+	pr.MarkCooldown("a", laterUntil, "429-again")
+	got, ok = pr.CooldownUntil("a")
+	if !ok || !got.Equal(laterUntil) {
+		t.Errorf("after later cooldown = %v,%v; want %v,true (extended)", got, ok, laterUntil)
+	}
+
+	// Explicit clear (zero) still recovers despite an active longer cooldown.
+	pr.MarkCooldown("a", time.Time{}, "")
+	if _, cooling := pr.CooldownUntil("a"); cooling {
+		t.Error("after explicit clear CooldownUntil(a) cooling=true, want false (recovery path must not be blocked by monotonicity)")
+	}
+	if active, _ := pr.ResolveActive("pool"); active != "a" {
+		t.Errorf("after clear active = %q, want a", active)
+	}
+
+	// Expired existing cooldown must lose to a fresh future one (lazy
+	// expiry preserved): set a past cooldown, then a normal future one.
+	pr.MarkCooldown("b", time.Now().Add(-time.Hour), "stale") // zero/past => clear, b stays healthy
+	freshUntil := time.Now().Add(RateLimitCooldown)
+	pr.MarkCooldown("b", freshUntil, "429")
+	got, ok = pr.CooldownUntil("b")
+	if !ok || !got.Equal(freshUntil) {
+		t.Errorf("fresh cooldown after stale = %v,%v; want %v,true", got, ok, freshUntil)
+	}
+}
+
 func TestPoolForMemberAndMembers(t *testing.T) {
 	pr := NewPoolResolver([]store.Pool{mkPool("pool", "a", "b")}, nil)
 	if p := pr.PoolForMember("b"); p != "pool" {

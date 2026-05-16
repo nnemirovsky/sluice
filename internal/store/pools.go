@@ -327,13 +327,47 @@ func (s *Store) SetCredentialHealth(credential, status string, cooldownUntil tim
 	} else {
 		cu = nil
 	}
+	// Monotonic extend for the durable row, mirroring MarkCooldown's
+	// in-memory invariant. When the incoming write is a cooldown AND the
+	// stored row already has a cooldown_until strictly in the future that
+	// is LATER than the incoming one, keep the stored (longer) value: a
+	// short rate-limit cooldown must never shorten a longer auth-failure
+	// cooldown, even on the durable side, so restart durability matches
+	// the resolver. Any transition to "healthy" (excluded.status =
+	// 'healthy', whose cooldown_until is NULL) always overwrites, so the
+	// recovery/heal path is intact. cooldown_until is always written as
+	// UTC RFC3339 by this function, so the string comparison is a valid
+	// chronological ordering; the datetime('now') guard makes an already
+	// expired stored cooldown lose to the fresh future one (lazy expiry
+	// preserved).
 	_, err := s.db.Exec(
 		`INSERT INTO credential_health (credential, status, cooldown_until, last_failure_reason, updated_at)
 		 VALUES (?, ?, ?, ?, datetime('now'))
 		 ON CONFLICT(credential) DO UPDATE SET
-		   status = excluded.status,
-		   cooldown_until = excluded.cooldown_until,
-		   last_failure_reason = excluded.last_failure_reason,
+		   cooldown_until = CASE
+		     WHEN excluded.status = 'cooldown'
+		       AND credential_health.cooldown_until IS NOT NULL
+		       AND credential_health.cooldown_until > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		       AND credential_health.cooldown_until > excluded.cooldown_until
+		     THEN credential_health.cooldown_until
+		     ELSE excluded.cooldown_until
+		   END,
+		   status = CASE
+		     WHEN excluded.status = 'cooldown'
+		       AND credential_health.cooldown_until IS NOT NULL
+		       AND credential_health.cooldown_until > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		       AND credential_health.cooldown_until > excluded.cooldown_until
+		     THEN credential_health.status
+		     ELSE excluded.status
+		   END,
+		   last_failure_reason = CASE
+		     WHEN excluded.status = 'cooldown'
+		       AND credential_health.cooldown_until IS NOT NULL
+		       AND credential_health.cooldown_until > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		       AND credential_health.cooldown_until > excluded.cooldown_until
+		     THEN credential_health.last_failure_reason
+		     ELSE excluded.last_failure_reason
+		   END,
 		   updated_at = excluded.updated_at`,
 		credential, status, cu, nilIfEmpty(reason),
 	)

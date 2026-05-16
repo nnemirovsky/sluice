@@ -278,6 +278,74 @@ func TestCredentialHealthCRUD(t *testing.T) {
 	}
 }
 
+func TestSetCredentialHealthMonotonicCooldown(t *testing.T) {
+	s := newTestStore(t)
+
+	// Seed a long auth-failure cooldown (now+300s).
+	authUntil := time.Now().Add(300 * time.Second).UTC().Truncate(time.Second)
+	if err := s.SetCredentialHealth("a", "cooldown", authUntil, "401 auth fail"); err != nil {
+		t.Fatalf("seed cooldown: %v", err)
+	}
+
+	// A subsequent shorter rate-limit cooldown (now+60s) must NOT shorten
+	// the durable row — restart durability must match the resolver.
+	rlUntil := time.Now().Add(60 * time.Second).UTC().Truncate(time.Second)
+	if err := s.SetCredentialHealth("a", "cooldown", rlUntil, "429 rate limited"); err != nil {
+		t.Fatalf("shorter cooldown write: %v", err)
+	}
+	h, _ := s.GetCredentialHealth("a")
+	if h == nil || !h.CooldownUntil.Equal(authUntil) {
+		t.Fatalf("after shorter write CooldownUntil = %v, want %v (NOT shortened)",
+			cooldownOf(h), authUntil)
+	}
+	if h.LastFailureReason != "401 auth fail" {
+		t.Errorf("reason = %q, want %q (longer cooldown's metadata kept)", h.LastFailureReason, "401 auth fail")
+	}
+
+	// A strictly LATER cooldown does extend.
+	laterUntil := authUntil.Add(120 * time.Second)
+	if err := s.SetCredentialHealth("a", "cooldown", laterUntil, "429 again"); err != nil {
+		t.Fatalf("later cooldown write: %v", err)
+	}
+	h, _ = s.GetCredentialHealth("a")
+	if h == nil || !h.CooldownUntil.Equal(laterUntil) {
+		t.Fatalf("after later write CooldownUntil = %v, want %v (extended)",
+			cooldownOf(h), laterUntil)
+	}
+
+	// Transition to healthy clears, even though a longer cooldown is active
+	// (recovery/heal path must remain intact).
+	if err := s.SetCredentialHealth("a", "healthy", time.Time{}, ""); err != nil {
+		t.Fatalf("heal write: %v", err)
+	}
+	h, _ = s.GetCredentialHealth("a")
+	if h == nil || h.Status != "healthy" || !h.CooldownUntil.IsZero() {
+		t.Errorf("after heal = %+v, want healthy/zero (recovery must not be blocked by monotonicity)", h)
+	}
+
+	// An already-expired stored cooldown loses to a fresh future one
+	// (lazy expiry preserved at the durable layer too).
+	pastUntil := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	if err := s.SetCredentialHealth("b", "cooldown", pastUntil, "stale"); err != nil {
+		t.Fatalf("seed stale cooldown: %v", err)
+	}
+	freshUntil := time.Now().Add(60 * time.Second).UTC().Truncate(time.Second)
+	if err := s.SetCredentialHealth("b", "cooldown", freshUntil, "429"); err != nil {
+		t.Fatalf("fresh cooldown write: %v", err)
+	}
+	h, _ = s.GetCredentialHealth("b")
+	if h == nil || !h.CooldownUntil.Equal(freshUntil) {
+		t.Errorf("fresh cooldown after stale = %v, want %v", cooldownOf(h), freshUntil)
+	}
+}
+
+func cooldownOf(h *CredentialHealth) interface{} {
+	if h == nil {
+		return nil
+	}
+	return h.CooldownUntil
+}
+
 // TestMigration000006DownUp verifies the pool migration is reversible.
 func TestMigration000006DownUp(t *testing.T) {
 	dir := t.TempDir()

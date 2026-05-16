@@ -288,7 +288,7 @@ github_pat       static  api.github.com
 
 ## Credential Pools
 
-A credential pool lets a single phantom identity the agent sees be backed by **N real OAuth credentials**, with sluice auto-failing-over to the next member when the upstream rejects the active one. Primary use case: two OpenAI Codex OAuth accounts driven by one agent, so quota exhaustion on one account transparently rolls onto the other. The agent always holds one pool-scoped phantom pair (`SLUICE_PHANTOM:<pool>.access` / `.refresh`); sluice maps it to the currently active member's real token at injection time and persists refreshed tokens back to the member that issued them.
+A credential pool lets a single phantom identity the agent sees be backed by **N real OAuth credentials**, with sluice auto-failing-over to the next member when the upstream rejects the active one. Primary use case: two OpenAI Codex OAuth accounts driven by one agent, so quota exhaustion on one account transparently rolls onto the other. The agent always holds one pool-scoped phantom pair, byte-stable across member switches: the **access** phantom is a synthetic pool-stable JWT (HS256, `sub: sluice-pool:<name>`, `iss: sluice-phantom`, far-future `exp`) that is byte-identical for a given pool regardless of which member is active, so a cross-member failover never changes the access token the agent holds; the **refresh** phantom is the static string `SLUICE_PHANTOM:<pool>.refresh`. Sluice maps the pair to the currently active member's real token at injection time and persists refreshed tokens back to the member that issued them.
 
 ```bash
 sluice pool create <name> --members credA,credB[,credC] [--strategy failover]
