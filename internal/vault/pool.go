@@ -25,6 +25,18 @@ type memberHealth struct {
 	reason        string
 }
 
+// memberIdentity is the pool+epoch identity of a credential in the CURRENT
+// resolver generation. A remove/re-add of the same credential name yields a
+// strictly greater epoch (and possibly a different pool), so a stale
+// MarkCooldown carrying the OLD identity can be told apart from its
+// re-created successor and rejected. The zero value (pool=="", epoch==0) is
+// never a live identity because every membership row is stamped with a
+// post-bump epoch >= 1.
+type memberIdentity struct {
+	pool  string
+	epoch int64
+}
+
 // PoolHealth is the mutex-guarded credential cooldown map. It is
 // deliberately a SEPARATE object from PoolResolver so it can outlive any
 // single resolver generation.
@@ -46,30 +58,32 @@ type memberHealth struct {
 // Store rows still seed the map at startup (Seed) for cross-restart
 // durability, and the seed is monotonic (never shortens a live in-memory
 // cooldown).
-// Finding 3 (round-15): a response handled by an OLD resolver generation can
-// call MarkCooldown AFTER a NEW generation already pruned non-members during
-// resolver rebuild (StorePool/MergeLiveCooldowns shared path). If that
-// credential was removed from every pool in the new generation, the
-// unguarded MarkCooldown would re-insert a stale in-memory cooldown that a
-// later same-named re-add inherits before its TTL. The fix is to store the
-// CURRENT generation's authoritative member set on the shared PoolHealth and
-// update it under the SAME mutex that guards the cooldown map, so the prune
-// (member-set replace) and a concurrent MarkCooldown cannot interleave to
-// leave a non-member cooldown entry behind. MarkCooldown, under the lock,
-// no-ops when the credential is not in currentMembers (and currentMembers is
-// non-nil). currentMembers stays nil until SetCurrentMembers is called the
-// first time (ad-hoc/private resolvers that never set it keep the old
-// permissive behavior, so single-generation callers are not regressed).
+// Finding 3 (round-15) + Cluster A (round-18): a response handled by an OLD
+// resolver generation can call MarkCooldown AFTER a NEW generation already
+// pruned/replaced membership during resolver rebuild. The round-15 gate
+// keyed only on the credential NAME being present in SOME pool, so a
+// remove/re-add of the same name into a DIFFERENT pool would let the stale
+// write through and the new member would inherit the OLD response's
+// cooldown. The fix is to key the gate on the credential's pool+epoch
+// IDENTITY (memberIdentity) for the current generation, updated under the
+// SAME mutex that guards the cooldown map, so the membership replace and a
+// concurrent stale MarkCooldown cannot interleave AND a stale write whose
+// (pool, epoch) no longer matches the live identity no-ops. currentMembers
+// stays nil until SetCurrentMembers is called the first time
+// (ad-hoc/private resolvers that never set it keep the old permissive
+// behavior, so single-generation callers are not regressed).
 type PoolHealth struct {
 	mu     sync.RWMutex
 	health map[string]memberHealth
-	// currentMembers is the authoritative member set of the CURRENT
-	// resolver generation. nil = "not tracked" (gate disabled, legacy
-	// permissive behavior). Non-nil but missing a credential = that
-	// credential is not a member of any pool in the current generation, so
-	// MarkCooldown must NOT write a cooldown for it (write-after-prune
-	// guard). Mutated only under mu, the same lock the cooldown map uses.
-	currentMembers map[string]struct{}
+	// currentMembers maps a credential name -> its pool+epoch identity in
+	// the CURRENT resolver generation. nil = "not tracked" (gate disabled,
+	// legacy permissive behavior). Non-nil but missing a credential = that
+	// credential is not a member of any pool in the current generation.
+	// Present but with a DIFFERENT (pool, epoch) than the stale write
+	// carries = the credential was removed and re-added (a later
+	// same-named successor) so the stale write must NOT apply. Mutated only
+	// under mu, the same lock the cooldown map uses.
+	currentMembers map[string]memberIdentity
 }
 
 // NewPoolHealth returns an empty shared health map. Call this exactly once
@@ -88,7 +102,7 @@ func NewPoolHealth() *PoolHealth {
 // observes the OLD member set entirely or the NEW one entirely — it can never
 // observe a half-updated set, and it can never slip a non-member cooldown in
 // between the prune and the member-set swap.
-func (ph *PoolHealth) SetCurrentMembers(members map[string]struct{}) {
+func (ph *PoolHealth) SetCurrentMembers(members map[string]memberIdentity) {
 	if ph == nil {
 		return
 	}
@@ -143,6 +157,12 @@ type PoolResolver struct {
 	pools map[string][]string
 	// memberOf maps a credential name -> the pools that contain it.
 	memberOf map[string][]string
+	// identity maps a credential name -> its pool+epoch identity in THIS
+	// generation. Threaded into MarkCooldown and the FailoverEvent so a
+	// stale write carrying an old (pool, epoch) cannot apply to a
+	// re-created same-name successor. A credential belongs to at most one
+	// pool (store enforces this), so a single identity per credential.
+	identity map[string]memberIdentity
 
 	// health is the shared, swap-surviving cooldown map. Never nil after
 	// NewPoolResolver (a fresh PoolHealth is allocated when none is given,
@@ -181,6 +201,7 @@ func NewPoolResolverShared(pools []store.Pool, healthRows []store.CredentialHeal
 	pr := &PoolResolver{
 		pools:    make(map[string][]string, len(pools)),
 		memberOf: make(map[string][]string),
+		identity: make(map[string]memberIdentity),
 		health:   shared,
 	}
 	for _, p := range pools {
@@ -188,6 +209,7 @@ func NewPoolResolverShared(pools []store.Pool, healthRows []store.CredentialHeal
 		for _, m := range p.Members {
 			members = append(members, m.Credential)
 			pr.memberOf[m.Credential] = append(pr.memberOf[m.Credential], p.Name)
+			pr.identity[m.Credential] = memberIdentity{pool: p.Name, epoch: m.Epoch}
 		}
 		pr.pools[p.Name] = members
 	}
@@ -202,9 +224,9 @@ func NewPoolResolverShared(pools []store.Pool, healthRows []store.CredentialHeal
 	// nil, e.g. CLI `pool` subcommands) leave currentMembers nil to preserve
 	// the old permissive single-generation behavior.
 	if explicitShared {
-		cm := make(map[string]struct{}, len(pr.memberOf))
-		for cred := range pr.memberOf {
-			cm[cred] = struct{}{}
+		cm := make(map[string]memberIdentity, len(pr.identity))
+		for cred, id := range pr.identity {
+			cm[cred] = id
 		}
 		shared.SetCurrentMembers(cm)
 	}
@@ -296,12 +318,52 @@ func (pr *PoolResolver) ResolveActive(name string) (member string, ok bool) {
 	return soonest, true
 }
 
+// IdentityForMember returns the pool+epoch identity of a credential in THIS
+// resolver generation. ok is false when the credential is not a member of
+// any pool in this generation. The failover path captures this at the time
+// the cooldown decision is made and threads (pool, epoch) through to
+// MarkCooldown and the durable guarded write so a stale write cannot apply
+// to a re-created same-name successor (Cluster A).
+func (pr *PoolResolver) IdentityForMember(credential string) (pool string, epoch int64, ok bool) {
+	if pr == nil {
+		return "", 0, false
+	}
+	id, ok := pr.identity[credential]
+	if !ok {
+		return "", 0, false
+	}
+	return id.pool, id.epoch, true
+}
+
 // MarkCooldown records, in memory and synchronously, that a member should be
 // skipped until `until`. Phase 2 failover calls this on the response path
 // BEFORE the response returns so the very next request injects the next
 // member; the durable store write only reconciles afterwards. Calling with a
 // zero/past `until` clears the cooldown (recovery).
+//
+// This is the legacy identity-UNSCOPED form: it keeps the round-15
+// name-only write-after-prune guard but does NOT distinguish a removed and
+// re-added same-name credential. The response/failover path MUST use
+// MarkCooldownScoped so a stale write cannot park a re-created successor
+// (Cluster A #1). Single-generation callers (CLI tools, unit tests) keep
+// using this.
 func (pr *PoolResolver) MarkCooldown(credential string, until time.Time, reason string) {
+	pr.markCooldown(credential, "", -1, until, reason)
+}
+
+// MarkCooldownScoped is the pool+epoch identity-scoped form used by the
+// Phase 2 failover response path. pool+epoch identify WHICH membership
+// generation the cooldown decision was made against. The gate commits the
+// in-memory write only if that exact (pool, epoch) is still the live
+// identity for `credential` in the current generation: a stale write whose
+// membership was removed and the name re-added (a strictly greater epoch,
+// or a different pool) no-ops, so the re-created successor does NOT inherit
+// the old response's cooldown (Cluster A #1).
+func (pr *PoolResolver) MarkCooldownScoped(credential, pool string, epoch int64, until time.Time, reason string) {
+	pr.markCooldown(credential, pool, epoch, until, reason)
+}
+
+func (pr *PoolResolver) markCooldown(credential, pool string, epoch int64, until time.Time, reason string) {
 	if pr == nil {
 		return
 	}
@@ -328,7 +390,20 @@ func (pr *PoolResolver) MarkCooldown(credential string, until time.Time, reason 
 	// single-generation callers are not regressed.
 	isClear := until.IsZero() || !until.After(time.Now())
 	if !isClear && pr.health.currentMembers != nil {
-		if _, isMember := pr.health.currentMembers[credential]; !isMember {
+		live, isMember := pr.health.currentMembers[credential]
+		if !isMember {
+			// Not a member of any pool in the current generation:
+			// write-after-prune guard (round-15).
+			return
+		}
+		// Cluster A #1: identity-scoped guard. When the caller carries a
+		// pool+epoch (epoch >= 0), reject the write unless it still matches
+		// the live identity. A removed+re-added same-name credential has a
+		// strictly greater epoch (or a different pool), so an old in-flight
+		// 429's MarkCooldown does NOT park the re-created successor. A
+		// caller that opts out (epoch < 0) keeps the round-15 name-only
+		// behavior.
+		if epoch >= 0 && (live.pool != pool || live.epoch != epoch) {
 			return
 		}
 	}
@@ -405,9 +480,9 @@ func (pr *PoolResolver) MergeLiveCooldowns(prev *PoolResolver) {
 		// for any credential this generation no longer owns — the prune
 		// and the member-set swap are one atomic critical section, so no
 		// non-member cooldown can be slipped in between them.
-		cm := make(map[string]struct{}, len(pr.memberOf))
-		for cred := range pr.memberOf {
-			cm[cred] = struct{}{}
+		cm := make(map[string]memberIdentity, len(pr.identity))
+		for cred, id := range pr.identity {
+			cm[cred] = id
 		}
 		pr.health.currentMembers = cm
 		pr.health.mu.Unlock()

@@ -384,24 +384,74 @@ func TestMigration000006DownUp(t *testing.T) {
 		t.Fatalf("migrator: %v", err)
 	}
 
-	// Step down one migration (000006 -> 000005).
-	if err := m.Steps(-1); err != nil {
-		t.Fatalf("down 1: %v", err)
-	}
-	for _, tbl := range []string{"credential_pools", "credential_pool_members", "credential_health"} {
-		if tableExists(tbl) {
-			t.Errorf("table %q still present after down migration", tbl)
+	columnExists := func(table, col string) bool {
+		rows, qerr := s.db.Query("PRAGMA table_info(" + table + ")")
+		if qerr != nil {
+			return false
 		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var cid int
+			var name, ctype string
+			var notnull, pk int
+			var dflt interface{}
+			if scanErr := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); scanErr != nil {
+				return false
+			}
+			if name == col {
+				return true
+			}
+		}
+		return false
 	}
 
-	// Step back up; tables return.
-	if err := m.Steps(1); err != nil {
-		t.Fatalf("up 1: %v", err)
+	// 000007 added the epoch column + pool_membership_epoch counter on top
+	// of 000006. Both must be present after the up migration.
+	if !columnExists("credential_pool_members", "epoch") {
+		t.Fatal("credential_pool_members.epoch missing after up migration (000007)")
+	}
+	if !tableExists("pool_membership_epoch") {
+		t.Fatal("pool_membership_epoch missing after up migration (000007)")
+	}
+
+	// Step down one migration (000007 -> 000006): the epoch column and the
+	// counter table go away, the 000006 pool tables stay.
+	if err := m.Steps(-1); err != nil {
+		t.Fatalf("down 1 (000007): %v", err)
+	}
+	if columnExists("credential_pool_members", "epoch") {
+		t.Error("credential_pool_members.epoch still present after 000007 down")
+	}
+	if tableExists("pool_membership_epoch") {
+		t.Error("pool_membership_epoch still present after 000007 down")
 	}
 	for _, tbl := range []string{"credential_pools", "credential_pool_members", "credential_health"} {
 		if !tableExists(tbl) {
+			t.Errorf("000006 table %q wrongly dropped by 000007 down", tbl)
+		}
+	}
+
+	// Step down again (000006 -> 000005): the pool tables themselves go.
+	if err := m.Steps(-1); err != nil {
+		t.Fatalf("down 1 (000006): %v", err)
+	}
+	for _, tbl := range []string{"credential_pools", "credential_pool_members", "credential_health"} {
+		if tableExists(tbl) {
+			t.Errorf("table %q still present after 000006 down migration", tbl)
+		}
+	}
+
+	// Step back up twice; tables and the epoch column return.
+	if err := m.Steps(2); err != nil {
+		t.Fatalf("up 2: %v", err)
+	}
+	for _, tbl := range []string{"credential_pools", "credential_pool_members", "credential_health", "pool_membership_epoch"} {
+		if !tableExists(tbl) {
 			t.Errorf("table %q missing after re-up migration", tbl)
 		}
+	}
+	if !columnExists("credential_pool_members", "epoch") {
+		t.Error("credential_pool_members.epoch missing after re-up migration")
 	}
 }
 
@@ -821,6 +871,110 @@ func TestSetCredentialHealthIfPoolMemberSkipsRemoved(t *testing.T) {
 		if r.Credential == "gone" {
 			t.Fatalf("same-named credential inherited a stale cooldown from a resurrected row: %+v", r)
 		}
+	}
+}
+
+// TestSetCredentialHealthIfPoolMemberEpochRejectsReAddedSuccessor is the
+// Cluster A #2 regression. The name-only guard only verifies the credential
+// is a member of SOME pool. Sequence: pool P with member c (epoch e1) takes a
+// 429; remove P; re-create c into a NEW pool Q (epoch e2 > e1); a late
+// detached failover goroutine fires the guarded write for (c, P, e1). The
+// name-only guard finds c present (now in Q) and WRONGLY persists the OLD
+// response's cooldown — which loadPoolResolver then seeds onto the NEW member.
+//
+// Fail-before: SetCredentialHealthIfPoolMember(c) returns wrote=true and a
+// cooldown row appears for the re-added c. Pass-after: the epoch-scoped
+// SetCredentialHealthIfPoolMemberEpoch(c, "P", e1) finds no (c, P, e1) row
+// (Q's row has e2) and no-ops; the genuinely-live (c, Q, e2) write still
+// persists.
+func TestSetCredentialHealthIfPoolMemberEpochRejectsReAddedSuccessor(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "c")
+	if err := s.CreatePoolWithMembers("P", "failover", []string{"c"}); err != nil {
+		t.Fatalf("create pool P: %v", err)
+	}
+	pP, err := s.GetPool("P")
+	if err != nil || pP == nil || len(pP.Members) != 1 {
+		t.Fatalf("GetPool(P) = %+v, %v", pP, err)
+	}
+	e1 := pP.Members[0].Epoch
+	if e1 <= 0 {
+		t.Fatalf("expected a positive membership epoch for the first pool, got %d", e1)
+	}
+
+	// Remove P (CASCADE wipes membership + deletes c's health row), then
+	// re-create c into a different pool Q. The re-add gets a strictly
+	// greater epoch.
+	if removed, rerr := s.RemovePool("P"); rerr != nil || !removed {
+		t.Fatalf("RemovePool(P) = %v, %v", removed, rerr)
+	}
+	seedOAuthCred(t, s, "c")
+	if err := s.CreatePoolWithMembers("Q", "failover", []string{"c"}); err != nil {
+		t.Fatalf("recreate c into Q: %v", err)
+	}
+	pQ, err := s.GetPool("Q")
+	if err != nil || pQ == nil || len(pQ.Members) != 1 {
+		t.Fatalf("GetPool(Q) = %+v, %v", pQ, err)
+	}
+	e2 := pQ.Members[0].Epoch
+	if e2 <= e1 {
+		t.Fatalf("re-added member epoch %d must be strictly greater than the removed one %d (monotonic epoch broken)", e2, e1)
+	}
+
+	// The stale late failover from P (epoch e1) must NOT apply to the
+	// re-added c that now lives in Q at epoch e2.
+	until := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	wrote, err := s.SetCredentialHealthIfPoolMemberEpoch("c", "P", e1, "cooldown", until, "failover:429 stale")
+	if err != nil {
+		t.Fatalf("guarded epoch write (stale): %v", err)
+	}
+	if wrote {
+		t.Fatal("stale failover from removed pool P (epoch e1) wrongly persisted onto the re-added member in pool Q (Cluster A #2)")
+	}
+	if h, herr := s.GetCredentialHealth("c"); herr != nil || h != nil {
+		t.Fatalf("re-added c inherited a stale cooldown row: %+v, %v", h, herr)
+	}
+
+	// The genuinely-still-live member (Q, e2) must still persist (CRITICAL-1
+	// restart durability preserved).
+	wrote, err = s.SetCredentialHealthIfPoolMemberEpoch("c", "Q", e2, "cooldown", until, "failover:429 live")
+	if err != nil {
+		t.Fatalf("guarded epoch write (live): %v", err)
+	}
+	if !wrote {
+		t.Fatal("guarded epoch write skipped the genuinely-live member of Q (CRITICAL-1 durability regressed)")
+	}
+	h, herr := s.GetCredentialHealth("c")
+	if herr != nil || h == nil || h.Status != "cooldown" || !h.CooldownUntil.Equal(until) {
+		t.Fatalf("live member cooldown not persisted: %+v, %v", h, herr)
+	}
+}
+
+// TestSetCredentialHealthIfPoolMemberEpochLiveMemberSamePool pins the common
+// path: a still-live member failing over against its CURRENT (pool, epoch)
+// always persists, so monotonic-cooldown / round-9/11/14/15 durability is
+// intact for a genuinely-live member.
+func TestSetCredentialHealthIfPoolMemberEpochLiveMemberSamePool(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "m")
+	if err := s.CreatePoolWithMembers("pool", "failover", []string{"m"}); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	p, _ := s.GetPool("pool")
+	ep := p.Members[0].Epoch
+	until := time.Now().Add(5 * time.Minute).UTC().Truncate(time.Second)
+	wrote, err := s.SetCredentialHealthIfPoolMemberEpoch("m", "pool", ep, "cooldown", until, "429")
+	if err != nil || !wrote {
+		t.Fatalf("live same-pool/epoch write = %v, %v; want true, nil", wrote, err)
+	}
+	// A write carrying a wrong (mismatched) epoch for the SAME live pool
+	// must also no-op — defends against an epoch confusion bug.
+	w2, err := s.SetCredentialHealthIfPoolMemberEpoch("m", "pool", ep+999, "cooldown", until, "429")
+	if err != nil {
+		t.Fatalf("mismatched-epoch write err: %v", err)
+	}
+	if w2 {
+		t.Fatal("write with a mismatched epoch for the live pool wrongly committed")
 	}
 }
 

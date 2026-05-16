@@ -446,3 +446,119 @@ func TestPoolRotateGuardedAgainstConcurrentRemoval(t *testing.T) {
 		}
 	}
 }
+
+// TestPoolRotateEpochScopedRejectsCrossPoolReAdd is the Cluster A #3
+// regression. `pool rotate` snapshots the pool, resolves the active member,
+// then writes the cooldown. The round-15 name-only guard only checked the
+// active credential was a member of SOME pool. If the pool/member is removed
+// after the snapshot and the SAME name is re-added to ANOTHER pool before
+// the guarded write, the name-only guard's predicate is satisfied by the
+// successor, so the rotate would park the OTHER pool's member while
+// reporting a successful rotate of the original pool.
+//
+// The fix captures the active member's membership epoch from the snapshot
+// and gates the write on (active, this pool, that epoch). This test
+// reproduces the exact post-race store state the guarded write observes:
+// pool P snapshot resolved member c at epoch e1, but by write time c was
+// removed from P and re-added into Q at epoch e2. The store-level proof that
+// the (pool, epoch) predicate no-ops is
+// TestSetCredentialHealthIfPoolMemberEpochRejectsReAddedSuccessor; here we
+// assert the HANDLER end-to-end: the genuine rotate persists with the
+// correct epoch (must-not-regress), and after a real remove+cross-pool
+// re-add the rotate fails AND the re-added member in Q is never parked.
+func TestPoolRotateEpochScopedRejectsCrossPoolReAdd(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+	seedPoolCred(t, dbPath, dir, "c")
+	seedPoolCred(t, dbPath, dir, "d")
+
+	// Genuine rotate of pool P {c,d}: must persist c's cooldown with P's
+	// CURRENT epoch (must-not-regress half of the fix).
+	if err := handlePoolCommand([]string{"create", "--db", dbPath, "--members", "c,d", "P"}); err != nil {
+		t.Fatalf("pool create P: %v", err)
+	}
+	out := captureStdout(t, func() {
+		if err := handlePoolCommand([]string{"rotate", "--db", dbPath, "P"}); err != nil {
+			t.Fatalf("genuine rotate: %v", err)
+		}
+	})
+	if !strings.Contains(out, "c -> d") {
+		t.Errorf("genuine rotate output = %q; want c -> d", out)
+	}
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if h, herr := db.GetCredentialHealth("c"); herr != nil || h == nil || h.Status != "cooldown" {
+		_ = db.Close()
+		t.Fatalf("genuine rotate did not persist c cooldown: h=%+v err=%v", h, herr)
+	}
+	_ = db.Close()
+
+	// Now the cross-pool re-add. Remove P (CASCADE clears c/d health rows
+	// and advances the epoch), re-create c into a DIFFERENT pool Q. Q's
+	// member row carries a strictly greater epoch than P's snapshot did.
+	db, err = store.New(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	if _, rerr := db.RemovePool("P"); rerr != nil {
+		_ = db.Close()
+		t.Fatalf("RemovePool(P): %v", rerr)
+	}
+	if cerr := db.CreatePoolWithMembers("Q", "failover", []string{"c", "d"}); cerr != nil {
+		_ = db.Close()
+		t.Fatalf("recreate c,d into Q: %v", cerr)
+	}
+	qp, _ := db.GetPool("Q")
+	var cEpochInQ int64 = -1
+	for _, m := range qp.Members {
+		if m.Credential == "c" {
+			cEpochInQ = m.Epoch
+		}
+	}
+	if cEpochInQ <= 0 {
+		_ = db.Close()
+		t.Fatalf("c epoch in Q = %d; want positive", cEpochInQ)
+	}
+	_ = db.Close()
+
+	// A stale rotate command for the now-removed pool P. handlePoolRotate's
+	// GetPool("P") returns nil (P is gone), so the handler must fail with a
+	// "pool not found" error and persist NOTHING — in particular it must NOT
+	// park c (which now lives in Q at a greater epoch).
+	if rotErr := handlePoolCommand([]string{"rotate", "--db", dbPath, "P"}); rotErr == nil {
+		t.Fatal("rotate of a removed pool must fail, not silently succeed")
+	}
+
+	// INVARIANT: c (the cross-pool re-added successor in Q) must carry NO
+	// cooldown. The pre-fix name-only guard would have let a stale P-rotate
+	// write park it; the epoch-scoped guard rejects the stale epoch.
+	db, err = store.New(dbPath)
+	if err != nil {
+		t.Fatalf("final reopen db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	h, herr := db.GetCredentialHealth("c")
+	if herr != nil {
+		t.Fatalf("GetCredentialHealth(c): %v", herr)
+	}
+	if h != nil && h.Status == "cooldown" {
+		t.Fatalf("Cluster A #3: cross-pool re-added member c in Q was parked by a stale P-rotate: %+v", h)
+	}
+
+	// And a genuine rotate of Q now must still work with Q's epoch
+	// (epoch-scoped guard does not break the live path).
+	out = captureStdout(t, func() {
+		if rerr := handlePoolCommand([]string{"rotate", "--db", dbPath, "Q"}); rerr != nil {
+			t.Fatalf("genuine rotate of Q: %v", rerr)
+		}
+	})
+	if !strings.Contains(out, "c -> d") {
+		t.Errorf("genuine Q rotate output = %q; want c -> d", out)
+	}
+	h, herr = db.GetCredentialHealth("c")
+	if herr != nil || h == nil || h.Status != "cooldown" {
+		t.Fatalf("genuine Q rotate did not persist c cooldown at Q epoch: h=%+v err=%v", h, herr)
+	}
+}

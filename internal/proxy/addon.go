@@ -766,15 +766,33 @@ func (a *SluiceAddon) Request(f *mitmproxy.Flow) {
 	}
 
 	// Pass 2+3 on URL query.
-	if rawQ := f.Request.URL.RawQuery; bytesContainsAnyPhantomPrefix([]byte(rawQ)) {
+	//
+	// Round-18 #5: the prefix gate alone is INSUFFICIENT for pooled OAuth
+	// credentials. A pooled credential's access phantom is the R3
+	// pool-stable SYNTHETIC JWT (poolStablePhantomAccess) which has NO
+	// "SLUICE_PHANTOM" prefix — it is `header.payload.sig`. If an SDK puts
+	// the access token in a query parameter or path segment,
+	// bytesContainsAnyPhantomPrefix returns false, the swap is skipped, and
+	// the synthetic phantom JWT is forwarded upstream verbatim (request
+	// fails / phantom leaks). The body swap above already runs
+	// unconditionally; query/path must likewise run when any scoped pair's
+	// actual phantom bytes (including the prefix-less pooled JWT) are
+	// present. pairsPhantomPresentIn only matches phantom bytes that ARE in
+	// this destination's scoped pairs, so unrelated requests are not
+	// over-scanned and R3 byte-stability is untouched (we only trigger the
+	// existing swapPhantomBytes; the synthetic-JWT shape is unchanged).
+	if rawQ := f.Request.URL.RawQuery; bytesContainsAnyPhantomPrefix([]byte(rawQ)) ||
+		pairsPhantomPresentIn([]byte(rawQ), pairs) {
 		f.Request.URL.RawQuery = string(
 			a.swapPhantomBytes([]byte(rawQ), pairs, host, port, "URL query", false),
 		)
 	}
 
 	// Pass 2+3 on URL path. pathContext=true selects path escaping so
-	// secrets containing spaces get %20, not '+'.
-	if rawP := f.Request.URL.Path; bytesContainsAnyPhantomPrefix([]byte(rawP)) {
+	// secrets containing spaces get %20, not '+'. Same pooled-JWT
+	// consideration as the query swap above (#5).
+	if rawP := f.Request.URL.Path; bytesContainsAnyPhantomPrefix([]byte(rawP)) ||
+		pairsPhantomPresentIn([]byte(rawP), pairs) {
 		f.Request.URL.Path = string(
 			a.swapPhantomBytes([]byte(rawP), pairs, host, port, "URL path", true),
 		)
@@ -1689,6 +1707,37 @@ func pairPhantomPresentInRequest(f *mitmproxy.Flow, p phantomPair) bool {
 			return true
 		}
 		if contains([]byte(f.Request.URL.Path)) {
+			return true
+		}
+	}
+	return false
+}
+
+// pairsPhantomPresentIn reports whether the given byte slice contains the
+// actual phantom bytes (literal or either URL-encoded form) of ANY pair in
+// pairs. Used to gate the URL query/path swap so a pooled credential's
+// prefix-less R3 synthetic-JWT access phantom (poolStablePhantomAccess) is
+// detected and swapped even though bytesContainsAnyPhantomPrefix — which
+// only knows the literal "SLUICE_PHANTOM" prefix — would miss it (#5).
+//
+// This does NOT over-scan unrelated requests: pairs is already scoped to
+// the bindings/pool that match THIS request's destination + protocol
+// (buildPhantomPairs), and we only match phantom bytes that are genuinely
+// present. It does NOT change R3 byte-stability: the synthetic-JWT shape is
+// untouched; we merely let the existing swapPhantomBytes run on the
+// query/path when the pooled phantom is there.
+func pairsPhantomPresentIn(data []byte, pairs []phantomPair) bool {
+	if len(data) == 0 {
+		return false
+	}
+	for _, p := range pairs {
+		if len(p.phantom) > 0 && bytes.Contains(data, p.phantom) {
+			return true
+		}
+		if len(p.encodedPhantom) > 0 && bytes.Contains(data, p.encodedPhantom) {
+			return true
+		}
+		if len(p.encodedPhantomLower) > 0 && bytes.Contains(data, p.encodedPhantomLower) {
 			return true
 		}
 	}

@@ -140,6 +140,12 @@ type FailoverEvent struct {
 	Reason string // short tag: 429 | 403 | 401 | invalid_grant | invalid_token
 	Class  failoverClass
 	Until  time.Time // member cooldown expiry just applied
+	// Epoch is the From member's membership epoch in the resolver
+	// generation that produced this failover. The durable guarded write
+	// commits only if (From, Pool, Epoch) is still a live membership row,
+	// so a late callback firing after a remove/re-add cannot persist this
+	// cooldown onto the re-created same-name successor (Cluster A #2).
+	Epoch int64
 }
 
 // poolForResponse maps a response's CONNECT destination back to a pooled
@@ -388,7 +394,22 @@ func (a *SluiceAddon) handlePoolFailover(f *mitmproxy.Flow) {
 	// MarkCooldown takes the resolver's write lock; ResolveActive takes the
 	// read lock, so the next request observes the new active member with no
 	// dependency on the store-reconcile watcher.
-	pr.MarkCooldown(from, until, tag)
+	//
+	// Cluster A: capture the FROM member's pool+epoch identity from THIS
+	// resolver generation and thread it through MarkCooldown and the
+	// FailoverEvent. If the membership was removed and `from` re-added under
+	// the same name (a strictly greater epoch, or a different pool) before
+	// this stale write lands, the identity no longer matches and the
+	// re-created successor does NOT inherit this old response's cooldown.
+	idPool, idEpoch, idOK := pr.IdentityForMember(from)
+	if !idOK {
+		// `from` is no longer a member of any pool in the current
+		// generation (raced removal). There is no sound member to
+		// attribute this cooldown to; skip it entirely rather than write
+		// an unscoped cooldown a same-name re-add could inherit.
+		return
+	}
+	pr.MarkCooldownScoped(from, idPool, idEpoch, until, tag)
 
 	// (2) Recompute the active member now that `from` is cooling down. If
 	// every member is in cooldown ResolveActive degrades to the
@@ -437,6 +458,7 @@ func (a *SluiceAddon) handlePoolFailover(f *mitmproxy.Flow) {
 			Reason: tag,
 			Class:  class,
 			Until:  until,
+			Epoch:  idEpoch,
 		})
 	}
 }

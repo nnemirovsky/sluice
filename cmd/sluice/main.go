@@ -492,18 +492,22 @@ func main() {
 				reason := fmt.Sprintf("failover:%s", ev.Reason)
 				// Guarded write: this goroutine is detached and can fire
 				// AFTER a pool/credential removal already deleted the
-				// health row. SetCredentialHealthIfPoolMember upserts only
-				// when ev.From is still a live pool member, atomically, so
-				// a late failover cannot resurrect a removed credential's
-				// cooldown (which a later same-named credential would
-				// otherwise inherit via loadPoolResolver). A live member
-				// still gets the durable cooldown (CRITICAL-1 restart
-				// durability preserved).
-				switch wrote, herr := db.SetCredentialHealthIfPoolMember(ev.From, "cooldown", ev.Until, reason); {
+				// health row AND the same name was re-added into ANOTHER
+				// pool. SetCredentialHealthIfPoolMemberEpoch upserts only
+				// when (ev.From, ev.Pool, ev.Epoch) is STILL a live
+				// membership row, atomically, so a late failover from a
+				// removed pool cannot persist the old cooldown onto a
+				// re-added same-name member in a different pool (Cluster A
+				// #2). The name-only guard checked only that ev.From was in
+				// SOME pool, which the re-added successor satisfies. A
+				// genuinely-still-live member (same pool, same epoch) still
+				// gets the durable cooldown (CRITICAL-1 restart durability
+				// preserved).
+				switch wrote, herr := db.SetCredentialHealthIfPoolMemberEpoch(ev.From, ev.Pool, ev.Epoch, "cooldown", ev.Until, reason); {
 				case herr != nil:
 					log.Printf("[POOL-FAILOVER] durable health write for %q failed: %v", ev.From, herr)
 				case !wrote:
-					log.Printf("[POOL-FAILOVER] durable health write for %q skipped: no longer a live pool member (removed before failover landed)", ev.From)
+					log.Printf("[POOL-FAILOVER] durable health write for %q skipped: no longer a live member of pool %q at epoch %d (removed/re-added before failover landed)", ev.From, ev.Pool, ev.Epoch)
 				}
 			}
 			if failoverBroker != nil {

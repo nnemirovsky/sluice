@@ -22,10 +22,37 @@ type Pool struct {
 }
 
 // PoolMember is one credential entry in a pool. Position determines the
-// failover order (lowest first).
+// failover order (lowest first). Epoch is the value of the monotonic
+// pool_membership_epoch counter at the time this membership row was
+// inserted: a remove/re-add of the same (pool, credential) yields a
+// strictly greater epoch, so a stale in-flight failover write that carries
+// the OLD epoch can be told apart from its re-created successor and no-ops
+// instead of parking the new member with the old response's cooldown.
 type PoolMember struct {
 	Credential string
 	Position   int
+	Epoch      int64
+}
+
+// bumpMembershipEpochTx increments the single-row monotonic
+// pool_membership_epoch counter inside the supplied transaction and returns
+// the NEW value. Called on every pool create and pool remove so any
+// membership change advances the epoch; member inserts in the same
+// transaction stamp the returned value onto their rows. Monotonic across
+// the process lifetime and across restarts (the counter is durable).
+func bumpMembershipEpochTx(tx *sql.Tx) (int64, error) {
+	if _, err := tx.Exec(
+		"UPDATE pool_membership_epoch SET epoch = epoch + 1 WHERE id = 1",
+	); err != nil {
+		return 0, fmt.Errorf("bump membership epoch: %w", err)
+	}
+	var ep int64
+	if err := tx.QueryRow(
+		"SELECT epoch FROM pool_membership_epoch WHERE id = 1",
+	).Scan(&ep); err != nil {
+		return 0, fmt.Errorf("read membership epoch: %w", err)
+	}
+	return ep, nil
 }
 
 // CredentialHealth records whether a credential is currently eligible for
@@ -172,6 +199,15 @@ func (s *Store) CreatePoolWithMembers(name, strategy string, members []string) e
 		return fmt.Errorf("insert pool %q: %w", name, err)
 	}
 
+	// Advance the monotonic membership epoch and stamp it on every member
+	// inserted here. A pool removed and re-created under the same name (or a
+	// member removed and re-added) gets a strictly greater epoch, so a stale
+	// failover write carrying the OLD epoch cannot apply to the successor.
+	epoch, err := bumpMembershipEpochTx(tx)
+	if err != nil {
+		return err
+	}
+
 	for i, m := range members {
 		if err := validatePoolMemberTx(tx, m); err != nil {
 			return err
@@ -180,8 +216,8 @@ func (s *Store) CreatePoolWithMembers(name, strategy string, members []string) e
 			return err
 		}
 		if _, err := tx.Exec(
-			"INSERT INTO credential_pool_members (pool, credential, position) VALUES (?, ?, ?)",
-			name, m, i,
+			"INSERT INTO credential_pool_members (pool, credential, position, epoch) VALUES (?, ?, ?, ?)",
+			name, m, i, epoch,
 		); err != nil {
 			return fmt.Errorf("insert pool member %q: %w", m, err)
 		}
@@ -208,7 +244,7 @@ func (s *Store) GetPool(name string) (*Pool, error) {
 	}
 
 	rows, err := s.db.Query(
-		"SELECT credential, position FROM credential_pool_members WHERE pool = ? ORDER BY position", name,
+		"SELECT credential, position, epoch FROM credential_pool_members WHERE pool = ? ORDER BY position", name,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list pool members %q: %w", name, err)
@@ -216,7 +252,7 @@ func (s *Store) GetPool(name string) (*Pool, error) {
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var m PoolMember
-		if err := rows.Scan(&m.Credential, &m.Position); err != nil {
+		if err := rows.Scan(&m.Credential, &m.Position, &m.Epoch); err != nil {
 			return nil, fmt.Errorf("scan pool member: %w", err)
 		}
 		p.Members = append(p.Members, m)
@@ -252,7 +288,7 @@ func (s *Store) ListPools() ([]Pool, error) {
 	_ = rows.Close()
 
 	mrows, err := s.db.Query(
-		"SELECT pool, credential, position FROM credential_pool_members ORDER BY pool, position",
+		"SELECT pool, credential, position, epoch FROM credential_pool_members ORDER BY pool, position",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list pool members: %w", err)
@@ -261,7 +297,7 @@ func (s *Store) ListPools() ([]Pool, error) {
 	for mrows.Next() {
 		var pool string
 		var m PoolMember
-		if err := mrows.Scan(&pool, &m.Credential, &m.Position); err != nil {
+		if err := mrows.Scan(&pool, &m.Credential, &m.Position, &m.Epoch); err != nil {
 			return nil, fmt.Errorf("scan pool member: %w", err)
 		}
 		if p, ok := pools[pool]; ok {
@@ -328,6 +364,14 @@ func (s *Store) RemovePool(name string) (bool, error) {
 	n, _ := res.RowsAffected()
 
 	if n > 0 {
+		// Advance the membership epoch on removal too. A guarded write or a
+		// MarkCooldown still carrying this pool generation's epoch will no
+		// longer find a matching (credential, pool, epoch) row once the
+		// CASCADE has wiped the membership, so a late failover cannot
+		// resurrect the removed member's cooldown for a re-created successor.
+		if _, err := bumpMembershipEpochTx(tx); err != nil {
+			return false, err
+		}
 		// The CASCADE has now removed this pool's credential_pool_members
 		// rows. For each former member, drop its health row UNLESS it is
 		// still a member of some OTHER pool (the membership query runs
@@ -479,6 +523,34 @@ func (s *Store) SetCredentialHealth(credential, status string, cooldownUntil tim
 // The membership SELECT and the upsert share one transaction so a concurrent
 // removal cannot interleave between the check and the write.
 func (s *Store) SetCredentialHealthIfPoolMember(credential, status string, cooldownUntil time.Time, reason string) (wrote bool, err error) {
+	return s.setCredentialHealthGuarded(credential, "", -1, status, cooldownUntil, reason)
+}
+
+// SetCredentialHealthIfPoolMemberEpoch is the pool+epoch-scoped guarded
+// write. It commits the monotonic-extend cooldown upsert ONLY when a
+// credential_pool_members row exists for exactly (credential, pool, epoch),
+// with the membership check and the upsert in ONE transaction.
+//
+// This closes the remove/re-add aliasing hole that the name-only guard left
+// open (Cluster A #1/#2/#3). Sequence: pool P with member c (epoch e1) takes
+// a 429; remove P; recreate c into a new pool Q (epoch e2 > e1); the
+// detached failover goroutine — or a stale old-generation MarkCooldown, or
+// a raced `pool rotate` — fires SetCredentialHealthIfPoolMemberEpoch(c, "P",
+// e1, ...). The name-only guard would find c present (now in Q) and wrongly
+// persist the OLD response's cooldown onto the NEW member. The (pool, epoch)
+// predicate finds no row matching ("P", e1) and no-ops (wrote=false). A
+// genuinely-still-live member fires with its CURRENT (pool, epoch) and the
+// row matches, so CRITICAL-1 restart durability and the round-9/11/14/15
+// fixes are preserved.
+//
+// pool=="" with epoch<0 falls back to the legacy name-only predicate so
+// callers without pool/epoch context (and the store unit tests that
+// exercise the name-only path) are not regressed.
+func (s *Store) SetCredentialHealthIfPoolMemberEpoch(credential, pool string, epoch int64, status string, cooldownUntil time.Time, reason string) (wrote bool, err error) {
+	return s.setCredentialHealthGuarded(credential, pool, epoch, status, cooldownUntil, reason)
+}
+
+func (s *Store) setCredentialHealthGuarded(credential, pool string, epoch int64, status string, cooldownUntil time.Time, reason string) (wrote bool, err error) {
 	cu, verr := validateCredentialHealthArgs(credential, status, cooldownUntil)
 	if verr != nil {
 		return false, verr
@@ -491,14 +563,27 @@ func (s *Store) SetCredentialHealthIfPoolMember(credential, status string, coold
 	defer func() { _ = tx.Rollback() }()
 
 	var live int
-	qerr := tx.QueryRow(
-		"SELECT 1 FROM credential_pool_members WHERE credential = ? LIMIT 1", credential,
-	).Scan(&live)
+	var qerr error
+	if pool == "" && epoch < 0 {
+		// Legacy name-only predicate (no pool/epoch context).
+		qerr = tx.QueryRow(
+			"SELECT 1 FROM credential_pool_members WHERE credential = ? LIMIT 1", credential,
+		).Scan(&live)
+	} else {
+		// Pool+epoch-scoped predicate. A stale write carrying the OLD epoch
+		// (the membership row was removed and the credential re-added under
+		// the same name into another pool with a strictly greater epoch)
+		// finds no matching row and is a no-op.
+		qerr = tx.QueryRow(
+			"SELECT 1 FROM credential_pool_members WHERE credential = ? AND pool = ? AND epoch = ? LIMIT 1",
+			credential, pool, epoch,
+		).Scan(&live)
+	}
 	switch {
 	case errors.Is(qerr, sql.ErrNoRows):
-		// Not a live pool member: skip the durable write entirely so a
-		// removed credential's health row is never resurrected. No commit
-		// needed — nothing was written.
+		// Not a live member of THIS pool at THIS epoch: skip the durable
+		// write entirely so a removed/superseded membership's health row is
+		// never resurrected onto a re-created successor. No commit needed.
 		return false, nil
 	case qerr != nil:
 		return false, fmt.Errorf("check pool membership for %q: %w", credential, qerr)

@@ -209,26 +209,37 @@ func handlePoolRotate(args []string) error {
 	// recovery, same as auto-failover), so a rotated-away member rejoins the
 	// rotation once its cooldown expires.
 	//
-	// Finding 1 (round-15): use the guarded SetCredentialHealthIfPoolMember,
-	// NOT the unconditional SetCredentialHealth. `active` was resolved from a
-	// snapshot taken above; another process could remove the pool (or this
-	// member from it) between that snapshot and this write. The unconditional
-	// upsert would then RESURRECT a credential_health row for a credential no
-	// longer a live pool member — a later same-named credential/pool would
-	// inherit the stale cooldown. The guarded variant performs the
-	// pool-membership check and the upsert in one transaction, so a raced
-	// removal makes the write a no-op (wrote=false) instead of resurrecting
-	// the row. wrote=false means the rotate raced a pool removal: nothing was
-	// persisted and the in-memory rotate is meaningless (the pool is gone),
-	// so surface that to the operator as a failed/stale rotate rather than
-	// silently claiming success.
+	// Finding 1 (round-15) + Cluster A #3 (round-18): use the pool+epoch
+	// scoped guarded write, NOT the unconditional SetCredentialHealth and
+	// NOT the name-only guard. `active` was resolved from the snapshot `p`
+	// taken above; another process could remove this pool (or this member
+	// from it) AND re-add the same name into a DIFFERENT pool between that
+	// snapshot and this write. The name-only guard only checked that
+	// `active` was a member of SOME pool — the re-added successor satisfies
+	// that, so the rotate would park the OTHER pool's member while
+	// reporting a successful rotate of THIS pool. Capture `active`'s
+	// pool+epoch identity from the snapshot and gate the write on exactly
+	// (active, this pool, that epoch): a raced removal/re-add makes the
+	// write a no-op (wrote=false) because the snapshot's epoch no longer
+	// matches the live membership row, so we surface a failed/stale rotate
+	// instead of silently parking an unrelated pool's member.
+	var rotateEpoch int64 = -1
+	for _, m := range p.Members {
+		if m.Credential == active {
+			rotateEpoch = m.Epoch
+			break
+		}
+	}
+	if rotateEpoch < 0 {
+		return fmt.Errorf("pool %q rotate: resolved active member %q is not in the pool snapshot (membership changed under the rotate); re-check with \"sluice pool list %s\"", name, active, name)
+	}
 	until := time.Now().Add(vault.AuthFailCooldown)
-	wrote, err := db.SetCredentialHealthIfPoolMember(active, "cooldown", until, "manual rotate")
+	wrote, err := db.SetCredentialHealthIfPoolMemberEpoch(active, name, rotateEpoch, "cooldown", until, "manual rotate")
 	if err != nil {
 		return err
 	}
 	if !wrote {
-		return fmt.Errorf("pool %q rotate raced a concurrent pool/member removal: %q is no longer a live member of pool %q, so nothing was persisted; re-check the pool with \"sluice pool list %s\"", name, active, name, name)
+		return fmt.Errorf("pool %q rotate raced a concurrent pool/member removal or re-add: %q is no longer a live member of pool %q at the snapshotted epoch %d, so nothing was persisted; re-check the pool with \"sluice pool list %s\"", name, active, name, rotateEpoch, name)
 	}
 
 	// Recompute the new active member for operator feedback.

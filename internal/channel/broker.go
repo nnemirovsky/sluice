@@ -100,6 +100,16 @@ type Broker struct {
 	// so the resolve/detach interleave can be forced deterministically
 	// without sleeps. nil in production.
 	subDeadlineGate func()
+
+	// cancelAllAfterClearHook is a test-only seam invoked in CancelAll
+	// immediately after b.mu is released (post-#4-fix that is AFTER the
+	// terminal denies were already sent under the lock and the waiter map
+	// cleared). A test uses it to release a coalesced subscriber parked at
+	// its deadline so the CancelAll-vs-sub-deadline interleave is forced
+	// deterministically: pre-fix the deny was sent only AFTER this point so
+	// the released sub observed a lost wakeup; post-fix the deny is already
+	// buffered. nil in production.
+	cancelAllAfterClearHook func()
 }
 
 // waiter tracks a pending approval request and its response channel.
@@ -643,19 +653,49 @@ func (b *Broker) CancelAll() {
 		// shutdown (Finding 2).
 		b.recordCoalescedLocked(id, w.count)
 	}
-	b.waiters = make(map[string]waiter)
-	b.dedupIndex = make(map[string]string)
-	b.mu.Unlock()
 
-	// Send deny responses before closing done. This ensures goroutines in
-	// the select see the response on ch before they see done closed, so
-	// they return the response without an error. Coalesced subscribers are
-	// fanned the same deny on their buffered (cap 1) chans.
-	for id, w := range waiters {
+	// Send the deny to every primary and every coalesced subscriber WHILE
+	// STILL HOLDING b.mu, BEFORE clearing the waiter map — exactly mirroring
+	// the round-6 Resolve fix. Round-18 #4: the old code cleared b.waiters,
+	// released b.mu, and only THEN sent the denies. A coalesced subscriber
+	// whose deadline fired in that window took b.mu in detachSub, found NO
+	// waiter (map already cleared), returned immediately, and its
+	// post-detach non-blocking read missed the not-yet-sent buffered deny —
+	// so it returned a spurious "approval timeout" during shutdown instead
+	// of the cancel/deny.
+	//
+	// Sending under the lock closes that window: a subscriber whose deadline
+	// fires serializes against this section via detachSub's b.mu. It either
+	// detaches BEFORE this runs (it is gone from w.subs, gets no send, and
+	// legitimately returns its own timeout — it never coalesced under this
+	// shutdown decision) or AFTER (the deny is already buffered on its cap-1
+	// chan and waitSub's post-detach non-blocking read picks it up). There
+	// is no instant where a sub can observe "waiter gone AND deny not yet
+	// sent". The primary ch and every sub chan are buffered cap-1 and
+	// receive exactly one value, so these sends never block — holding the
+	// lock here is safe and cannot deadlock.
+	for _, w := range waiters {
 		w.ch <- ResponseDeny
 		for _, sub := range w.subs {
 			sub <- ResponseDeny
 		}
+	}
+	b.waiters = make(map[string]waiter)
+	b.dedupIndex = make(map[string]string)
+	b.mu.Unlock()
+
+	if b.cancelAllAfterClearHook != nil {
+		// Post-fix the denies were already delivered under the lock above,
+		// so a sub released here finds its deny buffered. Pre-fix the send
+		// loop ran AFTER this point, so the released sub saw a lost wakeup.
+		b.cancelAllAfterClearHook()
+	}
+
+	// cancelOnChannels calls channel implementations that may do blocking
+	// network I/O (Telegram message edit), so it must stay OUTSIDE b.mu.
+	// The deny responses were already delivered above, so a subscriber can
+	// no longer observe a spurious timeout regardless of how long these take.
+	for id := range waiters {
 		b.cancelOnChannels(id)
 	}
 

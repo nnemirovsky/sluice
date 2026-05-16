@@ -1652,3 +1652,115 @@ func TestBrokerResolveDetachLostWakeup(t *testing.T) {
 		t.Fatal("coalesced subscriber never returned (deadlock?)")
 	}
 }
+
+// TestBrokerCancelAllSubDeadlineLostWakeup is the round-18 #4 regression. It
+// deterministically forces the CancelAll-vs-coalesced-sub-deadline
+// interleave that re-opened the exact lost-wakeup window the round-6 Resolve
+// fix closed. Pre-fix CancelAll cleared the waiter map and released b.mu
+// BEFORE sending the terminal denies; a coalesced subscriber whose deadline
+// fired in that window took b.mu in detachSub, found NO waiter (already
+// cleared), and its post-detach non-blocking read missed the not-yet-sent
+// buffered deny — returning a spurious "approval timeout" during shutdown.
+// Post-fix CancelAll sends every primary/sub deny WHILE HOLDING b.mu, before
+// clearing the map, so the released subscriber's detachSub serializes
+// against the send: by the time its non-blocking read runs, ResponseDeny is
+// already buffered on its cap-1 chan and it returns the cancel deny cleanly.
+//
+// Forced with two seams, no sleeps for the critical ordering:
+//   - subDeadlineGate parks the subscriber at the very top of waitSub's
+//     deadline branch (before detachSub) until released.
+//   - cancelAllAfterClearHook fires in CancelAll right after b.mu is
+//     released (post-fix: AFTER the under-lock denies + map clear) and is
+//     where the test releases the subscriber so its detach/read races the
+//     terminal send exactly in the (pre-fix) lost-wakeup window.
+func TestBrokerCancelAllSubDeadlineLostWakeup(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const dest = "cancelall-lostwakeup.example.com"
+	const port = 443
+
+	// Long-lived primary so it stays pending while the sub coalesces.
+	primaryOut := make(chan result, 1)
+	go func() {
+		resp, err := broker.Request(dest, port, "https", 5*time.Second)
+		primaryOut <- result{resp, err}
+	}()
+	var primaryID string
+	for {
+		reqs := ch.getRequests()
+		if len(reqs) == 1 {
+			primaryID = reqs[0].ID
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Park the subscriber at the start of its deadline branch.
+	subAtGate := make(chan struct{})
+	releaseSub := make(chan struct{})
+	var gateOnce sync.Once
+	broker.subDeadlineGate = func() {
+		gateOnce.Do(func() { close(subAtGate) })
+		<-releaseSub
+	}
+
+	// Subscriber with a very short timeout: it coalesces onto the primary,
+	// then its deadline fires and it blocks in subDeadlineGate (still
+	// attached, detachSub not yet called).
+	subOut := make(chan result, 1)
+	go func() {
+		resp, err := broker.Request(dest, port, "https", 20*time.Millisecond)
+		subOut <- result{resp, err}
+	}()
+	for broker.CoalescedCount(primaryID) < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	<-subAtGate
+
+	// In CancelAll, after b.mu is released (post-fix: denies already sent
+	// under the lock + map cleared), release the parked subscriber so its
+	// detachSub + non-blocking read races the terminal send exactly in the
+	// pre-fix lost-wakeup window. Yield generously so the subscriber
+	// goroutine is scheduled before the hook returns.
+	broker.cancelAllAfterClearHook = func() {
+		close(releaseSub)
+		for i := 0; i < 1000; i++ {
+			runtime.Gosched()
+		}
+	}
+
+	broker.CancelAll()
+
+	pr := <-primaryOut
+	if pr.resp != ResponseDeny {
+		t.Fatalf("primary: expected ResponseDeny from CancelAll, got %v (err %v)", pr.resp, pr.err)
+	}
+
+	select {
+	case sr := <-subOut:
+		// The whole point of #4: the coalesced subscriber whose deadline
+		// fired in the CancelAll window must observe the shutdown DENY
+		// CLEANLY (the buffered cancel response via waitSub's post-detach
+		// non-blocking read), NOT a spurious "approval timeout" error.
+		//
+		// Both the clean cancel-deny and the spurious-timeout paths return
+		// the SAME ResponseDeny value (waitSub's timeout branch returns
+		// ResponseDeny + an error), so the resp value alone cannot tell
+		// them apart. The distinguishing signal is the error: the clean
+		// cancel path returns (ResponseDeny, nil); the lost-wakeup path
+		// returns (ResponseDeny, "approval timeout after ...").
+		if sr.resp != ResponseDeny {
+			t.Fatalf("coalesced subscriber got %v; want ResponseDeny", sr.resp)
+		}
+		if sr.err != nil {
+			t.Fatalf("coalesced subscriber got ResponseDeny but with error %v; want a "+
+				"CLEAN cancel deny — lost-wakeup: CancelAll cleared the waiter map "+
+				"then the sub's deadline fired before the terminal send, so the "+
+				"sub returned a spurious approval timeout instead of the buffered "+
+				"shutdown deny (round-18 #4)", sr.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("coalesced subscriber never returned after CancelAll (deadlock?)")
+	}
+}

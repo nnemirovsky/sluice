@@ -16,6 +16,88 @@ func mkPool(name string, members ...string) store.Pool {
 	return p
 }
 
+// mkPoolEpoch builds a pool whose members all carry the given membership
+// epoch, mirroring what the store stamps on credential_pool_members rows.
+func mkPoolEpoch(name string, epoch int64, members ...string) store.Pool {
+	p := store.Pool{Name: name, Strategy: store.PoolStrategyFailover}
+	for i, m := range members {
+		p.Members = append(p.Members, store.PoolMember{Credential: m, Position: i, Epoch: epoch})
+	}
+	return p
+}
+
+// TestMarkCooldownScopedRejectsReAddedSuccessor is the Cluster A #1
+// regression. The round-15 gate only checked the credential NAME was in the
+// current generation's member set. Sequence: pool P with member c (epoch e1)
+// takes a 429 on an in-flight request; c/P are removed and c is re-created
+// into a NEW pool Q (epoch e2 > e1); the OLD in-flight response's
+// MarkCooldown for c now lands. The name-only gate sees c present (it is a
+// member of Q now) and WRONGLY parks the re-created successor with the OLD
+// response's cooldown.
+//
+// Deterministic interleave (no sleeps): operations are explicitly ordered so
+// the stale gen1 MarkCooldownScoped(c, P, e1) runs AFTER gen2 published Q's
+// member set (c at epoch e2). Fail-before: c cooling in gen2. Pass-after:
+// the (pool, epoch) identity no longer matches so the write no-ops, and the
+// genuinely-live (c, Q, e2) cooldown still applies.
+func TestMarkCooldownScopedRejectsReAddedSuccessor(t *testing.T) {
+	shared := NewPoolHealth()
+
+	const e1 = int64(1)
+	const e2 = int64(2)
+
+	// gen1 (OLD): pool P with member c at epoch e1. An in-flight response
+	// resolved through gen1 and holds the gen1 resolver.
+	gen1 := NewPoolResolverShared([]store.Pool{mkPoolEpoch("P", e1, "c")}, nil, shared)
+
+	// gen2 (NEW): P removed; c re-created into pool Q at a strictly greater
+	// epoch e2. The rebuild publishes gen2's identity map.
+	gen2 := NewPoolResolverShared([]store.Pool{mkPoolEpoch("Q", e2, "c")}, nil, shared)
+	gen2.MergeLiveCooldowns(gen1)
+
+	// INTERLEAVE: the stale gen1 response records a failover cooldown for c
+	// using the identity it captured (P, e1) — AFTER gen2 published (c -> Q,
+	// e2). The identity no longer matches, so the write must be gated out.
+	gen1.MarkCooldownScoped("c", "P", e1, time.Now().Add(300*time.Second), "failover:429")
+
+	if until, cooling := gen2.CooldownUntil("c"); cooling {
+		t.Fatalf("Cluster A #1: stale (P,e1) MarkCooldownScoped parked the re-added successor c (Q,e2): until=%v", until)
+	}
+	if got, ok := gen2.ResolveActive("Q"); !ok || got != "c" {
+		t.Fatalf("Cluster A #1: re-added c must be active in Q; got %q,%v want c,true", got, ok)
+	}
+
+	// CRITICAL-1 preserved: the genuinely-live member failing over against
+	// its CURRENT identity (Q, e2) still records the cooldown.
+	gen2.MarkCooldownScoped("c", "Q", e2, time.Now().Add(300*time.Second), "failover:429 live")
+	if _, cooling := gen2.CooldownUntil("c"); !cooling {
+		t.Fatal("Cluster A #1 regressed CRITICAL-1: live (Q,e2) failover cooldown was dropped")
+	}
+}
+
+// TestMarkCooldownLegacyUnscopedStillGated pins that the legacy
+// identity-UNSCOPED MarkCooldown keeps the round-15 name-only
+// write-after-prune behavior (single-generation CLI/test callers are not
+// regressed): a non-member write is still gated, a member write still
+// applies.
+func TestMarkCooldownLegacyUnscopedStillGated(t *testing.T) {
+	shared := NewPoolHealth()
+	gen1 := NewPoolResolverShared([]store.Pool{mkPool("pool", "a", "x")}, nil, shared)
+	gen2 := NewPoolResolverShared([]store.Pool{mkPool("pool", "a")}, nil, shared)
+	gen2.MergeLiveCooldowns(gen1)
+
+	// Non-member "x": still gated by the name-only set (round-15 preserved).
+	gen1.MarkCooldown("x", time.Now().Add(300*time.Second), "failover:401")
+	if _, cooling := gen2.CooldownUntil("x"); cooling {
+		t.Fatal("legacy MarkCooldown lost the round-15 write-after-prune gate")
+	}
+	// Member "a": still applies.
+	gen2.MarkCooldown("a", time.Now().Add(300*time.Second), "429")
+	if _, cooling := gen2.CooldownUntil("a"); !cooling {
+		t.Fatal("legacy MarkCooldown wrongly gated a live member")
+	}
+}
+
 func TestResolveActivePassthroughForNonPool(t *testing.T) {
 	pr := NewPoolResolver(nil, nil)
 	got, ok := pr.ResolveActive("plain_cred")

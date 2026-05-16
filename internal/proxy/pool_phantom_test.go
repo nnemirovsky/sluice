@@ -268,6 +268,107 @@ func TestR3PoolPhantomByteIdenticalAcrossMemberSwitch(t *testing.T) {
 	}
 }
 
+// TestPooledAccessPhantomSwappedInQueryAndPath is the round-18 #5
+// regression. A pooled OAuth credential's access phantom is the R3
+// pool-stable SYNTHETIC JWT (poolStablePhantomAccess) — it has NO
+// "SLUICE_PHANTOM" prefix. The request-side URL query/path swap was gated
+// SOLELY on bytesContainsAnyPhantomPrefix, which only knows the literal
+// "SLUICE_PHANTOM" prefix. So when an SDK puts the access token in a query
+// parameter or a path segment, the gate returned false, the swap was
+// skipped, and the pool-stable JWT phantom was forwarded UPSTREAM verbatim
+// (request fails / phantom leaks). The fix also gates on
+// pairsPhantomPresentIn so the scoped pooled JWT triggers the existing
+// swap.
+//
+// Fail-before: the phantom JWT survives in RawQuery/Path. Pass-after: it is
+// replaced with the active member's real access token in BOTH. Header
+// placement still works, the SLUICE_PHANTOM-prefixed (refresh) phantom path
+// is unaffected, and the R3 byte-identical-across-member-switch guarantee
+// holds (the synthetic-JWT shape is untouched; we only added a detection
+// path that triggers the existing swapPhantomBytes).
+func TestPooledAccessPhantomSwappedInQueryAndPath(t *testing.T) {
+	addon, _, prPtr := setupPoolAddon(t, "memA", "memB")
+	client := setupAddonConn(addon, "auth.example.com:443")
+
+	poolAccessPhantom := poolStablePhantomAccess("codex_pool")
+	// Sanity: the pooled access phantom is a prefix-less synthetic JWT, so
+	// the old prefix-only gate genuinely could not see it.
+	if strings.HasPrefix(poolAccessPhantom, "SLUICE_PHANTOM") {
+		t.Fatalf("pooled access phantom unexpectedly carries the SLUICE_PHANTOM prefix: %q", poolAccessPhantom)
+	}
+	if bytesContainsAnyPhantomPrefix([]byte(poolAccessPhantom)) {
+		t.Fatal("pooled access phantom must NOT be detectable by bytesContainsAnyPhantomPrefix (that is the whole #5 bug)")
+	}
+
+	// --- Query-parameter placement. memA is active (position 0), so the
+	// phantom must be swapped for memA's real access token "A-access-old".
+	fq := newTestFlow(client, "GET",
+		"https://auth.example.com/v1/userinfo?access_token="+url.QueryEscape(poolAccessPhantom)+"&foo=bar")
+	addon.Request(fq)
+	gotQ := fq.Request.URL.RawQuery
+	if strings.Contains(gotQ, poolAccessPhantom) {
+		t.Fatalf("#5: pooled access phantom NOT swapped in URL query (forwarded upstream verbatim)\n query=%q", gotQ)
+	}
+	if !strings.Contains(gotQ, "A-access-old") {
+		t.Fatalf("#5: active member's real access token not injected into URL query\n query=%q", gotQ)
+	}
+
+	// --- Path-segment placement. ---
+	fp := newTestFlow(client, "GET",
+		"https://auth.example.com/v1/tokens/"+url.PathEscape(poolAccessPhantom)+"/info")
+	addon.Request(fp)
+	gotP := fp.Request.URL.Path
+	if strings.Contains(gotP, poolAccessPhantom) {
+		t.Fatalf("#5: pooled access phantom NOT swapped in URL path (forwarded upstream verbatim)\n path=%q", gotP)
+	}
+	if !strings.Contains(gotP, "A-access-old") {
+		t.Fatalf("#5: active member's real access token not injected into URL path\n path=%q", gotP)
+	}
+
+	// --- Header placement still works (must-not-regress). ---
+	fh := newTestFlow(client, "GET", "https://auth.example.com/v1/userinfo")
+	fh.Request.Header.Set("Authorization", "Bearer "+poolAccessPhantom)
+	addon.Request(fh)
+	auth := fh.Request.Header.Get("Authorization")
+	if strings.Contains(auth, poolAccessPhantom) || !strings.Contains(auth, "A-access-old") {
+		t.Fatalf("#5: header phantom swap regressed; Authorization=%q", auth)
+	}
+
+	// --- SLUICE_PHANTOM-prefixed (refresh) phantom in query still swaps via
+	// the unchanged prefix path (no regression to the non-pooled path). ---
+	fr := newTestFlow(client, "GET",
+		"https://auth.example.com/v1/refresh?rt="+url.QueryEscape("SLUICE_PHANTOM:codex_pool.refresh"))
+	addon.Request(fr)
+	if strings.Contains(fr.Request.URL.RawQuery, "SLUICE_PHANTOM") {
+		t.Fatalf("prefix-form refresh phantom not swapped in query: %q", fr.Request.URL.RawQuery)
+	}
+	if !strings.Contains(fr.Request.URL.RawQuery, "A-refresh-old") {
+		t.Fatalf("prefix-form refresh phantom not replaced with real refresh: %q", fr.Request.URL.RawQuery)
+	}
+
+	// --- R3 byte-identity preserved: fail member A over and confirm the
+	// phantom the agent would hold is still byte-identical (pool-stable),
+	// and the query swap now injects member B's real token. ---
+	before := poolStablePhantomAccess("codex_pool")
+	prPtr.Load().MarkCooldown("memA", timeFuture(), "429")
+	if got, _ := prPtr.Load().ResolveActive("codex_pool"); got != "memB" {
+		t.Fatalf("after cooldown active = %q, want memB", got)
+	}
+	after := poolStablePhantomAccess("codex_pool")
+	if before != after {
+		t.Fatalf("R3 byte-identity violated across member switch:\n before %q\n after  %q", before, after)
+	}
+	fq2 := newTestFlow(client, "GET",
+		"https://auth.example.com/v1/userinfo?access_token="+url.QueryEscape(after))
+	addon.Request(fq2)
+	if strings.Contains(fq2.Request.URL.RawQuery, after) {
+		t.Fatalf("#5: pooled access phantom not swapped after failover; query=%q", fq2.Request.URL.RawQuery)
+	}
+	if !strings.Contains(fq2.Request.URL.RawQuery, "B-access-old") {
+		t.Fatalf("#5: post-failover query swap did not inject member B's real access token; query=%q", fq2.Request.URL.RawQuery)
+	}
+}
+
 // TestR1RefreshAttributionByInjectedRefreshToken asserts a B-refresh
 // response is persisted to B's vault entry, never A's, even though both
 // members share one token URL (OAuthIndex.Match is 1:1 and collides).
