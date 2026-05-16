@@ -490,8 +490,20 @@ func main() {
 		go func() {
 			if db != nil {
 				reason := fmt.Sprintf("failover:%s", ev.Reason)
-				if herr := db.SetCredentialHealth(ev.From, "cooldown", ev.Until, reason); herr != nil {
+				// Guarded write: this goroutine is detached and can fire
+				// AFTER a pool/credential removal already deleted the
+				// health row. SetCredentialHealthIfPoolMember upserts only
+				// when ev.From is still a live pool member, atomically, so
+				// a late failover cannot resurrect a removed credential's
+				// cooldown (which a later same-named credential would
+				// otherwise inherit via loadPoolResolver). A live member
+				// still gets the durable cooldown (CRITICAL-1 restart
+				// durability preserved).
+				switch wrote, herr := db.SetCredentialHealthIfPoolMember(ev.From, "cooldown", ev.Until, reason); {
+				case herr != nil:
 					log.Printf("[POOL-FAILOVER] durable health write for %q failed: %v", ev.From, herr)
+				case !wrote:
+					log.Printf("[POOL-FAILOVER] durable health write for %q skipped: no longer a live pool member (removed before failover landed)", ev.From)
 				}
 			}
 			if failoverBroker != nil {

@@ -381,69 +381,136 @@ func (s *Store) PoolsForMember(credential string) ([]string, error) {
 	return pools, rows.Err()
 }
 
-// SetCredentialHealth upserts a credential's health row. When status is
-// "healthy" the cooldown is cleared. cooldown_until is stored as RFC3339.
-func (s *Store) SetCredentialHealth(credential, status string, cooldownUntil time.Time, reason string) error {
+// credentialHealthUpsertSQL is the monotonic-extend upsert shared by the
+// unconditional SetCredentialHealth and the guarded
+// SetCredentialHealthIfPoolMember. Both paths must apply the identical
+// cooldown-extend semantics so a guarded failover write and a manual-rotate
+// write cannot diverge in how they collapse competing cooldown TTLs.
+//
+// Monotonic extend for the durable row, mirroring MarkCooldown's in-memory
+// invariant. When the incoming write is a cooldown AND the stored row already
+// has a cooldown_until strictly in the future that is LATER than the incoming
+// one, keep the stored (longer) value: a short rate-limit cooldown must never
+// shorten a longer auth-failure cooldown, even on the durable side, so restart
+// durability matches the resolver. Any transition to "healthy"
+// (excluded.status = 'healthy', whose cooldown_until is NULL) always
+// overwrites, so the recovery/heal path is intact. cooldown_until is always
+// written as UTC RFC3339 by the callers, so the string comparison is a valid
+// chronological ordering; the datetime('now') guard makes an already expired
+// stored cooldown lose to the fresh future one (lazy expiry preserved).
+const credentialHealthUpsertSQL = `INSERT INTO credential_health (credential, status, cooldown_until, last_failure_reason, updated_at)
+	 VALUES (?, ?, ?, ?, datetime('now'))
+	 ON CONFLICT(credential) DO UPDATE SET
+	   cooldown_until = CASE
+	     WHEN excluded.status = 'cooldown'
+	       AND credential_health.cooldown_until IS NOT NULL
+	       AND credential_health.cooldown_until > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+	       AND credential_health.cooldown_until > excluded.cooldown_until
+	     THEN credential_health.cooldown_until
+	     ELSE excluded.cooldown_until
+	   END,
+	   status = CASE
+	     WHEN excluded.status = 'cooldown'
+	       AND credential_health.cooldown_until IS NOT NULL
+	       AND credential_health.cooldown_until > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+	       AND credential_health.cooldown_until > excluded.cooldown_until
+	     THEN credential_health.status
+	     ELSE excluded.status
+	   END,
+	   last_failure_reason = CASE
+	     WHEN excluded.status = 'cooldown'
+	       AND credential_health.cooldown_until IS NOT NULL
+	       AND credential_health.cooldown_until > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+	       AND credential_health.cooldown_until > excluded.cooldown_until
+	     THEN credential_health.last_failure_reason
+	     ELSE excluded.last_failure_reason
+	   END,
+	   updated_at = excluded.updated_at`
+
+// validateCredentialHealthArgs validates the inputs shared by both health
+// upsert entry points and returns the cooldown_until bind value (string or
+// nil) the upsert SQL expects.
+func validateCredentialHealthArgs(credential, status string, cooldownUntil time.Time) (interface{}, error) {
 	if credential == "" {
-		return fmt.Errorf("credential name is required")
+		return nil, fmt.Errorf("credential name is required")
 	}
 	if status != "healthy" && status != "cooldown" {
-		return fmt.Errorf("invalid health status %q: must be healthy or cooldown", status)
+		return nil, fmt.Errorf("invalid health status %q: must be healthy or cooldown", status)
 	}
-	var cu interface{}
 	if status == "cooldown" && !cooldownUntil.IsZero() {
-		cu = cooldownUntil.UTC().Format(time.RFC3339)
-	} else {
-		cu = nil
+		return cooldownUntil.UTC().Format(time.RFC3339), nil
 	}
-	// Monotonic extend for the durable row, mirroring MarkCooldown's
-	// in-memory invariant. When the incoming write is a cooldown AND the
-	// stored row already has a cooldown_until strictly in the future that
-	// is LATER than the incoming one, keep the stored (longer) value: a
-	// short rate-limit cooldown must never shorten a longer auth-failure
-	// cooldown, even on the durable side, so restart durability matches
-	// the resolver. Any transition to "healthy" (excluded.status =
-	// 'healthy', whose cooldown_until is NULL) always overwrites, so the
-	// recovery/heal path is intact. cooldown_until is always written as
-	// UTC RFC3339 by this function, so the string comparison is a valid
-	// chronological ordering; the datetime('now') guard makes an already
-	// expired stored cooldown lose to the fresh future one (lazy expiry
-	// preserved).
-	_, err := s.db.Exec(
-		`INSERT INTO credential_health (credential, status, cooldown_until, last_failure_reason, updated_at)
-		 VALUES (?, ?, ?, ?, datetime('now'))
-		 ON CONFLICT(credential) DO UPDATE SET
-		   cooldown_until = CASE
-		     WHEN excluded.status = 'cooldown'
-		       AND credential_health.cooldown_until IS NOT NULL
-		       AND credential_health.cooldown_until > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-		       AND credential_health.cooldown_until > excluded.cooldown_until
-		     THEN credential_health.cooldown_until
-		     ELSE excluded.cooldown_until
-		   END,
-		   status = CASE
-		     WHEN excluded.status = 'cooldown'
-		       AND credential_health.cooldown_until IS NOT NULL
-		       AND credential_health.cooldown_until > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-		       AND credential_health.cooldown_until > excluded.cooldown_until
-		     THEN credential_health.status
-		     ELSE excluded.status
-		   END,
-		   last_failure_reason = CASE
-		     WHEN excluded.status = 'cooldown'
-		       AND credential_health.cooldown_until IS NOT NULL
-		       AND credential_health.cooldown_until > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-		       AND credential_health.cooldown_until > excluded.cooldown_until
-		     THEN credential_health.last_failure_reason
-		     ELSE excluded.last_failure_reason
-		   END,
-		   updated_at = excluded.updated_at`,
-		credential, status, cu, nilIfEmpty(reason),
-	)
+	return nil, nil
+}
+
+// SetCredentialHealth upserts a credential's health row UNCONDITIONALLY. When
+// status is "healthy" the cooldown is cleared. cooldown_until is stored as
+// RFC3339. Used by callers that operate on a credential known to be live (the
+// manual-rotate path cools the resolver's currently-active member) and by the
+// store unit tests that exercise the raw upsert. The failover durable write
+// must NOT use this — it can race a pool/credential removal; it uses
+// SetCredentialHealthIfPoolMember instead.
+func (s *Store) SetCredentialHealth(credential, status string, cooldownUntil time.Time, reason string) error {
+	cu, err := validateCredentialHealthArgs(credential, status, cooldownUntil)
 	if err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(credentialHealthUpsertSQL, credential, status, cu, nilIfEmpty(reason)); err != nil {
 		return fmt.Errorf("set credential health %q: %w", credential, err)
 	}
 	return nil
+}
+
+// SetCredentialHealthIfPoolMember performs the same monotonic-extend upsert as
+// SetCredentialHealth, but ONLY when the credential is still a live member of
+// some pool, with the membership check and the upsert in a SINGLE
+// transaction. This closes the failover-vs-removal race: a detached failover
+// goroutine that fires AFTER a pool/credential removal (which deletes the
+// credential_health row in its own transaction) must not resurrect a health
+// row for a credential that no longer belongs to any pool. credential_health
+// is not FK-tied to live membership, so a resurrected stale cooldown would
+// otherwise be inherited by a later same-named credential the next time
+// loadPoolResolver seeds PoolHealth from ALL credential_health rows.
+//
+// Returns wrote=true when the row was upserted (credential is a live pool
+// member: CRITICAL-1 restart durability preserved) and wrote=false when the
+// write was skipped because the credential is no longer in any pool (a benign
+// no-op the caller logs — a removed member legitimately needs no cooldown).
+// The membership SELECT and the upsert share one transaction so a concurrent
+// removal cannot interleave between the check and the write.
+func (s *Store) SetCredentialHealthIfPoolMember(credential, status string, cooldownUntil time.Time, reason string) (wrote bool, err error) {
+	cu, verr := validateCredentialHealthArgs(credential, status, cooldownUntil)
+	if verr != nil {
+		return false, verr
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var live int
+	qerr := tx.QueryRow(
+		"SELECT 1 FROM credential_pool_members WHERE credential = ? LIMIT 1", credential,
+	).Scan(&live)
+	switch {
+	case errors.Is(qerr, sql.ErrNoRows):
+		// Not a live pool member: skip the durable write entirely so a
+		// removed credential's health row is never resurrected. No commit
+		// needed — nothing was written.
+		return false, nil
+	case qerr != nil:
+		return false, fmt.Errorf("check pool membership for %q: %w", credential, qerr)
+	}
+
+	if _, err := tx.Exec(credentialHealthUpsertSQL, credential, status, cu, nilIfEmpty(reason)); err != nil {
+		return false, fmt.Errorf("set credential health %q: %w", credential, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit: %w", err)
+	}
+	return true, nil
 }
 
 // GetCredentialHealth returns the health row for a credential, or nil if no

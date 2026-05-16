@@ -735,3 +735,104 @@ func TestAddCredentialMetaRejectsLivePoolMemberDowngrade(t *testing.T) {
 		t.Fatalf("non-member static upsert did not apply: %+v", fm)
 	}
 }
+
+// TestSetCredentialHealthIfPoolMemberLiveMemberPersists is case (a): a
+// credential that IS a live pool member must get its durable cooldown written
+// by the guarded failover path, preserving the CRITICAL-1 restart-durability
+// guarantee. Fail-before would exist if the guard skipped a live member;
+// pass-after asserts wrote=true and the row is readable with the cooldown.
+func TestSetCredentialHealthIfPoolMemberLiveMemberPersists(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "live")
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"live"}); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	until := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+
+	wrote, err := s.SetCredentialHealthIfPoolMember("live", "cooldown", until, "failover:401 auth fail")
+	if err != nil {
+		t.Fatalf("SetCredentialHealthIfPoolMember: %v", err)
+	}
+	if !wrote {
+		t.Fatal("guarded write skipped a LIVE pool member (CRITICAL-1 durability regressed)")
+	}
+	h, err := s.GetCredentialHealth("live")
+	if err != nil || h == nil {
+		t.Fatalf("GetCredentialHealth(live) = %+v, %v; want a persisted cooldown row", h, err)
+	}
+	if h.Status != "cooldown" {
+		t.Errorf("health status = %q, want cooldown", h.Status)
+	}
+	if !h.CooldownUntil.Equal(until) {
+		t.Errorf("cooldown_until = %v, want %v (durable cooldown not persisted)", h.CooldownUntil, until)
+	}
+}
+
+// TestSetCredentialHealthIfPoolMemberSkipsRemoved is case (b): once the
+// credential is no longer a live pool member (its pool — and health row — was
+// removed), a LATE-running failover goroutine's guarded write must be a no-op:
+// NO credential_health row may be (re)created, and a later same-named
+// credential added to a NEW pool must inherit NO stale cooldown.
+//
+// Fail-before: the old unconditional db.SetCredentialHealth upsert would
+// resurrect a credential_health row for the removed credential, which
+// loadPoolResolver later seeds into PoolHealth, so a same-named re-add starts
+// in cooldown. Pass-after: the guarded write returns wrote=false and writes
+// nothing.
+func TestSetCredentialHealthIfPoolMemberSkipsRemoved(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "gone")
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"gone"}); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+
+	// Pool removal deletes the member's credential_health row (round-8/9/11
+	// cleanup) AND drops it from credential_pool_members.
+	removed, err := s.RemovePool("p")
+	if err != nil || !removed {
+		t.Fatalf("RemovePool = %v, %v; want true, nil", removed, err)
+	}
+
+	// A failover goroutine for the just-removed credential lands LATE.
+	until := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	wrote, err := s.SetCredentialHealthIfPoolMember("gone", "cooldown", until, "failover:401 auth fail")
+	if err != nil {
+		t.Fatalf("SetCredentialHealthIfPoolMember (late failover): %v", err)
+	}
+	if wrote {
+		t.Fatal("late failover write resurrected a removed credential's health row (Finding)")
+	}
+	if h, herr := s.GetCredentialHealth("gone"); herr != nil || h != nil {
+		t.Fatalf("health row resurrected for a removed credential: %+v, %v", h, herr)
+	}
+
+	// A later same-named credential added to a NEW pool must inherit NO stale
+	// cooldown: ListCredentialHealth (what loadPoolResolver seeds from) must
+	// carry no row for "gone".
+	seedOAuthCred(t, s, "gone")
+	if err := s.CreatePoolWithMembers("p2", "failover", []string{"gone"}); err != nil {
+		t.Fatalf("recreate pool: %v", err)
+	}
+	rows, err := s.ListCredentialHealth()
+	if err != nil {
+		t.Fatalf("ListCredentialHealth: %v", err)
+	}
+	for _, r := range rows {
+		if r.Credential == "gone" {
+			t.Fatalf("same-named credential inherited a stale cooldown from a resurrected row: %+v", r)
+		}
+	}
+}
+
+// TestSetCredentialHealthIfPoolMemberValidates pins that the guarded variant
+// applies the same input validation as the unconditional path before touching
+// the DB (no transaction opened for invalid input).
+func TestSetCredentialHealthIfPoolMemberValidates(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.SetCredentialHealthIfPoolMember("", "cooldown", time.Now(), "x"); err == nil {
+		t.Error("empty credential name accepted")
+	}
+	if _, err := s.SetCredentialHealthIfPoolMember("c", "bogus", time.Time{}, ""); err == nil {
+		t.Error("invalid status accepted")
+	}
+}
