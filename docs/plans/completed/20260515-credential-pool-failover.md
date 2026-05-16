@@ -105,7 +105,29 @@ rotate` is an operator override, not the primary mechanism.
 - [x] update CLAUDE.md credential-pool/failover notes — added `### Credential pools and auto-failover` (pool concept, `sluice pool` CLI, migration 000006 tables, Phase 1 chokepoint + R1 fail-closed attribution + R3 pool-stable JWT, Phase 2 classification + synchronous failover + `cred_failover` audit + Telegram notice + cooldown TTLs).
 - [x] move plan to `docs/plans/completed/`.
 
-> **E2e gap (Testing Strategy item, honestly noted):** the dedicated two-fake-OAuth-upstreams pool-failover e2e (assert A used until 429 → switch to B → B's refreshed tokens land in B's vault not A's → phantom access JWT byte-identical across failover) was **not added**. Standing up a full e2e harness with JWT-issuing fake token endpoints, pool wiring through SOCKS5 + MITM, and 429-then-switch assertions is a substantial new harness beyond the reasonable scope of this verify+docs task. The failover behavior it would cover is already exercised by unit tests added in Tasks 2 & 3 (`internal/vault/pool_test.go`, `internal/proxy/pool_failover_test.go`): R1 collision/fail-closed, R3 phantom byte-identity, classification, synchronous health swap, cooldown TTL/lazy recovery, non-blocking notice. The existing non-container e2e suite was run in full (64 tests, all passing). Recommend tracking the pool-failover e2e as follow-up future work.
+> **E2e (Testing Strategy item — now implemented):** the dedicated
+> two-fake-OAuth-upstreams pool-failover e2e exists at
+> `e2e/pool_failover_test.go` (`TestPoolFailover_EndToEnd`, `e2e` build
+> tag, runs in CI's non-container E2E jobs). It stands up one TLS upstream
+> serving both an OAuth `/token` endpoint that mints **real JWT** access
+> tokens (HMAC-signed, per-member-and-per-refresh unique) and a protected
+> `/api` endpoint that returns 429 for member A's real access token and
+> 200 for member B's. It creates two OAuth members sharing one token URL
+> (the R1 collision), a `failover` pool over them, and a Bearer-header
+> binding to the API destination, all driven through the live SOCKS5 +
+> MITM proxy. Asserts: (a) member A used until `/api` 429s; (b) the next
+> API request fails over to member B and 200s (synchronous in-memory
+> health swap, no cooldown wait); (c) member B's rotated tokens land in
+> member B's vault entry and member A's vault entry is NOT clobbered with
+> B's tokens (Risk R1 attribution via the injected real refresh token,
+> JWT payload decoded to verify the `member` claim); (d) the phantom
+> access token the agent receives from `/token` is byte-identical before
+> and after the failover (Risk R3 pool-keyed synthetic JWT) and no real
+> upstream JWT or real refresh token ever leaks to the agent; the
+> `cred_failover` audit event is present. Proven non-vacuous: neutering
+> `PoolResolver.MarkCooldown` (so failover never switches members) makes
+> the test fail at assertion (b). The full non-container e2e suite was
+> run with the two new tests added: 61 top-level PASS / 0 FAIL.
 
 ## Out of scope / future work
 
