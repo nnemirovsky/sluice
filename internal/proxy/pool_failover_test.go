@@ -57,6 +57,17 @@ func TestClassifyFailover(t *testing.T) {
 		{"403 insufficient_quota", 403, `{"error":"insufficient_quota"}`, false, failoverRateLimited, "403"},
 		{"403 quota_exceeded", 403, `{"error":{"code":"quota_exceeded"}}`, false, failoverRateLimited, "403"},
 		{"403 unrelated -> noop", 403, `{"error":"forbidden: bad scope"}`, false, failoverNone, ""},
+		// Finding 1: a token-endpoint 403 carrying invalid_grant/invalid_token
+		// is an auth failure (consistent with the 400/401 token-endpoint path).
+		// The old code early-returned failoverNone in the 403 branch before the
+		// token-endpoint body check ever ran.
+		{"403 token-endpoint invalid_grant -> auth", 403, `{"error":"invalid_grant"}`, true, failoverAuthFailure, "invalid_grant"},
+		{"403 token-endpoint invalid_token -> auth", 403, `{"error":"invalid_token"}`, true, failoverAuthFailure, "invalid_token"},
+		// 403 + quota signal stays rate-limited (unchanged).
+		{"403 insufficient_quota (tokenEP) stays rate-limited", 403, `{"error":"insufficient_quota"}`, true, failoverRateLimited, "403"},
+		// 403 + invalid_grant but NOT a real token endpoint -> still noop
+		// (the body is only trusted on a real token URL).
+		{"403 invalid_grant but NOT token endpoint -> noop", 403, `{"error":"invalid_grant"}`, false, failoverNone, ""},
 		{"401 auth failure", 401, "", false, failoverAuthFailure, "401"},
 		{"token-endpoint invalid_grant", 400, `{"error":"invalid_grant"}`, true, failoverAuthFailure, "invalid_grant"},
 		{"token-endpoint invalid_token", 400, `{"error":"invalid_token"}`, true, failoverAuthFailure, "invalid_token"},
@@ -307,7 +318,7 @@ func TestPoolForResponseResolvesActiveMember(t *testing.T) {
 	client := setupAddonConn(addon, "auth.example.com:443")
 	f := newPoolRespFlow(client, 429, nil)
 
-	pool, member, pr, ok := addon.poolForResponse(f)
+	pool, member, _, pr, ok := addon.poolForResponse(f)
 	if !ok {
 		t.Fatal("poolForResponse: expected a pooled destination match")
 	}
@@ -392,7 +403,7 @@ func TestTokenEndpointHostFailoverOnPooledMember(t *testing.T) {
 	// (this is exactly the gap CRITICAL-2 describes). poolForResponse must
 	// still succeed via the token-URL index path.
 	f := newPoolRespFlow(client, 400, []byte(`{"error":"invalid_grant"}`))
-	pool, member, _, ok := addon.poolForResponse(f)
+	pool, member, _, _, ok := addon.poolForResponse(f)
 	if !ok {
 		t.Fatal("poolForResponse: token-endpoint response on a pooled member must be attributed (CRITICAL-2 fix); got ok=false")
 	}
@@ -497,7 +508,7 @@ func TestTokenEndpointFailoverAttributesInjectedMemberNotFirstIndex(t *testing.T
 	// poolForResponse must now attribute the failure to memB (the injected
 	// member), NOT memA (the first index entry).
 	f := newPoolRespFlowBody(client, 400, "B-refresh-old", []byte(`{"error":"invalid_grant"}`))
-	pool, member, _, ok := addon.poolForResponse(f)
+	pool, member, _, _, ok := addon.poolForResponse(f)
 	if !ok {
 		t.Fatal("poolForResponse: token-endpoint failure on a pooled member must be attributed")
 	}
@@ -614,7 +625,7 @@ func TestTokenEndpointFailover3MemberAttributesMiddleMember(t *testing.T) {
 	addon.refreshAttr.Tag("memB-refresh", "memB")
 
 	f := newPoolRespFlowBody(client, 401, "memB-refresh", []byte(`{"error":"invalid_token"}`))
-	pool, member, _, ok := addon.poolForResponse(f)
+	pool, member, _, _, ok := addon.poolForResponse(f)
 	if !ok || pool != "codex_pool" || member != "memB" {
 		t.Fatalf("poolForResponse got ok=%v pool=%q member=%q, want codex_pool/memB", ok, pool, member)
 	}
@@ -650,7 +661,7 @@ func TestTokenEndpointFailoverFallsBackToActiveMember(t *testing.T) {
 	}
 
 	f := newPoolRespFlowBody(client, 400, "untagged-refresh", []byte(`{"error":"invalid_grant"}`))
-	pool, member, _, ok := addon.poolForResponse(f)
+	pool, member, _, _, ok := addon.poolForResponse(f)
 	if !ok {
 		t.Fatal("poolForResponse: expected attribution via active-member fallback")
 	}

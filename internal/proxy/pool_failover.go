@@ -86,9 +86,14 @@ func classifyFailover(statusCode int, body []byte, isTokenEndpoint bool) (class 
 		if bodyContainsAny(body, "insufficient_quota", "quota_exceeded", "quota exhausted", "rate_limit_exceeded") {
 			return failoverRateLimited, ""
 		}
-		return failoverNone, ""
+		// NOT a quota signal: do not early-return. A 403 is still a non-2xx
+		// status, so a real token-endpoint body of invalid_grant/invalid_token
+		// must classify as auth-failure (consistent with the 400/401 path).
+		// The shared non-2xx token-endpoint check below handles it; a 403 from
+		// a non-token-endpoint with an unrelated body still resolves to
+		// failoverNone there (the body is only trusted on a real token URL).
 	}
-	// Non-4xx-status path. Only a real token-endpoint body may be classified
+	// Non-2xx-status path. Only a real token-endpoint body may be classified
 	// (invalid_grant/invalid_token), and only when the status is not a 2xx
 	// success. A 2xx token response is a healthy refresh, never a failover.
 	if isTokenEndpoint && (statusCode < 200 || statusCode > 299) {
@@ -133,21 +138,26 @@ type FailoverEvent struct {
 // poolForResponse maps a response's CONNECT destination back to a pooled
 // binding and returns the pool name + the member that was active for this
 // request. Returns ok=false when the destination is not bound to a pool.
-func (a *SluiceAddon) poolForResponse(f *mitmproxy.Flow) (pool, activeMember string, pr *vault.PoolResolver, ok bool) {
+//
+// proto is the protocol detected for THIS request (the same value used for
+// the protocol-scoped binding lookup). The caller threads it into the
+// cred_failover audit event so the audit records the real protocol of the
+// pooled binding (grpc / http2 / etc.) instead of a hardcoded "https".
+func (a *SluiceAddon) poolForResponse(f *mitmproxy.Flow) (pool, activeMember, proto string, pr *vault.PoolResolver, ok bool) {
 	if a.poolResolver == nil || a.resolver == nil {
-		return "", "", nil, false
+		return "", "", "", nil, false
 	}
 	pr = a.poolResolver.Load()
 	if pr == nil {
-		return "", "", nil, false
+		return "", "", "", nil, false
 	}
 	res := a.resolver.Load()
 	if res == nil {
-		return "", "", nil, false
+		return "", "", "", nil, false
 	}
 	host, port := connectTargetForFlow(a, f)
 	if host == "" {
-		return "", "", nil, false
+		return "", "", "", nil, false
 	}
 	// Finding 3: the failover binding lookup MUST use the same protocol the
 	// request-side injection (injectHeaders / buildPhantomPairs) used, not a
@@ -157,7 +167,7 @@ func (a *SluiceAddon) poolForResponse(f *mitmproxy.Flow) (pool, activeMember str
 	// detectRequestProtocol mirrors the injection path exactly (URL scheme
 	// then header refinement); for the common unscoped-binding case the
 	// result is still https-equivalent so behavior is unchanged.
-	proto := a.detectRequestProtocol(f, port).String()
+	proto = a.detectRequestProtocol(f, port).String()
 	for _, boundName := range res.CredentialsForDestination(host, port, proto) {
 		if !pr.IsPool(boundName) {
 			continue
@@ -176,7 +186,7 @@ func (a *SluiceAddon) poolForResponse(f *mitmproxy.Flow) (pool, activeMember str
 				// member of this pool (a membership change could have
 				// raced); otherwise fall through to ResolveActive.
 				if pr.PoolForMember(injected) == boundName {
-					return boundName, injected, pr, true
+					return boundName, injected, proto, pr, true
 				}
 			}
 		}
@@ -184,7 +194,7 @@ func (a *SluiceAddon) poolForResponse(f *mitmproxy.Flow) (pool, activeMember str
 		if !mok || member == "" {
 			continue
 		}
-		return boundName, member, pr, true
+		return boundName, member, proto, pr, true
 	}
 
 	// Token-endpoint path. An OAuth refresh hits the credential's token-URL
@@ -246,7 +256,7 @@ func (a *SluiceAddon) poolForResponse(f *mitmproxy.Flow) (pool, activeMember str
 			realRefresh := extractRequestRefreshToken(f.Request.Body, reqCT)
 			if owner, ok := a.refreshAttr.Peek(realRefresh); ok && owner != "" {
 				if ownerPool := pr.PoolForMember(owner); ownerPool != "" {
-					return ownerPool, owner, pr, true
+					return ownerPool, owner, proto, pr, true
 				}
 				// owner is no longer in any pool (membership change
 				// raced the failure); fall through to the active-member
@@ -261,20 +271,20 @@ func (a *SluiceAddon) poolForResponse(f *mitmproxy.Flow) (pool, activeMember str
 				log.Printf("[POOL-FAILOVER] pool %q: could not attribute "+
 					"token-endpoint failure via injected refresh token; "+
 					"falling back to active member %q", pool, active)
-				return pool, active, pr, true
+				return pool, active, proto, pr, true
 			}
 			// Last resort: a pooled index match if any (preserves prior
 			// behavior when even ResolveActive cannot decide; better than
 			// no attribution at all).
 			for _, c := range matches {
 				if pr.PoolForMember(c) != "" {
-					return pool, c, pr, true
+					return pool, c, proto, pr, true
 				}
 			}
-			return pool, matched, pr, true
+			return pool, matched, proto, pr, true
 		}
 	}
-	return "", "", nil, false
+	return "", "", "", nil, false
 }
 
 // handlePoolFailover is the Phase 2 entry point invoked from Response for
@@ -302,7 +312,7 @@ func (a *SluiceAddon) handlePoolFailover(f *mitmproxy.Flow) {
 	if f == nil || f.Response == nil || f.Request == nil {
 		return
 	}
-	pool, from, pr, ok := a.poolForResponse(f)
+	pool, from, proto, pr, ok := a.poolForResponse(f)
 	if !ok {
 		return
 	}
@@ -352,11 +362,14 @@ func (a *SluiceAddon) handlePoolFailover(f *mitmproxy.Flow) {
 		evt := audit.Event{
 			Destination: host,
 			Port:        port,
-			Protocol:    "https",
-			Verdict:     "failover",
-			Action:      "cred_failover",
-			Reason:      fmt.Sprintf("%s:%s->%s:%s", pool, from, to, tag),
-			Credential:  from,
+			// Same protocol used for the protocol-scoped binding lookup in
+			// poolForResponse, NOT a hardcoded "https". For a grpc/http2
+			// scoped pooled binding the audit must record the real protocol.
+			Protocol:   proto,
+			Verdict:    "failover",
+			Action:     "cred_failover",
+			Reason:     fmt.Sprintf("%s:%s->%s:%s", pool, from, to, tag),
+			Credential: from,
 		}
 		if err := a.auditLog.Log(evt); err != nil {
 			log.Printf("[POOL-FAILOVER] audit log error: %v", err)

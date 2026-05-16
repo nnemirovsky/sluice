@@ -1,11 +1,15 @@
 package proxy
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
 )
@@ -241,7 +245,7 @@ func TestSplitHost_TokenEndpointFailoverWithPlainCredSortingFirst(t *testing.T) 
 	// poolForResponse MUST attribute the failure to memB (the injected
 	// member), not return ok=false because the plain credential sorted first.
 	f := newPoolRespFlowBody(client, 400, "B-refresh-old", []byte(`{"error":"invalid_grant"}`))
-	pool, member, _, ok := addon.poolForResponse(f)
+	pool, member, _, _, ok := addon.poolForResponse(f)
 	if !ok {
 		t.Fatal("Finding 2: token-endpoint failure on a pooled member must be attributed even when a plain cred sorts first; got ok=false")
 	}
@@ -355,13 +359,27 @@ func TestFinding3_ProtocolScopedPooledBindingFailoverLookup(t *testing.T) {
 		t.Fatal("precondition: a 'https' lookup must NOT match the grpc-scoped binding (this is the Finding 3 bug)")
 	}
 
-	pool2, member, _, ok := addon.poolForResponse(f)
+	pool2, member, detProto, _, ok := addon.poolForResponse(f)
 	if !ok {
 		t.Fatal("Finding 3: protocol-scoped (grpc) pooled binding must be recognized on the failover path; got ok=false")
 	}
 	if pool2 != poolName || member != "gA" {
 		t.Fatalf("Finding 3: got pool=%q member=%q, want %s/gA", pool2, member, poolName)
 	}
+	if detProto != ProtoGRPC.String() {
+		t.Fatalf("Finding 2: poolForResponse detected protocol = %q, want %q", detProto, ProtoGRPC.String())
+	}
+
+	// Finding 2: the cred_failover audit event must record the SAME
+	// protocol that drove the binding lookup (grpc here), not a hardcoded
+	// "https". Wire a real audit logger and assert the persisted Protocol.
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	logger, lerr := audit.NewFileLogger(logPath)
+	if lerr != nil {
+		t.Fatalf("NewFileLogger: %v", lerr)
+	}
+	addon.auditLog = logger
 
 	var got FailoverEvent
 	gotCalled := make(chan struct{}, 1)
@@ -381,5 +399,33 @@ func TestFinding3_ProtocolScopedPooledBindingFailoverLookup(t *testing.T) {
 	}
 	if got.From != "gA" || got.Pool != poolName || got.Reason != "429" {
 		t.Fatalf("FailoverEvent = %+v, want from=gA pool=%s reason=429", got, poolName)
+	}
+
+	if cerr := logger.Close(); cerr != nil {
+		t.Fatalf("logger close: %v", cerr)
+	}
+	data, rerr := os.ReadFile(logPath)
+	if rerr != nil {
+		t.Fatalf("read audit log: %v", rerr)
+	}
+	var foundFailover bool
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var evt audit.Event
+		if uerr := json.Unmarshal([]byte(line), &evt); uerr != nil {
+			t.Fatalf("unmarshal audit line %q: %v", line, uerr)
+		}
+		if evt.Action != "cred_failover" {
+			continue
+		}
+		foundFailover = true
+		if evt.Protocol != ProtoGRPC.String() {
+			t.Fatalf("Finding 2: cred_failover audit Protocol = %q, want %q (must match the detected request protocol, not hardcoded https)", evt.Protocol, ProtoGRPC.String())
+		}
+	}
+	if !foundFailover {
+		t.Fatalf("no cred_failover audit event found in:\n%s", data)
 	}
 }
