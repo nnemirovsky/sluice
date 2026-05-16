@@ -1763,6 +1763,39 @@ func (s *Store) AddCredentialMeta(name, credType, tokenURL string) error {
 		return fmt.Errorf("check pool name collision for %q: %w", name, collErr)
 	}
 
+	// Live-pool-member downgrade guard. AddCredentialMeta is an upsert, so a
+	// re-add/update path could flip an EXISTING credential that is currently
+	// a live pool member to static / non-oauth / missing token_url. Pool
+	// creation validates members are oauth (validatePoolMemberTx), but this
+	// upsert bypasses that post-hoc and would leave the pool pointing at a
+	// member the pooled OAuth injection+failover code cannot use. Reject the
+	// downgrade only when the row already exists AND is a live pool member
+	// AND the new metadata is not a usable oauth credential. Benign updates
+	// (still oauth with a token_url, e.g. a token_url change) are allowed.
+	var existingType string
+	exErr := tx.QueryRow("SELECT cred_type FROM credential_meta WHERE name = ?", name).Scan(&existingType)
+	switch exErr {
+	case nil:
+		var memberPool string
+		memErr := tx.QueryRow(
+			"SELECT pool FROM credential_pool_members WHERE credential = ? ORDER BY pool LIMIT 1", name,
+		).Scan(&memberPool)
+		switch memErr {
+		case nil:
+			if credType != "oauth" || tokenURL == "" {
+				return fmt.Errorf("credential %q is a live member of pool %q; it must stay an oauth credential with a token_url (pooled failover cannot use a %s credential)", name, memberPool, credType)
+			}
+		case sql.ErrNoRows:
+			// not a pool member; any upsert is fine
+		default:
+			return fmt.Errorf("check pool membership for %q: %w", name, memErr)
+		}
+	case sql.ErrNoRows:
+		// brand-new credential; nothing to downgrade
+	default:
+		return fmt.Errorf("check existing credential meta for %q: %w", name, exErr)
+	}
+
 	if _, err := tx.Exec(
 		`INSERT INTO credential_meta (name, cred_type, token_url)
 		 VALUES (?, ?, ?)
@@ -1886,12 +1919,22 @@ func deleteCredentialMetaGuardedTx(tx *sql.Tx, name, deleteSQL string, deleteArg
 	if err != nil {
 		return 0, fmt.Errorf("delete credential meta: %w", err)
 	}
-	// Drop the health row in the same transaction so a removed credential
-	// never leaves a stale cooldown that a same-named recreation inherits.
-	if _, err := tx.Exec("DELETE FROM credential_health WHERE credential = ?", name); err != nil {
-		return 0, fmt.Errorf("delete credential health: %w", err)
-	}
 	n, _ := res.RowsAffected()
+	// Drop the health row in the same transaction ONLY when a meta row was
+	// actually deleted. The CAS caller appends a compare-and-swap predicate
+	// to deleteSQL, so a concurrent writer that changed cred_type/token_url
+	// makes the meta DELETE a no-op (0 rows). In that case the concurrent
+	// writer's metadata is correctly left intact; wiping its health row too
+	// would silently destroy a live cooldown it still owns. When 0 rows are
+	// deleted we leave both untouched and signal the no-op to the caller
+	// (RemoveCredentialMetaCAS turns n==0 into removed=false). A plain
+	// delete-by-name still removes the health row whenever it removes the
+	// meta row, so non-CAS semantics are unchanged.
+	if n > 0 {
+		if _, err := tx.Exec("DELETE FROM credential_health WHERE credential = ?", name); err != nil {
+			return 0, fmt.Errorf("delete credential health: %w", err)
+		}
+	}
 	return n, nil
 }
 

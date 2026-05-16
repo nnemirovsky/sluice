@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	migsqlite "github.com/golang-migrate/migrate/v4/database/sqlite"
@@ -3315,6 +3316,110 @@ func TestRemoveCredentialMetaCASMissingRow(t *testing.T) {
 	}
 	if !noConcurrent {
 		t.Error("expected noConcurrent=true on missing row")
+	}
+}
+
+// TestDeleteCredentialMetaGuardedTxNoOpKeepsHealth pins the round-10
+// regression: deleteCredentialMetaGuardedTx must NOT delete the
+// credential_health row when the meta DELETE affected zero rows. The CAS
+// caller appends a compare-and-swap predicate to the meta DELETE, so a
+// concurrent writer that changed cred_type/token_url makes the delete a no-op
+// (0 rows). The concurrent writer's metadata is correctly left intact;
+// wiping its still-live health row would silently destroy a cooldown it owns.
+//
+// Fail-before: the helper unconditionally deleted credential_health, so a CAS
+// no-op left the meta row but wiped the health row. Pass-after: a 0-row meta
+// delete leaves BOTH untouched; a matching delete still removes both.
+func TestDeleteCredentialMetaGuardedTxNoOpKeepsHealth(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.AddCredentialMeta("concurrent", "static", ""); err != nil {
+		t.Fatalf("seed meta: %v", err)
+	}
+	until := time.Now().Add(60 * time.Second).UTC().Truncate(time.Second)
+	if err := s.SetCredentialHealth("concurrent", "cooldown", until, "429 rate limited"); err != nil {
+		t.Fatalf("seed health: %v", err)
+	}
+
+	// Simulate the CAS rollback racing a concurrent writer: the CAS DELETE
+	// predicate no longer matches the current row, so the meta DELETE
+	// affects 0 rows.
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	n, err := deleteCredentialMetaGuardedTx(tx, "concurrent",
+		"DELETE FROM credential_meta WHERE name = ? AND cred_type = ?",
+		[]any{"concurrent", "oauth"}) // predicate fails: row is static
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("deleteCredentialMetaGuardedTx: %v", err)
+	}
+	if n != 0 {
+		_ = tx.Rollback()
+		t.Fatalf("expected 0 rows deleted on CAS no-op, got %d", n)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// The concurrent writer's metadata must still be there...
+	meta, err := s.GetCredentialMeta("concurrent")
+	if err != nil {
+		t.Fatalf("get meta: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("CAS no-op wrongly deleted the concurrent writer's meta row")
+	}
+	// ...and so must its live cooldown (this is the regression assertion).
+	h, err := s.GetCredentialHealth("concurrent")
+	if err != nil {
+		t.Fatalf("get health: %v", err)
+	}
+	if h == nil {
+		t.Fatal("CAS no-op wrongly deleted the concurrent writer's credential_health row")
+	}
+	if h.Status != "cooldown" {
+		t.Errorf("health status = %q, want cooldown (cooldown destroyed)", h.Status)
+	}
+
+	// A matching CAS delete still removes BOTH meta and health.
+	removed, noConcurrent, err := s.RemoveCredentialMetaCAS("concurrent", "static", "")
+	if err != nil {
+		t.Fatalf("matching CAS delete: %v", err)
+	}
+	if !removed || !noConcurrent {
+		t.Fatalf("matching CAS delete: removed=%v noConcurrent=%v, want true,true", removed, noConcurrent)
+	}
+	if m, _ := s.GetCredentialMeta("concurrent"); m != nil {
+		t.Error("matching CAS delete left meta row")
+	}
+	if hh, _ := s.GetCredentialHealth("concurrent"); hh != nil {
+		t.Error("matching CAS delete left health row")
+	}
+}
+
+// TestRemoveCredentialMetaStillDeletesHealth confirms the non-CAS
+// delete-by-name path is unchanged: deleting the meta row also deletes the
+// health row (so a same-named recreation does not inherit a stale cooldown).
+func TestRemoveCredentialMetaStillDeletesHealth(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.AddCredentialMeta("plain", "static", ""); err != nil {
+		t.Fatalf("seed meta: %v", err)
+	}
+	until := time.Now().Add(60 * time.Second).UTC().Truncate(time.Second)
+	if err := s.SetCredentialHealth("plain", "cooldown", until, "401 auth fail"); err != nil {
+		t.Fatalf("seed health: %v", err)
+	}
+
+	deleted, err := s.RemoveCredentialMeta("plain")
+	if err != nil || !deleted {
+		t.Fatalf("RemoveCredentialMeta = %v, %v; want true, nil", deleted, err)
+	}
+	if m, _ := s.GetCredentialMeta("plain"); m != nil {
+		t.Error("meta row survived RemoveCredentialMeta")
+	}
+	if h, _ := s.GetCredentialHealth("plain"); h != nil {
+		t.Error("health row survived RemoveCredentialMeta (stale cooldown would be inherited)")
 	}
 }
 

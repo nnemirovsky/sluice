@@ -281,12 +281,81 @@ func (s *Store) ListPools() ([]Pool, error) {
 
 // RemovePool deletes a pool and (via ON DELETE CASCADE) its members. Returns
 // true if a pool row was deleted.
+//
+// The members' credential_health rows are deleted in the SAME transaction so
+// a cooled member taken out with its pool does not leave a stale durable
+// cooldown. loadPoolResolver seeds the shared PoolHealth from ALL
+// credential_health rows, so an orphaned cooldown would otherwise be
+// inherited by the same credential when it is re-added to a new pool before
+// the old TTL expires. A member that is still a live member of ANOTHER pool
+// keeps its health row (its cooldown is still meaningful for that pool); only
+// members no longer in any pool after this delete have their health row
+// removed.
 func (s *Store) RemovePool(name string) (bool, error) {
-	res, err := s.db.Exec("DELETE FROM credential_pools WHERE name = ?", name)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Snapshot the pool's members before the cascade wipes the membership
+	// rows so we know whose health rows to consider for cleanup.
+	mrows, err := tx.Query(
+		"SELECT credential FROM credential_pool_members WHERE pool = ?", name,
+	)
+	if err != nil {
+		return false, fmt.Errorf("list members of pool %q: %w", name, err)
+	}
+	var members []string
+	for mrows.Next() {
+		var c string
+		if scanErr := mrows.Scan(&c); scanErr != nil {
+			_ = mrows.Close()
+			return false, fmt.Errorf("scan pool member: %w", scanErr)
+		}
+		members = append(members, c)
+	}
+	if mrowsErr := mrows.Err(); mrowsErr != nil {
+		_ = mrows.Close()
+		return false, fmt.Errorf("iterate pool members: %w", mrowsErr)
+	}
+	_ = mrows.Close()
+
+	res, err := tx.Exec("DELETE FROM credential_pools WHERE name = ?", name)
 	if err != nil {
 		return false, fmt.Errorf("delete pool %q: %w", name, err)
 	}
 	n, _ := res.RowsAffected()
+
+	if n > 0 {
+		// The CASCADE has now removed this pool's credential_pool_members
+		// rows. For each former member, drop its health row UNLESS it is
+		// still a member of some OTHER pool (the membership query runs
+		// post-cascade, so any remaining row means another pool still owns
+		// the credential and its cooldown stays meaningful).
+		for _, c := range members {
+			var stillPooled int
+			err := tx.QueryRow(
+				"SELECT 1 FROM credential_pool_members WHERE credential = ? LIMIT 1", c,
+			).Scan(&stillPooled)
+			switch {
+			case errors.Is(err, sql.ErrNoRows):
+				if _, delErr := tx.Exec(
+					"DELETE FROM credential_health WHERE credential = ?", c,
+				); delErr != nil {
+					return false, fmt.Errorf("delete health for former pool member %q: %w", c, delErr)
+				}
+			case err != nil:
+				return false, fmt.Errorf("check residual pool membership for %q: %w", c, err)
+			default:
+				// Still a member of another pool; leave its health row.
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit: %w", err)
+	}
 	return n > 0, nil
 }
 

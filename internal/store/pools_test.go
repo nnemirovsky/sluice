@@ -596,3 +596,142 @@ func TestRemoveCredentialMetaCASGuardsLivePoolMember(t *testing.T) {
 		t.Fatal("CAS wiped a concurrent writer's row despite the predicate mismatch")
 	}
 }
+
+// TestRemovePoolDeletesMemberHealth pins Finding 1: RemovePool must delete the
+// credential_health rows of the pool's members in the same transaction so a
+// cooled member taken out with its pool does not leave a stale durable
+// cooldown that loadPoolResolver (which seeds the shared PoolHealth from ALL
+// credential_health rows) would inherit when the credential is re-added to a
+// NEW pool before the old TTL expires.
+//
+// Fail-before: RemovePool only DELETEd credential_pools (members cascaded),
+// leaving the health row -> GetCredentialHealth still returns the cooldown.
+// Pass-after: the member's health row is gone.
+func TestRemovePoolDeletesMemberHealth(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "m")
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"m"}); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	until := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	if err := s.SetCredentialHealth("m", "cooldown", until, "429 rate limited"); err != nil {
+		t.Fatalf("cool member: %v", err)
+	}
+
+	removed, err := s.RemovePool("p")
+	if err != nil || !removed {
+		t.Fatalf("RemovePool = %v, %v; want true, nil", removed, err)
+	}
+
+	// The former member's durable cooldown must be gone so re-adding it to a
+	// new pool before the old TTL expires yields a healthy member.
+	h, err := s.GetCredentialHealth("m")
+	if err != nil {
+		t.Fatalf("GetCredentialHealth: %v", err)
+	}
+	if h != nil {
+		t.Fatalf("member health row survived RemovePool (stale cooldown inherited): %+v", h)
+	}
+}
+
+// TestRemovePoolSparesStillPooledMemberHealth is the negative case for
+// Finding 1: a member that is STILL a live member of another pool after the
+// removal must keep its health row (its cooldown is still meaningful for that
+// pool). The one-credential-one-pool invariant is enforced at the
+// application layer, so a second membership is injected via raw SQL to
+// exercise the residual-membership defensive branch (the same reason
+// PoolsForMember returns a slice).
+func TestRemovePoolSparesStillPooledMemberHealth(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "m")
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"m"}); err != nil {
+		t.Fatalf("create pool p: %v", err)
+	}
+	// "m" also belongs to pool q (legacy/pre-invariant row injected directly).
+	if _, err := s.db.Exec("INSERT INTO credential_pools (name, strategy) VALUES ('q', 'failover')"); err != nil {
+		t.Fatalf("insert pool q: %v", err)
+	}
+	if _, err := s.db.Exec("INSERT INTO credential_pool_members (pool, credential, position) VALUES ('q', 'm', 0)"); err != nil {
+		t.Fatalf("insert q membership: %v", err)
+	}
+	until := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	if err := s.SetCredentialHealth("m", "cooldown", until, "401 auth fail"); err != nil {
+		t.Fatalf("cool member: %v", err)
+	}
+
+	removed, err := s.RemovePool("p")
+	if err != nil || !removed {
+		t.Fatalf("RemovePool(p) = %v, %v; want true, nil", removed, err)
+	}
+
+	// "m" is still in pool q, so its cooldown must be preserved.
+	h, err := s.GetCredentialHealth("m")
+	if err != nil {
+		t.Fatalf("GetCredentialHealth: %v", err)
+	}
+	if h == nil {
+		t.Fatal("RemovePool(p) wiped the health row of a member still in pool q")
+	}
+	if h.Status != "cooldown" {
+		t.Errorf("health status = %q, want cooldown (cooldown for still-pooled member destroyed)", h.Status)
+	}
+}
+
+// TestAddCredentialMetaRejectsLivePoolMemberDowngrade pins Finding 2:
+// AddCredentialMeta is an upsert, and a re-add/update path could flip an
+// existing credential that is a LIVE pool member to static / non-oauth /
+// missing token_url, leaving the pool pointing at a member the pooled OAuth
+// injection+failover code cannot use. The downgrade must be rejected; benign
+// updates (still oauth with a token_url) and non-member upserts must still
+// work.
+func TestAddCredentialMetaRejectsLivePoolMemberDowngrade(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "poolcred")
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"poolcred"}); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+
+	// Downgrade a live pool member to static -> rejected, row unchanged.
+	if err := s.AddCredentialMeta("poolcred", "static", ""); err == nil {
+		t.Fatal("expected AddCredentialMeta to reject downgrading a live pool member to static")
+	}
+	meta, err := s.GetCredentialMeta("poolcred")
+	if err != nil {
+		t.Fatalf("get meta: %v", err)
+	}
+	if meta == nil || meta.CredType != "oauth" || meta.TokenURL == "" {
+		t.Fatalf("live pool member meta was mutated by a rejected downgrade: %+v", meta)
+	}
+
+	// Dropping the token_url while still "oauth" is also a downgrade
+	// (pooled failover needs a token endpoint). AddCredentialMeta's own
+	// oauth-needs-token_url validation rejects this before the guard, which
+	// still leaves the row unchanged — the property under test.
+	if err := s.AddCredentialMeta("poolcred", "oauth", ""); err == nil {
+		t.Fatal("expected AddCredentialMeta to reject a live pool member losing its token_url")
+	}
+	if m, _ := s.GetCredentialMeta("poolcred"); m == nil || m.TokenURL == "" {
+		t.Fatalf("token_url drop mutated the live pool member row: %+v", m)
+	}
+
+	// Benign update: still oauth, new token_url -> allowed.
+	if err := s.AddCredentialMeta("poolcred", "oauth", "https://new.example.com/token"); err != nil {
+		t.Fatalf("benign oauth token_url change on a pool member rejected: %v", err)
+	}
+	m2, _ := s.GetCredentialMeta("poolcred")
+	if m2 == nil || m2.TokenURL != "https://new.example.com/token" {
+		t.Fatalf("benign token_url change not applied: %+v", m2)
+	}
+
+	// Non-member credential: static upsert still allowed (no regression).
+	if err := s.AddCredentialMeta("freecred", "oauth", "https://auth.example.com/token"); err != nil {
+		t.Fatalf("seed freecred: %v", err)
+	}
+	if err := s.AddCredentialMeta("freecred", "static", ""); err != nil {
+		t.Fatalf("static upsert of a non-pool-member credential was wrongly rejected: %v", err)
+	}
+	fm, _ := s.GetCredentialMeta("freecred")
+	if fm == nil || fm.CredType != "static" {
+		t.Fatalf("non-member static upsert did not apply: %+v", fm)
+	}
+}
