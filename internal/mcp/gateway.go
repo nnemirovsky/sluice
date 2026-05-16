@@ -225,7 +225,13 @@ func (gw *Gateway) HandleToolCall(req CallToolParams) (*ToolResult, error) {
 		}
 		log.Printf("[MCP ASK] %s (args: %s)", req.Name, argsStr)
 		timeout := time.Duration(gw.timeoutSec) * time.Second
-		resp, err := gw.broker.Request(req.Name, 0, "mcp", timeout, channel.WithToolArgs(argsStr))
+		// MCP tool calls opt out of broker-level coalescing: two calls to
+		// the same tool with different ToolArgs are semantically distinct
+		// and feed arg-sensitive ContentInspector/exec rules, so each must
+		// get its own prompt. A "dest:port" dedup key (req.Name + port 0)
+		// would wrongly collapse them.
+		resp, err := gw.broker.Request(req.Name, 0, "mcp", timeout,
+			channel.WithToolArgs(argsStr), channel.WithNoCoalesce())
 		if err != nil {
 			gw.logAudit(req.Name, "tool_call", policy.Deny)
 			return &ToolResult{

@@ -1,0 +1,318 @@
+package proxy
+
+import (
+	"sync"
+	"time"
+
+	uuid "github.com/satori/go.uuid"
+)
+
+// flowAttrTTL bounds how long a flow-id -> injected-member tag is retained.
+// An HTTP request/response round-trip completes in well under a second in
+// practice; a generous TTL absorbs slow upstreams while still bounding the
+// map so a flow whose response never arrives cannot leak the tag forever.
+// The tag is also deleted on first successful lookup (single-use per flow).
+const flowAttrTTL = 5 * time.Minute
+
+// flowInjectedMember maps a go-mitmproxy Flow ID to the pool member whose
+// credential was injected into THAT request at injection time (pass-1 header
+// inject / pass-2 phantom swap in Requestheaders/Request).
+//
+// This is the join key for the API-host failover attribution bug (Finding
+// 1). A pooled API-host failover (HTTP 429 / 403-quota) must be attributed
+// to the member that was ACTIVE WHEN THE REQUEST WAS SENT, not the member
+// that happens to be active when the response is processed. With concurrent
+// in-flight requests both backed by member A, request1's 429 cools A and the
+// pool switches to B; if request2's 429 is then attributed via a
+// response-time ResolveActive it would wrongly cool B (now active) and park
+// both accounts. The flow ID is stable across Requestheaders -> Request ->
+// Response for one HTTP request (or HTTP/2 stream), so recording the
+// resolved member per flow at injection time and reading it on the matching
+// response pins attribution to the request's own injected member.
+type flowInjectedMember struct {
+	mu      sync.Mutex
+	entries map[uuid.UUID]flowAttrEntry
+}
+
+type flowAttrEntry struct {
+	member  string
+	expires time.Time
+}
+
+func newFlowInjectedMember() *flowInjectedMember {
+	return &flowInjectedMember{entries: make(map[uuid.UUID]flowAttrEntry)}
+}
+
+// Tag records that the given pool member's credential was injected for the
+// request identified by flowID. Idempotent: pass-1 (injectHeaders) and
+// pass-2 (buildPhantomPairs) both resolve the same member for one flow, so
+// recording twice is harmless. A best-effort opportunistic sweep of expired
+// entries keeps the map bounded without a background goroutine.
+func (m *flowInjectedMember) Tag(flowID uuid.UUID, member string) {
+	if member == "" || flowID == uuid.Nil {
+		return
+	}
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.entries) > 0 {
+		for k, e := range m.entries {
+			if now.After(e.expires) {
+				delete(m.entries, k)
+			}
+		}
+	}
+	m.entries[flowID] = flowAttrEntry{member: member, expires: now.Add(flowAttrTTL)}
+}
+
+// Recover returns the member tagged for the given flow ID and removes the
+// entry (single-use: a flow's response is processed exactly once). Returns
+// ("", false) when no live tag exists — the caller falls back to
+// response-time ResolveActive.
+func (m *flowInjectedMember) Recover(flowID uuid.UUID) (string, bool) {
+	if flowID == uuid.Nil {
+		return "", false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[flowID]
+	if !ok {
+		return "", false
+	}
+	delete(m.entries, flowID)
+	if time.Now().After(e.expires) {
+		return "", false
+	}
+	return e.member, true
+}
+
+// Peek returns the member tagged for the given flow ID WITHOUT removing the
+// entry. Returns ("", false) when no live tag exists.
+//
+// Peek exists for poolForResponse's API-host failover path. That path
+// iterates CredentialsForDestination(dest:port), which can return MULTIPLE
+// matching pools for one destination. A consuming Recover inside that loop
+// would let the FIRST matching pool consume the tag even when the tag
+// actually belongs to a LATER pool, starving the true owner and forcing a
+// blind ResolveActive on an unrelated pool (the round-12 bug). A single
+// non-consuming Peek before/independent of the loop serves the whole
+// iteration so attribution is decided once, by membership, against the one
+// pool the injected member actually belongs to.
+//
+// poolForResponse is invoked exactly once per response (one flow ->
+// one Response callback -> one poolForResponse call), so not deleting the
+// entry here does not re-attribute across responses; the entry is bounded
+// by flowAttrTTL and the opportunistic sweep in Tag. The consuming Recover
+// is retained for any caller that requires exactly-once semantics.
+func (m *flowInjectedMember) Peek(flowID uuid.UUID) (string, bool) {
+	if flowID == uuid.Nil {
+		return "", false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[flowID]
+	if !ok {
+		return "", false
+	}
+	if time.Now().After(e.expires) {
+		return "", false
+	}
+	return e.member, true
+}
+
+// Delete removes the tag for the given flow ID if present. It is a no-op
+// when flowID is uuid.Nil or no entry exists.
+//
+// Finding 1: the API-host failover path uses a NON-consuming Peek (a
+// destination can map to multiple candidate pools and a consuming Recover
+// inside that loop would let the first pool steal a later pool's tag, the
+// round-12 bug). Because Peek does not delete, a COMPLETED pooled request's
+// tag would otherwise linger for the full flowAttrTTL (5 min). Under
+// sustained pooled traffic that makes Tag's opportunistic whole-map sweep
+// O(n) on every new request and lets the map grow unboundedly within the
+// TTL window. The buffered Response handler calls Delete keyed by f.Id once
+// it has finished poolForResponse (API-host AND token-endpoint use happen
+// within that single poolForResponse call), so a completed request's tag is
+// freed immediately instead of waiting out the TTL. The TTL + Tag sweep
+// remain as a backstop for flows that never complete a buffered Response
+// (streamed responses, abandoned/aborted flows whose Response callback never
+// fires).
+func (m *flowInjectedMember) Delete(flowID uuid.UUID) {
+	if flowID == uuid.Nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.entries, flowID)
+}
+
+// refreshAttrTTL is how long a real-refresh-token -> member tag is retained.
+// An OAuth refresh round-trip (agent POSTs refresh_token, upstream answers
+// with rotated tokens) completes in well under a second in practice; a
+// generous TTL absorbs slow upstreams and clock skew while still bounding
+// the map so a member that never sees its response cannot leak the tag
+// forever. The tag is also deleted on first successful lookup.
+const refreshAttrTTL = 5 * time.Minute
+
+// refreshAttribution maps the REAL refresh token sluice injected into an
+// outbound OAuth refresh-grant request to the pool member that owns it.
+//
+// This is the join key for Risk R1: two pool members share one token URL,
+// so OAuthIndex.Match is 1:1 and cannot tell which member a token-endpoint
+// response belongs to. The injected real refresh token, by contrast, is
+// unique per member and is present verbatim in the RFC-6749 refresh-grant
+// request body (`refresh_token=<value>`). Recording member-by-injected-
+// refresh-token at pass-2 swap time and recovering it on the matching
+// response is the only attribution that cannot misfile B's rotated tokens
+// under A. The access token is NOT a valid key (it is not echoed in the
+// refresh-grant request body), and the client connection is NOT a valid key
+// (one HTTP/2 connection multiplexes both members' streams).
+type refreshAttribution struct {
+	mu      sync.Mutex
+	entries map[string]refreshAttrEntry
+}
+
+// refreshAttrEntry records the member a real refresh token was injected for,
+// plus the INJECTION-TIME pool identity (Finding 2, round 20).
+//
+// Storing only the member name was insufficient: a token-endpoint response
+// arriving after the member was removed and re-added into the same-named pool
+// (a strictly greater membership epoch — the round-18 mechanism) would be
+// attributed via the member's CURRENT pool generation rather than the pool
+// whose phantom was actually swapped into the request. That rewrites the
+// response with the wrong-generation pool phantom and persists/audits against
+// the wrong epoch. The entry therefore captures {pool, epoch} as observed at
+// injection time so the response path can detect a raced membership change
+// and fail closed instead of silently misfiling.
+//
+// Plain (non-pooled) OAuth credentials carry the sentinel pool=="" /
+// epoch==-1 (round-19 Finding 1: a plain refresh on a shared token URL is
+// attributed 1:1 and must never be treated as pooled). pooled reports
+// whether this is a pooled tag so a plain entry with no identity is not
+// confused with a pooled entry whose identity happened to be zero-valued.
+type refreshAttrEntry struct {
+	member  string
+	pool    string
+	epoch   int64
+	pooled  bool
+	expires time.Time
+}
+
+func newRefreshAttribution() *refreshAttribution {
+	return &refreshAttribution{entries: make(map[string]refreshAttrEntry)}
+}
+
+func (r *refreshAttribution) tag(realRefreshToken string, e refreshAttrEntry) {
+	if realRefreshToken == "" || e.member == "" {
+		return
+	}
+	now := time.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.entries) > 0 {
+		for k, en := range r.entries {
+			if now.After(en.expires) {
+				delete(r.entries, k)
+			}
+		}
+	}
+	e.expires = now.Add(refreshAttrTTL)
+	r.entries[realRefreshToken] = e
+}
+
+// Tag records that the given real refresh token was injected for a PLAIN
+// (non-pooled) OAuth credential. The entry carries the sentinel identity
+// (pool=="", epoch==-1, pooled==false) so the 2xx persist path attributes it
+// 1:1 (round-19 Finding 1) and never runs the pooled epoch-staleness check.
+func (r *refreshAttribution) Tag(realRefreshToken, member string) {
+	r.tag(realRefreshToken, refreshAttrEntry{member: member, epoch: -1})
+}
+
+// TagPooled records that the given real refresh token was injected for a
+// POOL member, capturing the pool identity (pool name + membership epoch)
+// observed at injection time. The 2xx persist path validates this captured
+// identity against the live membership before persisting: if the member was
+// removed and re-added (a strictly greater epoch) or moved to a different
+// pool between injection and response, the response is treated as the
+// documented fail-closed/stale case (Finding 2, round 20).
+func (r *refreshAttribution) TagPooled(realRefreshToken, member, pool string, epoch int64) {
+	r.tag(realRefreshToken, refreshAttrEntry{
+		member: member,
+		pool:   pool,
+		epoch:  epoch,
+		pooled: true,
+	})
+}
+
+// Recover returns the member tagged for the given real refresh token and
+// removes the entry (single-use: a rotated refresh token will never be
+// presented again). Returns ("", false) when no live tag exists — the
+// caller MUST fail closed (skip the vault write, never guess) per R1.
+//
+// Recover is used exclusively by the 2xx persist path
+// (resolveOAuthResponseAttribution): a successful refresh rotates the
+// refresh token, so the tag is dead after one use and must be deleted to
+// bound the map.
+func (r *refreshAttribution) Recover(realRefreshToken string) (string, bool) {
+	member, _, _, _, ok := r.RecoverIdentity(realRefreshToken)
+	return member, ok
+}
+
+// RecoverIdentity is Recover plus the injection-time pool identity. It is
+// single-use (deletes the entry) and used by the 2xx persist path so it can
+// validate the captured {pool, epoch} against the live membership before
+// persisting (Finding 2, round 20). For a plain entry pooled is false and
+// pool/epoch carry the sentinel.
+func (r *refreshAttribution) RecoverIdentity(realRefreshToken string) (member, pool string, epoch int64, pooled, ok bool) {
+	if realRefreshToken == "" {
+		return "", "", -1, false, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, found := r.entries[realRefreshToken]
+	if !found {
+		return "", "", -1, false, false
+	}
+	delete(r.entries, realRefreshToken)
+	if time.Now().After(e.expires) {
+		return "", "", -1, false, false
+	}
+	return e.member, e.pool, e.epoch, e.pooled, true
+}
+
+// Peek returns the member tagged for the given real refresh token WITHOUT
+// removing the entry. Returns ("", false) when no live tag exists.
+//
+// This is the CRITICAL-2 join key for the FAILOVER path
+// (poolForResponse). Two pool members share one token URL, so
+// OAuthIndex.Match is 1:1 and always returns the first index entry
+// regardless of which member's refresh token is actually in the request
+// body. Attributing a token-endpoint failure by idx.Match therefore cools
+// the WRONG member whenever the failing member is not the first index
+// entry. The injected real refresh token, by contrast, is unique per
+// member and present verbatim in the refresh-grant request body, so it
+// recovers the true owning member.
+//
+// Peek does NOT delete the entry because, unlike Recover (2xx success
+// rotates the token, making the tag dead), a token-endpoint FAILURE
+// (401 / invalid_grant) does NOT rotate the refresh token: the agent's
+// SDK will retry the same refresh token and the tag must still resolve.
+// processOAuthResponseIfMatching (the Recover caller) is 2xx-only, so on
+// a 4xx the tag has not been consumed and is still live for this Peek.
+// The entry is allowed to expire naturally via refreshAttrTTL / the
+// opportunistic sweep in Tag.
+func (r *refreshAttribution) Peek(realRefreshToken string) (string, bool) {
+	if realRefreshToken == "" {
+		return "", false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[realRefreshToken]
+	if !ok {
+		return "", false
+	}
+	if time.Now().After(e.expires) {
+		return "", false
+	}
+	return e.member, true
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,6 +24,20 @@ var ErrDestinationRateLimited = fmt.Errorf("destination rate limited")
 // never tap expired buttons.
 const timedOutTTL = 10 * time.Minute
 
+// maxCoalescedSubs caps how many coalesced subscribers may attach to a single
+// primary prompt. Coalesced subscribers deliberately bypass both the pending
+// limit and the per-destination rate limit (the operator answers the whole
+// burst with one tap), but an unbounded attach lets an abusive client
+// hammering one dest:port accumulate goroutines and channels without limit.
+// The cap bounds that fan-out: a reasonable burst still coalesces to one
+// prompt, but once the primary already has this many subscribers the excess
+// callers are rejected with the broker's standard over-capacity response
+// (ResponseDeny + ErrPendingLimitExceeded) instead of being appended. 256 is
+// well above any legitimate concurrent burst to a single target yet small
+// enough that the worst-case goroutine/channel footprint per primary stays
+// bounded.
+const maxCoalescedSubs = 256
+
 // Broker coordinates approval flow across multiple enabled channels.
 // Approval requests are broadcast to all channels. The first Resolve call
 // wins. Other channels receive CancelApproval for cleanup.
@@ -32,6 +47,19 @@ type Broker struct {
 	waiters  map[string]waiter
 	timedOut map[string]time.Time
 	nextID   atomic.Int64
+
+	// dedupIndex maps a persistence-equivalent target key ("dest:port")
+	// to the primary request ID currently holding an open prompt for that
+	// target. Concurrent requests to the same target while the primary is
+	// pending attach to the primary as coalesced subscribers instead of
+	// opening their own prompt.
+	dedupIndex map[string]string
+
+	// coalesced retains the final coalesced count for a primary request ID
+	// after its waiter has been removed (resolved/timed-out/cancelled), so
+	// channels editing the resolved/cancelled message can render how many
+	// requests the single decision covered. GC'd like timedOut.
+	coalesced map[string]coalescedRecord
 
 	// closed is set to true by CancelAll under the mutex, before the done
 	// channel is closed. Request checks this flag under the same mutex to
@@ -56,12 +84,54 @@ type Broker struct {
 
 	// nowFunc is used for testing to control time. If nil, time.Now is used.
 	nowFunc func() time.Time
+
+	// resolveAfterDeleteHook is a test-only seam invoked inside Resolve
+	// immediately after the waiter has been deleted from b.waiters and the
+	// coalesced count recorded, but before the primary/subscriber response
+	// sends. It runs while b.mu is held (post-fix the sends are also under
+	// the lock), so a test can drive a coalesced subscriber's deadline path
+	// concurrently and assert it cannot observe a lost wakeup. nil in
+	// production.
+	resolveAfterDeleteHook func()
+
+	// subDeadlineGate is a test-only seam invoked at the very top of
+	// waitSub's deadline branch, before detachSub. A test uses it to park a
+	// coalesced subscriber exactly at the start of its timeout-handling path
+	// so the resolve/detach interleave can be forced deterministically
+	// without sleeps. nil in production.
+	subDeadlineGate func()
+
+	// cancelAllAfterClearHook is a test-only seam invoked in CancelAll
+	// immediately after b.mu is released (post-#4-fix that is AFTER the
+	// terminal denies were already sent under the lock and the waiter map
+	// cleared). A test uses it to release a coalesced subscriber parked at
+	// its deadline so the CancelAll-vs-sub-deadline interleave is forced
+	// deterministically: pre-fix the deny was sent only AFTER this point so
+	// the released sub observed a lost wakeup; post-fix the deny is already
+	// buffered. nil in production.
+	cancelAllAfterClearHook func()
 }
 
 // waiter tracks a pending approval request and its response channel.
+//
+// subs holds buffered (cap 1) response channels for coalesced requests that
+// attached to this primary waiter while it was pending. count starts at 1
+// (the primary) and increments for every attached sub. dedupKey is the
+// "dest:port" key under which this waiter is registered in dedupIndex (empty
+// when the request opted out of coalescing).
 type waiter struct {
-	ch  chan Response
-	req ApprovalRequest
+	ch       chan Response
+	req      ApprovalRequest
+	subs     []chan Response
+	count    int
+	dedupKey string
+}
+
+// coalescedRecord retains a resolved primary's final coalesced count for a
+// bounded TTL so message-edit paths can render it after the waiter is gone.
+type coalescedRecord struct {
+	count int
+	at    time.Time
 }
 
 // BrokerOption configures a Broker.
@@ -88,6 +158,8 @@ func NewBroker(channels []Channel, opts ...BrokerOption) *Broker {
 		channels:           channels,
 		waiters:            make(map[string]waiter),
 		timedOut:           make(map[string]time.Time),
+		dedupIndex:         make(map[string]string),
+		coalesced:          make(map[string]coalescedRecord),
 		done:               make(chan struct{}),
 		MaxPendingRequests: 50,
 		destRateMax:        5,
@@ -117,6 +189,18 @@ type RequestOption func(*requestConfig)
 type requestConfig struct {
 	req             ApprovalRequest
 	bypassRateLimit bool
+	noCoalesce      bool
+}
+
+// WithNoCoalesce disables broker-level coalescing for this request. Use it
+// when distinct requests to the same "dest:port" are NOT semantically
+// equivalent — e.g. MCP tool calls, whose ToolArgs differ and feed
+// arg-sensitive ContentInspector/exec rules. Such requests must each get
+// their own prompt.
+func WithNoCoalesce() RequestOption {
+	return func(c *requestConfig) {
+		c.noCoalesce = true
+	}
 }
 
 // WithToolArgs sets the truncated tool arguments on an MCP approval request.
@@ -157,13 +241,17 @@ func WithBypassRateLimit() RequestOption {
 
 // Request sends an approval request to all channels and blocks until one
 // responds or the timeout expires. Returns the first response received.
+//
+// Coalescing: concurrent requests sharing a persistence-equivalent target
+// ("dest:port") collapse onto the first one's prompt. Only the first opens a
+// prompt; later arrivals attach as buffered subscribers and receive the same
+// response when the primary resolves/times out/is cancelled. Pass
+// WithNoCoalesce to opt out (MCP tool calls).
 func (b *Broker) Request(dest string, port int, protocol string, timeout time.Duration, opts ...RequestOption) (Response, error) {
-	id := fmt.Sprintf("req_%d", b.nextID.Add(1))
 	ch := make(chan Response, 1)
 
 	cfg := requestConfig{
 		req: ApprovalRequest{
-			ID:          id,
 			Destination: dest,
 			Port:        port,
 			Protocol:    protocol,
@@ -174,11 +262,52 @@ func (b *Broker) Request(dest string, port int, protocol string, timeout time.Du
 		opt(&cfg)
 	}
 
+	var dedupKey string
+	if !cfg.noCoalesce {
+		dedupKey = dest + ":" + strconv.Itoa(port)
+	}
+
+	// Single deadline for the entire request lifecycle (covers both the
+	// primary path and the coalesced-subscriber path).
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
 		return ResponseDeny, fmt.Errorf("approval broker shutting down")
 	}
+
+	// Coalesce: attach to an existing pending prompt for the same target.
+	// This runs before the pending/rate-limit checks because a coalesced
+	// subscriber consumes neither budget — the primary already did, and the
+	// whole point is to avoid both the prompt wall and spurious rate-limit
+	// denials for a burst the operator will answer with a single tap.
+	if dedupKey != "" {
+		if primaryID, ok := b.dedupIndex[dedupKey]; ok {
+			if w, ok := b.waiters[primaryID]; ok {
+				// Bound the coalesced fan-out. Without a cap an abusive
+				// client hammering one dest:port grows w.subs (and a
+				// blocked goroutine per sub) without limit, since
+				// coalesced subscribers intentionally skip the pending
+				// and per-destination limits. Mirror the broker's
+				// existing over-capacity behavior (the pending-limit
+				// branch below) and reject the excess caller instead of
+				// appending unboundedly.
+				if len(w.subs) >= maxCoalescedSubs {
+					b.mu.Unlock()
+					return ResponseDeny, ErrPendingLimitExceeded
+				}
+				subCh := make(chan Response, 1)
+				w.subs = append(w.subs, subCh)
+				w.count++
+				b.waiters[primaryID] = w
+				b.mu.Unlock()
+				return b.waitSub(primaryID, subCh, deadline.C, timeout)
+			}
+		}
+	}
+
 	// Check pending limit.
 	if b.MaxPendingRequests > 0 && len(b.waiters) >= b.MaxPendingRequests {
 		b.mu.Unlock()
@@ -218,16 +347,17 @@ func (b *Broker) Request(dest string, port int, protocol string, timeout time.Du
 		}
 	}
 
+	id := fmt.Sprintf("req_%d", b.nextID.Add(1))
+	cfg.req.ID = id
 	req := cfg.req
-	b.waiters[id] = waiter{ch: ch, req: req}
+	b.waiters[id] = waiter{ch: ch, req: req, count: 1, dedupKey: dedupKey}
+	if dedupKey != "" {
+		b.dedupIndex[dedupKey] = id
+	}
 	b.mu.Unlock()
 
 	// Broadcast to all channels (non-blocking).
 	b.broadcast(req)
-
-	// Single deadline for the entire request lifecycle.
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
 
 	select {
 	case resp := <-ch:
@@ -241,16 +371,35 @@ func (b *Broker) Request(dest string, port int, protocol string, timeout time.Du
 		default:
 		}
 		b.mu.Lock()
-		delete(b.waiters, id)
+		w, ok := b.waiters[id]
+		if ok {
+			delete(b.waiters, id)
+			if w.dedupKey != "" {
+				delete(b.dedupIndex, w.dedupKey)
+			}
+			// Retain the final coalesced count so the shutdown
+			// CancelApproval edit can still render "applied to N
+			// requests" for a burst that was pending at shutdown.
+			b.recordCoalescedLocked(id, w.count)
+		}
 		b.mu.Unlock()
+		// Fan the terminal deny to any coalesced subscribers (buffered
+		// cap 1, so a send to a detached sub never blocks).
+		for _, sub := range w.subs {
+			sub <- ResponseDeny
+		}
 		b.cancelOnChannels(id)
 		return ResponseDeny, fmt.Errorf("approval broker shutting down")
 	case <-deadline.C:
 		b.mu.Lock()
-		_, stillPending := b.waiters[id]
+		w, stillPending := b.waiters[id]
 		if stillPending {
 			delete(b.waiters, id)
+			if w.dedupKey != "" {
+				delete(b.dedupIndex, w.dedupKey)
+			}
 			b.timedOut[id] = b.now()
+			b.recordCoalescedLocked(id, w.count)
 			// Garbage-collect stale timedOut entries.
 			now := b.now()
 			for k, t := range b.timedOut {
@@ -266,9 +415,103 @@ func (b *Broker) Request(dest string, port int, protocol string, timeout time.Du
 			// what the channel showed to the operator.
 			return <-ch, nil
 		}
+		// Fan the terminal deny to every coalesced subscriber.
+		for _, sub := range w.subs {
+			sub <- ResponseDeny
+		}
 		b.cancelOnChannels(id)
 		return ResponseDeny, fmt.Errorf("approval timeout after %v", timeout)
 	}
+}
+
+// waitSub blocks a coalesced subscriber until the primary resolves (its
+// response is fanned to subCh), the deadline fires, or the broker shuts
+// down. A subscriber owns no waiter/timedOut entry: on timeout it detaches
+// only itself from the primary's subs slice and must never tear down the
+// shared primary waiter.
+func (b *Broker) waitSub(primaryID string, subCh chan Response, deadlineC <-chan time.Time, timeout time.Duration) (Response, error) {
+	select {
+	case resp := <-subCh:
+		return resp, nil
+	case <-b.done:
+		// Prefer a response the primary may have already fanned out.
+		select {
+		case resp := <-subCh:
+			return resp, nil
+		default:
+		}
+		b.detachSub(primaryID, subCh)
+		return ResponseDeny, fmt.Errorf("approval broker shutting down")
+	case <-deadlineC:
+		if b.subDeadlineGate != nil {
+			b.subDeadlineGate()
+		}
+		b.detachSub(primaryID, subCh)
+		// The primary may have resolved between the deadline firing and
+		// the detach completing. The sub chan is buffered (cap 1), so a
+		// concurrent fan-out send already landed; honor it rather than
+		// denying an approved request.
+		select {
+		case resp := <-subCh:
+			return resp, nil
+		default:
+		}
+		return ResponseDeny, fmt.Errorf("approval timeout after %v", timeout)
+	}
+}
+
+// detachSub removes a single subscriber channel from a primary waiter's subs
+// slice if the waiter is still present. It never deletes the waiter itself.
+func (b *Broker) detachSub(primaryID string, subCh chan Response) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	w, ok := b.waiters[primaryID]
+	if !ok {
+		return
+	}
+	for i, c := range w.subs {
+		if c == subCh {
+			w.subs = append(w.subs[:i], w.subs[i+1:]...)
+			// A subscriber that timed out and detached is no longer
+			// covered by the primary's eventual decision, so it must not
+			// inflate the coalesced count. Decrement, never below 1 (the
+			// primary itself is always counted) (Finding 3).
+			if w.count > 1 {
+				w.count--
+			}
+			b.waiters[primaryID] = w
+			return
+		}
+	}
+}
+
+// recordCoalescedLocked stores a resolved/timed-out primary's final coalesced
+// count for a bounded TTL so message-edit paths can render it after the
+// waiter is gone. Caller must hold b.mu.
+func (b *Broker) recordCoalescedLocked(id string, count int) {
+	now := b.now()
+	b.coalesced[id] = coalescedRecord{count: count, at: now}
+	for k, r := range b.coalesced {
+		if now.Sub(r.at) > timedOutTTL {
+			delete(b.coalesced, k)
+		}
+	}
+}
+
+// CoalescedCount reports how many requests a single approval decision covered
+// for the given primary request ID. While the waiter is still pending it
+// returns the live count; after resolution it returns the retained final
+// count; if nothing is known it returns 1 (a lone request).
+func (b *Broker) CoalescedCount(id string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if w, ok := b.waiters[id]; ok {
+		return w.count
+	}
+	if r, ok := b.coalesced[id]; ok {
+		return r.count
+	}
+	return 1
 }
 
 // broadcast sends the approval request to all channels. Errors and panics
@@ -345,13 +588,46 @@ func (b *Broker) Resolve(id string, resp Response) bool {
 	b.mu.Lock()
 	w, ok := b.waiters[id]
 	if ok {
+		// Delete the waiter AND its dedup index entry in the same locked
+		// section. This is what closes the late-attach race: any request
+		// that took b.mu before this point either found the waiter (and
+		// attached as a sub captured in w.subs below) or, after this,
+		// finds neither the dedupIndex entry nor the waiter and opens its
+		// own fresh prompt — it can never attach to a dead waiter.
 		delete(b.waiters, id)
+		if w.dedupKey != "" {
+			delete(b.dedupIndex, w.dedupKey)
+		}
+		b.recordCoalescedLocked(id, w.count)
+
+		if b.resolveAfterDeleteHook != nil {
+			b.resolveAfterDeleteHook()
+		}
+
+		// Deliver the primary response and fan it to every coalesced
+		// subscriber WHILE STILL HOLDING b.mu. The primary ch and every
+		// sub chan are buffered cap-1 and receive exactly one value, so
+		// these sends cannot block — holding the lock here is safe and
+		// closes the resolve/detach lost-wakeup window: a subscriber
+		// whose deadline fires takes b.mu in detachSub, so it serializes
+		// against this section. It therefore either detaches BEFORE this
+		// runs (removed from w.subs, gets no send, returns its own
+		// timeout — correct, it never coalesced under this decision) or
+		// AFTER (the response is already buffered on its cap-1 chan, and
+		// waitSub's post-detach non-blocking read picks it up instead of
+		// denying an approved request). There is no instant where a sub
+		// can observe "waiter gone AND response not yet sent".
+		w.ch <- resp
+		for _, sub := range w.subs {
+			sub <- resp
+		}
 	}
 	b.mu.Unlock()
 
 	if ok {
-		w.ch <- resp
-		// Cancel on all channels so they can clean up (e.g. edit message).
+		// Cancel on all channels so they can clean up (e.g. edit
+		// message). This calls into channel implementations that may do
+		// blocking network I/O, so it must stay OUTSIDE b.mu.
 		b.cancelOnChannels(id)
 	}
 	return ok
@@ -370,15 +646,56 @@ func (b *Broker) CancelAll() {
 	waiters := make(map[string]waiter, len(b.waiters))
 	for id, w := range b.waiters {
 		waiters[id] = w
+		// Retain each waiter's final coalesced count before the map is
+		// cleared, mirroring Resolve and the primary-timeout path. Without
+		// this the shutdown CancelApproval edit sees CoalescedCount==1 and
+		// omits "applied to N requests" for a burst that was pending at
+		// shutdown (Finding 2).
+		b.recordCoalescedLocked(id, w.count)
+	}
+
+	// Send the deny to every primary and every coalesced subscriber WHILE
+	// STILL HOLDING b.mu, BEFORE clearing the waiter map — exactly mirroring
+	// the round-6 Resolve fix. Round-18 #4: the old code cleared b.waiters,
+	// released b.mu, and only THEN sent the denies. A coalesced subscriber
+	// whose deadline fired in that window took b.mu in detachSub, found NO
+	// waiter (map already cleared), returned immediately, and its
+	// post-detach non-blocking read missed the not-yet-sent buffered deny —
+	// so it returned a spurious "approval timeout" during shutdown instead
+	// of the cancel/deny.
+	//
+	// Sending under the lock closes that window: a subscriber whose deadline
+	// fires serializes against this section via detachSub's b.mu. It either
+	// detaches BEFORE this runs (it is gone from w.subs, gets no send, and
+	// legitimately returns its own timeout — it never coalesced under this
+	// shutdown decision) or AFTER (the deny is already buffered on its cap-1
+	// chan and waitSub's post-detach non-blocking read picks it up). There
+	// is no instant where a sub can observe "waiter gone AND deny not yet
+	// sent". The primary ch and every sub chan are buffered cap-1 and
+	// receive exactly one value, so these sends never block — holding the
+	// lock here is safe and cannot deadlock.
+	for _, w := range waiters {
+		w.ch <- ResponseDeny
+		for _, sub := range w.subs {
+			sub <- ResponseDeny
+		}
 	}
 	b.waiters = make(map[string]waiter)
+	b.dedupIndex = make(map[string]string)
 	b.mu.Unlock()
 
-	// Send deny responses before closing done. This ensures goroutines in
-	// the select see the response on ch before they see done closed, so
-	// they return the response without an error.
-	for id, w := range waiters {
-		w.ch <- ResponseDeny
+	if b.cancelAllAfterClearHook != nil {
+		// Post-fix the denies were already delivered under the lock above,
+		// so a sub released here finds its deny buffered. Pre-fix the send
+		// loop ran AFTER this point, so the released sub saw a lost wakeup.
+		b.cancelAllAfterClearHook()
+	}
+
+	// cancelOnChannels calls channel implementations that may do blocking
+	// network I/O (Telegram message edit), so it must stay OUTSIDE b.mu.
+	// The deny responses were already delivered above, so a subscriber can
+	// no longer observe a spurious timeout regardless of how long these take.
+	for id := range waiters {
 		b.cancelOnChannels(id)
 	}
 

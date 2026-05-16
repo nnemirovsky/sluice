@@ -3,11 +3,20 @@ package channel
 import (
 	"context"
 	"errors"
+	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// result bundles a Broker.Request return for fan-in over a channel in
+// concurrency tests.
+type result struct {
+	resp Response
+	err  error
+}
 
 // mockChannel implements Channel for testing.
 type mockChannel struct {
@@ -353,12 +362,15 @@ func TestBrokerPendingLimitExceeded(t *testing.T) {
 	broker := NewBroker([]Channel{ch1}, WithMaxPending(3))
 
 	// Fill up the pending slots by sending requests that won't be resolved.
+	// Distinct destinations so each opens its own waiter (same-dest:port
+	// requests now coalesce onto a single waiter by design).
 	var wg sync.WaitGroup
 	for i := 0; i < 3; i++ {
+		dest := fmt.Sprintf("example-%d.com", i)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = broker.Request("example.com", 443, "", 2*time.Second)
+			_, _ = broker.Request(dest, 443, "", 2*time.Second)
 		}()
 	}
 	// Wait until all 3 are registered as waiters.
@@ -507,10 +519,13 @@ func TestBrokerCancelAllDeniesAllPending(t *testing.T) {
 	}
 	results := make(chan result, n)
 
-	// Start n requests that will block waiting for approval.
+	// Start n requests that will block waiting for approval. Distinct
+	// destinations so each registers its own waiter (same-dest:port
+	// requests now coalesce by design).
 	for i := 0; i < n; i++ {
+		dest := fmt.Sprintf("cancel-test-%d.com", i)
 		go func() {
-			resp, err := broker.Request("cancel-test.com", 443, "", 5*time.Second)
+			resp, err := broker.Request(dest, 443, "", 5*time.Second)
 			results <- result{resp, err}
 		}()
 	}
@@ -842,5 +857,910 @@ func TestBrokerChannelErrorDoesNotBlockOthers(t *testing.T) {
 	}
 	if resp != ResponseAllowOnce {
 		t.Errorf("expected AllowOnce, got %v", resp)
+	}
+}
+
+// --- Coalescing tests (broker-level dedup by dest:port) ---
+
+// fireCoalescedBurst starts n concurrent Request calls to the same
+// dest:port and waits until the broker reports all n have attached to a
+// single primary waiter. It returns the primary request ID and a channel
+// that yields each call's (resp, err) result.
+func fireCoalescedBurst(t *testing.T, broker *Broker, ch *mockChannel, dest string, n int, timeout time.Duration) (string, <-chan result) {
+	t.Helper()
+	const port = 443
+	type res = result
+	out := make(chan res, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			resp, err := broker.Request(dest, port, "https", timeout)
+			out <- res{resp, err}
+		}()
+	}
+	// Wait for the primary prompt to land.
+	deadline := time.After(5 * time.Second)
+	for {
+		reqs := ch.getRequests()
+		if len(reqs) >= 1 {
+			id := reqs[0].ID
+			if broker.CoalescedCount(id) >= n {
+				return id, out
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("burst did not fully coalesce: got %d requests, count=%v",
+				len(ch.getRequests()), func() int {
+					if r := ch.getRequests(); len(r) > 0 {
+						return broker.CoalescedCount(r[0].ID)
+					}
+					return 0
+				}())
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+func TestBrokerCoalesceOneBroadcastFanToAll(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const n = 8
+	primaryID, out := fireCoalescedBurst(t, broker, ch, "cas.example.com", n, 5*time.Second)
+
+	// Exactly one prompt was broadcast for the whole burst.
+	if got := len(ch.getRequests()); got != 1 {
+		t.Fatalf("expected exactly 1 broadcast, got %d", got)
+	}
+	if c := broker.CoalescedCount(primaryID); c != n {
+		t.Fatalf("expected coalesced count %d, got %d", n, c)
+	}
+	if pc := broker.PendingCount(); pc != 1 {
+		t.Fatalf("expected 1 pending waiter, got %d", pc)
+	}
+
+	if !broker.Resolve(primaryID, ResponseAlwaysAllow) {
+		t.Fatal("Resolve returned false for primary")
+	}
+
+	for i := 0; i < n; i++ {
+		r := <-out
+		if r.err != nil {
+			t.Errorf("request %d: unexpected error %v", i, r.err)
+		}
+		if r.resp != ResponseAlwaysAllow {
+			t.Errorf("request %d: expected AlwaysAllow, got %v", i, r.resp)
+		}
+	}
+	// Final count retained for message-edit paths after the waiter is gone.
+	if c := broker.CoalescedCount(primaryID); c != n {
+		t.Errorf("expected retained coalesced count %d, got %d", n, c)
+	}
+}
+
+func TestBrokerCoalesceDenyFanOut(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const n = 5
+	primaryID, out := fireCoalescedBurst(t, broker, ch, "deny.example.com", n, 5*time.Second)
+	broker.Resolve(primaryID, ResponseDeny)
+
+	for i := 0; i < n; i++ {
+		r := <-out
+		if r.resp != ResponseDeny {
+			t.Errorf("request %d: expected Deny, got %v", i, r.resp)
+		}
+	}
+}
+
+func TestBrokerCoalesceTimeoutFanOut(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const n = 4
+	// No resolve: the primary times out and fans the terminal Deny to
+	// every subscriber. The primary itself returns the timeout error;
+	// subscribers receive Deny via the fan-out (nil err, like any
+	// terminal resolution). Every caller must end up denied.
+	_, out := fireCoalescedBurst(t, broker, ch, "slowburst.example.com", n, 80*time.Millisecond)
+
+	timeoutErrs := 0
+	for i := 0; i < n; i++ {
+		r := <-out
+		if r.resp != ResponseDeny {
+			t.Errorf("request %d: expected Deny on timeout, got %v", i, r.resp)
+		}
+		if r.err != nil {
+			timeoutErrs++
+		}
+	}
+	if timeoutErrs == 0 {
+		t.Error("expected at least the primary to report a timeout error")
+	}
+}
+
+func TestBrokerCoalesceShutdownFanOut(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const n = 6
+	_, out := fireCoalescedBurst(t, broker, ch, "shutdown.example.com", n, 5*time.Second)
+	broker.CancelAll()
+
+	for i := 0; i < n; i++ {
+		r := <-out
+		if r.resp != ResponseDeny {
+			t.Errorf("request %d: expected Deny on shutdown, got %v", i, r.resp)
+		}
+	}
+}
+
+// TestBrokerCoalesceSubsCapBounded is the Copilot round-13 Finding 3
+// regression. Coalesced subscribers intentionally bypass both the pending
+// limit and the per-destination rate limit, and before the fix they were
+// appended to the primary's w.subs with NO cap. A burst/abusive client
+// hammering one dest:port could accumulate unbounded subscriber channels and
+// blocked goroutines. The fix caps w.subs at maxCoalescedSubs and rejects the
+// excess callers with the broker's standard over-capacity response
+// (ResponseDeny + ErrPendingLimitExceeded), mirroring the pending-limit
+// branch.
+//
+// Deterministic: a primary stays pending for the whole test (long timeout, no
+// resolve). Exactly maxCoalescedSubs subscribers attach (CoalescedCount
+// settles at 1+maxCoalescedSubs). Then synchronous over-cap callers must each
+// be denied immediately with ErrPendingLimitExceeded while CoalescedCount
+// stays pinned at the cap (no unbounded append). Pre-fix this test fails:
+// CoalescedCount climbs past 1+maxCoalescedSubs and the over-cap callers
+// block instead of being denied.
+func TestBrokerCoalesceSubsCapBounded(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const dest = "capburst.example.com"
+	const port = 443
+
+	// Primary: stays pending for the entire test (no resolve, long timeout).
+	type res = result
+	primaryOut := make(chan res, 1)
+	go func() {
+		resp, err := broker.Request(dest, port, "https", 30*time.Second)
+		primaryOut <- res{resp, err}
+	}()
+
+	// Wait for the primary prompt to land and become the dedup primary.
+	deadline := time.After(5 * time.Second)
+	var primaryID string
+	for primaryID == "" {
+		if reqs := ch.getRequests(); len(reqs) >= 1 {
+			primaryID = reqs[0].ID
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("primary prompt did not land")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	// Launch exactly maxCoalescedSubs coalesced subscribers. They all attach
+	// (cap not yet exceeded: len(w.subs) goes 0..maxCoalescedSubs-1 < cap).
+	subOut := make(chan res, maxCoalescedSubs)
+	for i := 0; i < maxCoalescedSubs; i++ {
+		go func() {
+			resp, err := broker.Request(dest, port, "https", 30*time.Second)
+			subOut <- res{resp, err}
+		}()
+	}
+
+	// Wait until all maxCoalescedSubs subscribers have attached: count is
+	// 1 (primary) + maxCoalescedSubs.
+	wantCount := 1 + maxCoalescedSubs
+	deadline = time.After(10 * time.Second)
+	for broker.CoalescedCount(primaryID) < wantCount {
+		select {
+		case <-deadline:
+			t.Fatalf("subscribers did not all attach: CoalescedCount=%d want %d",
+				broker.CoalescedCount(primaryID), wantCount)
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	// Over-cap callers: each must be rejected immediately with the broker's
+	// standard over-capacity response, NOT appended (no unbounded growth) and
+	// NOT blocked. Call synchronously so the deny is observed deterministically.
+	const extra = 16
+	for i := 0; i < extra; i++ {
+		resp, err := broker.Request(dest, port, "https", 30*time.Second)
+		if resp != ResponseDeny {
+			t.Fatalf("over-cap caller %d: expected ResponseDeny, got %v", i, resp)
+		}
+		if !errors.Is(err, ErrPendingLimitExceeded) {
+			t.Fatalf("over-cap caller %d: expected ErrPendingLimitExceeded, got %v", i, err)
+		}
+	}
+
+	// The subscriber slice must remain bounded: count must NOT have grown past
+	// the cap despite the extra hammering.
+	if c := broker.CoalescedCount(primaryID); c != wantCount {
+		t.Fatalf("coalesced count grew past the cap: got %d want %d (w.subs must be bounded at maxCoalescedSubs=%d)",
+			c, wantCount, maxCoalescedSubs)
+	}
+
+	// Cleanup: shut down so the primary + all subscribers unblock. Every
+	// attached caller (primary + maxCoalescedSubs subs) must drain with Deny.
+	broker.CancelAll()
+	pr := <-primaryOut
+	if pr.resp != ResponseDeny {
+		t.Errorf("primary: expected Deny on shutdown, got %v", pr.resp)
+	}
+	for i := 0; i < maxCoalescedSubs; i++ {
+		r := <-subOut
+		if r.resp != ResponseDeny {
+			t.Errorf("subscriber %d: expected Deny on shutdown, got %v", i, r.resp)
+		}
+	}
+}
+
+// TestBrokerCoalesceSubCapNormalBurstStillFansOut verifies the cap does not
+// regress normal coalescing: a reasonable sub-cap burst still collapses to a
+// single prompt and every caller receives the one decision.
+func TestBrokerCoalesceSubCapNormalBurstStillFansOut(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const n = 32 // well under maxCoalescedSubs
+	primaryID, out := fireCoalescedBurst(t, broker, ch, "normalburst.example.com", n, 5*time.Second)
+
+	if got := len(ch.getRequests()); got != 1 {
+		t.Fatalf("expected exactly 1 broadcast for a sub-cap burst, got %d", got)
+	}
+	if c := broker.CoalescedCount(primaryID); c != n {
+		t.Fatalf("expected coalesced count %d, got %d", n, c)
+	}
+
+	if !broker.Resolve(primaryID, ResponseAlwaysAllow) {
+		t.Fatal("Resolve returned false for primary")
+	}
+	for i := 0; i < n; i++ {
+		r := <-out
+		if r.err != nil {
+			t.Errorf("request %d: unexpected error %v", i, r.err)
+		}
+		if r.resp != ResponseAlwaysAllow {
+			t.Errorf("request %d: expected AlwaysAllow, got %v", i, r.resp)
+		}
+	}
+}
+
+// TestBrokerCancelAllRetainsCoalescedCount is the Finding 2 regression.
+// CancelAll cleared the waiter map without retaining each waiter's final
+// coalesced count, so the shutdown CancelApproval edit saw
+// CoalescedCount==1 and dropped the "applied to N requests" suffix for a
+// burst that was pending at shutdown. The fix records the count under the
+// broker lock before the map is cleared, mirroring Resolve.
+//
+// Pre-fix this test fails: CoalescedCount after CancelAll returns 1.
+func TestBrokerCancelAllRetainsCoalescedCount(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const n = 7
+	primaryID, out := fireCoalescedBurst(t, broker, ch, "cancelcount.example.com", n, 5*time.Second)
+
+	broker.CancelAll()
+
+	// Drain so the goroutines finish (they all get a terminal Deny).
+	for i := 0; i < n; i++ {
+		<-out
+	}
+
+	if c := broker.CoalescedCount(primaryID); c != n {
+		t.Fatalf("after CancelAll, CoalescedCount(%s) = %d, want %d "+
+			"(the shutdown cancel edit would render \"applied to %d "+
+			"requests\"; pre-fix it renders just 1) — Finding 2",
+			primaryID, c, n, c)
+	}
+}
+
+// TestBrokerDetachedSubNotCounted is the Finding 3 regression. When a
+// coalesced subscriber times out and detaches, the waiter's count was NOT
+// decremented, so a later Resolve reported a CoalescedCount that still
+// included subscribers that had already given up — Telegram said "applied
+// to N" for more than were actually resolved by the tap. The fix
+// decrements the count on detach, never below 1 (the primary).
+//
+// Pre-fix this test fails: the retained count stays at the peak (1 + total
+// attached) instead of dropping by the number of detached subs.
+func TestBrokerDetachedSubNotCounted(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const dest = "detachcount.example.com"
+	const port = 443
+
+	// Long-lived primary so it stays pending while subs come and go.
+	primaryOut := make(chan result, 1)
+	go func() {
+		resp, err := broker.Request(dest, port, "https", 5*time.Second)
+		primaryOut <- result{resp, err}
+	}()
+	var primaryID string
+	for {
+		reqs := ch.getRequests()
+		if len(reqs) == 1 {
+			primaryID = reqs[0].ID
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// k subscribers that each attach then time out and detach.
+	const k = 3
+	subOut := make(chan result, k)
+	for i := 0; i < k; i++ {
+		go func() {
+			resp, err := broker.Request(dest, port, "https", 30*time.Millisecond)
+			subOut <- result{resp, err}
+		}()
+	}
+	// Wait until all k have attached (count == 1 + k at the peak).
+	for broker.CoalescedCount(primaryID) < 1+k {
+		time.Sleep(time.Millisecond)
+	}
+	// Let every sub time out and detach.
+	for i := 0; i < k; i++ {
+		sr := <-subOut
+		if sr.resp != ResponseDeny || sr.err == nil {
+			t.Fatalf("sub %d should have timed out with Deny+err, got %v / %v", i, sr.resp, sr.err)
+		}
+	}
+	// All k detached; the primary alone remains.
+	if c := broker.CoalescedCount(primaryID); c != 1 {
+		t.Fatalf("after %d subs detached, live CoalescedCount = %d, want 1 "+
+			"(detached subs must not inflate the count) — Finding 3", k, c)
+	}
+
+	// Resolve the primary; the retained count must reflect only the
+	// primary (the k detached subs gave up before the decision).
+	if !broker.Resolve(primaryID, ResponseAllowOnce) {
+		t.Fatal("Resolve returned false for primary")
+	}
+	pr := <-primaryOut
+	if pr.resp != ResponseAllowOnce {
+		t.Fatalf("primary: expected AllowOnce, got %v", pr.resp)
+	}
+	if c := broker.CoalescedCount(primaryID); c != 1 {
+		t.Fatalf("retained CoalescedCount after resolve = %d, want 1 "+
+			"(Telegram would say \"applied to %d requests\" when only the "+
+			"primary was actually covered) — Finding 3", c, c)
+	}
+}
+
+func TestBrokerCoalesceSubTimeoutDoesNotBlockFanOut(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	// Primary with a long timeout so it stays pending.
+	primaryOut := make(chan result, 1)
+	go func() {
+		resp, err := broker.Request("subtimeout.example.com", 443, "https", 5*time.Second)
+		primaryOut <- result{resp, err}
+	}()
+	var primaryID string
+	for {
+		reqs := ch.getRequests()
+		if len(reqs) == 1 {
+			primaryID = reqs[0].ID
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// A coalesced sub with a very short timeout: it detaches itself.
+	subOut := make(chan result, 1)
+	go func() {
+		resp, err := broker.Request("subtimeout.example.com", 443, "https", 30*time.Millisecond)
+		subOut <- result{resp, err}
+	}()
+	// Wait for the sub to attach (count == 2) then time out (count back
+	// near 1 once it detaches; tolerate the race by just waiting for the
+	// sub result).
+	for broker.CoalescedCount(primaryID) < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	sr := <-subOut
+	if sr.resp != ResponseDeny || sr.err == nil {
+		t.Fatalf("sub should have timed out with Deny+err, got %v / %v", sr.resp, sr.err)
+	}
+
+	// Resolving the primary must not block on the departed sub.
+	done := make(chan bool, 1)
+	go func() { done <- broker.Resolve(primaryID, ResponseAllowOnce) }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("Resolve returned false")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Resolve blocked on a detached sub")
+	}
+	pr := <-primaryOut
+	if pr.resp != ResponseAllowOnce {
+		t.Errorf("primary: expected AllowOnce, got %v", pr.resp)
+	}
+}
+
+func TestBrokerCoalesceLateAttachOpensNewPrompt(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	// First prompt for the target.
+	out1 := make(chan result, 1)
+	go func() {
+		resp, err := broker.Request("late.example.com", 443, "https", 5*time.Second)
+		out1 <- result{resp, err}
+	}()
+	var id1 string
+	for {
+		reqs := ch.getRequests()
+		if len(reqs) == 1 {
+			id1 = reqs[0].ID
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Resolve the first; dedupIndex entry is cleared in the same locked
+	// section as the waiter delete.
+	broker.Resolve(id1, ResponseAllowOnce)
+	if r := <-out1; r.resp != ResponseAllowOnce {
+		t.Fatalf("first request: expected AllowOnce, got %v", r.resp)
+	}
+
+	// A new request to the same target after resolution must NOT attach to
+	// the dead waiter — it must open a fresh prompt with a new ID.
+	out2 := make(chan result, 1)
+	go func() {
+		resp, err := broker.Request("late.example.com", 443, "https", 5*time.Second)
+		out2 <- result{resp, err}
+	}()
+	var id2 string
+	for {
+		reqs := ch.getRequests()
+		if len(reqs) == 2 {
+			id2 = reqs[1].ID
+			break
+		}
+		select {
+		case <-time.After(2 * time.Second):
+			t.Fatal("late request did not open a new prompt (attached to dead waiter)")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if id2 == id1 {
+		t.Fatalf("late request reused dead primary id %q", id1)
+	}
+	broker.Resolve(id2, ResponseDeny)
+	if r := <-out2; r.resp != ResponseDeny {
+		t.Errorf("second request: expected Deny, got %v", r.resp)
+	}
+}
+
+func TestBrokerCoalesceConcurrentResolveAndAttach(t *testing.T) {
+	// Stress the resolve/attach interleave: no sub may end up attached to
+	// a deleted waiter (which would hang forever) and none may be lost.
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const rounds = 40
+	for round := 0; round < rounds; round++ {
+		dest := fmt.Sprintf("race-%d.example.com", round)
+		out := make(chan result, 3)
+		for i := 0; i < 3; i++ {
+			go func() {
+				resp, err := broker.Request(dest, 443, "https", 3*time.Second)
+				out <- result{resp, err}
+			}()
+		}
+		// Resolve as soon as the first prompt appears, racing the other
+		// two arrivals (some attach as subs, some open fresh prompts).
+		var firstID string
+		for {
+			for _, r := range ch.getRequests() {
+				if r.Destination == dest {
+					firstID = r.ID
+					break
+				}
+			}
+			if firstID != "" {
+				break
+			}
+			time.Sleep(time.Microsecond * 200)
+		}
+		// Keep resolving every pending prompt for this dest until all
+		// three callers return. Any caller that opened its own prompt
+		// gets resolved here too.
+		got := 0
+		timeout := time.After(3 * time.Second)
+		for got < 3 {
+			for _, r := range broker.PendingRequests() {
+				if r.Destination == dest {
+					broker.Resolve(r.ID, ResponseAllowOnce)
+				}
+			}
+			select {
+			case res := <-out:
+				if res.resp != ResponseAllowOnce {
+					t.Fatalf("round %d: expected AllowOnce, got %v (err %v)", round, res.resp, res.err)
+				}
+				got++
+			case <-timeout:
+				t.Fatalf("round %d: only %d/3 callers returned (deadlock?)", round, got)
+			default:
+				time.Sleep(time.Microsecond * 200)
+			}
+		}
+	}
+}
+
+func TestBrokerDistinctDestNotCoalesced(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	out := make(chan result, 2)
+	go func() {
+		resp, err := broker.Request("a.example.com", 443, "https", 5*time.Second)
+		out <- result{resp, err}
+	}()
+	go func() {
+		resp, err := broker.Request("b.example.com", 443, "https", 5*time.Second)
+		out <- result{resp, err}
+	}()
+	// Two distinct targets -> two waiters, two broadcasts.
+	for broker.PendingCount() < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(ch.getRequests()); got != 2 {
+		t.Fatalf("expected 2 broadcasts for distinct targets, got %d", got)
+	}
+	for _, r := range broker.PendingRequests() {
+		broker.Resolve(r.ID, ResponseAllowOnce)
+	}
+	<-out
+	<-out
+}
+
+func TestBrokerSamePortDifferentDestNotCoalesced(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	out := make(chan result, 2)
+	// Same host, different port -> different dedup key, not coalesced.
+	go func() {
+		resp, err := broker.Request("svc.example.com", 443, "https", 5*time.Second)
+		out <- result{resp, err}
+	}()
+	go func() {
+		resp, err := broker.Request("svc.example.com", 8443, "https", 5*time.Second)
+		out <- result{resp, err}
+	}()
+	for broker.PendingCount() < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(ch.getRequests()); got != 2 {
+		t.Fatalf("expected 2 broadcasts for differing ports, got %d", got)
+	}
+	for _, r := range broker.PendingRequests() {
+		broker.Resolve(r.ID, ResponseAllowOnce)
+	}
+	<-out
+	<-out
+}
+
+func TestBrokerWithNoCoalesceNeverCoalesces(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const n = 4
+	out := make(chan result, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			resp, err := broker.Request("mcp-tool", 0, "mcp", 5*time.Second, WithNoCoalesce())
+			out <- result{resp, err}
+		}()
+	}
+	for broker.PendingCount() < n {
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(ch.getRequests()); got != n {
+		t.Fatalf("WithNoCoalesce: expected %d separate prompts, got %d", n, got)
+	}
+	for _, r := range broker.PendingRequests() {
+		broker.Resolve(r.ID, ResponseAllowOnce)
+	}
+	for i := 0; i < n; i++ {
+		<-out
+	}
+}
+
+func TestBrokerCoalesceCrossChannelFirstWins(t *testing.T) {
+	ch1 := newMockChannel(ChannelTelegram)
+	ch2 := newMockChannel(ChannelHTTP)
+	broker := NewBroker([]Channel{ch1, ch2}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const n = 5
+	out := make(chan result, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			resp, err := broker.Request("xchan.example.com", 443, "https", 5*time.Second)
+			out <- result{resp, err}
+		}()
+	}
+	var primaryID string
+	for {
+		reqs := ch1.getRequests()
+		if len(reqs) == 1 && broker.CoalescedCount(reqs[0].ID) >= n {
+			primaryID = reqs[0].ID
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Both channels saw exactly one prompt (the primary).
+	if len(ch1.getRequests()) != 1 || len(ch2.getRequests()) != 1 {
+		t.Fatalf("expected 1 prompt per channel, got ch1=%d ch2=%d",
+			len(ch1.getRequests()), len(ch2.getRequests()))
+	}
+	// Two channels race to resolve the same primary; first wins, and the
+	// whole coalesced burst gets that winner's response.
+	r1 := make(chan bool, 1)
+	r2 := make(chan bool, 1)
+	go func() { r1 <- broker.Resolve(primaryID, ResponseAlwaysAllow) }()
+	go func() { r2 <- broker.Resolve(primaryID, ResponseDeny) }()
+	wins := 0
+	if <-r1 {
+		wins++
+	}
+	if <-r2 {
+		wins++
+	}
+	if wins != 1 {
+		t.Fatalf("expected exactly 1 winning Resolve, got %d", wins)
+	}
+	first := result{}
+	for i := 0; i < n; i++ {
+		r := <-out
+		if i == 0 {
+			first = r
+		} else if r.resp != first.resp {
+			t.Fatalf("coalesced burst got mixed responses: %v vs %v", first.resp, r.resp)
+		}
+	}
+	if first.resp != ResponseAlwaysAllow && first.resp != ResponseDeny {
+		t.Fatalf("unexpected response %v", first.resp)
+	}
+}
+
+// TestBrokerResolveDetachLostWakeup deterministically forces the exact
+// resolve/detach interleave from Copilot Finding 2: the primary's Resolve
+// has deleted the waiter but the coalesced subscriber's deadline fires in
+// the window before the fan-out send. Pre-fix, Resolve sent AFTER releasing
+// b.mu, so the subscriber's detachSub (no waiter found) + non-blocking read
+// (subCh still empty) returned a spurious ResponseDeny and the buffered
+// allow was dropped — a coalesced caller wrongly denied. Post-fix the
+// fan-out send happens INSIDE the locked resolution section, so the
+// subscriber's detachSub serializes against it via b.mu: by the time the
+// subscriber's non-blocking read runs, the allow is already buffered on its
+// cap-1 chan and it returns ResponseAllowOnce.
+//
+// The interleave is forced with two test-only seams (no sleeps for the
+// critical ordering):
+//   - subDeadlineGate parks the subscriber at the very top of waitSub's
+//     deadline branch (before detachSub) until the test releases it.
+//   - resolveAfterDeleteHook fires inside Resolve right after the waiter is
+//     deleted (lock held), and is where the test releases the subscriber so
+//     its detach/read races the fan-out exactly in the lost-wakeup window.
+func TestBrokerResolveDetachLostWakeup(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const dest = "lostwakeup.example.com"
+	const port = 443
+
+	// Long-lived primary so it stays pending while the sub attaches.
+	primaryOut := make(chan result, 1)
+	go func() {
+		resp, err := broker.Request(dest, port, "https", 5*time.Second)
+		primaryOut <- result{resp, err}
+	}()
+	var primaryID string
+	for {
+		reqs := ch.getRequests()
+		if len(reqs) == 1 {
+			primaryID = reqs[0].ID
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Park the subscriber at the start of its deadline branch.
+	subAtGate := make(chan struct{})
+	releaseSub := make(chan struct{})
+	var gateOnce sync.Once
+	broker.subDeadlineGate = func() {
+		gateOnce.Do(func() { close(subAtGate) })
+		<-releaseSub
+	}
+
+	// Subscriber with a very short timeout: it attaches, coalesces onto the
+	// primary, then its deadline fires and it blocks in subDeadlineGate.
+	subOut := make(chan result, 1)
+	go func() {
+		resp, err := broker.Request(dest, port, "https", 20*time.Millisecond)
+		subOut <- result{resp, err}
+	}()
+	// Wait for it to coalesce (count == 2) so it is in w.subs when Resolve
+	// deletes the waiter — the precondition for the lost-wakeup window.
+	for broker.CoalescedCount(primaryID) < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	// Wait until the subscriber's deadline has fired and it is parked at the
+	// gate (still attached, detachSub not yet called).
+	<-subAtGate
+
+	// Inside Resolve, after the waiter is deleted (lock held), release the
+	// parked subscriber so its detachSub + non-blocking read races the
+	// fan-out send exactly in the lost-wakeup window. Yield generously so
+	// the subscriber goroutine is scheduled and (post-fix) blocks on b.mu
+	// inside detachSub before this hook returns and Resolve performs the
+	// under-lock fan-out send.
+	broker.resolveAfterDeleteHook = func() {
+		close(releaseSub)
+		for i := 0; i < 1000; i++ {
+			runtime.Gosched()
+		}
+	}
+
+	if !broker.Resolve(primaryID, ResponseAllowOnce) {
+		t.Fatal("Resolve returned false for primary")
+	}
+
+	pr := <-primaryOut
+	if pr.resp != ResponseAllowOnce {
+		t.Fatalf("primary: expected ResponseAllowOnce, got %v (err %v)", pr.resp, pr.err)
+	}
+
+	select {
+	case sr := <-subOut:
+		// The whole point of Finding 2: the coalesced subscriber whose
+		// deadline fired in the resolve window must observe the operator's
+		// ALLOW, not a spurious timeout deny.
+		if sr.resp != ResponseAllowOnce {
+			t.Fatalf("coalesced subscriber wrongly got %v (err %v); want ResponseAllowOnce "+
+				"— lost-wakeup: Resolve deleted the waiter then the sub's deadline "+
+				"fired before the fan-out send (Finding 2)", sr.resp, sr.err)
+		}
+		if sr.err != nil {
+			t.Fatalf("coalesced subscriber got ALLOW but with error %v; the resolved "+
+				"decision must come back clean", sr.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("coalesced subscriber never returned (deadlock?)")
+	}
+}
+
+// TestBrokerCancelAllSubDeadlineLostWakeup is the round-18 #4 regression. It
+// deterministically forces the CancelAll-vs-coalesced-sub-deadline
+// interleave that re-opened the exact lost-wakeup window the round-6 Resolve
+// fix closed. Pre-fix CancelAll cleared the waiter map and released b.mu
+// BEFORE sending the terminal denies; a coalesced subscriber whose deadline
+// fired in that window took b.mu in detachSub, found NO waiter (already
+// cleared), and its post-detach non-blocking read missed the not-yet-sent
+// buffered deny — returning a spurious "approval timeout" during shutdown.
+// Post-fix CancelAll sends every primary/sub deny WHILE HOLDING b.mu, before
+// clearing the map, so the released subscriber's detachSub serializes
+// against the send: by the time its non-blocking read runs, ResponseDeny is
+// already buffered on its cap-1 chan and it returns the cancel deny cleanly.
+//
+// Forced with two seams, no sleeps for the critical ordering:
+//   - subDeadlineGate parks the subscriber at the very top of waitSub's
+//     deadline branch (before detachSub) until released.
+//   - cancelAllAfterClearHook fires in CancelAll right after b.mu is
+//     released (post-fix: AFTER the under-lock denies + map clear) and is
+//     where the test releases the subscriber so its detach/read races the
+//     terminal send exactly in the (pre-fix) lost-wakeup window.
+func TestBrokerCancelAllSubDeadlineLostWakeup(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const dest = "cancelall-lostwakeup.example.com"
+	const port = 443
+
+	// Long-lived primary so it stays pending while the sub coalesces.
+	primaryOut := make(chan result, 1)
+	go func() {
+		resp, err := broker.Request(dest, port, "https", 5*time.Second)
+		primaryOut <- result{resp, err}
+	}()
+	var primaryID string
+	for {
+		reqs := ch.getRequests()
+		if len(reqs) == 1 {
+			primaryID = reqs[0].ID
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Park the subscriber at the start of its deadline branch.
+	subAtGate := make(chan struct{})
+	releaseSub := make(chan struct{})
+	var gateOnce sync.Once
+	broker.subDeadlineGate = func() {
+		gateOnce.Do(func() { close(subAtGate) })
+		<-releaseSub
+	}
+
+	// Subscriber with a very short timeout: it coalesces onto the primary,
+	// then its deadline fires and it blocks in subDeadlineGate (still
+	// attached, detachSub not yet called).
+	subOut := make(chan result, 1)
+	go func() {
+		resp, err := broker.Request(dest, port, "https", 20*time.Millisecond)
+		subOut <- result{resp, err}
+	}()
+	for broker.CoalescedCount(primaryID) < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	<-subAtGate
+
+	// In CancelAll, after b.mu is released (post-fix: denies already sent
+	// under the lock + map cleared), release the parked subscriber so its
+	// detachSub + non-blocking read races the terminal send exactly in the
+	// pre-fix lost-wakeup window. Yield generously so the subscriber
+	// goroutine is scheduled before the hook returns.
+	broker.cancelAllAfterClearHook = func() {
+		close(releaseSub)
+		for i := 0; i < 1000; i++ {
+			runtime.Gosched()
+		}
+	}
+
+	broker.CancelAll()
+
+	pr := <-primaryOut
+	if pr.resp != ResponseDeny {
+		t.Fatalf("primary: expected ResponseDeny from CancelAll, got %v (err %v)", pr.resp, pr.err)
+	}
+
+	select {
+	case sr := <-subOut:
+		// The whole point of #4: the coalesced subscriber whose deadline
+		// fired in the CancelAll window must observe the shutdown DENY
+		// CLEANLY (the buffered cancel response via waitSub's post-detach
+		// non-blocking read), NOT a spurious "approval timeout" error.
+		//
+		// Both the clean cancel-deny and the spurious-timeout paths return
+		// the SAME ResponseDeny value (waitSub's timeout branch returns
+		// ResponseDeny + an error), so the resp value alone cannot tell
+		// them apart. The distinguishing signal is the error: the clean
+		// cancel path returns (ResponseDeny, nil); the lost-wakeup path
+		// returns (ResponseDeny, "approval timeout after ...").
+		if sr.resp != ResponseDeny {
+			t.Fatalf("coalesced subscriber got %v; want ResponseDeny", sr.resp)
+		}
+		if sr.err != nil {
+			t.Fatalf("coalesced subscriber got ResponseDeny but with error %v; want a "+
+				"CLEAN cancel deny — lost-wakeup: CancelAll cleared the waiter map "+
+				"then the sub's deadline fired before the terminal send, so the "+
+				"sub returned a spurious approval timeout instead of the buffered "+
+				"shutdown deny (round-18 #4)", sr.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("coalesced subscriber never returned after CancelAll (deadlock?)")
 	}
 }

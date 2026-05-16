@@ -1263,40 +1263,50 @@ func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Remove associated bindings and auto-created rules first. If vault.Remove
-	// below fails, bindings/rules are already gone. This is a pre-existing
-	// ordering tradeoff: reversing it would orphan bindings when vault succeeds
-	// but SQLite fails. A transactional approach would require the vault to
-	// participate in the same transaction, which is not currently possible.
-	if _, err := s.store.RemoveBindingsByCredential(name); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to remove bindings: "+err.Error(), "")
+	// Store-first removal order (Finding 3, round-9 + Finding 2, round-15).
+	// RemoveCredentialFully is the authoritative, fail-closed
+	// pool-membership gate AND the atomic store-side cleanup: in one
+	// transaction it refuses if the credential is still a live pool member,
+	// otherwise deletes credential_meta, credential_health, all bindings on
+	// the credential, and all auto-created rules (cred-add:/binding-add:).
+	// It runs BEFORE the vault delete so the vault secret is only destroyed
+	// once the entire store unit has committed. If it refuses (or any of
+	// the store deletes fail), the whole tx rolls back: vault secret,
+	// bindings, rules, meta, and health are all left intact and no window
+	// exists where credential_meta is gone but bindings/rules survive
+	// (the partially-deleted-credential bug this fixes).
+	if _, _, _, err := s.store.RemoveCredentialFully(name); err != nil {
+		// Only the fail-closed pool-member guard is a client conflict
+		// (the operator must take the credential out of its pool first);
+		// map that — and only that — to 409. Store faults (tx
+		// begin/exec/commit failures) are server errors: returning 409
+		// for them would hide a backend failure as a client mistake and
+		// is inconsistent with the binding handlers (4xx for typed
+		// validation/conflict only, 500 for store faults).
+		status := http.StatusInternalServerError
+		if errors.Is(err, store.ErrCredentialInUseByPool) {
+			status = http.StatusConflict
+		}
+		writeError(w, status, "failed to remove credential store state (vault secret + all store rows left intact so the credential is not partially deleted): "+err.Error(), "")
 		return
 	}
-	// Rules may have been created by either "cred add --destination" (tagged
-	// cred-add:<name>) or by "binding add" against the same credential
-	// (tagged binding-add:<name>). Remove both so cleanup is symmetric with
-	// the CLI, otherwise orphan allow rules would persist after the
-	// credential is gone.
-	for _, src := range []string{
-		store.CredAddSourcePrefix + name,
-		store.BindingAddSourcePrefix + name,
-	} {
-		if _, err := s.store.RemoveRulesBySource(src); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to remove associated rules: "+err.Error(), "")
-			return
-		}
-	}
 
-	// Remove the credential from the vault first. If this fails, metadata
-	// stays intact so the credential type is not lost.
-	if err := s.vault.Remove(name); err != nil {
+	// Store removal already succeeded above (the pool-membership gate
+	// passed and credential_meta+health+bindings+rules are gone atomically).
+	// Only now is it safe to delete the vault secret.
+	//
+	// Finding 4: an already-missing vault secret is NOT a failure. The
+	// store cleanup has already committed; treating os.IsNotExist as a
+	// hard 500 here would abort BEFORE the engine recompile / resolver
+	// rebuild, leaving the live policy stale until a manual reload — and
+	// it makes using the API to finish a previous partial cleanup
+	// impossible. The CLI (cmd/sluice/cred.go) and Telegram
+	// (internal/telegram/commands.go) paths already treat os.IsNotExist as
+	// success and continue; match them. Any OTHER vault error is still a
+	// hard 500 (do not swallow real failures).
+	if err := s.vault.Remove(name); err != nil && !os.IsNotExist(err) {
 		writeError(w, http.StatusInternalServerError, "failed to remove credential: "+err.Error(), "")
 		return
-	}
-
-	// Remove credential metadata after vault deletion succeeded.
-	if _, err := s.store.RemoveCredentialMeta(name); err != nil {
-		log.Printf("[WARN] failed to remove credential meta %q: %v", name, err)
 	}
 
 	if err := s.recompileEngine(); err != nil {

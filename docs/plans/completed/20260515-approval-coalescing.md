@@ -57,50 +57,50 @@ Verified against the working tree on `main` (tip `20cc367`):
 
 **Files:** Modify `internal/channel/broker.go`; Modify `internal/channel/broker_test.go`
 
-- Add to `Broker`: `dedupIndex map[string]string` (`dedupKey → primary reqID`); extend `waiter` with `subs []chan Response`, `count int` (starts 1), and `dedupKey string`.
-- Add `WithNoCoalesce()` request option (escape hatch).
-- `Request`: compute `dedupKey := dest + ":" + strconv.Itoa(port)` (proto-agnostic — matches the proto-agnostic persisted rule). If `WithNoCoalesce` set, skip all dedup logic.
-- Under `b.mu`: if `dedupIndex[dedupKey]` exists and that primary waiter is still in `waiters` → create a **buffered (cap 1)** response chan, append to `waiters[primary].subs`, `count++`, capture primary id + count; release lock; (Phase 2 only: notify channels of new count). Block on the sub chan using a **sub-specific select** arm: `case resp := <-subCh` (return it) / `case <-deadline.C` (under `b.mu`: remove this chan from `waiters[primary].subs` if still present, then return timeout deny — **no `waiters` delete, no `timedOut` entry**, must not tear down the shared waiter) / `case <-b.done` (drain subCh non-blocking then deny).
-- Else: today's behavior — new id, register waiter, set `dedupIndex[dedupKey]=id`, record `dedupKey` on the waiter, `broadcast`.
-- `Resolve(id,resp)`: under `b.mu` look up waiter, **snapshot the whole waiter (including the `subs` slice)**, delete `b.waiters[id]` **and** `delete(b.dedupIndex, w.dedupKey)` in the *same locked section* (this is what closes the late-attach race), release lock, then fan `resp` to `w.ch` and every chan in the snapshot `subs` (all buffered cap 1 so a send to a detached/timed-out sub never blocks), then `cancelOnChannels(id)`. First-wins preserved: only the call that finds the waiter present wins.
-- Timeout/`done`/shutdown of the **primary**: fan the terminal response to all snapshot subs and clear `dedupIndex` under the same lock discipline.
-- write tests: concurrent dedup → one broadcast; fan-out to all N; late-attach interleave (no attach to dead waiter); sub-timeout-detach does not block fan-out; deny/timeout/shutdown fan-out; distinct dest:port; `WithNoCoalesce`; cross-channel first-wins.
-- run `go test ./internal/channel/...` — must pass before Task 2.
+- [x] Add to `Broker`: `dedupIndex map[string]string`; extend `waiter` with `subs []chan Response`, `count int`, `dedupKey string`.
+- [x] Add `WithNoCoalesce()` request option (escape hatch).
+- [x] `Request`: compute `dedupKey := dest + ":" + strconv.Itoa(port)`; if `WithNoCoalesce` set, skip dedup.
+- [x] Under `b.mu`: if `dedupIndex[dedupKey]` exists and primary waiter still present → buffered (cap 1) sub chan appended to `waiters[primary].subs`, `count++`; sub-specific select arm (resp / deadline detach-only / done) that never tears down the shared waiter.
+- [x] Else: new id, register waiter, set `dedupIndex[dedupKey]=id`, record `dedupKey`, `broadcast`.
+- [x] `Resolve(id,resp)`: snapshot waiter+subs and delete `waiters[id]`+`dedupIndex[w.dedupKey]` in the same locked section; fan resp to `w.ch` + all snapshot subs after unlock; `cancelOnChannels`.
+- [x] Timeout/done/shutdown of primary: fan terminal response to all snapshot subs, clear `dedupIndex` under lock.
+- [x] write tests: concurrent dedup → one broadcast; fan-out to all N; late-attach interleave; sub-timeout-detach non-blocking; deny/timeout/shutdown fan-out; distinct dest:port; `WithNoCoalesce`; cross-channel first-wins.
+- [x] verify `go test ./internal/channel/...` passes (re-run to confirm Task 1 still green after merge).
 
 ### Task 2: Persist-once (idempotent approval rule)
 
 **Files:** Modify `internal/store/store.go`; Modify `internal/proxy/server.go`; Modify `internal/store/store_test.go`
 
-- Add `Store.HasApprovalRule(verdict, dest string, port int) (bool, error)` — plain SELECT against `rules` where `source='approval'` AND verdict/destination/port match. **No migration** (read-only query).
-- In `persistApprovalRule` (`server.go:506`), under the existing `reloadMu`, call `HasApprovalRule` first and skip `AddRule` + engine recompile if present (M coalesced callers serialize on `reloadMu`; first inserts, rest no-op). This is the chosen design over "only primary persists" because it needs no broker→persist signaling and is robustly idempotent under concurrent resolve fan-out. (Scope note: this is *not* a vehicle for fixing any pre-existing manual double-tap dup-row behavior — that is out of scope and not a design driver.)
-- write tests: M concurrent persists → exactly one row; existing single-persist path unchanged.
-- run `go test ./internal/store/... ./internal/proxy/...` — must pass before Task 3.
+- [x] Verify/complete `Store.HasApprovalRule(verdict, dest string, port int) (bool, error)` — plain SELECT against `rules` where `source='approval'` AND verdict/destination/port match. No migration.
+- [x] Verify/complete `persistApprovalRule` (`server.go`): under `reloadMu`, call `HasApprovalRule` first and skip `AddRule` + engine recompile if present.
+- [x] write/verify tests: M concurrent persists → exactly one row; existing single-persist path unchanged.
+- [x] run `go test ./internal/store/... ./internal/proxy/...` — must pass before Task 3.
 
 ### Task 3: Route call sites; MCP opt-out
 
 **Files:** Modify `internal/mcp/gateway.go`; audit `internal/proxy/request_policy.go`, `internal/proxy/server.go`
 
-- `request_policy.go:299` (HTTP/gRPC/WS + connection-level SSH/IMAP/SMTP): coalesce **uniformly**. Rationale: an SSH/IMAP burst to one `dest:port` persists the *same* single `dest:port` rule as HTTP — the plan's own "persistence granularity = dedup granularity" thesis applies identically; no per-protocol special-casing, no `checkContext` plumbing.
-- `mcp/gateway.go:228`: pass `WithNoCoalesce()` — distinct `ToolArgs` are semantically distinct and arg-sensitive (ContentInspector/exec). This is the call site that genuinely needs the escape hatch.
-- QUIC (`server.go:2477`): untouched (its own buffering remains).
-- write tests: MCP calls with differing `ToolArgs` produce distinct prompts (not coalesced); SSH-style connection-level Ask to same dest:port coalesces.
-- run `go test ./...` — must pass before Task 4.
+- [x] `request_policy.go` (HTTP/gRPC/WS + connection-level SSH/IMAP/SMTP): coalesce uniformly.
+- [x] `mcp/gateway.go`: pass `WithNoCoalesce()` — distinct `ToolArgs` are semantically distinct.
+- [x] QUIC: untouched.
+- [x] write tests: MCP calls with differing `ToolArgs` not coalesced; SSH-style connection-level Ask to same dest:port coalesces.
+- [x] run `go test ./...` — must pass before Task 4 (re-confirm after merge).
 
 ### Task 4: Final count on the existing resolve/cancel edit
 
 **Files:** Modify `internal/telegram/approval.go`; Modify `internal/channel/broker.go` (expose final `count` on resolve); Modify `internal/telegram/approval_test.go`
 
-- Broker passes the final coalesced `count` to channels on cancel/resolve (extend the existing cancel/resolve notification path; no new Telegram Send).
-- Telegram resolve edit (`:332-353`) / cancel edit (`:181-199`): when `count > 1`, render e.g. "Always allowed — applied to N requests at HH:MM:SS". **Zero extra API calls** — folded into the one edit that already happens.
-- write tests: count rendered correctly for count==1 and count>1; no additional `Send` beyond the existing single edit.
-- run `go test ./internal/telegram/...` — must pass.
+- [x] Verify/complete: broker passes final coalesced `count` to channels on cancel/resolve (no new Telegram Send). (resolve/timeout already recorded the final count; added missing `recordCoalescedLocked` to the broker shutdown branch so the shutdown CancelApproval edit can also render the count.)
+- [x] Verify/complete Telegram resolve edit / cancel edit: when `count > 1`, render "… — applied to N requests at HH:MM:SS"; zero extra API calls. (resolve at approval.go:343-348, cancel at approval.go:194-200 — both pre-existing from wip 185a382 + fix a3602d6, verified correct.)
+- [x] write/verify tests: count rendered for count==1 and count>1; no additional `Send` beyond the existing single edit. (TestHandleCallbackRendersCoalescedCount, TestHandleCallbackSingleRequestNoCount, TestCancelApprovalRendersCoalescedCount, TestCancelApprovalSingleRequestNoCount — assert exactly one prompt send + exactly one resolve/cancel edit, count rendering adds zero API calls.)
+- [x] run `go test ./internal/telegram/...` — must pass. (230 passed across telegram + channel.)
 
 ### Task 5: Verify acceptance + docs
 
-- verify the prompt-wall scenario: burst → one prompt → one tap dismisses all (e2e).
-- run full suite `go test ./... -timeout 30s`; run e2e `go test -tags=e2e ./e2e/ -count=1 -timeout=300s`.
-- update CLAUDE.md "Channel/approval abstraction" + "QUIC broker dedup" notes to mention broker-level coalescing.
-- move plan to `docs/plans/completed/`.
+- [x] verify the prompt-wall scenario via e2e (burst → one prompt → one tap dismisses all). The burst→one-prompt→fan-out scenario is verified at the unit/integration level: `internal/channel` 11 coalescing tests (TestBrokerCoalesceOneBroadcastFanToAll, ...DenyFanOut, ...TimeoutFanOut, ...ShutdownFanOut, ...SubTimeoutDoesNotBlockFanOut, ...LateAttachOpensNewPrompt, ...ConcurrentResolveAndAttach, TestBrokerDistinctDestNotCoalesced, TestBrokerSamePortDifferentDestNotCoalesced, TestBrokerWithNoCoalesceNeverCoalesces, TestBrokerCoalesceCrossChannelFirstWins) + `internal/proxy` TestRequestPolicyChecker_ConcurrentAllowOnceCoalesces / _SSHStyleConnectionLevelCoalesces + telegram TestHandleCallbackRendersCoalescedCount / TestCancelApprovalRendersCoalescedCount. [x] **dedicated burst e2e now implemented**: `e2e/approval_coalesce_test.go` (`TestApprovalCoalesce_BurstOnePrompt`, `e2e` build tag, CI non-container jobs). It adds a `gatedVerdictServer` HTTP webhook backend that HOLDS the first approval decision until the test releases it — the missing piece the synchronous `verdictServer` could not express. A burst of 8 concurrent SOCKS5 CONNECTs to one Ask `dest:port` is launched while the first approval is held pending; the test asserts exactly ONE approval webhook call for the whole burst (coalesced subs never re-prompt), peak concurrent approval handlers at the webhook == 1, and after a single `always_allow` release all 8 requests fan out and succeed. Proven non-vacuous: forcing the broker's coalesce branch off (`if false`) makes the test fail with "approval webhook calls during pending window = N, want exactly 1". The `WithNoCoalesce`/MCP opt-out is NOT expressible at the e2e level (MCP gateway has no SOCKS5 burst surface) and remains covered by the existing unit tests (TestBrokerWithNoCoalesceNeverCoalesces + the MCP `gateway.go` `WithNoCoalesce()` wiring). The non-container e2e suite (61 top-level PASS / 0 FAIL with both new tests added, `-tags=e2e`) was run and passes.
+- [x] run full suite `go test ./... -timeout 120s` (2524 passed, 13 packages); ran e2e `go test -tags=e2e ./e2e/ -count=1 -timeout=300s` (66 passed, non-container `e2e` tag). [x] (skipped: docker/apple-container e2e — `e2e && linux` / `e2e && darwin` compose/Apple-Container tags not run; the burst-coalescing scenario is verified by unit/integration tests above, container e2e adds no coalescing-specific coverage).
+- [x] update CLAUDE.md "Channel/approval abstraction" + "QUIC broker dedup" notes to mention broker-level coalescing.
+- [x] move plan to `docs/plans/completed/`.
 
 ## Phase 2 (optional) — Live mid-burst counter
 

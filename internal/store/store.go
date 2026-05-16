@@ -7,6 +7,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -297,6 +298,37 @@ func (s *Store) RuleExists(verdict string, opts RuleExistsOpts) (bool, error) {
 		return false, fmt.Errorf("one of destination, tool, or pattern is required")
 	}
 
+	var count int
+	if err := s.db.QueryRow(query, args...).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// HasApprovalRule reports whether an approval-sourced rule already exists for
+// the given verdict, destination, and single port. It is a read-only SELECT
+// (no migration) used by the proxy to make approval-rule persistence
+// idempotent: when a burst of coalesced "Always Allow"/"Always Deny"
+// responses fan out, the first caller inserts the rule and the rest see it
+// already present and skip the insert + engine recompile.
+//
+// The match is intentionally narrow — source='approval', exact verdict,
+// exact destination, and exact ports JSON for the single approval port —
+// mirroring exactly what persistApprovalRule writes via AddRule. It is not a
+// general dedup for manually added rules.
+func (s *Store) HasApprovalRule(verdict, dest string, port int) (bool, error) {
+	if verdict == "" || dest == "" {
+		return false, fmt.Errorf("verdict and destination are required")
+	}
+	portsJSON := portsToJSONPtr([]int{port})
+	query := "SELECT COUNT(*) FROM rules WHERE source = 'approval' AND verdict = ? AND destination = ? AND "
+	args := []any{verdict, dest}
+	if portsJSON != nil {
+		query += "ports = ?"
+		args = append(args, *portsJSON)
+	} else {
+		query += "ports IS NULL"
+	}
 	var count int
 	if err := s.db.QueryRow(query, args...).Scan(&count); err != nil {
 		return false, err
@@ -615,6 +647,14 @@ func (s *Store) AddBinding(destination, credential string, opts BindingOpts) (in
 		}
 	}()
 
+	// The credential must resolve to a live credential or a live pool.
+	// Runs on the same tx as the INSERT so a concurrent pool/credential
+	// delete cannot interleave between the check and the write, closing
+	// the creation half of the bind/remove TOCTOU.
+	if err := assertBindingCredentialExistsTx(tx, credential); err != nil {
+		return 0, err
+	}
+
 	// Uniqueness check runs on the same tx as the INSERT so the single
 	// connection serializes them. Without this, concurrent callers could
 	// both observe no collision and then both insert the same env_var
@@ -672,6 +712,60 @@ var ErrBindingDuplicate = fmt.Errorf("binding already exists for credential/dest
 // this sentinel every store failure collapses into a 400, hiding real
 // server faults from clients.
 var ErrBindingValidation = fmt.Errorf("binding validation failed")
+
+// ErrBindingCredentialMissing is returned by AddBinding / AddRuleAndBinding
+// when the named credential does not exist as either a live credential
+// (credential_meta) or a live pool (credential_pools). It is wrapped under
+// ErrBindingValidation so the API layer maps it to a 400, but callers that
+// want to detect this specific case (e.g. to print "create the credential
+// or pool first") can test with errors.Is on this sentinel.
+//
+// This closes the creation half of the bind/remove TOCTOU:
+// RemovePoolIfUnreferenced refuses to delete a pool that a binding still
+// references, and this check refuses to create a binding for a credential
+// or pool that no longer exists. The existence check and the binding INSERT
+// run in the same transaction so a concurrent pool/credential delete cannot
+// interleave between them and leave a binding pointing at a vanished name.
+var ErrBindingCredentialMissing = fmt.Errorf("binding references a credential or pool that does not exist")
+
+// ErrCredentialInUseByPool is returned (wrapped) by the fail-closed
+// pool-member guard in deleteCredentialMetaGuardedTx — and therefore by
+// RemoveCredentialMeta, RemoveCredentialMetaCAS, and RemoveCredentialFully —
+// when a credential cannot be removed because it is still a live member of
+// one or more pools. It is a typed sentinel so callers can distinguish this
+// client-facing conflict (the operator must take the credential out of the
+// pool first) from genuine store faults (transaction begin/exec/commit
+// failures). The REST layer maps errors.Is(err, ErrCredentialInUseByPool) to
+// 409 Conflict and every other RemoveCredentialFully error to 500; the CLI
+// and Telegram paths treat any non-nil error as the fail-closed refusal and
+// leave all state intact regardless of which kind it is.
+var ErrCredentialInUseByPool = fmt.Errorf("credential is a live member of a pool")
+
+// assertBindingCredentialExistsTx verifies, inside the caller's transaction,
+// that the binding's credential refers to either a live credential
+// (credential_meta) OR a live pool (credential_pools). A binding's
+// credential column is a free-form name that resolves at proxy time to one
+// of those two namespaces, so accepting a name that matches neither would
+// persist a permanently dead binding (and could later be silently inherited
+// by a same-named credential/pool created afterwards). Run on the same tx as
+// the INSERT so the check and the write are atomic against a concurrent
+// pool/credential delete.
+func assertBindingCredentialExistsTx(tx *sql.Tx, credential string) error {
+	var one int
+	err := tx.QueryRow(
+		`SELECT 1 WHERE EXISTS (SELECT 1 FROM credential_meta WHERE name = ?)
+		            OR EXISTS (SELECT 1 FROM credential_pools WHERE name = ?)`,
+		credential, credential,
+	).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: %w: credential %q is neither a live credential nor a live pool (create it first)",
+			ErrBindingValidation, ErrBindingCredentialMissing, credential)
+	}
+	if err != nil {
+		return fmt.Errorf("check credential/pool existence for %q: %w", credential, err)
+	}
+	return nil
+}
 
 // isBindingUniqueViolation detects the SQLite UNIQUE constraint violation
 // that indicates a duplicate binding on (credential, destination).
@@ -1645,6 +1739,16 @@ func (s *Store) AddRuleAndBinding(
 	}
 	ruleID, _ = res.LastInsertId()
 
+	// The credential must resolve to a live credential or a live pool.
+	// Same tx as the rule + binding inserts so a concurrent pool/credential
+	// delete cannot interleave and leave a binding pointing at a vanished
+	// name (creation half of the bind/remove TOCTOU). cred add
+	// --destination commits the credential_meta row in its own prior
+	// transaction, so the just-created credential is already visible here.
+	if err = assertBindingCredentialExistsTx(tx, credential); err != nil {
+		return 0, 0, err
+	}
+
 	// Validate and check env_var uniqueness before inserting (uses tx to
 	// avoid deadlock with the single-connection pool).
 	if bindingOpts.EnvVar != "" {
@@ -1707,14 +1811,74 @@ func (s *Store) AddCredentialMeta(name, credType, tokenURL string) error {
 	if credType == "oauth" && tokenURL == "" {
 		return fmt.Errorf("token_url is required for oauth credentials")
 	}
-	_, err := s.db.Exec(
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Namespace mutual-exclusion: a credential must not shadow a pool. Pool
+	// and credential names share one namespace so a bound destination
+	// resolves unambiguously to either a pool or a plain credential. This is
+	// the store-layer counterpart to the pool-side check in
+	// CreatePoolWithMembers; enforcing it here protects every credential
+	// creation path (CLI, REST API, any future caller), not just the CLI.
+	// The check and the insert run in one transaction so a concurrent
+	// CreatePoolWithMembers cannot interleave between them.
+	var poolName string
+	collErr := tx.QueryRow("SELECT name FROM credential_pools WHERE name = ?", name).Scan(&poolName)
+	switch collErr {
+	case nil:
+		return fmt.Errorf("name %q is already a credential pool; pool and credential names share one namespace", name)
+	case sql.ErrNoRows:
+		// ok
+	default:
+		return fmt.Errorf("check pool name collision for %q: %w", name, collErr)
+	}
+
+	// Live-pool-member downgrade guard. AddCredentialMeta is an upsert, so a
+	// re-add/update path could flip an EXISTING credential that is currently
+	// a live pool member to static / non-oauth / missing token_url. Pool
+	// creation validates members are oauth (validatePoolMemberTx), but this
+	// upsert bypasses that post-hoc and would leave the pool pointing at a
+	// member the pooled OAuth injection+failover code cannot use. Reject the
+	// downgrade only when the row already exists AND is a live pool member
+	// AND the new metadata is not a usable oauth credential. Benign updates
+	// (still oauth with a token_url, e.g. a token_url change) are allowed.
+	var existingType string
+	exErr := tx.QueryRow("SELECT cred_type FROM credential_meta WHERE name = ?", name).Scan(&existingType)
+	switch exErr {
+	case nil:
+		var memberPool string
+		memErr := tx.QueryRow(
+			"SELECT pool FROM credential_pool_members WHERE credential = ? ORDER BY pool LIMIT 1", name,
+		).Scan(&memberPool)
+		switch memErr {
+		case nil:
+			if credType != "oauth" || tokenURL == "" {
+				return fmt.Errorf("credential %q is a live member of pool %q; it must stay an oauth credential with a token_url (pooled failover cannot use a %s credential)", name, memberPool, credType)
+			}
+		case sql.ErrNoRows:
+			// not a pool member; any upsert is fine
+		default:
+			return fmt.Errorf("check pool membership for %q: %w", name, memErr)
+		}
+	case sql.ErrNoRows:
+		// brand-new credential; nothing to downgrade
+	default:
+		return fmt.Errorf("check existing credential meta for %q: %w", name, exErr)
+	}
+
+	if _, err := tx.Exec(
 		`INSERT INTO credential_meta (name, cred_type, token_url)
 		 VALUES (?, ?, ?)
 		 ON CONFLICT(name) DO UPDATE SET cred_type = excluded.cred_type, token_url = excluded.token_url`,
 		name, credType, nilIfEmpty(tokenURL),
-	)
-	if err != nil {
+	); err != nil {
 		return fmt.Errorf("insert credential meta: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }
@@ -1761,13 +1925,175 @@ func (s *Store) ListCredentialMeta() ([]CredentialMeta, error) {
 
 // RemoveCredentialMeta deletes a credential metadata row by name. Returns true
 // if a row was deleted.
+//
+// The fail-closed pool-member guard and the credential_health cleanup are
+// enforced for every caller (CLI, REST API, Telegram) via the shared
+// deleteCredentialMetaGuardedTx helper, which RemoveCredentialMetaCAS also
+// routes through so the bare-delete and CAS-rollback paths cannot diverge.
 func (s *Store) RemoveCredentialMeta(name string) (bool, error) {
-	res, err := s.db.Exec("DELETE FROM credential_meta WHERE name = ?", name)
+	tx, err := s.db.Begin()
 	if err != nil {
-		return false, fmt.Errorf("delete credential meta: %w", err)
+		return false, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	n, err := deleteCredentialMetaGuardedTx(tx, name, "DELETE FROM credential_meta WHERE name = ?", []any{name})
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit: %w", err)
+	}
+	return n > 0, nil
+}
+
+// deleteCredentialMetaGuardedTx is the single guarded credential_meta delete
+// path shared by RemoveCredentialMeta and RemoveCredentialMetaCAS so the two
+// can never diverge on the pool-member integrity guard or the health-row
+// cleanup. It must be called inside an open transaction; the caller commits.
+//
+// Invariants enforced here for EVERY removal path (bare delete and CAS
+// rollback alike):
+//
+//   - Pool-member integrity (fail-closed): removal is REFUSED when the
+//     credential is still a live member of one or more pools. Deleting it
+//     would leave a credential_pool_members row pointing at a missing
+//     credential. This also closes the add-rollback TOCTOU: a concurrent
+//     pool-create can claim the just-added credential between insert and
+//     rollback, so the CAS rollback must honour the same guard. When the
+//     guard refuses, the meta row stays (it IS a live pool member, which is
+//     correct) and an informative error is returned so the caller surfaces
+//     it instead of silently leaving inconsistent state.
+//   - Health-row cleanup: the per-credential credential_health row is keyed
+//     by credential name and is not FK-tied to credential_meta, so a bare
+//     meta delete would leave a stale cooldown a same-named recreation would
+//     inherit. The health row is deleted in the same transaction.
+//
+// deleteSQL/deleteArgs let the CAS caller add its compare-and-swap predicate
+// to the meta delete while sharing the guard and health cleanup.
+func deleteCredentialMetaGuardedTx(tx *sql.Tx, name, deleteSQL string, deleteArgs []any) (int64, error) {
+	// Fail-closed pool-member guard. Same semantics as the CLI guard in
+	// `sluice cred remove`: a credential that is a live pool member cannot
+	// be removed until it is taken out of the pool.
+	var pool string
+	memErr := tx.QueryRow(
+		"SELECT pool FROM credential_pool_members WHERE credential = ? ORDER BY pool LIMIT 1", name,
+	).Scan(&pool)
+	switch memErr {
+	case nil:
+		return 0, fmt.Errorf("%w: credential %q is a member of pool %q; remove it from the pool first (sluice pool remove <p>, or recreate the pool without it)", ErrCredentialInUseByPool, name, pool)
+	case sql.ErrNoRows:
+		// not a pool member; safe to remove
+	default:
+		return 0, fmt.Errorf("check pool membership for %q: %w", name, memErr)
+	}
+
+	res, err := tx.Exec(deleteSQL, deleteArgs...)
+	if err != nil {
+		return 0, fmt.Errorf("delete credential meta: %w", err)
 	}
 	n, _ := res.RowsAffected()
-	return n > 0, nil
+	// Drop the health row in the same transaction ONLY when a meta row was
+	// actually deleted. The CAS caller appends a compare-and-swap predicate
+	// to deleteSQL, so a concurrent writer that changed cred_type/token_url
+	// makes the meta DELETE a no-op (0 rows). In that case the concurrent
+	// writer's metadata is correctly left intact; wiping its health row too
+	// would silently destroy a live cooldown it still owns. When 0 rows are
+	// deleted we leave both untouched and signal the no-op to the caller
+	// (RemoveCredentialMetaCAS turns n==0 into removed=false). A plain
+	// delete-by-name still removes the health row whenever it removes the
+	// meta row, so non-CAS semantics are unchanged.
+	if n > 0 {
+		if _, err := tx.Exec("DELETE FROM credential_health WHERE credential = ?", name); err != nil {
+			return 0, fmt.Errorf("delete credential health: %w", err)
+		}
+	}
+	return n, nil
+}
+
+// RemoveCredentialFully removes ALL store-side state for a credential as a
+// single atomic transaction: the fail-closed pool-member guard, the
+// credential_meta row, the credential_health row, every binding on the
+// credential, and every auto-created allow rule tagged cred-add:<name> or
+// binding-add:<name>. Either every one of these is gone on return or none is
+// (the tx rolls back as a unit).
+//
+// This is the round-15 Finding 2 fix. The previous REST/CLI/Telegram removal
+// paths deleted credential_meta (+ health) in its own committed transaction
+// and only THEN removed bindings and rules in separate statements. A failure
+// in the binding/rule cleanup left meta+health gone while the vault secret
+// and a partial set of bindings/rules survived: a partially-deleted
+// credential. Folding all four deletes into one tx removes that window.
+//
+// Ordering contract for callers (preserved from round-13): open/validate the
+// vault FIRST (an unopenable vault must abort before any store mutation),
+// then call RemoveCredentialFully, and only delete the vault secret AFTER
+// this returns nil. If the pool-member guard refuses, this returns a non-nil
+// error with NOTHING deleted, so the caller leaves the vault secret intact
+// and no window exists where the secret is gone but credential_pool_members
+// still references it.
+//
+// Returns metaDeleted=true when a credential_meta row was actually deleted
+// (false is a benign "already gone" — bindings/rules are still swept so a
+// previously partial cleanup is finished). bindings/rules are the counts
+// removed, for operator feedback.
+func (s *Store) RemoveCredentialFully(name string) (metaDeleted bool, bindings, rules int64, err error) {
+	if name == "" {
+		return false, 0, 0, fmt.Errorf("credential name is required")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, 0, 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Guarded meta+health delete (also runs the fail-closed pool-member
+	// guard). If the credential is still a live pool member this returns an
+	// error and the deferred Rollback discards everything — nothing is
+	// removed, exactly as the standalone RemoveCredentialMeta behaved.
+	n, err := deleteCredentialMetaGuardedTx(tx, name, "DELETE FROM credential_meta WHERE name = ?", []any{name})
+	if err != nil {
+		return false, 0, 0, err
+	}
+
+	// Round-17 Finding 1: deleteCredentialMetaGuardedTx only drops the
+	// credential_health row when the meta DELETE affected a row (CAS no-op
+	// semantics, correct for RemoveCredentialMetaCAS — see that helper's
+	// comment). But this is the FULL-removal path: if a prior partial
+	// cleanup already removed credential_meta, n==0 and the guarded helper
+	// leaves a stale credential_health row behind, so a later same-named
+	// credential would inherit the dead cooldown. Full removal must wipe
+	// the named credential's health UNCONDITIONALLY in the same tx,
+	// regardless of whether a meta row existed. This does NOT alter
+	// deleteCredentialMetaGuardedTx's behavior, so the round-11
+	// RemoveCredentialMetaCAS no-op invariant is unchanged.
+	if _, err := tx.Exec("DELETE FROM credential_health WHERE credential = ?", name); err != nil {
+		return false, 0, 0, fmt.Errorf("delete credential health for %q: %w", name, err)
+	}
+
+	bres, err := tx.Exec("DELETE FROM bindings WHERE credential = ?", name)
+	if err != nil {
+		return false, 0, 0, fmt.Errorf("delete bindings by credential %q: %w", name, err)
+	}
+	bn, _ := bres.RowsAffected()
+
+	var rn int64
+	for _, src := range []string{
+		CredAddSourcePrefix + name,
+		BindingAddSourcePrefix + name,
+	} {
+		rres, rerr := tx.Exec("DELETE FROM rules WHERE source = ?", src)
+		if rerr != nil {
+			return false, 0, 0, fmt.Errorf("delete rules by source %q: %w", src, rerr)
+		}
+		c, _ := rres.RowsAffected()
+		rn += c
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, 0, 0, fmt.Errorf("commit: %w", err)
+	}
+	return n > 0, bn, rn, nil
 }
 
 // RemoveCredentialMetaCAS deletes a credential metadata row only when its
@@ -1811,15 +2137,22 @@ func (s *Store) RemoveCredentialMetaCAS(name, expectedType, expectedTokenURL str
 		return false, false, nil
 	}
 
-	res, err := tx.Exec("DELETE FROM credential_meta WHERE name = ? AND cred_type = ? AND COALESCE(token_url, '') = ?",
-		name, expectedType, expectedTokenURL)
-	if err != nil {
-		return false, false, fmt.Errorf("delete credential meta: %w", err)
+	// Route the actual delete through the shared guarded helper so the
+	// CAS rollback path enforces the SAME fail-closed pool-member guard and
+	// the SAME credential_health cleanup as RemoveCredentialMeta. A
+	// concurrent pool-create can claim the just-added credential between
+	// our insert and this rollback (TOCTOU); the guard refuses the delete
+	// in that case, surfacing an informative error and leaving the meta row
+	// in place (it IS a live pool member, which is the correct state).
+	n, gErr := deleteCredentialMetaGuardedTx(tx, name,
+		"DELETE FROM credential_meta WHERE name = ? AND cred_type = ? AND COALESCE(token_url, '') = ?",
+		[]any{name, expectedType, expectedTokenURL})
+	if gErr != nil {
+		return false, false, gErr
 	}
 	if commitErr := tx.Commit(); commitErr != nil {
 		return false, false, fmt.Errorf("commit: %w", commitErr)
 	}
-	n, _ := res.RowsAffected()
 	return n > 0, true, nil
 }
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	migsqlite "github.com/golang-migrate/migrate/v4/database/sqlite"
@@ -23,6 +24,21 @@ func newTestStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	return s
+}
+
+// mustAddCred registers a static credential so a subsequent AddBinding /
+// AddRuleAndBinding referencing it passes the live-credential-or-pool
+// existence check. Real callers (CLI "cred add", REST, Telegram) always
+// create the credential before binding to it; these binding-CRUD tests
+// previously relied on the store accepting a free-form credential name with
+// no backing row. The existence check now enforces the same invariant the
+// production paths already satisfy, so the fixture mirrors reality rather
+// than weakening the test.
+func mustAddCred(t *testing.T, s *Store, name string) {
+	t.Helper()
+	if err := s.AddCredentialMeta(name, "static", ""); err != nil {
+		t.Fatalf("add credential meta %q: %v", name, err)
+	}
 }
 
 // --- Schema migration tests ---
@@ -757,6 +773,7 @@ func TestConfigUpdateVaultProviderClearFields(t *testing.T) {
 
 func TestBindingCRUD(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_api_key")
 	id, err := s.AddBinding("api.example.com", "my_api_key", BindingOpts{
 		Ports:     []int{443},
 		Header:    "Authorization",
@@ -806,6 +823,7 @@ func TestBindingCRUD(t *testing.T) {
 
 func TestBindingMultipleProtocols(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "mail_cred")
 	_, err := s.AddBinding("mail.example.com", "mail_cred", BindingOpts{
 		Ports:     []int{993, 587},
 		Protocols: []string{"imap", "smtp"},
@@ -821,6 +839,7 @@ func TestBindingMultipleProtocols(t *testing.T) {
 
 func TestBindingNoProtocols(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "key")
 	_, err := s.AddBinding("api.example.com", "key", BindingOpts{
 		Ports:  []int{443},
 		Header: "Authorization",
@@ -846,6 +865,7 @@ func TestBindingValidation(t *testing.T) {
 
 func TestUpdateBindingSingleField(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{
 		Ports:    []int{443},
 		Header:   "Authorization",
@@ -882,6 +902,7 @@ func TestUpdateBindingSingleField(t *testing.T) {
 
 func TestUpdateBindingMultipleFields(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{
 		Ports:     []int{443},
 		Header:    "Authorization",
@@ -935,6 +956,7 @@ func TestUpdateBindingMultipleFields(t *testing.T) {
 
 func TestUpdateBindingClearFields(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{
 		Ports:    []int{443},
 		Header:   "Authorization",
@@ -979,6 +1001,7 @@ func TestUpdateBindingNotFound(t *testing.T) {
 
 func TestUpdateBindingEmptyOpts(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{Ports: []int{443}})
 	if err != nil {
 		t.Fatalf("add: %v", err)
@@ -995,6 +1018,7 @@ func TestUpdateBindingEmptyOpts(t *testing.T) {
 
 func TestUpdateBindingEmptyDestination(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{})
 	if err != nil {
 		t.Fatalf("add: %v", err)
@@ -1010,6 +1034,7 @@ func TestUpdateBindingEmptyDestination(t *testing.T) {
 // This is distinct from passing nil (which means "no change").
 func TestUpdateBindingClearPortsAndProtocols(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{
 		Ports:     []int{443, 8080},
 		Protocols: []string{"http", "grpc"},
@@ -1048,6 +1073,8 @@ func TestUpdateBindingClearPortsAndProtocols(t *testing.T) {
 // allowed because they resolve to the same phantom value.
 func TestUpdateBindingEnvVar(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
+	mustAddCred(t, s, "other_cred")
 	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{})
 	if err != nil {
 		t.Fatalf("add: %v", err)
@@ -1307,6 +1334,7 @@ func TestRuleExistsProtocolScoped(t *testing.T) {
 
 func TestBindingExists(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	_, _ = s.AddBinding("api.example.com", "my_key", BindingOpts{})
 
 	exists, _ := s.BindingExists("api.example.com", "my_key")
@@ -2752,6 +2780,8 @@ func TestAddChannelWithoutOpts(t *testing.T) {
 
 func TestListBindingsByCredential(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred_a")
+	mustAddCred(t, s, "cred_b")
 	_, _ = s.AddBinding("api.one.com", "cred_a", BindingOpts{Ports: []int{443}})
 	_, _ = s.AddBinding("api.two.com", "cred_a", BindingOpts{Ports: []int{443}})
 	_, _ = s.AddBinding("api.three.com", "cred_b", BindingOpts{Ports: []int{443}})
@@ -2775,6 +2805,8 @@ func TestListBindingsByCredential(t *testing.T) {
 
 func TestRemoveBindingsByCredential(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred_a")
+	mustAddCred(t, s, "cred_b")
 	_, _ = s.AddBinding("api.one.com", "cred_a", BindingOpts{})
 	_, _ = s.AddBinding("api.two.com", "cred_a", BindingOpts{})
 	_, _ = s.AddBinding("api.three.com", "cred_b", BindingOpts{})
@@ -2839,6 +2871,7 @@ func TestIsEmpty(t *testing.T) {
 
 func TestIsEmptyWithBinding(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred")
 	_, _ = s.AddBinding("test.com", "cred", BindingOpts{})
 
 	empty, err := s.IsEmpty()
@@ -2865,6 +2898,7 @@ func TestIsEmptyWithUpstream(t *testing.T) {
 
 func TestAddRuleAndBinding(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "api_key")
 	ruleID, bindingID, err := s.AddRuleAndBinding(
 		"allow",
 		RuleOpts{Destination: "api.example.com", Ports: []int{443}, Name: "api access"},
@@ -3318,6 +3352,110 @@ func TestRemoveCredentialMetaCASMissingRow(t *testing.T) {
 	}
 }
 
+// TestDeleteCredentialMetaGuardedTxNoOpKeepsHealth pins the round-10
+// regression: deleteCredentialMetaGuardedTx must NOT delete the
+// credential_health row when the meta DELETE affected zero rows. The CAS
+// caller appends a compare-and-swap predicate to the meta DELETE, so a
+// concurrent writer that changed cred_type/token_url makes the delete a no-op
+// (0 rows). The concurrent writer's metadata is correctly left intact;
+// wiping its still-live health row would silently destroy a cooldown it owns.
+//
+// Fail-before: the helper unconditionally deleted credential_health, so a CAS
+// no-op left the meta row but wiped the health row. Pass-after: a 0-row meta
+// delete leaves BOTH untouched; a matching delete still removes both.
+func TestDeleteCredentialMetaGuardedTxNoOpKeepsHealth(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.AddCredentialMeta("concurrent", "static", ""); err != nil {
+		t.Fatalf("seed meta: %v", err)
+	}
+	until := time.Now().Add(60 * time.Second).UTC().Truncate(time.Second)
+	if err := s.SetCredentialHealth("concurrent", "cooldown", until, "429 rate limited"); err != nil {
+		t.Fatalf("seed health: %v", err)
+	}
+
+	// Simulate the CAS rollback racing a concurrent writer: the CAS DELETE
+	// predicate no longer matches the current row, so the meta DELETE
+	// affects 0 rows.
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	n, err := deleteCredentialMetaGuardedTx(tx, "concurrent",
+		"DELETE FROM credential_meta WHERE name = ? AND cred_type = ?",
+		[]any{"concurrent", "oauth"}) // predicate fails: row is static
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("deleteCredentialMetaGuardedTx: %v", err)
+	}
+	if n != 0 {
+		_ = tx.Rollback()
+		t.Fatalf("expected 0 rows deleted on CAS no-op, got %d", n)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// The concurrent writer's metadata must still be there...
+	meta, err := s.GetCredentialMeta("concurrent")
+	if err != nil {
+		t.Fatalf("get meta: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("CAS no-op wrongly deleted the concurrent writer's meta row")
+	}
+	// ...and so must its live cooldown (this is the regression assertion).
+	h, err := s.GetCredentialHealth("concurrent")
+	if err != nil {
+		t.Fatalf("get health: %v", err)
+	}
+	if h == nil {
+		t.Fatal("CAS no-op wrongly deleted the concurrent writer's credential_health row")
+	}
+	if h.Status != "cooldown" {
+		t.Errorf("health status = %q, want cooldown (cooldown destroyed)", h.Status)
+	}
+
+	// A matching CAS delete still removes BOTH meta and health.
+	removed, noConcurrent, err := s.RemoveCredentialMetaCAS("concurrent", "static", "")
+	if err != nil {
+		t.Fatalf("matching CAS delete: %v", err)
+	}
+	if !removed || !noConcurrent {
+		t.Fatalf("matching CAS delete: removed=%v noConcurrent=%v, want true,true", removed, noConcurrent)
+	}
+	if m, _ := s.GetCredentialMeta("concurrent"); m != nil {
+		t.Error("matching CAS delete left meta row")
+	}
+	if hh, _ := s.GetCredentialHealth("concurrent"); hh != nil {
+		t.Error("matching CAS delete left health row")
+	}
+}
+
+// TestRemoveCredentialMetaStillDeletesHealth confirms the non-CAS
+// delete-by-name path is unchanged: deleting the meta row also deletes the
+// health row (so a same-named recreation does not inherit a stale cooldown).
+func TestRemoveCredentialMetaStillDeletesHealth(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.AddCredentialMeta("plain", "static", ""); err != nil {
+		t.Fatalf("seed meta: %v", err)
+	}
+	until := time.Now().Add(60 * time.Second).UTC().Truncate(time.Second)
+	if err := s.SetCredentialHealth("plain", "cooldown", until, "401 auth fail"); err != nil {
+		t.Fatalf("seed health: %v", err)
+	}
+
+	deleted, err := s.RemoveCredentialMeta("plain")
+	if err != nil || !deleted {
+		t.Fatalf("RemoveCredentialMeta = %v, %v; want true, nil", deleted, err)
+	}
+	if m, _ := s.GetCredentialMeta("plain"); m != nil {
+		t.Error("meta row survived RemoveCredentialMeta")
+	}
+	if h, _ := s.GetCredentialHealth("plain"); h != nil {
+		t.Error("health row survived RemoveCredentialMeta (stale cooldown would be inherited)")
+	}
+}
+
 func TestCredentialMetaCRUDRoundTrip(t *testing.T) {
 	s := newTestStore(t)
 
@@ -3360,6 +3498,7 @@ func TestCredentialMetaCRUDRoundTrip(t *testing.T) {
 
 func TestBindingEnvVarMigration(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "key")
 
 	// Verify the env_var column exists by inserting and reading back.
 	_, err := s.AddBinding("api.example.com", "key", BindingOpts{
@@ -3384,6 +3523,7 @@ func TestBindingEnvVarMigration(t *testing.T) {
 
 func TestBindingEnvVarEmpty(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "key")
 
 	// Binding without env_var should have empty string.
 	_, err := s.AddBinding("api.example.com", "key", BindingOpts{
@@ -3400,6 +3540,7 @@ func TestBindingEnvVarEmpty(t *testing.T) {
 
 func TestAddBindingWithEnvVar(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "openai_key")
 
 	id, err := s.AddBinding("api.openai.com", "openai_key", BindingOpts{
 		Ports:  []int{443},
@@ -3431,6 +3572,9 @@ func TestAddBindingWithEnvVar(t *testing.T) {
 
 func TestAddBindingEnvVarUniqueness(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "openai_key")
+	mustAddCred(t, s, "other_key")
+	mustAddCred(t, s, "telegram_bot")
 
 	// First binding with env_var should succeed.
 	_, err := s.AddBinding("api.openai.com", "openai_key", BindingOpts{
@@ -3482,6 +3626,9 @@ func TestAddBindingEnvVarUniquenessConcurrent(t *testing.T) {
 	s := newTestStore(t)
 
 	const workers = 20
+	for i := 0; i < workers; i++ {
+		mustAddCred(t, s, fmt.Sprintf("cred-%d", i))
+	}
 	var (
 		wg       sync.WaitGroup
 		successM sync.Mutex
@@ -3541,6 +3688,9 @@ func TestAddBindingEnvVarUniquenessConcurrent(t *testing.T) {
 
 func TestListBindingsWithEnvVar(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "openai_key")
+	mustAddCred(t, s, "github_key")
+	mustAddCred(t, s, "telegram_bot")
 
 	// Add bindings with and without env_var.
 	_, _ = s.AddBinding("api.openai.com", "openai_key", BindingOpts{
@@ -3585,7 +3735,10 @@ func TestListBindingsWithEnvVarEmpty(t *testing.T) {
 	}
 
 	// Add binding without env_var.
-	_, _ = s.AddBinding("api.example.com", "key", BindingOpts{Ports: []int{443}})
+	mustAddCred(t, s, "key")
+	if _, err := s.AddBinding("api.example.com", "key", BindingOpts{Ports: []int{443}}); err != nil {
+		t.Fatalf("add binding without env_var: %v", err)
+	}
 
 	bindings, err = s.ListBindingsWithEnvVar()
 	if err != nil {
@@ -3598,6 +3751,7 @@ func TestListBindingsWithEnvVarEmpty(t *testing.T) {
 
 func TestAddRuleAndBindingWithEnvVar(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "openai_key")
 	_, bindingID, err := s.AddRuleAndBinding(
 		"allow",
 		RuleOpts{Destination: "api.openai.com", Ports: []int{443}},
@@ -3622,6 +3776,8 @@ func TestAddRuleAndBindingWithEnvVar(t *testing.T) {
 
 func TestAddRuleAndBindingEnvVarUniqueness(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "openai_key")
+	mustAddCred(t, s, "other_key")
 
 	// First should succeed.
 	_, _, err := s.AddRuleAndBinding(
@@ -3648,6 +3804,8 @@ func TestAddRuleAndBindingEnvVarUniqueness(t *testing.T) {
 
 func TestListBindingsByCredentialWithEnvVar(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "openai_key")
+	mustAddCred(t, s, "other_key")
 	_, _ = s.AddBinding("api.openai.com", "openai_key", BindingOpts{
 		Ports:  []int{443},
 		EnvVar: "OPENAI_API_KEY",
@@ -3670,6 +3828,7 @@ func TestListBindingsByCredentialWithEnvVar(t *testing.T) {
 
 func TestBindingEnvVarMigrationDown(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "key")
 
 	// Add a binding with env_var to verify data exists.
 	_, err := s.AddBinding("api.example.com", "key", BindingOpts{
@@ -3720,6 +3879,12 @@ func TestBindingEnvVarMigrationDown(t *testing.T) {
 
 func TestAddBindingEnvVarFormatValidation(t *testing.T) {
 	s := newTestStore(t)
+	// The valid sub-cases use the env var string as the credential name, so
+	// seed those credentials; invalid cases fail input validation before the
+	// existence check is reached.
+	mustAddCred(t, s, "OPENAI_API_KEY")
+	mustAddCred(t, s, "my_key")
+	mustAddCred(t, s, "_HIDDEN")
 
 	tests := []struct {
 		name   string
@@ -3766,6 +3931,7 @@ func TestAddBindingEnvVarFormatValidation(t *testing.T) {
 // return ErrBindingDuplicate.
 func TestAddBindingDuplicateRejected(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	if _, err := s.AddBinding("api.example.com", "my_key", BindingOpts{}); err != nil {
 		t.Fatalf("first add: %v", err)
 	}
@@ -3786,6 +3952,7 @@ func TestAddBindingDuplicateRejected(t *testing.T) {
 // leaving a partially-applied rule behind.
 func TestAddRuleAndBindingDuplicateRejected(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	if _, err := s.AddBinding("api.example.com", "my_key", BindingOpts{}); err != nil {
 		t.Fatalf("seed binding: %v", err)
 	}
@@ -3861,6 +4028,7 @@ func TestRemoveRuleByBindingPair(t *testing.T) {
 // binding destination change + paired rule update + returned ruleFound flag.
 func TestUpdateBindingWithRuleSync(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	ruleID, bindingID, err := s.AddRuleAndBinding(
 		"allow",
 		RuleOpts{
@@ -3918,6 +4086,7 @@ func TestUpdateBindingWithRuleSync(t *testing.T) {
 // authorize the old one, breaking the new port and leaking the old.
 func TestUpdateBindingWithRuleSyncPropagatesPortsAndProtocols(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred")
 	ruleID, bindingID, err := s.AddRuleAndBinding(
 		"allow",
 		RuleOpts{
@@ -4009,6 +4178,7 @@ func TestUpdateBindingWithRuleSyncPropagatesPortsAndProtocols(t *testing.T) {
 // paired-rule sync path validates port ranges before touching the rule.
 func TestUpdateBindingWithRuleSyncRejectsInvalidPorts(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred")
 	_, bindingID, err := s.AddRuleAndBinding(
 		"allow",
 		RuleOpts{
@@ -4076,6 +4246,7 @@ func TestAddRuleAndBindingRejectsInvalidPorts(t *testing.T) {
 // connection time. Mirrors the TOML import validator.
 func TestAddRuleAndBindingRejectsUnknownProtocol(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred")
 
 	// Rule-level typo.
 	_, _, err := s.AddRuleAndBinding(
@@ -4121,6 +4292,7 @@ func TestAddRuleAndBindingRejectsUnknownProtocol(t *testing.T) {
 // for the standalone AddBinding path.
 func TestAddBindingRejectsUnknownProtocol(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred")
 
 	_, err := s.AddBinding("api.example.com", "cred", BindingOpts{Protocols: []string{"htp"}})
 	if err == nil || !strings.Contains(err.Error(), "unknown protocol") {
@@ -4137,6 +4309,7 @@ func TestAddBindingRejectsUnknownProtocol(t *testing.T) {
 // path rejects unknown protocols before any transaction runs.
 func TestUpdateBindingWithRuleSyncRejectsUnknownProtocol(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred")
 	_, bindingID, err := s.AddRuleAndBinding(
 		"allow",
 		RuleOpts{
@@ -4173,6 +4346,7 @@ func TestUpdateBindingWithRuleSyncRejectsUnknownProtocol(t *testing.T) {
 // scope drifted from what the remaining rule authorized.
 func TestUpdateBindingWithRuleSyncUpdatesBothSourcePrefixes(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred")
 
 	// Seed the first rule via AddRuleAndBinding with the cred-add prefix.
 	// This mirrors "sluice cred add --destination" creating the initial
@@ -4246,6 +4420,7 @@ func TestUpdateBindingWithRuleSyncUpdatesBothSourcePrefixes(t *testing.T) {
 // iteration 9 finding 2.
 func TestRemoveBindingWithRuleCleanupCaseInsensitive(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 
 	// Add a binding via AddBinding (no paired rule) so we can seed the
 	// paired rule at a different case without fighting the atomic
@@ -4296,6 +4471,7 @@ func TestRemoveBindingWithRuleCleanupCaseInsensitive(t *testing.T) {
 // RemoveBindingWithRuleCleanup. Regression for codex iteration 9 finding 2.
 func TestUpdateBindingWithRuleSyncCaseInsensitive(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 
 	bindingID, err := s.AddBinding("api.example.com", "my_key", BindingOpts{})
 	if err != nil {
@@ -4433,6 +4609,7 @@ func TestAddRuleAndBindingValidationErrorsAreTagged(t *testing.T) {
 // AddRuleAndBinding test for the update path.
 func TestUpdateBindingWithRuleSyncValidationErrorsAreTagged(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred")
 	_, bindingID, err := s.AddRuleAndBinding(
 		"allow",
 		RuleOpts{
@@ -4481,6 +4658,7 @@ func TestUpdateBindingWithRuleSyncValidationErrorsAreTagged(t *testing.T) {
 // 6 finding 1.
 func TestAddBindingCaseInsensitiveDuplicate(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 
 	if _, err := s.AddBinding("api.example.com", "my_key", BindingOpts{}); err != nil {
 		t.Fatalf("first add: %v", err)
@@ -4516,6 +4694,7 @@ func TestAddBindingCaseInsensitiveDuplicate(t *testing.T) {
 // duplicate is detected so no orphan rule remains.
 func TestAddRuleAndBindingCaseInsensitiveDuplicate(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 
 	if _, _, err := s.AddRuleAndBinding(
 		"allow",
@@ -4556,6 +4735,7 @@ func TestAddRuleAndBindingCaseInsensitiveDuplicate(t *testing.T) {
 // callers can map them to 400. Regression for codex iteration 6 finding 3.
 func TestAddBindingValidation(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred")
 
 	cases := []struct {
 		name string
@@ -4585,5 +4765,86 @@ func TestAddBindingValidation(t *testing.T) {
 	// Valid input still succeeds on the same store.
 	if _, err := s.AddBinding("api.example.com", "cred", BindingOpts{Ports: []int{443}}); err != nil {
 		t.Errorf("unexpected error for valid input: %v", err)
+	}
+}
+
+// --- HasApprovalRule (idempotent approval persistence) ---
+
+func TestHasApprovalRule(t *testing.T) {
+	s := newTestStore(t)
+
+	// No approval rule yet.
+	has, err := s.HasApprovalRule("allow", "cas.example.com", 443)
+	if err != nil {
+		t.Fatalf("HasApprovalRule: %v", err)
+	}
+	if has {
+		t.Fatal("expected no approval rule before insert")
+	}
+
+	// Insert exactly what persistApprovalRule writes.
+	if _, err := s.AddRule("allow", RuleOpts{
+		Destination: "cas.example.com", Ports: []int{443}, Source: "approval",
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+
+	has, err = s.HasApprovalRule("allow", "cas.example.com", 443)
+	if err != nil {
+		t.Fatalf("HasApprovalRule: %v", err)
+	}
+	if !has {
+		t.Fatal("expected approval rule to be found after insert")
+	}
+
+	// Mismatches must not match.
+	cases := []struct {
+		name          string
+		verdict, dest string
+		port          int
+	}{
+		{"different verdict", "deny", "cas.example.com", 443},
+		{"different dest", "allow", "other.example.com", 443},
+		{"different port", "allow", "cas.example.com", 8443},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			has, err := s.HasApprovalRule(c.verdict, c.dest, c.port)
+			if err != nil {
+				t.Fatalf("HasApprovalRule: %v", err)
+			}
+			if has {
+				t.Errorf("expected no match for %s", c.name)
+			}
+		})
+	}
+}
+
+func TestHasApprovalRuleIgnoresNonApprovalSource(t *testing.T) {
+	s := newTestStore(t)
+
+	// A manually-added rule with the same shape must NOT be treated as an
+	// approval rule (HasApprovalRule filters source='approval').
+	if _, err := s.AddRule("allow", RuleOpts{
+		Destination: "manual.example.com", Ports: []int{443}, Source: "manual",
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	has, err := s.HasApprovalRule("allow", "manual.example.com", 443)
+	if err != nil {
+		t.Fatalf("HasApprovalRule: %v", err)
+	}
+	if has {
+		t.Error("manual-sourced rule must not satisfy HasApprovalRule")
+	}
+}
+
+func TestHasApprovalRuleValidatesInput(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.HasApprovalRule("", "x", 443); err == nil {
+		t.Error("expected error for empty verdict")
+	}
+	if _, err := s.HasApprovalRule("allow", "", 443); err == nil {
+		t.Error("expected error for empty destination")
 	}
 }

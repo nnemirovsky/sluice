@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -84,6 +85,14 @@ type SluiceAddon struct {
 	// atomically on SIGHUP / policy mutation.
 	resolver *atomic.Pointer[vault.BindingResolver]
 
+	// poolResolver expands a bound pool name to its currently active
+	// member at the single injection chokepoint (resolveInjectionTarget).
+	// Swapped atomically alongside resolver on reload; may be nil when
+	// no pools are configured (treated as identity passthrough). Phase 2
+	// mutates the contained health map in place under the resolver's own
+	// mutex on the response path.
+	poolResolver *atomic.Pointer[vault.PoolResolver]
+
 	// provider retrieves real credential values from the vault.
 	provider vault.Provider
 
@@ -117,11 +126,34 @@ type SluiceAddon struct {
 	// refreshes.
 	refreshGroup singleflight.Group
 
+	// refreshAttr maps the real refresh token sluice injected into an
+	// outbound OAuth refresh-grant to the pool member that owns it. It is
+	// the precise per-request join key for pooled credential refresh
+	// attribution (Risk R1). Never nil after NewSluiceAddon.
+	refreshAttr *refreshAttribution
+
+	// flowInjected maps a go-mitmproxy Flow ID to the pool member whose
+	// credential was injected into THAT request at injection time. It is
+	// the per-request join key for API-host failover attribution (Finding
+	// 1): a 429/403-quota failover must cool the member that backed the
+	// request when it was SENT, not whoever is active when the response is
+	// processed (which races with a concurrent request's failover). Never
+	// nil after NewSluiceAddon.
+	flowInjected *flowInjectedMember
+
 	// onOAuthRefresh is called after an OAuth token refresh persist
 	// completes successfully. It receives the credential name so the
 	// caller can re-inject updated phantom env vars into the agent
 	// container. Nil means no post-refresh action.
 	onOAuthRefresh func(credName string)
+
+	// onFailover is called after a Phase 2 pool failover has been applied
+	// in memory (the active-member switch already happened synchronously
+	// before this fires). The callback owns the durable store write
+	// (SetCredentialHealth) and the best-effort Telegram notice, and MUST
+	// NOT block the response path (it dispatches its own goroutine). Nil
+	// means failover is in-memory only (no durability, no notice).
+	onFailover func(FailoverEvent)
 
 	// persistDone is an optional channel signaled when an async OAuth
 	// token persist goroutine completes. Used by tests to avoid
@@ -160,6 +192,8 @@ type SluiceAddon struct {
 func NewSluiceAddon(opts ...SluiceAddonOption) *SluiceAddon {
 	a := &SluiceAddon{
 		pendingCheckers: make(map[string][]*pendingCheck),
+		refreshAttr:     newRefreshAttribution(),
+		flowInjected:    newFlowInjectedMember(),
 	}
 	for _, o := range opts {
 		o(a)
@@ -178,6 +212,60 @@ func WithResolver(r *atomic.Pointer[vault.BindingResolver]) SluiceAddonOption {
 // WithProvider sets the vault provider for credential injection.
 func WithProvider(p vault.Provider) SluiceAddonOption {
 	return func(a *SluiceAddon) { a.provider = p }
+}
+
+// WithPoolResolver sets the credential pool resolver pointer used by the
+// injection chokepoint to expand a bound pool name to its active member.
+func WithPoolResolver(r *atomic.Pointer[vault.PoolResolver]) SluiceAddonOption {
+	return func(a *SluiceAddon) { a.poolResolver = r }
+}
+
+// SetPoolResolver wires (or rewires) the shared pool resolver pointer. Safe
+// to call after construction; the pointer itself is stable and only its
+// contents are atomically swapped on reload.
+func (a *SluiceAddon) SetPoolResolver(r *atomic.Pointer[vault.PoolResolver]) {
+	a.poolResolver = r
+}
+
+// injectionTarget is the result of expanding a bound credential-or-pool
+// name at the single chokepoint. phantomName is the name the agent's
+// phantom string is keyed on (the POOL name when pooled, so the phantom is
+// stable across member switches); secretName is the concrete credential
+// whose real vault value is injected (the active member when pooled). For a
+// plain credential both fields equal the input name and pooled is false.
+type injectionTarget struct {
+	phantomName string
+	secretName  string
+	pooled      bool
+}
+
+// resolveInjectionTarget is the single chokepoint every credential consumer
+// (pass-1 header inject, pass-2 phantom pairs, OAuthIndex.Has gating,
+// persist attribution) routes through. It expands a pool name to its active
+// member exactly once here so no consumer scatters its own IsPool check
+// (Important I2). The pool→member expansion MUST happen before any
+// OAuthIndex.Has / JSON-envelope decision: a pool name is not in
+// credential_meta so idx.Has(pool) is always false, and gating on the pool
+// name would mis-handle the OAuth envelope as a static secret.
+func (a *SluiceAddon) resolveInjectionTarget(name string) injectionTarget {
+	if a.poolResolver == nil {
+		return injectionTarget{phantomName: name, secretName: name}
+	}
+	pr := a.poolResolver.Load()
+	if pr == nil {
+		return injectionTarget{phantomName: name, secretName: name}
+	}
+	if !pr.IsPool(name) {
+		return injectionTarget{phantomName: name, secretName: name}
+	}
+	member, ok := pr.ResolveActive(name)
+	if !ok || member == "" {
+		// Empty/unresolvable pool: keep the name so callers degrade
+		// gracefully (no secret found -> no injection) rather than
+		// dereferencing an empty string.
+		return injectionTarget{phantomName: name, secretName: name, pooled: true}
+	}
+	return injectionTarget{phantomName: name, secretName: member, pooled: true}
 }
 
 // WithAuditLogger sets the audit logger for per-request events.
@@ -279,6 +367,14 @@ func (a *SluiceAddon) CancelPendingChecker(dest string) {
 // refresh is persisted to the vault.
 func (a *SluiceAddon) SetOnOAuthRefresh(fn func(credName string)) {
 	a.onOAuthRefresh = fn
+}
+
+// SetOnFailover configures the callback invoked after a pool failover has
+// been applied in memory. The callback is responsible for the durable store
+// write and the Telegram notice and must be non-blocking. Safe to leave
+// unset (in-memory-only failover).
+func (a *SluiceAddon) SetOnFailover(fn func(FailoverEvent)) {
+	a.onFailover = fn
 }
 
 // UpdateOAuthIndex rebuilds the OAuth token URL index from credential
@@ -549,16 +645,36 @@ func (a *SluiceAddon) injectHeaders(f *mitmproxy.Flow, host string, port int) {
 		return
 	}
 
-	secret, err := a.provider.Get(binding.Credential)
+	// Chokepoint: expand a bound pool name to its active member BEFORE the
+	// vault lookup and the OAuthIndex.Has envelope decision. A pool name is
+	// not a vault credential and is not in credential_meta, so both
+	// provider.Get and extractInjectableSecret must operate on the resolved
+	// member name (Important I2).
+	target := a.resolveInjectionTarget(binding.Credential)
+
+	secret, err := a.provider.Get(target.secretName)
 	if err != nil {
-		log.Printf("[ADDON-INJECT] credential %q lookup failed: %v", binding.Credential, err)
+		log.Printf("[ADDON-INJECT] credential %q lookup failed: %v", target.secretName, err)
 		return
 	}
 	defer secret.Release()
 
-	f.Request.Header.Set(binding.Header, binding.FormatValue(extractInjectableSecret(a.oauthIndex.Load(), binding.Credential, secret.String())))
-	log.Printf("[ADDON-INJECT] injected header %q for %s:%d (credential %q)",
-		binding.Header, host, port, binding.Credential)
+	f.Request.Header.Set(binding.Header, binding.FormatValue(extractInjectableSecret(a.oauthIndex.Load(), target.secretName, secret.String())))
+	if target.pooled {
+		// Pin the API-host failover attribution to the member that backed
+		// THIS request at send time. The response-side poolForResponse
+		// API-host branch reads this by flow ID so a concurrent request's
+		// failover (which switches the active member) cannot mis-attribute
+		// this request's 429/403 to the wrong member (Finding 1).
+		if target.secretName != "" {
+			a.flowInjected.Tag(f.Id, target.secretName)
+		}
+		log.Printf("[ADDON-INJECT] injected header %q for %s:%d (pool %q -> member %q)",
+			binding.Header, host, port, binding.Credential, target.secretName)
+	} else {
+		log.Printf("[ADDON-INJECT] injected header %q for %s:%d (credential %q)",
+			binding.Header, host, port, binding.Credential)
+	}
 }
 
 // extractInjectableSecret returns the value to substitute into a binding's
@@ -626,11 +742,20 @@ func (a *SluiceAddon) Request(f *mitmproxy.Flow) {
 	proto := a.detectRequestProtocol(f, port)
 	protoStr := proto.String()
 
-	pairs := a.buildPhantomPairs(host, port, protoStr)
+	pairs := a.buildPhantomPairs(host, port, protoStr, f.Request.URL)
 	if len(pairs) == 0 && !a.hasPhantomPrefix(f) {
 		return
 	}
 	defer releasePhantomPairs(pairs)
+
+	// Finding 2: record the per-flow pool-usage tag ONLY for pooled pairs
+	// whose pool phantom is actually present in this outbound request. A
+	// plain OAuth request to a token URL shared with a pool builds the
+	// pool's pairs as candidates but carries no pool phantom, so it must
+	// not be tagged (otherwise its 401/invalid_grant would cool an
+	// unrelated pool member). Done BEFORE the swap so the phantom is still
+	// present to detect.
+	a.tagPooledFlowAfterSwap(f, pairs)
 
 	// Pass 2+3 on headers.
 	a.swapPhantomHeaders(f, pairs, host, port)
@@ -641,15 +766,33 @@ func (a *SluiceAddon) Request(f *mitmproxy.Flow) {
 	}
 
 	// Pass 2+3 on URL query.
-	if rawQ := f.Request.URL.RawQuery; bytesContainsAnyPhantomPrefix([]byte(rawQ)) {
+	//
+	// Round-18 #5: the prefix gate alone is INSUFFICIENT for pooled OAuth
+	// credentials. A pooled credential's access phantom is the R3
+	// pool-stable SYNTHETIC JWT (poolStablePhantomAccess) which has NO
+	// "SLUICE_PHANTOM" prefix — it is `header.payload.sig`. If an SDK puts
+	// the access token in a query parameter or path segment,
+	// bytesContainsAnyPhantomPrefix returns false, the swap is skipped, and
+	// the synthetic phantom JWT is forwarded upstream verbatim (request
+	// fails / phantom leaks). The body swap above already runs
+	// unconditionally; query/path must likewise run when any scoped pair's
+	// actual phantom bytes (including the prefix-less pooled JWT) are
+	// present. pairsPhantomPresentIn only matches phantom bytes that ARE in
+	// this destination's scoped pairs, so unrelated requests are not
+	// over-scanned and R3 byte-stability is untouched (we only trigger the
+	// existing swapPhantomBytes; the synthetic-JWT shape is unchanged).
+	if rawQ := f.Request.URL.RawQuery; bytesContainsAnyPhantomPrefix([]byte(rawQ)) ||
+		pairsPhantomPresentIn([]byte(rawQ), pairs) {
 		f.Request.URL.RawQuery = string(
 			a.swapPhantomBytes([]byte(rawQ), pairs, host, port, "URL query", false),
 		)
 	}
 
 	// Pass 2+3 on URL path. pathContext=true selects path escaping so
-	// secrets containing spaces get %20, not '+'.
-	if rawP := f.Request.URL.Path; bytesContainsAnyPhantomPrefix([]byte(rawP)) {
+	// secrets containing spaces get %20, not '+'. Same pooled-JWT
+	// consideration as the query swap above (#5).
+	if rawP := f.Request.URL.Path; bytesContainsAnyPhantomPrefix([]byte(rawP)) ||
+		pairsPhantomPresentIn([]byte(rawP), pairs) {
 		f.Request.URL.Path = string(
 			a.swapPhantomBytes([]byte(rawP), pairs, host, port, "URL path", true),
 		)
@@ -679,15 +822,26 @@ func (a *SluiceAddon) StreamRequestModifier(f *mitmproxy.Flow, in io.Reader) io.
 	proto := a.detectRequestProtocol(f, port)
 	protoStr := proto.String()
 
-	pairs := a.buildPhantomPairs(host, port, protoStr)
+	pairs := a.buildPhantomPairs(host, port, protoStr, f.Request.URL)
 	if len(pairs) == 0 {
 		return in
 	}
 
+	// Finding 2: the streamed (form-urlencoded refresh) body is not
+	// buffered into f.Request.Body, so pairPhantomPresentInRequest cannot
+	// see the pool phantom here. Tag per-flow attribution from inside the
+	// reader, only when a pooled pair's phantom is actually swapped out of
+	// the stream. flowID is captured so the tag survives the reader.
+	flowID := f.Id
 	return &phantomSwapReader{
 		inner:    in,
 		pairs:    pairs,
 		provider: a.provider,
+		onPooledSwap: func(member string) {
+			if flowID != uuid.Nil && member != "" {
+				a.flowInjected.Tag(flowID, member)
+			}
+		},
 	}
 }
 
@@ -737,6 +891,29 @@ func (a *SluiceAddon) Response(f *mitmproxy.Flow) {
 
 	a.processOAuthResponseIfMatching(f)
 
+	// Phase 2 pool auto-failover. Runs on every response (the failover
+	// triggers are non-2xx, so this cannot piggyback on the OAuth 2xx-only
+	// path). It does not mutate the response — it only updates in-memory
+	// pool health synchronously and dispatches the durable write + notice —
+	// so its position relative to OAuth swap / DLP is immaterial. It is a
+	// cheap no-op for non-pooled destinations and for non-trigger statuses.
+	a.handlePoolFailover(f)
+
+	// Finding 1: free this flow's API-host failover attribution tag now
+	// that poolForResponse (invoked inside handlePoolFailover) has used it
+	// — its API-host branch reads the tag with a NON-consuming Peek, so
+	// without this delete a completed request's tag would linger for the
+	// full flowAttrTTL, making Tag's opportunistic sweep O(n) and letting
+	// the map grow unboundedly under sustained pooled traffic. Both the
+	// API-host (Peek) and token-endpoint (Recover) uses happen within that
+	// single poolForResponse call, so deleting here is correct and
+	// race-free; Delete is idempotent if the token-endpoint path already
+	// consumed it. The flowAttrTTL + Tag sweep remain a backstop for flows
+	// whose buffered Response never fires (streamed/abandoned).
+	if f.Id != uuid.Nil {
+		a.flowInjected.Delete(f.Id)
+	}
+
 	// Test-only panic injection. Always nil in production. Lets a
 	// regression test exercise the deferred recover above without
 	// having to construct a Flow that triggers a real downstream
@@ -749,6 +926,151 @@ func (a *SluiceAddon) Response(f *mitmproxy.Flow) {
 	// patterns that should not reach the agent. Runs after OAuth
 	// processing so real tokens are already swapped to phantoms.
 	a.scanResponseForDLP(f)
+}
+
+// oauthRespAttribution describes how a token-endpoint response is handled.
+// phantomName keys the phantom strings the agent receives (the POOL name
+// for pooled creds, so the phantom is byte-identical across member switches
+// — Risk R3). persistMember names the vault entry the rotated real tokens
+// are written to. skipPersist is set when the response belongs to a pooled
+// token URL but the owning member could not be recovered from the injected
+// real refresh token — the swap still runs (the agent must never see real
+// tokens) but the vault write is skipped so we never misfile B's rotated
+// tokens under A (Risk R1, fail-closed).
+type oauthRespAttribution struct {
+	phantomName   string
+	persistMember string
+	pooled        bool
+	skipPersist   bool
+}
+
+// resolveOAuthResponseAttribution turns the OAuthIndex match into a precise
+// attribution. For a plain credential it is the identity (phantom + persist
+// both the matched name). For a pooled member it keys the phantom on the
+// pool name and recovers the owning member via the REAL refresh token that
+// was injected into this exact outbound request body (the only join key
+// that survives two members sharing one token URL). When recovery fails it
+// returns skipPersist=true and never falls back to OAuthIndex.Match for the
+// persist target (R1: never guess).
+//
+// Finding 1: the caller passes the FIRST OAuthIndex match (Match is
+// name-ordered and token URLs are commonly shared). If a plain OAuth
+// credential sorts before the pool members and shares the token URL,
+// matchedCred is that plain credential and pr.PoolForMember(matchedCred)
+// returns "" — the old code then took the plain-credential identity branch
+// and a pooled refresh response was swapped/persisted under the plain
+// credential's phantom + vault entry. We therefore consult MatchAll: if ANY
+// credential sharing this token URL is a pool member, the response could be
+// a pooled refresh, so we recover the true owner from the injected refresh
+// token instead of trusting the deterministic-first match.
+func (a *SluiceAddon) resolveOAuthResponseAttribution(f *mitmproxy.Flow, matchedCred string) oauthRespAttribution {
+	pr := (*vault.PoolResolver)(nil)
+	if a.poolResolver != nil {
+		pr = a.poolResolver.Load()
+	}
+
+	// Determine whether this token URL has ANY pooled credential, not just
+	// whether the deterministic-first match happens to be one.
+	poolName := ""
+	if pr != nil {
+		poolName = pr.PoolForMember(matchedCred)
+		if poolName == "" && f.Request != nil {
+			if idx := a.oauthIndex.Load(); idx != nil {
+				for _, c := range idx.MatchAll(f.Request.URL) {
+					if p := pr.PoolForMember(c); p != "" {
+						poolName = p
+						break
+					}
+				}
+			}
+		}
+	}
+	if poolName == "" {
+		// No pooled credential shares this token URL: unchanged 1:1
+		// behavior for the plain-credential case.
+		return oauthRespAttribution{phantomName: matchedCred, persistMember: matchedCred}
+	}
+
+	// A pooled credential shares this token URL. Recover the owning member
+	// from the real refresh token sluice injected into this request's body
+	// (R1 join key — unique per member, unlike the shared token URL).
+	reqCT := ""
+	reqBody := []byte(nil)
+	if f.Request != nil {
+		if f.Request.Header != nil {
+			reqCT = f.Request.Header.Get("Content-Type")
+		}
+		reqBody = f.Request.Body
+	}
+	realRefresh := extractRequestRefreshToken(reqBody, reqCT)
+	member, capPool, capEpoch, capPooled, ok := a.refreshAttr.RecoverIdentity(realRefresh)
+	if ok && !capPooled && pr.PoolForMember(member) == "" {
+		// Finding 1: the injected refresh token was tagged under a name
+		// that is NOT a pool member. That tag is only ever recorded by
+		// the PLAIN-credential injection path (buildOAuthPhantomPairs'
+		// onRefreshInject in buildPhantomPairs), so this response is a
+		// normal refresh for the plain OAuth credential `member` that
+		// merely shares its token URL with a pool. Attribute 1:1: the
+		// agent receives the plain credential's own phantom and the
+		// rotated tokens are persisted to the plain credential's own
+		// vault entry. This is NOT the pooled fail-closed path — the
+		// refresh token uniquely identified a plain credential, so there
+		// is no guessing and no R1 violation. The genuine pooled
+		// fail-closed branch below is reached only when recovery fails
+		// entirely or resolves to an actual pool member.
+		log.Printf("[ADDON-OAUTH] Finding 1: token URL shared with pool %q but the injected "+
+			"refresh token attributes to plain credential %q; persisting 1:1 to %q",
+			poolName, member, member)
+		return oauthRespAttribution{phantomName: member, persistMember: member}
+	}
+	if !ok {
+		// Recovery failed AND a pool shares this token URL (the
+		// poolName == "" plain-only case already returned above with a
+		// normal 1:1 persist to matchedCred). We cannot prove this
+		// response is not a pooled refresh: a pooled refresh always
+		// records a tag in buildPooledMemberPairs, but that tag can
+		// expire (refreshAttrTTL) or be consumed before a slow response
+		// comes back, so a missing tag is NOT evidence of "plain, not
+		// pooled". Attributing to the deterministic-first plain
+		// credential here would misfile a pooled member's rotated tokens
+		// under the plain entry — exactly the R1 ("never guess")
+		// violation. Strict fail-closed: skip the vault write. The agent
+		// still receives phantoms (the swap ran), and the next refresh
+		// cycle re-tags and persists correctly. A genuinely plain-only
+		// token URL is unaffected because it never reaches here.
+		log.Printf("[ADDON-OAUTH] R1 fail-closed: token URL shared with pool %q but the "+
+			"owning member could not be recovered from the injected refresh token "+
+			"(no live tag); skipping vault write to avoid misfiling a pooled refresh "+
+			"under the wrong credential (next refresh will retry)", poolName)
+		return oauthRespAttribution{phantomName: poolName, pooled: true, skipPersist: true}
+	}
+	// Finding 2 (round 20): the recovered tag is pooled. Do NOT trust the
+	// member's CURRENT pool (pr.PoolForMember / IdentityForMember as they
+	// stand now) — that races a membership change. Validate the pool
+	// identity captured AT INJECTION TIME against the live membership. The
+	// pool whose phantom was actually swapped into this request is capPool
+	// at generation capEpoch; if the member was removed and re-added (a
+	// strictly greater epoch) or moved to a different pool between
+	// injection and this response, attributing/persisting against the new
+	// generation rewrites the response with the wrong-generation pool
+	// phantom and misfiles the rotated tokens. That is the documented
+	// fail-closed/stale case: keep the agent-facing phantom keyed on the
+	// CAPTURED pool (so the swap that already ran stays byte-consistent)
+	// but skip the vault write and the pooled audit attribution.
+	livePool, liveEpoch, liveOK := pr.IdentityForMember(member)
+	if !liveOK || livePool != capPool || liveEpoch != capEpoch {
+		log.Printf("[ADDON-OAUTH] Finding 2 stale: pooled refresh for member %q was injected "+
+			"under pool %q epoch %d but the live membership is %q epoch %d (ok=%v); "+
+			"membership raced (member removed/re-added) — skipping vault write and "+
+			"pooled attribution to avoid misfiling against the wrong generation",
+			member, capPool, capEpoch, livePool, liveEpoch, liveOK)
+		return oauthRespAttribution{phantomName: capPool, pooled: true, skipPersist: true}
+	}
+	// Same generation: the captured identity still matches the live
+	// membership, so the response genuinely belongs to capPool at capEpoch.
+	log.Printf("[ADDON-OAUTH] R1 attributed pooled refresh to member %q (pool %q epoch %d)",
+		member, capPool, capEpoch)
+	return oauthRespAttribution{phantomName: capPool, persistMember: member, pooled: true}
 }
 
 // processOAuthResponseIfMatching performs OAuth token phantom swap on the
@@ -774,7 +1096,11 @@ func (a *SluiceAddon) processOAuthResponseIfMatching(f *mitmproxy.Flow) {
 		return
 	}
 
-	modified, err := a.processAddonOAuthResponse(f, credName)
+	// Chokepoint: turn the (collision-prone for pools) OAuthIndex match
+	// into a precise phantom-key + persist-member attribution.
+	attr := a.resolveOAuthResponseAttribution(f, credName)
+
+	modified, err := a.processAddonOAuthResponse(f, attr)
 	if err != nil {
 		log.Printf("[ADDON-OAUTH] error processing OAuth response for %q: %v", credName, err)
 		return
@@ -918,7 +1244,11 @@ func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) (o
 		contentType = f.Response.Header.Get("Content-Type")
 	}
 
-	modified, err := a.swapOAuthTokens(body, contentType, credName)
+	// Chokepoint: precise phantom-key + persist-member attribution
+	// (pool-stable phantom, R1 fail-closed when member unrecoverable).
+	attr := a.resolveOAuthResponseAttribution(f, credName)
+
+	modified, err := a.swapOAuthTokens(body, contentType, attr)
 	if err != nil {
 		// The body did not parse as an OAuth token response. This is
 		// usually an HTML error page from a misconfigured token
@@ -958,7 +1288,8 @@ func (a *SluiceAddon) StreamResponseModifier(f *mitmproxy.Flow, in io.Reader) (o
 // snapshot is restored on every failure path so the flow either has a
 // fully phantom-swapped body or the original bytes with original
 // headers, never a half-modified mix.
-func (a *SluiceAddon) processAddonOAuthResponse(f *mitmproxy.Flow, credName string) (modified bool, err error) {
+func (a *SluiceAddon) processAddonOAuthResponse(f *mitmproxy.Flow, attr oauthRespAttribution) (modified bool, err error) {
+	credName := attr.phantomName
 	if f == nil || f.Response == nil {
 		return false, nil
 	}
@@ -1019,7 +1350,7 @@ func (a *SluiceAddon) processAddonOAuthResponse(f *mitmproxy.Flow, credName stri
 		contentType = f.Response.Header.Get("Content-Type")
 	}
 
-	swapped, err := a.swapOAuthTokens(body, contentType, credName)
+	swapped, err := a.swapOAuthTokens(body, contentType, attr)
 	if err != nil {
 		rollback()
 		return false, err
@@ -1056,14 +1387,33 @@ func (a *SluiceAddon) processAddonOAuthResponse(f *mitmproxy.Flow, credName stri
 // swapOAuthTokens parses a token response body, replaces real tokens with
 // deterministic phantoms, and schedules an async vault persist. Returns
 // the modified body. Shared by Response (buffered) and StreamResponseModifier.
-func (a *SluiceAddon) swapOAuthTokens(body []byte, contentType, credName string) ([]byte, error) {
+//
+// attr controls phantom keying and persist target. For a plain credential
+// it is the identity. For a pooled credential the phantom is keyed on the
+// POOL name (byte-identical across member switches, Risk R3) and the
+// persist target is the recovered owning member; when the member could not
+// be recovered, attr.skipPersist suppresses the vault write entirely so a
+// rotated token is never misfiled (Risk R1, fail-closed) — the swap still
+// runs so the agent never receives the real tokens.
+func (a *SluiceAddon) swapOAuthTokens(body []byte, contentType string, attr oauthRespAttribution) ([]byte, error) {
 	tr, err := parseTokenResponse(body, contentType)
 	if err != nil {
 		return nil, err
 	}
 
-	accessPhantom := oauthPhantomAccess(credName, tr.AccessToken)
-	refreshPhantom := oauthPhantomRefresh(credName, tr.RefreshToken)
+	var accessPhantom, refreshPhantom string
+	if attr.pooled {
+		// Pooled: phantomName is the pool name. Use the pool-stable
+		// synthetic JWT for access and the deterministic static string
+		// for refresh, byte-identical to what buildPooledOAuthPhantomPairs
+		// emits on the request side, so the agent's stored phantom never
+		// changes across a member switch.
+		accessPhantom = poolStablePhantomAccess(attr.phantomName)
+		refreshPhantom = "SLUICE_PHANTOM:" + attr.phantomName + ".refresh"
+	} else {
+		accessPhantom = oauthPhantomAccess(attr.phantomName, tr.AccessToken)
+		refreshPhantom = oauthPhantomRefresh(attr.phantomName, tr.RefreshToken)
+	}
 
 	// Replace real tokens with phantoms in the response body.
 	// Replace the longer token first to prevent substring corruption when
@@ -1081,12 +1431,20 @@ func (a *SluiceAddon) swapOAuthTokens(body []byte, contentType, credName string)
 		modified = bytes.ReplaceAll(modified, []byte(tr.AccessToken), []byte(accessPhantom))
 	}
 
-	// Asynchronously persist the new tokens to the vault.
+	if attr.skipPersist {
+		// R1 fail-closed: response swapped to phantoms (agent safe) but
+		// the owning pool member is unknown, so do NOT write the vault.
+		// The next refresh round-trip carries a fresh tag and retries.
+		return modified, nil
+	}
+
+	// Asynchronously persist the new tokens to the vault, attributed to
+	// the precise member (pooled) or the credential itself (plain).
 	realAccess := vault.NewSecureBytes(tr.AccessToken)
 	realRefresh := vault.NewSecureBytes(tr.RefreshToken)
 	expiresIn := tr.ExpiresIn
 
-	go a.persistAddonOAuthTokens(credName, realAccess, realRefresh, expiresIn)
+	go a.persistAddonOAuthTokens(attr.persistMember, realAccess, realRefresh, expiresIn)
 
 	return modified, nil
 }
@@ -1162,34 +1520,100 @@ func (a *SluiceAddon) persistAddonOAuthTokens(credName string, realAccess, realR
 }
 
 // buildPhantomPairs builds the sorted list of phantom/secret pairs for a
-// destination. The caller must call releasePhantomPairs when done.
-func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string) []phantomPair {
+// destination. The caller must call releasePhantomPairs when done. reqURL is
+// the outbound request URL (nil on the QUIC path, which has no parsed URL);
+// it is used to expand pooled OAuth credentials whose token endpoint matches
+// the request even when they are not bound to the CONNECT host (Finding 4,
+// the split-host token-refresh case).
+//
+// Per-flow pool-member attribution for API-host failover (Finding 1) is NOT
+// recorded here: a pooled pair built here is only a CANDIDATE — the request
+// may not actually carry its pool phantom (e.g. a plain OAuth request to a
+// token URL shared with a pool, Finding 2). The flowInjected tag is recorded
+// post-swap by tagPooledFlowAfterSwap, which inspects the built pairs'
+// pooledMember field and tags only the members whose pool phantom was
+// actually present in this request.
+func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, reqURL *url.URL) []phantomPair {
 	res := a.resolver.Load()
 	if res == nil {
 		return nil
 	}
 	boundCreds := res.CredentialsForDestination(host, port, proto)
-	if len(boundCreds) == 0 {
-		return nil
-	}
+
+	// covered tracks every credential name already turned into pairs by the
+	// CONNECT-host binding loop so the token-host expansion below does not
+	// double-inject a pool whose API host is also its token host (the
+	// common same-host Codex/OpenAI deployment, where this whole second
+	// pass is a no-op).
+	covered := make(map[string]bool, len(boundCreds))
+
+	// poolEmitted tracks pool namespaces whose pool-keyed phantom pairs
+	// (SLUICE_PHANTOM:<pool>.access / .refresh) were already produced — by
+	// EITHER pass. The token-host expansion below must be gated on the POOL
+	// namespace, not on covered[member]: if the active member ALSO has a
+	// plain direct binding on the token host, the CONNECT-host loop emits
+	// only member-scoped phantoms and sets covered[member], which would
+	// otherwise wrongly suppress the pool namespace and leave
+	// SLUICE_PHANTOM:<pool>.refresh unswapped (Finding 1, round-9).
+	poolEmitted := make(map[string]bool)
 
 	var pairs []phantomPair
-	for _, name := range boundCreds {
+	for _, boundName := range boundCreds {
+		// Chokepoint: expand a bound pool name to its active member
+		// before the vault lookup and the OAuth-envelope decision. The
+		// agent holds a pool-keyed phantom; the secret injected is the
+		// active member's real token (Important I2).
+		target := a.resolveInjectionTarget(boundName)
+		name := target.secretName
 		secret, err := a.provider.Get(name)
 		if err != nil {
 			log.Printf("[ADDON-INJECT] credential %q lookup failed: %v", name, err)
 			continue
 		}
 		if vault.IsOAuth(secret.Bytes()) {
-			oauthPairs, parseErr := buildOAuthPhantomPairs(name, secret, "ADDON-INJECT")
+			if target.pooled {
+				poolName := target.phantomName
+				member := target.secretName
+				// Finding 2: do NOT tag flowInjected here. The
+				// per-flow pool-usage tag must be recorded only AFTER
+				// the swap confirms this request actually carried the
+				// pool phantom (tagPooledFlowAfterSwap), so a plain
+				// OAuth request that merely shares a token URL with
+				// this pool cannot acquire a pool-usage tag and
+				// mis-attribute its 401 to an unrelated member.
+				oauthPairs, parseErr := a.buildPooledMemberPairs(poolName, member, secret)
+				if parseErr != nil {
+					continue
+				}
+				covered[member] = true
+				poolEmitted[poolName] = true
+				pairs = append(pairs, oauthPairs...)
+				continue
+			}
+			// Finding 1: tag the real refresh token under the PLAIN
+			// credential name so a plain OAuth refresh whose token URL
+			// is shared with a pool is recoverable on the response side
+			// and attributed 1:1 (its own phantom + vault write) instead
+			// of being mistaken for an unrecoverable pooled refresh and
+			// fail-closed. PoolForMember(name) is "" for a plain cred, so
+			// the response path can tell it apart from a pooled member.
+			oauthPairs, parseErr := buildOAuthPhantomPairs(name, secret, "ADDON-INJECT",
+				func(realRefresh string) {
+					a.refreshAttr.Tag(realRefresh, name)
+				})
 			if parseErr != nil {
 				continue
 			}
+			covered[name] = true
 			pairs = append(pairs, oauthPairs...)
 			continue
 		}
+		// Static (non-OAuth) credential. Pools reject static members, so
+		// a pooled target never reaches here; the phantom is keyed on the
+		// resolved name (== bound name for plain creds).
 		phantom := []byte(PhantomToken(name))
 		encoded := encodePhantomForPair(phantom)
+		covered[name] = true
 		pairs = append(pairs, phantomPair{
 			phantom:             phantom,
 			encodedPhantom:      encoded,
@@ -1198,12 +1622,263 @@ func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string) []p
 		})
 	}
 
+	// Finding 4 (the crux): token-host phantom expansion. A pooled OAuth
+	// credential's refresh-grant POST goes to its token-URL host (e.g.
+	// auth.openai.com), which has NO pool binding — the pool binding lives
+	// on the API host (e.g. api.openai.com). The CONNECT-host loop above
+	// therefore produces no pairs for the token host, so the agent-held
+	// SLUICE_PHANTOM:<pool>.refresh would travel upstream verbatim and the
+	// refresh would fail (and Findings 1/2 attribution could never even
+	// trigger because no refresh-attribution tag would be recorded).
+	//
+	// Mirror what the existing pooled CONNECT-host path does, but key the
+	// expansion off OAuthIndex (token_url) instead of the binding resolver:
+	// for every pooled OAuth credential whose token endpoint matches this
+	// request, resolve the pool's active member and emit the pool-keyed
+	// phantom pairs + the flowInjected / refreshAttr tags (so R1 persist
+	// and token-endpoint failover work). MatchAll (not Match) is used so a
+	// plain OAuth credential that sorts before the pool members and shares
+	// the token URL cannot mask them.
+	if reqURL != nil {
+		if idx := a.oauthIndex.Load(); idx != nil {
+			pr := (*vault.PoolResolver)(nil)
+			if a.poolResolver != nil {
+				pr = a.poolResolver.Load()
+			}
+			if pr != nil {
+				for _, credName := range idx.MatchAll(reqURL) {
+					poolName := pr.PoolForMember(credName)
+					if poolName == "" {
+						// Finding 1: plain (non-pool) OAuth credential
+						// whose token URL matches this request but whose
+						// own API binding is on a DIFFERENT host (split
+						// host), so the CONNECT-host loop above produced
+						// no pairs for it. Without this, the plain
+						// credential's SLUICE_PHANTOM:<name>.refresh would
+						// travel upstream verbatim (refresh fails) and —
+						// when a pool shares this token URL — no plain
+						// attribution tag would be recorded, so the
+						// response side would fail-close the plain
+						// refresh as if it were an unrecoverable pooled
+						// refresh. Expand it here, recording the plain
+						// realRefreshToken -> name tag so the response
+						// path attributes it 1:1 to the plain credential.
+						if covered[credName] {
+							continue
+						}
+						secret, err := a.provider.Get(credName)
+						if err != nil {
+							log.Printf("[ADDON-INJECT] token-host plain oauth %q lookup failed: %v",
+								credName, err)
+							continue
+						}
+						if !vault.IsOAuth(secret.Bytes()) {
+							secret.Release()
+							continue
+						}
+						oauthPairs, parseErr := buildOAuthPhantomPairs(credName, secret, "ADDON-INJECT",
+							func(realRefresh string) {
+								a.refreshAttr.Tag(realRefresh, credName)
+							})
+						if parseErr != nil {
+							continue
+						}
+						covered[credName] = true
+						log.Printf("[ADDON-INJECT] token-host phantom expansion for plain oauth %q (%s)",
+							credName, reqURL.Host)
+						pairs = append(pairs, oauthPairs...)
+						continue
+					}
+					// Gate on the POOL namespace only. covered[member] is
+					// deliberately NOT consulted here: a plain direct
+					// binding for the active member on this same token
+					// host sets covered[member] but does NOT emit the
+					// pool-keyed phantoms the agent actually holds, so
+					// suppressing on it would leak SLUICE_PHANTOM:<pool>.*
+					// upstream unswapped (Finding 1, round-9).
+					if poolEmitted[poolName] {
+						continue
+					}
+					poolEmitted[poolName] = true
+					member, ok := pr.ResolveActive(poolName)
+					if !ok || member == "" {
+						continue
+					}
+					secret, err := a.provider.Get(member)
+					if err != nil {
+						log.Printf("[ADDON-INJECT] token-host pool %q member %q lookup failed: %v",
+							poolName, member, err)
+						continue
+					}
+					if !vault.IsOAuth(secret.Bytes()) {
+						secret.Release()
+						continue
+					}
+					// Finding 2: tagging is deferred to
+					// tagPooledFlowAfterSwap (post-swap, only if the
+					// pool phantom was actually present in this
+					// request). A plain OAuth request to a token URL
+					// shared with this pool reaches here too, but it
+					// carries no pool phantom, so it must not be tagged.
+					oauthPairs, parseErr := a.buildPooledMemberPairs(poolName, member, secret)
+					if parseErr != nil {
+						continue
+					}
+					covered[member] = true
+					log.Printf("[ADDON-INJECT] token-host phantom expansion for pool %q -> member %q (%s)",
+						poolName, member, reqURL.Host)
+					pairs = append(pairs, oauthPairs...)
+				}
+			}
+		}
+	}
+
+	if len(pairs) == 0 {
+		return nil
+	}
+
 	// Sort by phantom length descending so longer tokens are replaced
 	// before shorter prefixes that could corrupt them.
 	sort.Slice(pairs, func(i, j int) bool {
 		return len(pairs[i].phantom) > len(pairs[j].phantom)
 	})
 	return pairs
+}
+
+// buildPooledMemberPairs builds the pool-keyed phantom pairs for one active
+// pool member and records the realRefreshToken -> member attribution tag
+// (the Risk R1 join key consumed by the 2xx persist path and the
+// token-endpoint failover path). Shared by the CONNECT-host binding loop and
+// the Finding 4 token-host expansion so both record attribution identically.
+func (a *SluiceAddon) buildPooledMemberPairs(poolName, member string, secret vault.SecureBytes) ([]phantomPair, error) {
+	// Finding 2 (round 20): capture the pool identity (pool name +
+	// membership epoch) as observed RIGHT NOW, at injection time, and pin
+	// it to the refresh-attribution tag. The 2xx persist path validates
+	// this captured identity against the live membership before persisting
+	// so a response that arrives after the member was removed and re-added
+	// (a strictly greater epoch) is not silently misfiled against the new
+	// generation. Fall back to the resolveInjectionTarget poolName with a
+	// sentinel epoch if the resolver cannot supply an identity (e.g. the
+	// member just left): the response path's mismatch check then fails
+	// closed rather than guessing.
+	idPool, idEpoch := poolName, int64(-1)
+	if a.poolResolver != nil {
+		if pr := a.poolResolver.Load(); pr != nil {
+			if p, e, ok := pr.IdentityForMember(member); ok {
+				idPool, idEpoch = p, e
+			}
+		}
+	}
+	return buildPooledOAuthPhantomPairs(
+		poolName, member, secret, "ADDON-INJECT",
+		func(realRefresh string) {
+			a.refreshAttr.TagPooled(realRefresh, member, idPool, idEpoch)
+		},
+	)
+}
+
+// pairPhantomPresentInRequest reports whether the given pair's pool phantom
+// (literal OR either URL-encoded form) is actually present anywhere in the
+// outbound request the agent sent: body, any header value, the URL query, or
+// the URL path. This is the post-build evidence that the agent really held
+// (and is sending) this pool's phantom for THIS request, as opposed to the
+// pair merely being a candidate built because the destination/token-URL
+// matched a pool binding.
+func pairPhantomPresentInRequest(f *mitmproxy.Flow, p phantomPair) bool {
+	contains := func(data []byte) bool {
+		if len(data) == 0 {
+			return false
+		}
+		if bytes.Contains(data, p.phantom) {
+			return true
+		}
+		if len(p.encodedPhantom) > 0 && bytes.Contains(data, p.encodedPhantom) {
+			return true
+		}
+		if len(p.encodedPhantomLower) > 0 && bytes.Contains(data, p.encodedPhantomLower) {
+			return true
+		}
+		return false
+	}
+	if contains(f.Request.Body) {
+		return true
+	}
+	for _, vals := range f.Request.Header {
+		for _, v := range vals {
+			if contains([]byte(v)) {
+				return true
+			}
+		}
+	}
+	if f.Request.URL != nil {
+		if contains([]byte(f.Request.URL.RawQuery)) {
+			return true
+		}
+		if contains([]byte(f.Request.URL.Path)) {
+			return true
+		}
+	}
+	return false
+}
+
+// pairsPhantomPresentIn reports whether the given byte slice contains the
+// actual phantom bytes (literal or either URL-encoded form) of ANY pair in
+// pairs. Used to gate the URL query/path swap so a pooled credential's
+// prefix-less R3 synthetic-JWT access phantom (poolStablePhantomAccess) is
+// detected and swapped even though bytesContainsAnyPhantomPrefix — which
+// only knows the literal "SLUICE_PHANTOM" prefix — would miss it (#5).
+//
+// This does NOT over-scan unrelated requests: pairs is already scoped to
+// the bindings/pool that match THIS request's destination + protocol
+// (buildPhantomPairs), and we only match phantom bytes that are genuinely
+// present. It does NOT change R3 byte-stability: the synthetic-JWT shape is
+// untouched; we merely let the existing swapPhantomBytes run on the
+// query/path when the pooled phantom is there.
+func pairsPhantomPresentIn(data []byte, pairs []phantomPair) bool {
+	if len(data) == 0 {
+		return false
+	}
+	for _, p := range pairs {
+		if len(p.phantom) > 0 && bytes.Contains(data, p.phantom) {
+			return true
+		}
+		if len(p.encodedPhantom) > 0 && bytes.Contains(data, p.encodedPhantom) {
+			return true
+		}
+		if len(p.encodedPhantomLower) > 0 && bytes.Contains(data, p.encodedPhantomLower) {
+			return true
+		}
+	}
+	return false
+}
+
+// tagPooledFlowAfterSwap records the per-flow pool-usage attribution tag
+// (flowInjected) for every pooled pair whose pool phantom is ACTUALLY present
+// in this outbound request, and only those.
+//
+// Finding 2: the old code tagged the flow when it BUILT a pooled pair (either
+// the CONNECT-host loop or the token-host expansion in buildPhantomPairs),
+// before any proof the request carried that pool's phantom. A plain OAuth
+// request to a token URL shared with a pool builds the pool's candidate pairs
+// too, so it would acquire the tag and have its 401/invalid_grant cool an
+// unrelated pool member (poolForResponse treats a flowInjected tag as
+// pool-usage proof). Tagging only when the pool phantom is genuinely present
+// (and therefore about to be swapped out) keeps the API-host failover
+// attribution sound (Finding 1) while no longer mis-attributing plain OAuth
+// traffic. Must be called BEFORE the swap, while the phantom is still in the
+// request to detect.
+func (a *SluiceAddon) tagPooledFlowAfterSwap(f *mitmproxy.Flow, pairs []phantomPair) {
+	if f == nil || f.Id == uuid.Nil || f.Request == nil {
+		return
+	}
+	for _, p := range pairs {
+		if p.pooledMember == "" {
+			continue
+		}
+		if pairPhantomPresentInRequest(f, p) {
+			a.flowInjected.Tag(f.Id, p.pooledMember)
+		}
+	}
 }
 
 // releasePhantomPairs zeroes all secret values in the pairs slice.
@@ -1367,6 +2042,15 @@ type phantomSwapReader struct {
 	pending  []byte
 	eof      bool
 	released bool
+
+	// onPooledSwap, when non-nil, is invoked with a pool member name the
+	// first time a pooled pair's phantom is actually replaced in the
+	// streamed body. It pins the per-flow API-host failover attribution
+	// (Finding 1) to a member only when this request genuinely carried
+	// that member's pool phantom (Finding 2: a plain OAuth stream that
+	// merely shares a token URL with a pool carries no pool phantom, so
+	// the swap never fires and no spurious tag is recorded).
+	onPooledSwap func(member string)
 }
 
 // maxPhantomLen returns the length of the longest phantom token in the
@@ -1448,8 +2132,10 @@ func (r *phantomSwapReader) Read(p []byte) (int, error) {
 		// phantom is actually present and we need the encoded form of the
 		// real secret.
 		for _, pp := range r.pairs {
+			swapped := false
 			if bytes.Contains(toProcess, pp.phantom) {
 				toProcess = bytes.ReplaceAll(toProcess, pp.phantom, pp.secret.Bytes())
+				swapped = true
 			}
 			var encodedSecret []byte
 			ensureEncodedSecret := func() {
@@ -1460,10 +2146,19 @@ func (r *phantomSwapReader) Read(p []byte) (int, error) {
 			if len(pp.encodedPhantom) > 0 && bytes.Contains(toProcess, pp.encodedPhantom) {
 				ensureEncodedSecret()
 				toProcess = bytes.ReplaceAll(toProcess, pp.encodedPhantom, encodedSecret)
+				swapped = true
 			}
 			if len(pp.encodedPhantomLower) > 0 && bytes.Contains(toProcess, pp.encodedPhantomLower) {
 				ensureEncodedSecret()
 				toProcess = bytes.ReplaceAll(toProcess, pp.encodedPhantomLower, encodedSecret)
+				swapped = true
+			}
+			// Finding 2: only pin per-flow pool attribution when this
+			// request actually carried (and we just swapped out) the
+			// pool phantom — not merely because a pooled pair was built
+			// as a candidate.
+			if swapped && pp.pooledMember != "" && r.onPooledSwap != nil {
+				r.onPooledSwap(pp.pooledMember)
 			}
 		}
 		// Pass 3: strip unbound, including URL-encoded phantoms.

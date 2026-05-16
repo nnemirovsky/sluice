@@ -70,6 +70,11 @@ func main() {
 				log.Fatalf("channel: %v", err)
 			}
 			return
+		case "pool":
+			if err := handlePoolCommand(os.Args[2:]); err != nil {
+				log.Fatalf("pool: %v", err)
+			}
+			return
 		}
 	}
 
@@ -342,6 +347,28 @@ func main() {
 		}
 	}
 
+	// Process-wide shared pool health. CRITICAL-1: every PoolResolver
+	// generation (startup + every SIGHUP / data_version reload) is built
+	// against THIS single PoolHealth, so a failover cooldown recorded via
+	// MarkCooldown on any generation is observed by ResolveActive on the
+	// current generation regardless of how many resolver pointer swaps
+	// happened in between, and the cooldown never depends on the detached
+	// durable SetCredentialHealth write succeeding.
+	sharedPoolHealth := vault.NewPoolHealth()
+
+	// Populate the initial credential pool resolver at startup so pool
+	// expansion works for pools defined before the first SIGHUP. Always
+	// store a non-nil resolver (empty when no pools) so the addon never
+	// has to nil-check before ResolveActive (non-pool names passthrough).
+	if db != nil {
+		if pr, perr := loadPoolResolver(db, sharedPoolHealth); perr != nil {
+			log.Printf("pool resolver init failed: %v", perr)
+			srv.StorePool(vault.NewPoolResolverShared(nil, nil, sharedPoolHealth))
+		} else {
+			srv.StorePool(pr)
+		}
+	}
+
 	// Configure the OAuth refresh callback so that after a token refresh
 	// is persisted, the updated phantom env vars are re-injected into the
 	// agent container.
@@ -443,7 +470,63 @@ func main() {
 
 		// Update the proxy's broker reference now that it's created.
 		srv.SetBroker(broker)
+	} else {
+		log.Printf("no approval channels configured (ask rules will auto-deny)")
+	}
 
+	// Wire Phase 2 pool failover side effects: durable health write
+	// + best-effort Telegram notice. The in-memory active-member switch
+	// already happened synchronously on the response path before this
+	// callback fires (Risk I1); this only persists for restart durability
+	// and tells the operator. Registered UNCONDITIONALLY (outside the
+	// channel block): the durable SetCredentialHealth write is the
+	// CRITICAL-1 cooldown-durability guarantee and must run even in
+	// deployments with no Telegram/HTTP approval channel. Only the
+	// operator notice is gated on a broker being present. Everything
+	// here runs in a detached goroutine so the response/injection path
+	// is never blocked by a SQLite write or a Telegram round-trip.
+	failoverBroker := broker
+	srv.SetOnFailover(func(ev proxy.FailoverEvent) {
+		go func() {
+			if db != nil {
+				reason := fmt.Sprintf("failover:%s", ev.Reason)
+				// Guarded write: this goroutine is detached and can fire
+				// AFTER a pool/credential removal already deleted the
+				// health row AND the same name was re-added into ANOTHER
+				// pool. SetCredentialHealthIfPoolMemberEpoch upserts only
+				// when (ev.From, ev.Pool, ev.Epoch) is STILL a live
+				// membership row, atomically, so a late failover from a
+				// removed pool cannot persist the old cooldown onto a
+				// re-added same-name member in a different pool (Cluster A
+				// #2). The name-only guard checked only that ev.From was in
+				// SOME pool, which the re-added successor satisfies. A
+				// genuinely-still-live member (same pool, same epoch) still
+				// gets the durable cooldown (CRITICAL-1 restart durability
+				// preserved).
+				switch wrote, herr := db.SetCredentialHealthIfPoolMemberEpoch(ev.From, ev.Pool, ev.Epoch, "cooldown", ev.Until, reason); {
+				case herr != nil:
+					log.Printf("[POOL-FAILOVER] durable health write for %q failed: %v", ev.From, herr)
+				case !wrote:
+					log.Printf("[POOL-FAILOVER] durable health write for %q skipped: no longer a live member of pool %q at epoch %d (removed/re-added before failover landed)", ev.From, ev.Pool, ev.Epoch)
+				}
+			}
+			if failoverBroker != nil {
+				// Plain text: TelegramChannel.Notify sends with no parse
+				// mode, so markdown backticks would render literally.
+				msg := fmt.Sprintf("pool %s failed over %s -> %s (%s)",
+					ev.Pool, ev.From, ev.To, ev.Reason)
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				for _, ch := range failoverBroker.Channels() {
+					if nerr := ch.Notify(ctx, msg); nerr != nil {
+						log.Printf("[POOL-FAILOVER] notice via %s failed: %v", ch.Type(), nerr)
+					}
+				}
+			}
+		}()
+	})
+
+	if len(allChannels) > 0 {
 		// Start all channels.
 		if tgChannel != nil {
 			if err := tgChannel.Start(); err != nil {
@@ -458,8 +541,6 @@ func main() {
 			}
 			defer hc.Stop()
 		}
-	} else {
-		log.Printf("no approval channels configured (ask rules will auto-deny)")
 	}
 
 	// MCP gateway: always start (even with zero upstreams) so the
@@ -687,6 +768,19 @@ func main() {
 			log.Printf("reload oauth index failed: %v", metaErr)
 		}
 
+		// Rebuild and atomically swap the credential pool resolver. The
+		// new generation is built against the SAME process-wide
+		// sharedPoolHealth (CRITICAL-1), so membership changes (pool
+		// create/remove) take effect here while live failover cooldowns
+		// recorded in memory survive the swap with zero dependency on the
+		// detached durable write. Reloading health rows only seeds the
+		// shared map monotonically (never shortens a live cooldown).
+		if pr, perr := loadPoolResolver(db, sharedPoolHealth); perr != nil {
+			log.Printf("reload pool resolver failed: %v", perr)
+		} else {
+			srv.StorePool(pr)
+		}
+
 		// Re-inject env vars into the agent container after binding changes.
 		if containerMgr != nil {
 			if injectErr := injectEnvVarsFromStore(db, containerMgr); injectErr != nil {
@@ -811,6 +905,25 @@ func readBindings(db *store.Store) ([]vault.Binding, error) {
 		}
 	}
 	return bindings, nil
+}
+
+// loadPoolResolver builds a vault.PoolResolver from the store's pool,
+// member, and credential-health tables, bound to the process-wide shared
+// PoolHealth (CRITICAL-1) so failover cooldowns survive every resolver
+// pointer swap. A non-nil resolver is always returned on success (empty
+// when no pools), so callers can store it unconditionally and the addon
+// never has to nil-check before ResolveActive (a non-pool name is an
+// identity passthrough).
+func loadPoolResolver(db *store.Store, shared *vault.PoolHealth) (*vault.PoolResolver, error) {
+	pools, err := db.ListPools()
+	if err != nil {
+		return nil, fmt.Errorf("list pools: %w", err)
+	}
+	health, err := db.ListCredentialHealth()
+	if err != nil {
+		return nil, fmt.Errorf("list credential health: %w", err)
+	}
+	return vault.NewPoolResolverShared(pools, health, shared), nil
 }
 
 // injectEnvVarsFromStore reads bindings with env_var set from the store,

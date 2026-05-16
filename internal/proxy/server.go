@@ -82,9 +82,15 @@ type Server struct {
 	dnsInterceptor *DNSInterceptor
 	quicProxy      *QUICProxy
 	resolver       atomic.Pointer[vault.BindingResolver]
-	closed         atomic.Bool
-	serving        atomic.Bool
-	activeConns    sync.WaitGroup
+	// poolResolver expands a bound pool name to its active member at
+	// injection time. Swapped atomically alongside resolver on reload;
+	// membership is immutable per instance while health is mutated in
+	// place under the resolver's own mutex (Phase 2 synchronous
+	// failover). Parallel to resolver, never gates it.
+	poolResolver atomic.Pointer[vault.PoolResolver]
+	closed       atomic.Bool
+	serving      atomic.Bool
+	activeConns  sync.WaitGroup
 
 	// oauthMetasCache holds the latest credential_meta slice the
 	// server saw via UpdateOAuthIndex. Cached so a later
@@ -512,6 +518,51 @@ func (r *policyRuleSet) persistApprovalRule(verdict, dest string, port int) bool
 		log.Printf("[WARN] always-%s for %s:%d not persisted (no store)", verdict, dest, port)
 		return false
 	}
+	// Idempotent under coalesced approval fan-out: a burst of "Always
+	// Allow"/"Always Deny" responses for one target serializes here on
+	// reloadMu. The first caller inserts the rule; the rest see it already
+	// present and skip the redundant AddRule + engine recompile. The
+	// returned bool stays true so every caller treats the decision as
+	// persisted.
+	if exists, existsErr := r.store.HasApprovalRule(verdict, dest, port); existsErr != nil {
+		log.Printf("[WARN] failed to check existing %s rule for %s:%d: %v", verdict, dest, port, existsErr)
+	} else if exists {
+		// The row is present, but a prior persist may have written the row
+		// (AddRule) and then failed at LoadFromStore/Validate before the
+		// engine pointer swapped. In that window the durable store has the
+		// rule while the live engine still evaluates dest:port as ask. Only
+		// fast-path when the CURRENT live engine already reflects the rule;
+		// otherwise recompile/swap so the engine is guaranteed current
+		// before we report success. Without this, a coalesced caller that
+		// trusts the row would skip the safety-net per-request checker even
+		// though the live engine has not yet learned the rule.
+		if eng := r.engine.Load(); eng != nil {
+			v, src := eng.EvaluateDetailed(dest, port)
+			want := policy.Allow
+			if verdict == "deny" {
+				want = policy.Deny
+			}
+			if src == policy.RuleMatch && v == want {
+				log.Printf("[approval] %s rule for %s:%d already present and live engine current; skipping duplicate persist", verdict, dest, port)
+				return true
+			}
+		}
+		// Row present but engine stale: recompile from the store (the row
+		// is already there, so no duplicate AddRule) and swap so subsequent
+		// callers see a current engine.
+		log.Printf("[approval] %s rule for %s:%d present but live engine stale; recompiling", verdict, dest, port)
+		newEng, recompErr := policy.LoadFromStore(r.store)
+		if recompErr != nil {
+			log.Printf("[WARN] failed to recompile engine for stale %s rule %s:%d: %v", verdict, dest, port, recompErr)
+			return false
+		}
+		if valErr := newEng.Validate(); valErr != nil {
+			log.Printf("[WARN] engine validation failed for stale %s rule %s:%d: %v", verdict, dest, port, valErr)
+			return false
+		}
+		r.engine.Store(newEng)
+		return true
+	}
 	if _, storeErr := r.store.AddRule(verdict, store.RuleOpts{Destination: dest, Ports: []int{port}, Source: "approval"}); storeErr != nil {
 		log.Printf("[WARN] failed to persist %s rule for %s:%d: %v", verdict, dest, port, storeErr)
 		return false
@@ -659,6 +710,7 @@ func (s *Server) setupInjection(cfg Config, _ net.Listener) error {
 	// Create the SluiceAddon for go-mitmproxy.
 	addonOpts := []SluiceAddonOption{
 		WithResolver(&s.resolver),
+		WithPoolResolver(&s.poolResolver),
 		WithProvider(cfg.Provider),
 		WithWSProxy(wsProxy),
 	}
@@ -765,7 +817,7 @@ func (s *Server) setupInjection(cfg Config, _ net.Listener) error {
 	s.mailProxy = NewMailProxy(cfg.Provider, &caCert)
 
 	// QUIC proxy for HTTP/3 MITM credential injection over UDP.
-	qp, qpErr := NewQUICProxy(caCert, cfg.Provider, &s.resolver, cfg.Audit, cfg.QUICBlockRules, cfg.QUICRedactRules)
+	qp, qpErr := NewQUICProxy(caCert, cfg.Provider, &s.resolver, &s.poolResolver, cfg.Audit, cfg.QUICBlockRules, cfg.QUICRedactRules)
 	if qpErr != nil {
 		log.Printf("QUIC proxy disabled: %v", qpErr)
 	} else {
@@ -2681,6 +2733,40 @@ func (s *Server) StoreResolver(r *vault.BindingResolver) {
 	s.resolver.Store(r)
 }
 
+// StorePool atomically stores a new credential pool resolver. The caller
+// must hold ReloadMu() when concurrent mutations are possible. The MITM
+// addon shares the same atomic pointer so the injection chokepoint and the
+// response-side failover see the same pool/health snapshot. A nil resolver
+// (no pools configured) is stored as a non-nil empty resolver so the addon
+// can call IsPool/ResolveActive without nil-checking; ResolveActive on a
+// non-pool name is an identity passthrough.
+func (s *Server) StorePool(r *vault.PoolResolver) {
+	// Carry forward still-active in-memory cooldowns from the resolver being
+	// replaced. Phase 2 failover records cooldowns synchronously in memory and
+	// only persists them to the store from a detached best-effort goroutine, so
+	// rebuilding from store rows alone (NewPoolResolver, called by any reload —
+	// SIGHUP or the 2s data_version watcher on any unrelated DB write) would
+	// otherwise resurrect a just-cooled member for the full cooldown TTL, or
+	// permanently if the async store write failed. The merge is monotonic: a
+	// live cooldown is never shortened or erased by an unrelated reload.
+	if r != nil {
+		if prev := s.poolResolver.Load(); prev != nil {
+			r.MergeLiveCooldowns(prev)
+		}
+	}
+	s.poolResolver.Store(r)
+	if s.addon != nil {
+		s.addon.SetPoolResolver(&s.poolResolver)
+	}
+}
+
+// PoolResolverPtr returns the shared atomic pool resolver pointer so the
+// Telegram/REST mutation paths can keep the proxy's live pool snapshot in
+// sync with the store, mirroring ResolverPtr.
+func (s *Server) PoolResolverPtr() *atomic.Pointer[vault.PoolResolver] {
+	return &s.poolResolver
+}
+
 // UpdateOAuthIndex rebuilds the OAuth token URL index from credential
 // metadata. Call this after StoreResolver in the SIGHUP reload path or
 // after Telegram credential mutations so the response handler detects
@@ -2733,6 +2819,17 @@ func (s *Server) applyCachedOAuthIndexToQUIC() {
 func (s *Server) SetOnOAuthRefresh(fn func(credName string)) {
 	if s.addon != nil {
 		s.addon.SetOnOAuthRefresh(fn)
+	}
+}
+
+// SetOnFailover configures a callback on the addon that is invoked after a
+// pool failover has been applied in memory. The active-member switch has
+// already happened synchronously by the time this fires; the callback owns
+// the durable SetCredentialHealth store write and the best-effort Telegram
+// notice, and must not block the response path.
+func (s *Server) SetOnFailover(fn func(FailoverEvent)) {
+	if s.addon != nil {
+		s.addon.SetOnFailover(fn)
 	}
 }
 

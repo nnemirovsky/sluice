@@ -72,8 +72,32 @@ type QUICProxy struct {
 	caX509   *x509.Certificate
 	provider vault.Provider
 	resolver *atomic.Pointer[vault.BindingResolver]
-	audit    *audit.FileLogger
-	rules    atomic.Pointer[quicInspectRules]
+	// poolResolver expands a binding that NAMES A POOL to the pool's
+	// active member before the vault lookup, mirroring the HTTP-MITM
+	// chokepoint (SluiceAddon.resolveInjectionTarget). Without it a
+	// pool-named binding would call provider.Get(<pool>) — there is no
+	// vault secret stored under a pool name — and injection would fail
+	// for that destination over QUIC (Finding 2). Optional: nil means
+	// no pools are configured and every binding name is taken verbatim.
+	//
+	// QUIC supports request-side pool injection: active-member
+	// expansion (the vault lookup uses the pool's current active
+	// member) AND the Risk R3 pool-stable access phantom (the
+	// agent-facing access token is a synthetic JWT keyed on the POOL
+	// name via buildPooledOAuthPhantomPairs, byte-identical to the HTTP
+	// path so it never changes when the active member is switched).
+	// ONLY the response-side capabilities are NOT available on QUIC:
+	// per-request OAuth refresh attribution (Risk R1) and the Phase-2
+	// 429/401 auto-failover both require response-side OAuth
+	// interception, which the buffered QUIC injection path does not do.
+	// A pool binding over QUIC therefore injects the CURRENT active
+	// member's real credential and a pool-stable phantom; member
+	// rotation happens only when the HTTP path (or an operator) flips
+	// the active member. See CLAUDE.md "Credential pools" for the
+	// authoritative HTTP-vs-QUIC capability matrix.
+	poolResolver *atomic.Pointer[vault.PoolResolver]
+	audit        *audit.FileLogger
+	rules        atomic.Pointer[quicInspectRules]
 
 	// oauthIndex points at the same OAuthIndex the SluiceAddon uses
 	// so QUIC/HTTP3 header injection follows the same OAuth-vs-static
@@ -134,6 +158,7 @@ func NewQUICProxy(
 	caCert tls.Certificate,
 	provider vault.Provider,
 	resolver *atomic.Pointer[vault.BindingResolver],
+	poolResolver *atomic.Pointer[vault.PoolResolver],
 	auditLog *audit.FileLogger,
 	blockConfigs []QUICBlockRuleConfig,
 	redactConfigs []QUICRedactRuleConfig,
@@ -147,11 +172,12 @@ func NewQUICProxy(
 		}
 	}
 	qp := &QUICProxy{
-		caCert:   caCert,
-		caX509:   caX509,
-		provider: provider,
-		resolver: resolver,
-		audit:    auditLog,
+		caCert:       caCert,
+		caX509:       caX509,
+		provider:     provider,
+		resolver:     resolver,
+		poolResolver: poolResolver,
+		audit:        auditLog,
 	}
 	if err := qp.UpdateRules(blockConfigs, redactConfigs); err != nil {
 		return nil, err
@@ -423,12 +449,18 @@ func (q *QUICProxy) buildHandler(upstreamHost string, destPort int, checker *Req
 		// Binding-specific header injection.
 		if res := q.resolver.Load(); res != nil {
 			if binding, ok := res.ResolveForProtocol(host, port, ProtoQUIC.String()); ok {
-				secret, err := q.provider.Get(binding.Credential)
+				// Finding 2: a binding may name a pool. Expand to the
+				// active member before the vault lookup AND before the
+				// OAuth-envelope decision (extractInjectableSecret keys
+				// off credential_meta, which has no entry for a pool
+				// name), exactly as the HTTP-MITM chokepoint does.
+				secretName := q.resolvePoolMember(binding.Credential)
+				secret, err := q.provider.Get(secretName)
 				if err != nil {
-					log.Printf("[QUIC-MITM] credential %q lookup failed: %v", binding.Credential, err)
+					log.Printf("[QUIC-MITM] credential %q lookup failed: %v", secretName, err)
 				} else {
 					if binding.Header != "" {
-						r.Header.Set(binding.Header, binding.FormatValue(extractInjectableSecret(q.oauthIndex.Load(), binding.Credential, secret.String())))
+						r.Header.Set(binding.Header, binding.FormatValue(extractInjectableSecret(q.oauthIndex.Load(), secretName, secret.String())))
 					}
 					secret.Release()
 				}
@@ -545,6 +577,66 @@ func (q *QUICProxy) buildHandler(upstreamHost string, destPort int, checker *Req
 	})
 }
 
+// resolvePoolMember expands a binding name that NAMES A POOL to the pool's
+// current active member, mirroring SluiceAddon.resolveInjectionTarget on the
+// HTTP-MITM path (Finding 2). A plain credential name (or any name when no
+// pool resolver is configured) is returned verbatim. An empty or
+// unresolvable pool returns the pool name unchanged so the downstream
+// provider.Get fails cleanly (no injection) rather than panicking.
+//
+// QUIC-LIMITED: this helper performs only active-member expansion (the
+// secret-name resolution). The R3 pool-stable access phantom IS implemented
+// on QUIC via resolvePoolTarget + buildPooledOAuthPhantomPairs in
+// buildPhantomPairs; only the response-side capabilities — per-request OAuth
+// refresh attribution (R1) and the Phase-2 429/401 auto-failover — are not
+// available on QUIC (no response-side OAuth interception). The active member
+// is whatever the HTTP path / operator last selected. Documented in CLAUDE.md.
+func (q *QUICProxy) resolvePoolMember(name string) string {
+	if q.poolResolver == nil {
+		return name
+	}
+	pr := q.poolResolver.Load()
+	if pr == nil || !pr.IsPool(name) {
+		return name
+	}
+	member, ok := pr.ResolveActive(name)
+	if !ok || member == "" {
+		return name
+	}
+	return member
+}
+
+// resolvePoolTarget classifies a binding name. When name is a configured
+// pool, isPool is true and member is the pool's current active member (or
+// "" when the pool is empty/unresolvable). For a plain credential (or when
+// no pool resolver is configured) isPool is false and member == name.
+//
+// Finding 1 (R3 on QUIC): this is the QUIC analogue of
+// SluiceAddon.resolveInjectionTarget. It is required so the QUIC OAuth path
+// can route a pooled binding through buildPooledOAuthPhantomPairs — which
+// keys the agent-facing access phantom on the POOL name (a pool-stable
+// synthetic JWT) rather than re-signing the active member's real JWT. The
+// latter changes the agent-held phantom on every member switch, violating
+// the R3 pool-stable access-token guarantee. Only phantom stability +
+// active-member-secret selection is replicated on QUIC; the documented QUIC
+// limitation (no response-side R1 attribution, no 429/401 failover) stands.
+func (q *QUICProxy) resolvePoolTarget(name string) (member string, isPool bool) {
+	if q.poolResolver == nil {
+		return name, false
+	}
+	pr := q.poolResolver.Load()
+	if pr == nil || !pr.IsPool(name) {
+		return name, false
+	}
+	m, ok := pr.ResolveActive(name)
+	if !ok || m == "" {
+		// Empty/unresolvable pool: keep the pool name so the caller's
+		// provider.Get fails cleanly (no injection) instead of panicking.
+		return "", true
+	}
+	return m, true
+}
+
 // buildPhantomPairs resolves credentials bound to the destination and returns
 // phantom/secret pairs sorted by phantom length descending.
 //
@@ -556,23 +648,50 @@ func (q *QUICProxy) buildHandler(upstreamHost string, destPort int, checker *Req
 func (q *QUICProxy) buildPhantomPairs(host string, port int) []phantomPair {
 	var pairs []phantomPair
 	if res := q.resolver.Load(); res != nil {
-		for _, name := range res.CredentialsForDestination(host, port, ProtoQUIC.String()) {
-			secret, err := q.provider.Get(name)
+		for _, boundName := range res.CredentialsForDestination(host, port, ProtoQUIC.String()) {
+			// Finding 1/2: classify the binding. A pooled binding
+			// resolves to its active member for the vault lookup, but
+			// the agent-facing phantom MUST stay keyed on the POOL name
+			// so it is byte-identical across member switches (R3).
+			member, isPool := q.resolvePoolTarget(boundName)
+			secretName := member
+			if isPool && member == "" {
+				// Empty/unresolvable pool: keep the pool name so the
+				// provider.Get below fails cleanly (no injection).
+				secretName = boundName
+			}
+			secret, err := q.provider.Get(secretName)
 			if err != nil {
-				log.Printf("[QUIC-MITM] credential %q lookup failed: %v", name, err)
+				log.Printf("[QUIC-MITM] credential %q lookup failed: %v", secretName, err)
 				continue
 			}
 			// Check if this is an OAuth credential. If so, build two phantom
 			// pairs (access + refresh) instead of one static pair.
 			if vault.IsOAuth(secret.Bytes()) {
-				oauthPairs, parseErr := buildOAuthPhantomPairs(name, secret, "QUIC-MITM")
+				var oauthPairs []phantomPair
+				var parseErr error
+				if isPool {
+					// Finding 1 (R3 on QUIC): pool-stable synthetic-JWT
+					// access phantom keyed on the POOL name, refresh
+					// phantom is the deterministic SLUICE_PHANTOM:<pool>
+					// .refresh string, secrets are the ACTIVE member's
+					// real tokens. Byte-identical to the HTTP path so the
+					// agent-held phantom never changes on a member switch.
+					// onRefreshInject is nil: QUIC has no response-side
+					// R1 attribution (documented limitation).
+					oauthPairs, parseErr = buildPooledOAuthPhantomPairs(
+						boundName, secretName, secret, "QUIC-MITM", nil,
+					)
+				} else {
+					oauthPairs, parseErr = buildOAuthPhantomPairs(boundName, secret, "QUIC-MITM")
+				}
 				if parseErr != nil {
 					continue
 				}
 				pairs = append(pairs, oauthPairs...)
 				continue
 			}
-			phantom := []byte(PhantomToken(name))
+			phantom := []byte(PhantomToken(boundName))
 			encoded := encodePhantomForPair(phantom)
 			pairs = append(pairs, phantomPair{
 				phantom:             phantom,

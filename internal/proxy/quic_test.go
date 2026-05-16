@@ -129,7 +129,7 @@ func TestQUICProxy_HandshakeSucceeds(t *testing.T) {
 	}
 
 	var resolver atomic.Pointer[vault.BindingResolver]
-	qp, err := NewQUICProxy(caCert, &stubQUICProvider{}, &resolver, nil, nil, nil)
+	qp, err := NewQUICProxy(caCert, &stubQUICProvider{}, &resolver, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewQUICProxy: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestQUICProxy_SNIExtraction(t *testing.T) {
 	}
 
 	var resolver atomic.Pointer[vault.BindingResolver]
-	qp, err := NewQUICProxy(caCert, &stubQUICProvider{}, &resolver, nil, nil, nil)
+	qp, err := NewQUICProxy(caCert, &stubQUICProvider{}, &resolver, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewQUICProxy: %v", err)
 	}
@@ -291,7 +291,7 @@ func setupQUICProxyForH3(
 		resolverPtr.Store(resolver)
 	}
 
-	qp, err := NewQUICProxy(caCert, provider, &resolverPtr, nil, blockRules, redactRules)
+	qp, err := NewQUICProxy(caCert, provider, &resolverPtr, nil, nil, blockRules, redactRules)
 	if err != nil {
 		t.Fatalf("NewQUICProxy: %v", err)
 	}

@@ -36,6 +36,22 @@ func newTestStore(t *testing.T) *store.Store {
 	return s
 }
 
+// seedCred registers a static credential in credential_meta so a binding
+// referencing it passes the live-credential-or-pool existence check that
+// AddBinding / AddRuleAndBinding now enforce. The real REST flows always
+// create the credential before binding (POST /api/credentials registers
+// credential_meta before the paired binding; POST /api/bindings binds to a
+// pre-existing credential), so seeding here mirrors production rather than
+// weakening the test.
+func seedCred(t *testing.T, st *store.Store, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		if err := st.AddCredentialMeta(n, "static", ""); err != nil {
+			t.Fatalf("seed credential meta %q: %v", n, err)
+		}
+	}
+}
+
 // enableHTTPChannel inserts an enabled HTTP channel row (type=1) in the store.
 func enableHTTPChannel(t *testing.T, st *store.Store) {
 	t.Helper()
@@ -986,6 +1002,7 @@ func TestGetApiRulesExport_BindingEnvVar(t *testing.T) {
 	st := newTestStore(t)
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
+	seedCred(t, st, "openai_key")
 
 	// Add a binding with env_var set.
 	if _, err := st.AddBinding("api.openai.com", "openai_key", store.BindingOpts{
@@ -1336,6 +1353,7 @@ func TestPostApiCredentials_DuplicateBinding(t *testing.T) {
 	srv.SetVault(v)
 
 	// Seed an existing binding on (existing_cred, api.example.com).
+	seedCred(t, st, "existing_cred")
 	if _, err := st.AddBinding("api.example.com", "existing_cred", store.BindingOpts{}); err != nil {
 		t.Fatalf("seed binding: %v", err)
 	}
@@ -1408,6 +1426,7 @@ func TestDeleteApiCredentials_Success(t *testing.T) {
 	if _, err := v.Add("my_key", "value"); err != nil {
 		t.Fatalf("add: %v", err)
 	}
+	seedCred(t, st, "my_key")
 	if _, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{}); err != nil {
 		t.Fatalf("add binding: %v", err)
 	}
@@ -1463,6 +1482,7 @@ func TestDeleteApiCredentials_ConcurrentRace(t *testing.T) {
 	if _, err := v.Add("racer", "value"); err != nil {
 		t.Fatalf("add: %v", err)
 	}
+	seedCred(t, st, "racer")
 	if _, err := st.AddBinding("api.example.com", "racer", store.BindingOpts{}); err != nil {
 		t.Fatalf("add binding: %v", err)
 	}
@@ -1511,6 +1531,113 @@ func TestDeleteApiCredentials_ConcurrentRace(t *testing.T) {
 	if len(names) != 0 {
 		t.Errorf("expected 0 credentials, got %v", names)
 	}
+}
+
+// TestDeleteApiCredentials_PoolGuardVsStoreFault is the round-22 Finding 3
+// fail-before/pass-after regression. The REST cred-remove handler must map
+// ONLY the fail-closed pool-member guard to 409; a genuine store fault
+// (tx begin/exec/commit failure) must be 500, not a client conflict.
+// Before the fix every RemoveCredentialFully error became 409.
+func TestDeleteApiCredentials_PoolGuardVsStoreFault(t *testing.T) {
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+
+	// Case 1: removing a live pool member is a client conflict -> 409.
+	t.Run("live pool member is 409", func(t *testing.T) {
+		st := newTestStore(t)
+		enableHTTPChannel(t, st)
+		v := newTestVault(t)
+		srv := api.NewServer(st, nil, nil, "")
+		srv.SetVault(v)
+		var mu sync.Mutex
+		srv.SetEnginePtr(new(atomic.Pointer[policy.Engine]), &mu)
+
+		if _, err := v.Add("m", "value"); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+		// Pools require oauth credentials, so register oauth credential_meta
+		// rows for the members (mirrors the store package's seedOAuthCred).
+		for _, n := range []string{"m", "n"} {
+			if err := st.AddCredentialMeta(n, "oauth", "https://auth.example.com/token"); err != nil {
+				t.Fatalf("seed oauth cred %q: %v", n, err)
+			}
+		}
+		if err := st.CreatePoolWithMembers("p", "failover", []string{"m", "n"}); err != nil {
+			t.Fatalf("create pool: %v", err)
+		}
+
+		handler := newTestHandler(t, srv, st)
+		req := httptest.NewRequest("DELETE", "/api/credentials/m", nil)
+		req.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("live pool member removal: expected 409, got %d (%s)", rec.Code, rec.Body.String())
+		}
+		// The guard refused, so the vault secret must still be present.
+		if names, _ := v.List(); len(names) != 1 || names[0] != "m" {
+			t.Errorf("vault secret should be intact after a refused removal, got %v", names)
+		}
+	})
+
+	// Case 2: a store fault inside RemoveCredentialFully (here: the DB is
+	// closed so tx Begin fails) must be 500, NOT 409. Pre-fix this was 409.
+	t.Run("store fault is 500", func(t *testing.T) {
+		st := newTestStore(t)
+		enableHTTPChannel(t, st)
+		v := newTestVault(t)
+		srv := api.NewServer(st, nil, nil, "")
+		srv.SetVault(v)
+		var mu sync.Mutex
+		srv.SetEnginePtr(new(atomic.Pointer[policy.Engine]), &mu)
+
+		if _, err := v.Add("solo", "value"); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+		seedCred(t, st, "solo")
+		handler := newTestHandler(t, srv, st)
+
+		// Force a store fault: closing the DB makes tx Begin fail with a
+		// non-guard error inside RemoveCredentialFully.
+		if err := st.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+
+		req := httptest.NewRequest("DELETE", "/api/credentials/solo", nil)
+		req.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("store fault: expected 500, got %d (%s)", rec.Code, rec.Body.String())
+		}
+	})
+
+	// Case 3: a normal removal (no pool, healthy store) still succeeds 204.
+	t.Run("normal removal is 204", func(t *testing.T) {
+		st := newTestStore(t)
+		enableHTTPChannel(t, st)
+		v := newTestVault(t)
+		srv := api.NewServer(st, nil, nil, "")
+		srv.SetVault(v)
+		var mu sync.Mutex
+		srv.SetEnginePtr(new(atomic.Pointer[policy.Engine]), &mu)
+
+		if _, err := v.Add("plain", "value"); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+		seedCred(t, st, "plain")
+		handler := newTestHandler(t, srv, st)
+
+		req := httptest.NewRequest("DELETE", "/api/credentials/plain", nil)
+		req.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("normal removal: expected 204, got %d (%s)", rec.Code, rec.Body.String())
+		}
+	})
 }
 
 // TestPostApiCredentials_ConcurrentRace verifies that two concurrent POST
@@ -1988,6 +2115,98 @@ func TestDeleteApiCredentials_CascadesToMeta(t *testing.T) {
 	}
 }
 
+// TestDeleteApiCredentials_MissingVaultSecretIsNotFatal is the Finding 4
+// regression. Two concurrent DELETEs WITHOUT a reloadMu wired both pass the
+// vault.List() existence check, both run the (idempotent) store cleanup, and
+// both call vault.Remove. The loser's vault.Remove returns an os.IsNotExist
+// error because the winner already deleted the .age file. Before the fix the
+// REST handler treated that as a hard HTTP 500 — AFTER the store-side
+// cleanup (meta/bindings/rules) had committed and BEFORE the engine
+// recompile — so the live policy was left stale and the API could not be
+// used to finish a previous partial cleanup. The CLI and Telegram paths
+// already treat os.IsNotExist as success; the REST path must match.
+//
+// Invariant asserted over many interleavings: NO 500 ever (a 500 means the
+// loser aborted after wiping store state, the exact bug), at least one 204,
+// and the final state is fully clean in BOTH the vault and the store.
+func TestDeleteApiCredentials_MissingVaultSecretIsNotFatal(t *testing.T) {
+	for iter := 0; iter < 50; iter++ {
+		st := newTestStore(t)
+		enableHTTPChannel(t, st)
+		v := newTestVault(t)
+		srv := api.NewServer(st, nil, nil, "")
+		srv.SetVault(v)
+		// Deliberately do NOT wire reloadMu (SetEnginePtr): that is what
+		// lets both concurrent handlers pass the List() check and race on
+		// vault.Remove, so the loser hits the os.IsNotExist path the fix
+		// targets. An engine pointer alone (no mutex) still exercises
+		// recompileEngine after the store cleanup.
+		srv.SetEnginePtr(new(atomic.Pointer[policy.Engine]), nil)
+
+		if _, err := v.Add("dup", "value"); err != nil {
+			t.Fatalf("iter %d: add: %v", iter, err)
+		}
+		seedCred(t, st, "dup")
+		if _, err := st.AddBinding("api.example.com", "dup", store.BindingOpts{}); err != nil {
+			t.Fatalf("iter %d: add binding: %v", iter, err)
+		}
+
+		t.Setenv("SLUICE_API_TOKEN", "tok")
+		handler := newTestHandler(t, srv, st)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		codes := make([]int, 2)
+		bodies := make([]string, 2)
+		for i := 0; i < 2; i++ {
+			idx := i
+			go func() {
+				defer wg.Done()
+				req := httptest.NewRequest("DELETE", "/api/credentials/dup", nil)
+				req.Header.Set("Authorization", "Bearer tok")
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, req)
+				codes[idx] = rec.Code
+				bodies[idx] = rec.Body.String()
+			}()
+		}
+		wg.Wait()
+
+		has204 := false
+		for i, c := range codes {
+			switch c {
+			case http.StatusNoContent:
+				has204 = true
+			case http.StatusNotFound:
+				// Loser blocked at the List() precondition (the winner
+				// committed first) — acceptable, no store wipe happened.
+			case http.StatusInternalServerError:
+				t.Fatalf("iter %d: Finding 4: DELETE returned 500 (%q) — an "+
+					"already-missing vault secret must NOT be fatal after the "+
+					"store cleanup committed", iter, bodies[i])
+			default:
+				t.Fatalf("iter %d: unexpected status %d (%q)", iter, c, bodies[i])
+			}
+		}
+		if !has204 {
+			t.Fatalf("iter %d: expected at least one 204, got %v", iter, codes)
+		}
+
+		// Final state must be fully clean in BOTH stores (no partial
+		// cleanup left behind by a fail-closed loser).
+		if names, err := v.List(); err != nil {
+			t.Fatalf("iter %d: vault list: %v", iter, err)
+		} else if len(names) != 0 {
+			t.Fatalf("iter %d: vault not clean: %v", iter, names)
+		}
+		if b, err := st.ListBindings(); err != nil {
+			t.Fatalf("iter %d: list bindings: %v", iter, err)
+		} else if len(b) != 0 {
+			t.Fatalf("iter %d: bindings not clean: %d", iter, len(b))
+		}
+	}
+}
+
 func TestPostApiCredentials_StaticWithMetaCreated(t *testing.T) {
 	st := newTestStore(t)
 	enableHTTPChannel(t, st)
@@ -2117,6 +2336,7 @@ func TestPostApiBindings_Success(t *testing.T) {
 	t.Setenv("SLUICE_API_TOKEN", "tok")
 	handler := newTestHandler(t, srv, st)
 
+	seedCred(t, st, "my_key")
 	body := `{"destination": "api.example.com", "credential": "my_key", "ports": [443], "header": "Authorization", "template": "Bearer {value}"}`
 	req := httptest.NewRequest("POST", "/api/bindings", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer tok")
@@ -2155,6 +2375,7 @@ func TestPostApiBindings_PropagatesProtocolsAndPortsToRule(t *testing.T) {
 	t.Setenv("SLUICE_API_TOKEN", "tok")
 	handler := newTestHandler(t, srv, st)
 
+	seedCred(t, st, "my_key")
 	body := `{"destination":"api.example.com","credential":"my_key","ports":[443,8443],"protocols":["tcp"]}`
 	req := httptest.NewRequest("POST", "/api/bindings", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer tok")
@@ -2244,6 +2465,7 @@ func TestPatchApiBindingsId_RejectsUnknownProtocol(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "cred")
 	_, bindingID, err := st.AddRuleAndBinding(
 		"allow",
 		store.RuleOpts{Destination: "api.example.com", Source: store.BindingAddSourcePrefix + "cred"},
@@ -2277,6 +2499,7 @@ func TestDeleteApiBindings_Success(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{})
 	if err != nil {
 		t.Fatalf("add binding: %v", err)
@@ -2850,6 +3073,7 @@ func TestPostApiBindings_WithEnvVar(t *testing.T) {
 	t.Setenv("SLUICE_API_TOKEN", "tok")
 	handler := newTestHandler(t, srv, st)
 
+	seedCred(t, st, "my_key")
 	body := `{"destination": "api.example.com", "credential": "my_key", "ports": [443], "env_var": "MY_API_KEY"}`
 	req := httptest.NewRequest("POST", "/api/bindings", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer tok")
@@ -2879,6 +3103,7 @@ func TestGetApiBindings_ReturnsEnvVar(t *testing.T) {
 	srv := api.NewServer(st, nil, nil, "")
 
 	// Create a binding with env_var directly in the store.
+	seedCred(t, st, "my_key")
 	_, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{
 		Ports:  []int{443},
 		EnvVar: "EXAMPLE_KEY",
@@ -2917,6 +3142,7 @@ func TestGetApiBindings_OmitsEmptyEnvVar(t *testing.T) {
 	srv := api.NewServer(st, nil, nil, "")
 
 	// Create a binding without env_var.
+	seedCred(t, st, "my_key")
 	_, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{})
 	if err != nil {
 		t.Fatalf("add binding: %v", err)
@@ -3028,6 +3254,7 @@ func TestPostApiBindings_WithContainerManager(t *testing.T) {
 	mgr := &mockContainerMgr{}
 	srv.SetContainerManager(mgr)
 
+	seedCred(t, st, "openai_key")
 	body := `{"destination":"api.openai.com","credential":"openai_key","ports":[443],"env_var":"OPENAI_API_KEY"}`
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/bindings", strings.NewReader(body))
@@ -3051,6 +3278,7 @@ func TestDeleteApiBindingsId_ClearsEnvVar(t *testing.T) {
 	defer func() { _ = st.Close() }()
 
 	// Create a binding with env_var.
+	seedCred(t, st, "openai_key")
 	id, err := st.AddBinding("api.openai.com", "openai_key", store.BindingOpts{
 		Ports:  []int{443},
 		EnvVar: "OPENAI_API_KEY",
@@ -3091,6 +3319,7 @@ func TestPatchApiBindingsId_Success(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{
 		Ports:    []int{443},
 		Header:   "Authorization",
@@ -3136,6 +3365,7 @@ func TestPatchApiBindingsId_MultipleFields(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{
 		Ports: []int{443},
 	})
@@ -3200,6 +3430,7 @@ func TestPatchApiBindingsId_InvalidBody(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{})
 	if err != nil {
 		t.Fatalf("add binding: %v", err)
@@ -3230,6 +3461,7 @@ func TestPatchApiBindingsId_DestinationSyncsPairedRule(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	ruleID, bindingID, err := st.AddRuleAndBinding(
 		"allow",
 		store.RuleOpts{
@@ -3289,6 +3521,7 @@ func TestPatchApiBindingsId_EnvVar(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{})
 	if err != nil {
 		t.Fatalf("add binding: %v", err)
@@ -3335,6 +3568,7 @@ func TestPatchApiBindingsId_EmptyDestinationRejected(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{})
 	if err != nil {
 		t.Fatalf("add binding: %v", err)
@@ -3365,6 +3599,7 @@ func TestPatchApiBindingsId_EmptyBodyRejected(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{})
 	if err != nil {
 		t.Fatalf("add binding: %v", err)
@@ -3394,6 +3629,7 @@ func TestPatchApiBindingsId_DuplicateDestinationRejected(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	if _, err := st.AddBinding("api.a.com", "my_key", store.BindingOpts{}); err != nil {
 		t.Fatalf("add first binding: %v", err)
 	}
@@ -3427,6 +3663,7 @@ func TestPatchApiBindingsId_ClearsEnvVar(t *testing.T) {
 	mgr := &mockContainerMgr{}
 	srv.SetContainerManager(mgr)
 
+	seedCred(t, st, "my_key")
 	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{
 		EnvVar: "OLD_KEY",
 	})
@@ -3469,6 +3706,7 @@ func TestDeleteApiBindingsId_CleansUpPairedRule(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	ruleID, bindingID, err := st.AddRuleAndBinding(
 		"allow",
 		store.RuleOpts{
@@ -3521,6 +3759,7 @@ func TestDeleteApiCredentials_CleansUpBindingAddRules(t *testing.T) {
 	if _, err := v.Add("my_key", "s3cr3t"); err != nil {
 		t.Fatalf("seed credential: %v", err)
 	}
+	seedCred(t, st, "my_key")
 	if _, _, err := st.AddRuleAndBinding(
 		"allow",
 		store.RuleOpts{

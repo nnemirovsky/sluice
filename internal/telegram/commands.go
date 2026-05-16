@@ -605,17 +605,95 @@ func (h *CommandHandler) credList() string {
 }
 
 func (h *CommandHandler) credAdd(name, value, envVar string) string {
-	if _, err := h.vault.Add(name, value); err != nil {
+	// Capture the pre-add ciphertext so a later metadata/binding failure can
+	// roll the vault back via compare-and-swap, mirroring the CLI
+	// (cmd/sluice/cred.go) and REST (internal/api/server.go) "cred add"
+	// paths. Without this, a failed AddCredentialMeta (e.g. a pool-name
+	// collision) or env-var AddBinding would leave an orphaned vault secret
+	// with no credential_meta row — an inconsistent, unbindable credential.
+	prevCiphertext, readErr := h.vault.ReadRawCredential(name)
+	if readErr != nil {
+		return fmt.Sprintf("Failed to add credential: %v", readErr)
+	}
+	ourCiphertext, err := h.vault.Add(name, value)
+	if err != nil {
 		return fmt.Sprintf("Failed to add credential: %v", err)
 	}
 
-	// If env_var is specified and we have a store, create a binding with the env_var.
-	if envVar != "" && h.store != nil {
+	// rollbackVault reverts the vault entry using compare-and-swap so a
+	// concurrent writer that has since overwritten the credential is not
+	// clobbered. See (*vault.Store).RollbackAdd for semantics.
+	rollbackVault := func() {
+		owned, rbErr := h.vault.RollbackAdd(name, prevCiphertext, ourCiphertext)
+		if !owned {
+			log.Printf("warning: credential %q was modified concurrently; skipping vault rollback", name)
+			return
+		}
+		if rbErr != nil {
+			log.Printf("warning: failed to roll back vault credential %q after store error: %v", name, rbErr)
+		}
+	}
+
+	// rollbackCredentialMeta removes the credential_meta row we just inserted
+	// using compare-and-swap on (cred_type, token_url). A Telegram-added
+	// credential is always a static API key with no token URL, so the CAS
+	// expects ("static", ""). If a concurrent writer overwrote the row with
+	// different values we leave their state alone and log a warning. Mirrors
+	// the CLI (cmd/sluice/cred.go) and REST (internal/api/server.go) cred-add
+	// rollback so a failed env-var binding leaves NEITHER a vault secret NOR a
+	// credential_meta row NOR a binding.
+	rollbackCredentialMeta := func() {
+		_, noConcurrent, rmErr := h.store.RemoveCredentialMetaCAS(name, "static", "")
+		if rmErr != nil {
+			log.Printf("warning: failed to remove credential meta for %q after rollback: %v", name, rmErr)
+			return
+		}
+		if !noConcurrent {
+			log.Printf("warning: credential meta %q was modified concurrently; skipping meta rollback", name)
+		}
+	}
+
+	// Register the credential in credential_meta for EVERY Telegram add when
+	// a store is configured, mirroring the CLI and REST "cred add" paths
+	// (which always register a credential_meta row for static creds). A
+	// Telegram-added credential is always a static API key. This must run
+	// even when no --env-var is given: AddBinding (used by a later API/CLI
+	// `binding add`) now requires its credential to resolve to a live
+	// credential or pool, and a credential with no backing credential_meta
+	// row is exactly the state that guard rejects — so a Telegram-only
+	// `/cred add foo bar` would otherwise be unbindable, and pool-name
+	// collisions for it would not be rejected. AddCredentialMeta is an
+	// upsert, so the env-var sub-path below does not double-insert.
+	if h.store != nil {
 		h.reloadMu.Lock()
-		_, err := h.store.AddBinding("*", name, store.BindingOpts{EnvVar: envVar})
+		metaErr := h.store.AddCredentialMeta(name, "static", "")
+		var bindErr error
+		var bindingID int64
+		// If env_var is specified, also create a binding with the env_var.
+		if metaErr == nil && envVar != "" {
+			bindingID, bindErr = h.store.AddBinding("*", name, store.BindingOpts{EnvVar: envVar})
+		}
 		h.reloadMu.Unlock()
-		if err != nil {
-			return fmt.Sprintf("Added credential %s but failed to create binding with env_var: %v", name, err)
+		if metaErr != nil {
+			rollbackVault()
+			return fmt.Sprintf("Failed to register credential metadata for %s (vault rolled back): %v", name, metaErr)
+		}
+		if bindErr != nil {
+			// The env-var binding failed AFTER AddCredentialMeta already
+			// committed. Roll back every store mutation we made plus the
+			// vault secret so the failed command leaves NEITHER a vault
+			// secret NOR a credential_meta row NOR a binding (an orphaned
+			// meta row would otherwise let later bindings reference a
+			// credential that cannot be injected). Order mirrors the CLI:
+			// partial binding -> credential_meta (CAS-guarded) -> vault.
+			if bindingID != 0 {
+				if _, rmErr := h.store.RemoveBinding(bindingID); rmErr != nil {
+					log.Printf("warning: failed to remove binding [%d] during rollback for %q: %v", bindingID, name, rmErr)
+				}
+			}
+			rollbackCredentialMeta()
+			rollbackVault()
+			return fmt.Sprintf("Failed to create binding with env_var for %s (vault and credential metadata rolled back): %v", name, bindErr)
 		}
 	}
 
@@ -639,21 +717,13 @@ func (h *CommandHandler) credRotate(name, value string) string {
 }
 
 func (h *CommandHandler) credRemove(name string) string {
-	// Remove from vault. If already gone (previous partial cleanup),
-	// continue to DB cleanup so stale rules/bindings can be removed.
-	if err := h.vault.Remove(name); err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Sprintf("Failed to remove credential: %v", err)
-		}
-		// Vault entry already gone. Continue to clean up stale DB state.
-	}
-
 	// Clean up associated bindings and auto-created rules.
 	var warnings []string
 	var removedEnvVars []string
 	if h.store != nil {
 		h.reloadMu.Lock()
 		defer h.reloadMu.Unlock()
+
 		// Read env_var values from bindings before removal so we can clear
 		// them from the agent container after the bindings are deleted.
 		if credBindings, err := h.store.ListBindingsByCredential(name); err == nil {
@@ -663,18 +733,34 @@ func (h *CommandHandler) credRemove(name string) string {
 				}
 			}
 		}
-		if _, err := h.store.RemoveRulesBySource("cred-add:" + name); err != nil {
-			log.Printf("[WARN] remove rules for credential %q: %v", name, err)
-			warnings = append(warnings, fmt.Sprintf("failed to remove rules: %v", err))
+
+		// Store-first removal order (Finding 3, round-9 + Finding 2,
+		// round-15). RemoveCredentialFully is the authoritative,
+		// fail-closed pool-membership gate AND the atomic store cleanup:
+		// in one transaction it refuses if the credential is still a live
+		// pool member, otherwise deletes credential_meta,
+		// credential_health, all bindings, and all auto-created rules
+		// (cred-add:/binding-add:). Run it BEFORE the vault delete so the
+		// vault secret is only destroyed once the entire store unit has
+		// committed. If it refuses (or any store delete fails) the whole
+		// tx rolls back: vault secret, bindings, rules, meta, and health
+		// are all left intact and no partially-deleted-credential window
+		// exists.
+		if _, _, _, err := h.store.RemoveCredentialFully(name); err != nil {
+			log.Printf("[WARN] remove credential store state for %q: %v", name, err)
+			return fmt.Sprintf("Failed to remove credential %q (vault secret + all store rows left intact so the credential is not partially deleted): %v", name, err)
 		}
-		if _, err := h.store.RemoveBindingsByCredential(name); err != nil {
-			log.Printf("[WARN] remove bindings for credential %q: %v", name, err)
-			warnings = append(warnings, fmt.Sprintf("failed to remove bindings: %v", err))
+
+		// Store removal already succeeded atomically. Only now is it safe
+		// to delete the vault secret. If already gone (previous partial
+		// cleanup), continue.
+		if err := h.vault.Remove(name); err != nil {
+			if !os.IsNotExist(err) {
+				return fmt.Sprintf("Failed to remove credential: %v", err)
+			}
+			// Vault entry already gone. Continue.
 		}
-		if _, err := h.store.RemoveCredentialMeta(name); err != nil {
-			log.Printf("[WARN] remove credential meta for %q: %v", name, err)
-			warnings = append(warnings, fmt.Sprintf("failed to remove credential meta: %v", err))
-		}
+
 		// Recompile engine so removed allow rules take effect immediately.
 		if err := h.recompileAndSwap(); err != nil {
 			log.Printf("[WARN] recompile after cred remove failed: %v", err)
@@ -689,6 +775,14 @@ func (h *CommandHandler) credRemove(name string) string {
 		// the deleted credential's token URL.
 		if h.onOAuthIndexRebuild != nil {
 			h.onOAuthIndexRebuild()
+		}
+	} else {
+		// No store configured, so there is no pool-membership gate to
+		// run; delete the vault secret directly. If already gone
+		// (previous partial cleanup), report success — there is no DB
+		// state to clean up.
+		if err := h.vault.Remove(name); err != nil && !os.IsNotExist(err) {
+			return fmt.Sprintf("Failed to remove credential: %v", err)
 		}
 	}
 
