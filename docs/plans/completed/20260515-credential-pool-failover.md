@@ -9,9 +9,15 @@ credentials** (a "pool"), with sluice picking which real account to inject and
 OpenAI Codex OAuth accounts driven by one Hermes agent, so quota exhaustion on
 one account transparently rolls onto the other.
 
-The agent always holds **one pool-scoped phantom pair**
-(`SLUICE_PHANTOM:<pool>.access` / `.refresh`). Sluice maps the pool phantom to
-the *currently active member's* real token at injection time, and persists
+The agent always holds **one pool-scoped phantom pair**. As implemented
+(Risk R3, Phase 1.4), the two halves of that pair have different forms: the
+**access phantom is a pool-stable synthetic JWT** (`poolStablePhantomAccess`)
+that is byte-identical across every member switch, while the **refresh phantom
+is the static `SLUICE_PHANTOM:<pool>.refresh` string**. The static
+`SLUICE_PHANTOM:<pool>.access` string is NOT what the agent sees for the
+access token — see the Phantom-stability decision below for why the access
+side had to become a synthetic JWT instead. Sluice maps the pool phantom pair
+to the *currently active member's* real tokens at injection time, and persists
 refreshed tokens back to the member that actually issued them.
 
 **Phantom-stability decision (resolved — see Risk R3):** OpenAI Codex access

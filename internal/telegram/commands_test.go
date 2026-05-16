@@ -877,6 +877,119 @@ func TestCredAddWithoutEnvVar(t *testing.T) {
 	}
 }
 
+// TestCredAddRollsBackVaultOnMetadataFailure verifies the round-23 Finding 1
+// fix: when AddCredentialMeta fails during a Telegram `/cred add`, the
+// just-written vault secret must NOT be left behind (it would be an orphaned,
+// unbindable credential with no credential_meta row). The vault add must be
+// rolled back via compare-and-swap, mirroring the CLI (cmd/sluice/cred.go) and
+// REST (internal/api/server.go) "cred add" paths. A closed store makes
+// AddCredentialMeta's tx.Begin() fail deterministically.
+func TestCredAddRollsBackVaultOnMetadataFailure(t *testing.T) {
+	// Dedicated store (not newTestStore) so we can close it after the handler
+	// is built without breaking other handlers' cleanup.
+	s, err := store.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	dir := t.TempDir()
+	vaultStore, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.SetVault(vaultStore)
+
+	// Close the store so AddCredentialMeta fails (tx.Begin on a closed DB).
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	result := handler.Handle(&Command{
+		Name: "cred",
+		Args: []string{"add", "orphan_key", "secret123"},
+	})
+
+	// An error must be reported and it must mention the rollback.
+	if strings.Contains(result, "Added credential") {
+		t.Fatalf("cred add must NOT report success when metadata registration fails, got: %s", result)
+	}
+	if !strings.Contains(result, "Failed to register credential metadata") {
+		t.Fatalf("expected a metadata-failure error, got: %s", result)
+	}
+	if !strings.Contains(result, "vault rolled back") {
+		t.Errorf("error should indicate the vault was rolled back, got: %s", result)
+	}
+
+	// The crux: the vault secret must NOT be left behind.
+	if sb, getErr := vaultStore.Get("orphan_key"); getErr == nil {
+		sb.Release()
+		t.Fatalf("vault secret %q was left behind after a failed cred add; "+
+			"expected it to be rolled back (orphaned, unbindable credential)", "orphan_key")
+	}
+}
+
+// TestCredAddHappyPathStillBindsAfterRollbackFix verifies the rollback change
+// did not regress the success path: a Telegram `/cred add` (with and without
+// --env-var) still writes vault + credential_meta, and the credential is
+// bindable afterwards via the same store-level path the API/CLI use.
+func TestCredAddHappyPathStillBindsAfterRollbackFix(t *testing.T) {
+	s := newTestStore(t)
+	handler := newTestHandlerWithStore(t, s, nil, "")
+
+	dir := t.TempDir()
+	vaultStore, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.SetVault(vaultStore)
+
+	// Plain add (no env-var).
+	result := handler.Handle(&Command{
+		Name: "cred",
+		Args: []string{"add", "good_key", "secret123"},
+	})
+	if !strings.Contains(result, "Added credential") {
+		t.Fatalf("happy path should confirm add, got: %s", result)
+	}
+	sb, err := vaultStore.Get("good_key")
+	if err != nil {
+		t.Fatalf("vault secret should exist on happy path: %v", err)
+	}
+	sb.Release()
+	meta, err := s.GetCredentialMeta("good_key")
+	if err != nil {
+		t.Fatalf("get credential meta: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("expected a credential_meta row on happy path, got none")
+	}
+	if _, err := s.AddBinding("api.example.com", "good_key", store.BindingOpts{}); err != nil {
+		t.Fatalf("a successfully added credential must be bindable, got: %v", err)
+	}
+
+	// Env-var path still works end to end.
+	result = handler.Handle(&Command{
+		Name: "cred",
+		Args: []string{"add", "env_key", "secret456", "--env-var", "OPENAI_API_KEY"},
+	})
+	if !strings.Contains(result, "Added credential") || !strings.Contains(result, "OPENAI_API_KEY") {
+		t.Fatalf("env-var happy path should confirm add with env var, got: %s", result)
+	}
+	sb2, err := vaultStore.Get("env_key")
+	if err != nil {
+		t.Fatalf("vault secret should exist for env-var add: %v", err)
+	}
+	sb2.Release()
+	bindings, err := s.ListBindingsWithEnvVar()
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 1 || bindings[0].EnvVar != "OPENAI_API_KEY" {
+		t.Fatalf("expected 1 env-var binding OPENAI_API_KEY, got %+v", bindings)
+	}
+}
+
 func TestHandleMCPNoArgs(t *testing.T) {
 	s := newTestStore(t)
 	handler := newTestHandlerWithStore(t, s, nil, "")

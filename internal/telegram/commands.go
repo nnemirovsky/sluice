@@ -605,8 +605,33 @@ func (h *CommandHandler) credList() string {
 }
 
 func (h *CommandHandler) credAdd(name, value, envVar string) string {
-	if _, err := h.vault.Add(name, value); err != nil {
+	// Capture the pre-add ciphertext so a later metadata/binding failure can
+	// roll the vault back via compare-and-swap, mirroring the CLI
+	// (cmd/sluice/cred.go) and REST (internal/api/server.go) "cred add"
+	// paths. Without this, a failed AddCredentialMeta (e.g. a pool-name
+	// collision) or env-var AddBinding would leave an orphaned vault secret
+	// with no credential_meta row — an inconsistent, unbindable credential.
+	prevCiphertext, readErr := h.vault.ReadRawCredential(name)
+	if readErr != nil {
+		return fmt.Sprintf("Failed to add credential: %v", readErr)
+	}
+	ourCiphertext, err := h.vault.Add(name, value)
+	if err != nil {
 		return fmt.Sprintf("Failed to add credential: %v", err)
+	}
+
+	// rollbackVault reverts the vault entry using compare-and-swap so a
+	// concurrent writer that has since overwritten the credential is not
+	// clobbered. See (*vault.Store).RollbackAdd for semantics.
+	rollbackVault := func() {
+		owned, rbErr := h.vault.RollbackAdd(name, prevCiphertext, ourCiphertext)
+		if !owned {
+			log.Printf("warning: credential %q was modified concurrently; skipping vault rollback", name)
+			return
+		}
+		if rbErr != nil {
+			log.Printf("warning: failed to roll back vault credential %q after store error: %v", name, rbErr)
+		}
 	}
 
 	// Register the credential in credential_meta for EVERY Telegram add when
@@ -623,17 +648,19 @@ func (h *CommandHandler) credAdd(name, value, envVar string) string {
 	if h.store != nil {
 		h.reloadMu.Lock()
 		metaErr := h.store.AddCredentialMeta(name, "static", "")
-		var err error
+		var bindErr error
 		// If env_var is specified, also create a binding with the env_var.
 		if metaErr == nil && envVar != "" {
-			_, err = h.store.AddBinding("*", name, store.BindingOpts{EnvVar: envVar})
+			_, bindErr = h.store.AddBinding("*", name, store.BindingOpts{EnvVar: envVar})
 		}
 		h.reloadMu.Unlock()
 		if metaErr != nil {
-			return fmt.Sprintf("Added credential %s but failed to register credential metadata: %v", name, metaErr)
+			rollbackVault()
+			return fmt.Sprintf("Failed to register credential metadata for %s (vault rolled back): %v", name, metaErr)
 		}
-		if err != nil {
-			return fmt.Sprintf("Added credential %s but failed to create binding with env_var: %v", name, err)
+		if bindErr != nil {
+			rollbackVault()
+			return fmt.Sprintf("Failed to create binding with env_var for %s (vault rolled back): %v", name, bindErr)
 		}
 	}
 
