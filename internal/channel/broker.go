@@ -24,6 +24,20 @@ var ErrDestinationRateLimited = fmt.Errorf("destination rate limited")
 // never tap expired buttons.
 const timedOutTTL = 10 * time.Minute
 
+// maxCoalescedSubs caps how many coalesced subscribers may attach to a single
+// primary prompt. Coalesced subscribers deliberately bypass both the pending
+// limit and the per-destination rate limit (the operator answers the whole
+// burst with one tap), but an unbounded attach lets an abusive client
+// hammering one dest:port accumulate goroutines and channels without limit.
+// The cap bounds that fan-out: a reasonable burst still coalesces to one
+// prompt, but once the primary already has this many subscribers the excess
+// callers are rejected with the broker's standard over-capacity response
+// (ResponseDeny + ErrPendingLimitExceeded) instead of being appended. 256 is
+// well above any legitimate concurrent burst to a single target yet small
+// enough that the worst-case goroutine/channel footprint per primary stays
+// bounded.
+const maxCoalescedSubs = 256
+
 // Broker coordinates approval flow across multiple enabled channels.
 // Approval requests are broadcast to all channels. The first Resolve call
 // wins. Other channels receive CancelApproval for cleanup.
@@ -262,6 +276,18 @@ func (b *Broker) Request(dest string, port int, protocol string, timeout time.Du
 	if dedupKey != "" {
 		if primaryID, ok := b.dedupIndex[dedupKey]; ok {
 			if w, ok := b.waiters[primaryID]; ok {
+				// Bound the coalesced fan-out. Without a cap an abusive
+				// client hammering one dest:port grows w.subs (and a
+				// blocked goroutine per sub) without limit, since
+				// coalesced subscribers intentionally skip the pending
+				// and per-destination limits. Mirror the broker's
+				// existing over-capacity behavior (the pending-limit
+				// branch below) and reject the excess caller instead of
+				// appending unboundedly.
+				if len(w.subs) >= maxCoalescedSubs {
+					b.mu.Unlock()
+					return ResponseDeny, ErrPendingLimitExceeded
+				}
 				subCh := make(chan Response, 1)
 				w.subs = append(w.subs, subCh)
 				w.count++

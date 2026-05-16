@@ -997,6 +997,145 @@ func TestBrokerCoalesceShutdownFanOut(t *testing.T) {
 	}
 }
 
+// TestBrokerCoalesceSubsCapBounded is the Copilot round-13 Finding 3
+// regression. Coalesced subscribers intentionally bypass both the pending
+// limit and the per-destination rate limit, and before the fix they were
+// appended to the primary's w.subs with NO cap. A burst/abusive client
+// hammering one dest:port could accumulate unbounded subscriber channels and
+// blocked goroutines. The fix caps w.subs at maxCoalescedSubs and rejects the
+// excess callers with the broker's standard over-capacity response
+// (ResponseDeny + ErrPendingLimitExceeded), mirroring the pending-limit
+// branch.
+//
+// Deterministic: a primary stays pending for the whole test (long timeout, no
+// resolve). Exactly maxCoalescedSubs subscribers attach (CoalescedCount
+// settles at 1+maxCoalescedSubs). Then synchronous over-cap callers must each
+// be denied immediately with ErrPendingLimitExceeded while CoalescedCount
+// stays pinned at the cap (no unbounded append). Pre-fix this test fails:
+// CoalescedCount climbs past 1+maxCoalescedSubs and the over-cap callers
+// block instead of being denied.
+func TestBrokerCoalesceSubsCapBounded(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const dest = "capburst.example.com"
+	const port = 443
+
+	// Primary: stays pending for the entire test (no resolve, long timeout).
+	type res = result
+	primaryOut := make(chan res, 1)
+	go func() {
+		resp, err := broker.Request(dest, port, "https", 30*time.Second)
+		primaryOut <- res{resp, err}
+	}()
+
+	// Wait for the primary prompt to land and become the dedup primary.
+	deadline := time.After(5 * time.Second)
+	var primaryID string
+	for primaryID == "" {
+		if reqs := ch.getRequests(); len(reqs) >= 1 {
+			primaryID = reqs[0].ID
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("primary prompt did not land")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	// Launch exactly maxCoalescedSubs coalesced subscribers. They all attach
+	// (cap not yet exceeded: len(w.subs) goes 0..maxCoalescedSubs-1 < cap).
+	subOut := make(chan res, maxCoalescedSubs)
+	for i := 0; i < maxCoalescedSubs; i++ {
+		go func() {
+			resp, err := broker.Request(dest, port, "https", 30*time.Second)
+			subOut <- res{resp, err}
+		}()
+	}
+
+	// Wait until all maxCoalescedSubs subscribers have attached: count is
+	// 1 (primary) + maxCoalescedSubs.
+	wantCount := 1 + maxCoalescedSubs
+	deadline = time.After(10 * time.Second)
+	for broker.CoalescedCount(primaryID) < wantCount {
+		select {
+		case <-deadline:
+			t.Fatalf("subscribers did not all attach: CoalescedCount=%d want %d",
+				broker.CoalescedCount(primaryID), wantCount)
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	// Over-cap callers: each must be rejected immediately with the broker's
+	// standard over-capacity response, NOT appended (no unbounded growth) and
+	// NOT blocked. Call synchronously so the deny is observed deterministically.
+	const extra = 16
+	for i := 0; i < extra; i++ {
+		resp, err := broker.Request(dest, port, "https", 30*time.Second)
+		if resp != ResponseDeny {
+			t.Fatalf("over-cap caller %d: expected ResponseDeny, got %v", i, resp)
+		}
+		if !errors.Is(err, ErrPendingLimitExceeded) {
+			t.Fatalf("over-cap caller %d: expected ErrPendingLimitExceeded, got %v", i, err)
+		}
+	}
+
+	// The subscriber slice must remain bounded: count must NOT have grown past
+	// the cap despite the extra hammering.
+	if c := broker.CoalescedCount(primaryID); c != wantCount {
+		t.Fatalf("coalesced count grew past the cap: got %d want %d (w.subs must be bounded at maxCoalescedSubs=%d)",
+			c, wantCount, maxCoalescedSubs)
+	}
+
+	// Cleanup: shut down so the primary + all subscribers unblock. Every
+	// attached caller (primary + maxCoalescedSubs subs) must drain with Deny.
+	broker.CancelAll()
+	pr := <-primaryOut
+	if pr.resp != ResponseDeny {
+		t.Errorf("primary: expected Deny on shutdown, got %v", pr.resp)
+	}
+	for i := 0; i < maxCoalescedSubs; i++ {
+		r := <-subOut
+		if r.resp != ResponseDeny {
+			t.Errorf("subscriber %d: expected Deny on shutdown, got %v", i, r.resp)
+		}
+	}
+}
+
+// TestBrokerCoalesceSubCapNormalBurstStillFansOut verifies the cap does not
+// regress normal coalescing: a reasonable sub-cap burst still collapses to a
+// single prompt and every caller receives the one decision.
+func TestBrokerCoalesceSubCapNormalBurstStillFansOut(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const n = 32 // well under maxCoalescedSubs
+	primaryID, out := fireCoalescedBurst(t, broker, ch, "normalburst.example.com", n, 5*time.Second)
+
+	if got := len(ch.getRequests()); got != 1 {
+		t.Fatalf("expected exactly 1 broadcast for a sub-cap burst, got %d", got)
+	}
+	if c := broker.CoalescedCount(primaryID); c != n {
+		t.Fatalf("expected coalesced count %d, got %d", n, c)
+	}
+
+	if !broker.Resolve(primaryID, ResponseAlwaysAllow) {
+		t.Fatal("Resolve returned false for primary")
+	}
+	for i := 0; i < n; i++ {
+		r := <-out
+		if r.err != nil {
+			t.Errorf("request %d: unexpected error %v", i, r.err)
+		}
+		if r.resp != ResponseAlwaysAllow {
+			t.Errorf("request %d: expected AlwaysAllow, got %v", i, r.resp)
+		}
+	}
+}
+
 // TestBrokerCancelAllRetainsCoalescedCount is the Finding 2 regression.
 // CancelAll cleared the waiter map without retaining each waiter's final
 // coalesced count, so the shutdown CancelApproval edit saw

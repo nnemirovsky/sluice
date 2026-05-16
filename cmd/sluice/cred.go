@@ -562,17 +562,35 @@ func handleCredRemove(args []string) error {
 	}
 	name := fs.Arg(0)
 
-	// Store-first removal order (Finding 3, round-9). The authoritative
-	// pool-membership gate is the atomic, fail-closed RemoveCredentialMeta
-	// in the store layer: it refuses inside its own transaction if the
-	// credential is still a live pool member, closing the TOCTOU window
-	// where a separate pre-check passes and a concurrent caller then
-	// creates a pool with this credential before the vault secret is
-	// deleted. The vault secret is therefore only deleted AFTER the store
-	// removal has succeeded; if the store removal refuses, the vault
-	// secret is left untouched and no window exists where the secret is
-	// gone but credential_pool_members still references it.
+	// Removal order (Finding 1, round-13 + Finding 3, round-9):
 	//
+	//  1. Open/validate the vault store FIRST (no delete yet -- just
+	//     confirm it opens). If the configured backend cannot be opened
+	//     (e.g. a non-age provider unsupported by the CLI), abort BEFORE
+	//     any metadata is removed. Doing the store removal first and then
+	//     discovering the vault is unopenable would leave credential_meta
+	//     gone while the vault secret + bindings/rules are orphaned.
+	//
+	//  2. Run the store-layer pool-membership gate (RemoveCredentialMeta).
+	//     This is the atomic, fail-closed guard: it refuses inside its own
+	//     transaction if the credential is still a live pool member,
+	//     closing the TOCTOU window where a separate pre-check passes and a
+	//     concurrent caller then creates a pool with this credential before
+	//     the vault secret is deleted.
+	//
+	//  3. Only call vs.Remove AFTER that gate succeeds. If the gate
+	//     refuses, the vault secret is left untouched and no window exists
+	//     where the secret is gone but credential_pool_members still
+	//     references it.
+	//
+	// (1) precedes (2) so an unopenable vault aborts before any metadata is
+	// removed; (2) still precedes (3) so the store gate always runs before
+	// the actual secret delete.
+	vs, err := openVaultStore(*dbPath)
+	if err != nil {
+		return err
+	}
+
 	// Only consult/mutate the DB if it already exists (do not create it as
 	// a side effect of a removal).
 	dbExists := false
@@ -607,11 +625,6 @@ func handleCredRemove(args []string) error {
 		if metaDeleted {
 			fmt.Printf("removed credential metadata for %q\n", name)
 		}
-	}
-
-	vs, err := openVaultStore(*dbPath)
-	if err != nil {
-		return err
 	}
 
 	// Store removal already succeeded (or the DB does not exist). Now it is

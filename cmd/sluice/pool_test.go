@@ -302,8 +302,16 @@ func TestCredRemoveFailsClosedWhenDBUnopenable(t *testing.T) {
 	if err == nil {
 		t.Fatalf("cred remove with unopenable DB: err = nil, want fail-closed error")
 	}
-	if !strings.Contains(err.Error(), "refusing to remove") {
-		t.Fatalf("cred remove error = %v, want fail-closed message containing %q", err, "refusing to remove")
+	// Fail-closed message. Since Finding 1 (round-13) the vault store is
+	// opened/validated FIRST, before the pool-membership gate, so an
+	// unopenable DB is caught by openVaultStore ("open store ...") rather
+	// than by the membership-guard branch ("refusing to remove ..."). Either
+	// wording is an acceptable fail-closed refusal: the invariant the test
+	// guards is that the removal aborts BEFORE the vault delete (asserted
+	// below by the surviving secret), not the exact message. Accept both.
+	msg := err.Error()
+	if !strings.Contains(msg, "refusing to remove") && !strings.Contains(msg, "open store") {
+		t.Fatalf("cred remove error = %v, want a fail-closed message (containing %q or %q)", err, "refusing to remove", "open store")
 	}
 
 	// The secret must still be present: the removal was refused before the

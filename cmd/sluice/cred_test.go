@@ -2717,3 +2717,101 @@ func TestFinding3Round9_TOCTOUInterleaveStoreGatesVaultDelete(t *testing.T) {
 		}
 	}
 }
+
+// TestFinding1Round13_UnopenableVaultAbortsBeforeMetaRemoval is the Copilot
+// round-13 Finding 1 regression. round-9 moved the store-layer
+// RemoveCredentialMeta gate before the vault delete, but openVaultStore was
+// still called only AFTER RemoveCredentialMeta. If the configured vault
+// backend cannot be opened (e.g. a non-age provider unsupported by the CLI),
+// `cred remove` returned an error with credential_meta ALREADY removed while
+// the vault secret + bindings/rules were left orphaned.
+//
+// The fix opens/validates the vault store FIRST (no delete -- just confirm it
+// opens). An unopenable vault must abort BEFORE any metadata is removed.
+//
+// Fail-before/pass-after: with a non-age provider configured, openVaultStore
+// returns an error. Before the fix, RemoveCredentialMeta had already run by
+// the time that error surfaced, so credential_meta was gone. After the fix,
+// the vault-open failure aborts first and credential_meta + bindings + rules
+// remain intact.
+func TestFinding1Round13_UnopenableVaultAbortsBeforeMetaRemoval(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed credential metadata, an auto-created rule, and a binding so we can
+	// assert they all survive a failed removal.
+	if err := db.AddCredentialMeta("orphan_cred", "oauth", "https://auth.example.com/token"); err != nil {
+		t.Fatalf("AddCredentialMeta: %v", err)
+	}
+	if _, err := db.AddRule("allow", store.RuleOpts{
+		Destination: "api.example.com",
+		Source:      store.CredAddSourcePrefix + "orphan_cred",
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	if _, err := db.AddBinding("api.example.com", "orphan_cred", store.BindingOpts{
+		Ports: []int{443},
+	}); err != nil {
+		t.Fatalf("AddBinding: %v", err)
+	}
+	// Configure a non-age provider so openVaultStore fails (CLI only
+	// supports the age backend).
+	provider := "hashicorp"
+	if err := db.UpdateConfig(store.ConfigUpdate{VaultProvider: &provider}); err != nil {
+		t.Fatalf("UpdateConfig: %v", err)
+	}
+	_ = db.Close()
+
+	// `cred remove` must fail because the vault store cannot be opened.
+	err = handleCredCommand([]string{"remove", "orphan_cred", "--db", dbPath})
+	if err == nil {
+		t.Fatal("Finding 1 r13: cred remove must fail when the vault backend cannot be opened")
+	}
+	if !strings.Contains(err.Error(), "hashicorp") {
+		t.Errorf("Finding 1 r13: expected a vault-open error mentioning the provider, got: %v", err)
+	}
+
+	// The invariant: because the vault could not be opened, NOTHING must have
+	// been removed -- credential_meta, the rule, and the binding must all be
+	// intact. (Before the fix, credential_meta was already gone here.)
+	chk, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = chk.Close() }()
+
+	meta, gerr := chk.GetCredentialMeta("orphan_cred")
+	if gerr != nil {
+		t.Fatalf("Finding 1 r13: GetCredentialMeta: %v", gerr)
+	}
+	if meta == nil {
+		t.Fatal("Finding 1 r13: credential_meta was removed despite the vault failing to open — meta removal must come AFTER the vault-open check")
+	}
+
+	binds, berr := chk.ListBindingsByCredential("orphan_cred")
+	if berr != nil {
+		t.Fatalf("Finding 1 r13: ListBindingsByCredential: %v", berr)
+	}
+	if len(binds) != 1 {
+		t.Fatalf("Finding 1 r13: binding was removed despite the vault failing to open; want 1 binding, got %d", len(binds))
+	}
+
+	rules, rerr := chk.ListRules(store.RuleFilter{})
+	if rerr != nil {
+		t.Fatalf("Finding 1 r13: ListRules: %v", rerr)
+	}
+	found := false
+	for _, r := range rules {
+		if r.Source == store.CredAddSourcePrefix+"orphan_cred" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("Finding 1 r13: auto-created rule was removed despite the vault failing to open")
+	}
+}
