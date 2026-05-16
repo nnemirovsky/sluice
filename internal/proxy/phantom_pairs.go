@@ -242,6 +242,7 @@ func buildPooledOAuthPhantomPairs(poolName, member string, secret vault.SecureBy
 		encodedPhantom:      accessEncoded,
 		encodedPhantomLower: encodePhantomLowerForPair(accessEncoded),
 		secret:              accessSecret,
+		pooledMember:        member,
 	}}
 	if cred.RefreshToken != "" {
 		// Record the precise R1 join: this exact real refresh token is
@@ -263,6 +264,7 @@ func buildPooledOAuthPhantomPairs(poolName, member string, secret vault.SecureBy
 			encodedPhantom:      refreshEncoded,
 			encodedPhantomLower: encodePhantomLowerForPair(refreshEncoded),
 			secret:              refreshSecret,
+			pooledMember:        member,
 		})
 	}
 	return pairs, nil

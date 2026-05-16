@@ -388,6 +388,17 @@ type phantomPair struct {
 	encodedPhantom      []byte
 	encodedPhantomLower []byte
 	secret              vault.SecureBytes
+
+	// pooledMember is the concrete pool member whose real credential this
+	// pair injects, set ONLY for pool-keyed pairs built by
+	// buildPooledMemberPairs. It is "" for plain (non-pool) pairs. The
+	// request-side injection uses it to record the per-flow
+	// flowInjected attribution tag ONLY when this pair's pool phantom was
+	// actually present in (and swapped out of) the outbound request
+	// (Finding 2): a plain OAuth request to a token URL shared with a pool
+	// must not acquire a pool-usage tag and mis-attribute its 401 to an
+	// unrelated pool member.
+	pooledMember string
 }
 
 // Relay runs bidirectional WebSocket frame forwarding between agent and

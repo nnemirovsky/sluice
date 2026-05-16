@@ -742,11 +742,20 @@ func (a *SluiceAddon) Request(f *mitmproxy.Flow) {
 	proto := a.detectRequestProtocol(f, port)
 	protoStr := proto.String()
 
-	pairs := a.buildPhantomPairs(host, port, protoStr, f.Id, f.Request.URL)
+	pairs := a.buildPhantomPairs(host, port, protoStr, f.Request.URL)
 	if len(pairs) == 0 && !a.hasPhantomPrefix(f) {
 		return
 	}
 	defer releasePhantomPairs(pairs)
+
+	// Finding 2: record the per-flow pool-usage tag ONLY for pooled pairs
+	// whose pool phantom is actually present in this outbound request. A
+	// plain OAuth request to a token URL shared with a pool builds the
+	// pool's pairs as candidates but carries no pool phantom, so it must
+	// not be tagged (otherwise its 401/invalid_grant would cool an
+	// unrelated pool member). Done BEFORE the swap so the phantom is still
+	// present to detect.
+	a.tagPooledFlowAfterSwap(f, pairs)
 
 	// Pass 2+3 on headers.
 	a.swapPhantomHeaders(f, pairs, host, port)
@@ -795,15 +804,26 @@ func (a *SluiceAddon) StreamRequestModifier(f *mitmproxy.Flow, in io.Reader) io.
 	proto := a.detectRequestProtocol(f, port)
 	protoStr := proto.String()
 
-	pairs := a.buildPhantomPairs(host, port, protoStr, f.Id, f.Request.URL)
+	pairs := a.buildPhantomPairs(host, port, protoStr, f.Request.URL)
 	if len(pairs) == 0 {
 		return in
 	}
 
+	// Finding 2: the streamed (form-urlencoded refresh) body is not
+	// buffered into f.Request.Body, so pairPhantomPresentInRequest cannot
+	// see the pool phantom here. Tag per-flow attribution from inside the
+	// reader, only when a pooled pair's phantom is actually swapped out of
+	// the stream. flowID is captured so the tag survives the reader.
+	flowID := f.Id
 	return &phantomSwapReader{
 		inner:    in,
 		pairs:    pairs,
 		provider: a.provider,
+		onPooledSwap: func(member string) {
+			if flowID != uuid.Nil && member != "" {
+				a.flowInjected.Tag(flowID, member)
+			}
+		},
 	}
 }
 
@@ -860,6 +880,21 @@ func (a *SluiceAddon) Response(f *mitmproxy.Flow) {
 	// so its position relative to OAuth swap / DLP is immaterial. It is a
 	// cheap no-op for non-pooled destinations and for non-trigger statuses.
 	a.handlePoolFailover(f)
+
+	// Finding 1: free this flow's API-host failover attribution tag now
+	// that poolForResponse (invoked inside handlePoolFailover) has used it
+	// — its API-host branch reads the tag with a NON-consuming Peek, so
+	// without this delete a completed request's tag would linger for the
+	// full flowAttrTTL, making Tag's opportunistic sweep O(n) and letting
+	// the map grow unboundedly under sustained pooled traffic. Both the
+	// API-host (Peek) and token-endpoint (Recover) uses happen within that
+	// single poolForResponse call, so deleting here is correct and
+	// race-free; Delete is idempotent if the token-endpoint path already
+	// consumed it. The flowAttrTTL + Tag sweep remain a backstop for flows
+	// whose buffered Response never fires (streamed/abandoned).
+	if f.Id != uuid.Nil {
+		a.flowInjected.Delete(f.Id)
+	}
 
 	// Test-only panic injection. Always nil in production. Lets a
 	// regression test exercise the deferred recover above without
@@ -1428,15 +1463,20 @@ func (a *SluiceAddon) persistAddonOAuthTokens(credName string, realAccess, realR
 }
 
 // buildPhantomPairs builds the sorted list of phantom/secret pairs for a
-// destination. The caller must call releasePhantomPairs when done. flowID is
-// the go-mitmproxy Flow ID of the request being processed (uuid.Nil when no
-// flow is associated, e.g. the QUIC path); it is used to pin per-request
-// pool-member attribution for API-host failover (Finding 1). reqURL is the
-// outbound request URL (nil on the QUIC path, which has no parsed URL); it
-// is used to expand pooled OAuth credentials whose token endpoint matches
+// destination. The caller must call releasePhantomPairs when done. reqURL is
+// the outbound request URL (nil on the QUIC path, which has no parsed URL);
+// it is used to expand pooled OAuth credentials whose token endpoint matches
 // the request even when they are not bound to the CONNECT host (Finding 4,
 // the split-host token-refresh case).
-func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, flowID uuid.UUID, reqURL *url.URL) []phantomPair {
+//
+// Per-flow pool-member attribution for API-host failover (Finding 1) is NOT
+// recorded here: a pooled pair built here is only a CANDIDATE — the request
+// may not actually carry its pool phantom (e.g. a plain OAuth request to a
+// token URL shared with a pool, Finding 2). The flowInjected tag is recorded
+// post-swap by tagPooledFlowAfterSwap, which inspects the built pairs'
+// pooledMember field and tags only the members whose pool phantom was
+// actually present in this request.
+func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, reqURL *url.URL) []phantomPair {
 	res := a.resolver.Load()
 	if res == nil {
 		return nil
@@ -1477,12 +1517,13 @@ func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, flo
 			if target.pooled {
 				poolName := target.phantomName
 				member := target.secretName
-				// Pin API-host failover attribution to this request's
-				// injected member (Finding 1). Idempotent with the
-				// pass-1 injectHeaders tag for the same flow.
-				if member != "" {
-					a.flowInjected.Tag(flowID, member)
-				}
+				// Finding 2: do NOT tag flowInjected here. The
+				// per-flow pool-usage tag must be recorded only AFTER
+				// the swap confirms this request actually carried the
+				// pool phantom (tagPooledFlowAfterSwap), so a plain
+				// OAuth request that merely shares a token URL with
+				// this pool cannot acquire a pool-usage tag and
+				// mis-attribute its 401 to an unrelated member.
 				oauthPairs, parseErr := a.buildPooledMemberPairs(poolName, member, secret)
 				if parseErr != nil {
 					continue
@@ -1565,7 +1606,12 @@ func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, flo
 						secret.Release()
 						continue
 					}
-					a.flowInjected.Tag(flowID, member)
+					// Finding 2: tagging is deferred to
+					// tagPooledFlowAfterSwap (post-swap, only if the
+					// pool phantom was actually present in this
+					// request). A plain OAuth request to a token URL
+					// shared with this pool reaches here too, but it
+					// carries no pool phantom, so it must not be tagged.
 					oauthPairs, parseErr := a.buildPooledMemberPairs(poolName, member, secret)
 					if parseErr != nil {
 						continue
@@ -1603,6 +1649,79 @@ func (a *SluiceAddon) buildPooledMemberPairs(poolName, member string, secret vau
 			a.refreshAttr.Tag(realRefresh, member)
 		},
 	)
+}
+
+// pairPhantomPresentInRequest reports whether the given pair's pool phantom
+// (literal OR either URL-encoded form) is actually present anywhere in the
+// outbound request the agent sent: body, any header value, the URL query, or
+// the URL path. This is the post-build evidence that the agent really held
+// (and is sending) this pool's phantom for THIS request, as opposed to the
+// pair merely being a candidate built because the destination/token-URL
+// matched a pool binding.
+func pairPhantomPresentInRequest(f *mitmproxy.Flow, p phantomPair) bool {
+	contains := func(data []byte) bool {
+		if len(data) == 0 {
+			return false
+		}
+		if bytes.Contains(data, p.phantom) {
+			return true
+		}
+		if len(p.encodedPhantom) > 0 && bytes.Contains(data, p.encodedPhantom) {
+			return true
+		}
+		if len(p.encodedPhantomLower) > 0 && bytes.Contains(data, p.encodedPhantomLower) {
+			return true
+		}
+		return false
+	}
+	if contains(f.Request.Body) {
+		return true
+	}
+	for _, vals := range f.Request.Header {
+		for _, v := range vals {
+			if contains([]byte(v)) {
+				return true
+			}
+		}
+	}
+	if f.Request.URL != nil {
+		if contains([]byte(f.Request.URL.RawQuery)) {
+			return true
+		}
+		if contains([]byte(f.Request.URL.Path)) {
+			return true
+		}
+	}
+	return false
+}
+
+// tagPooledFlowAfterSwap records the per-flow pool-usage attribution tag
+// (flowInjected) for every pooled pair whose pool phantom is ACTUALLY present
+// in this outbound request, and only those.
+//
+// Finding 2: the old code tagged the flow when it BUILT a pooled pair (either
+// the CONNECT-host loop or the token-host expansion in buildPhantomPairs),
+// before any proof the request carried that pool's phantom. A plain OAuth
+// request to a token URL shared with a pool builds the pool's candidate pairs
+// too, so it would acquire the tag and have its 401/invalid_grant cool an
+// unrelated pool member (poolForResponse treats a flowInjected tag as
+// pool-usage proof). Tagging only when the pool phantom is genuinely present
+// (and therefore about to be swapped out) keeps the API-host failover
+// attribution sound (Finding 1) while no longer mis-attributing plain OAuth
+// traffic. Must be called BEFORE the swap, while the phantom is still in the
+// request to detect.
+func (a *SluiceAddon) tagPooledFlowAfterSwap(f *mitmproxy.Flow, pairs []phantomPair) {
+	if f == nil || f.Id == uuid.Nil || f.Request == nil {
+		return
+	}
+	for _, p := range pairs {
+		if p.pooledMember == "" {
+			continue
+		}
+		if pairPhantomPresentInRequest(f, p) {
+			a.flowInjected.Tag(f.Id, p.pooledMember)
+		}
+	}
 }
 
 // releasePhantomPairs zeroes all secret values in the pairs slice.
@@ -1766,6 +1885,15 @@ type phantomSwapReader struct {
 	pending  []byte
 	eof      bool
 	released bool
+
+	// onPooledSwap, when non-nil, is invoked with a pool member name the
+	// first time a pooled pair's phantom is actually replaced in the
+	// streamed body. It pins the per-flow API-host failover attribution
+	// (Finding 1) to a member only when this request genuinely carried
+	// that member's pool phantom (Finding 2: a plain OAuth stream that
+	// merely shares a token URL with a pool carries no pool phantom, so
+	// the swap never fires and no spurious tag is recorded).
+	onPooledSwap func(member string)
 }
 
 // maxPhantomLen returns the length of the longest phantom token in the
@@ -1847,8 +1975,10 @@ func (r *phantomSwapReader) Read(p []byte) (int, error) {
 		// phantom is actually present and we need the encoded form of the
 		// real secret.
 		for _, pp := range r.pairs {
+			swapped := false
 			if bytes.Contains(toProcess, pp.phantom) {
 				toProcess = bytes.ReplaceAll(toProcess, pp.phantom, pp.secret.Bytes())
+				swapped = true
 			}
 			var encodedSecret []byte
 			ensureEncodedSecret := func() {
@@ -1859,10 +1989,19 @@ func (r *phantomSwapReader) Read(p []byte) (int, error) {
 			if len(pp.encodedPhantom) > 0 && bytes.Contains(toProcess, pp.encodedPhantom) {
 				ensureEncodedSecret()
 				toProcess = bytes.ReplaceAll(toProcess, pp.encodedPhantom, encodedSecret)
+				swapped = true
 			}
 			if len(pp.encodedPhantomLower) > 0 && bytes.Contains(toProcess, pp.encodedPhantomLower) {
 				ensureEncodedSecret()
 				toProcess = bytes.ReplaceAll(toProcess, pp.encodedPhantomLower, encodedSecret)
+				swapped = true
+			}
+			// Finding 2: only pin per-flow pool attribution when this
+			// request actually carried (and we just swapped out) the
+			// pool phantom — not merely because a pooled pair was built
+			// as a candidate.
+			if swapped && pp.pooledMember != "" && r.onPooledSwap != nil {
+				r.onPooledSwap(pp.pooledMember)
 			}
 		}
 		// Pass 3: strip unbound, including URL-encoded phantoms.

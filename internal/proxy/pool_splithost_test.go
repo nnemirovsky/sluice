@@ -526,7 +526,7 @@ func TestFinding1Round9_PoolNamespaceNotSuppressedByMemberPlainBinding(t *testin
 	// The pool ACCESS phantom must also be swappable: build the pairs
 	// directly and assert the pool access phantom maps to memA's real
 	// access token exactly once (no double-emit, not suppressed).
-	pairs := addon.buildPhantomPairs("auth.example.com", 443, "https", reqFlow.Id, reqFlow.Request.URL)
+	pairs := addon.buildPhantomPairs("auth.example.com", 443, "https", reqFlow.Request.URL)
 	defer releasePhantomPairs(pairs)
 	accessPhantom := poolStablePhantomAccess(poolName)
 	refreshPhantom := "SLUICE_PHANTOM:" + poolName + ".refresh"
@@ -550,5 +550,140 @@ func TestFinding1Round9_PoolNamespaceNotSuppressedByMemberPlainBinding(t *testin
 	}
 	if refreshCount != 1 {
 		t.Fatalf("Finding 1 r9: pool refresh phantom emitted %d times, want exactly 1 (not suppressed, not double-emitted)", refreshCount)
+	}
+}
+
+// TestFinding2_PlainOAuthOnSharedTokenURLDoesNotTagOrCoolPool is the
+// Finding 2 (round-16) regression.
+//
+// The token-host expansion in buildPhantomPairs tagged the flow
+// (flowInjected.Tag) the moment it BUILT candidate pool phantom pairs for a
+// matching token URL — BEFORE verifying any pool phantom was actually
+// present in (and swapped out of) the outbound request. A plain OAuth
+// credential whose token URL is SHARED with a pool therefore acquired a
+// per-flow pool-usage tag on its OWN refresh. poolForResponse treats that
+// flowInjected tag as proof the request used the pool, so the plain
+// credential's 401 / invalid_grant cooled an UNRELATED active pool member
+// and parked it.
+//
+// The fix moves tagging to tagPooledFlowAfterSwap, which records the tag
+// only when the pool phantom is genuinely present in the request (i.e. an
+// actual pool-phantom replacement happens for this flow). A plain refresh
+// (no pool phantom in the body) is no longer tagged, so its failure cannot
+// be mis-attributed to the pool.
+//
+// Two halves, both must hold:
+//
+//	(a) plain OAuth refresh on the shared token URL, NO pool phantom in the
+//	    body, 401/invalid_grant -> NO pool member cooled (no flowInjected
+//	    tag was set). FAILS before the fix (the build-time tag is set, so
+//	    poolForResponse cools the active member).
+//	(b) a genuine pooled refresh (pool phantom present, actually swapped)
+//	    with 401/invalid_grant -> the correct member is still cooled. Guards
+//	    against the fix over-restricting the legit split-host pooled-refresh
+//	    path / regressing the round-9/12 fixes.
+func TestFinding2_PlainOAuthOnSharedTokenURLDoesNotTagOrCoolPool(t *testing.T) {
+	// --- (a) plain refresh, no pool phantom: must NOT tag, must NOT cool ---
+	addon, _, prPtr := setupPoolSplitHostWithPlainCred(t)
+	// CONNECT target is the shared TOKEN host (no pool binding lives here;
+	// the only pooled injection path is the token-host expansion).
+	client := setupAddonConn(addon, "auth.example.com:443")
+	pr := prPtr.Load()
+
+	// Realistic precursor: memA API-429-cooled, traffic on memB.
+	memACooldown := time.Now().Add(90 * time.Second)
+	pr.MarkCooldown("memA", memACooldown, "429")
+	if got, _ := pr.ResolveActive("codex_pool"); got != "memB" {
+		t.Fatalf("after cooling memA, active = %q, want memB", got)
+	}
+	memBPre, memBPreCooling := pr.CooldownUntil("memB")
+
+	// The agent refreshes a PLAIN OAuth credential against the shared token
+	// URL. Its body carries NO SLUICE_PHANTOM:codex_pool.* pool phantom —
+	// it is an ordinary refresh-grant. The token-host expansion still
+	// builds the pool's candidate phantom pairs (the pool shares this token
+	// URL), but no pool phantom is present to swap.
+	reqFlow := newTestFlow(client, "POST", testOAuthTokenURL)
+	reqFlow.Request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqFlow.Request.Body = []byte("grant_type=refresh_token&refresh_token=plain-refresh-old")
+
+	addon.Requestheaders(reqFlow)
+	addon.Request(reqFlow)
+
+	// The pool phantom never appeared in the request, so NO flowInjected
+	// pool-usage tag may have been recorded for this flow.
+	if m, ok := addon.flowInjected.Peek(reqFlow.Id); ok {
+		t.Fatalf("Finding 2: a plain OAuth refresh on a shared token URL acquired "+
+			"a flowInjected pool-usage tag (member=%q) even though NO pool phantom "+
+			"was present/swapped — its 401 would cool an unrelated pool member", m)
+	}
+
+	// The plain credential's refresh now 401s / invalid_grants on the
+	// shared token host. With no pool-usage evidence, poolForResponse must
+	// fail closed and NO pool member may be cooled.
+	respFlow := newPoolRespFlowBody(client, 401, "plain-refresh-old",
+		[]byte(`{"error":"invalid_grant"}`))
+	if pool, member, _, _, ok := addon.poolForResponse(respFlow); ok {
+		t.Fatalf("Finding 2: poolForResponse attributed a plain-credential failure "+
+			"to the pool (pool=%q member=%q) — the build-time flowInjected tag "+
+			"mis-flagged a plain refresh as pooled usage", pool, member)
+	}
+	addon.Response(respFlow)
+
+	if u, cooling := pr.CooldownUntil("memB"); cooling != memBPreCooling || !u.Equal(memBPre) {
+		t.Fatalf("Finding 2: active pool member memB cooldown changed (%v/%v -> %v/%v) "+
+			"on a PLAIN credential's invalid_grant — an innocent member was parked",
+			memBPre, memBPreCooling, u, cooling)
+	}
+	if aU, c := pr.CooldownUntil("memA"); !c || aU.Sub(memACooldown).Abs() > time.Second {
+		t.Fatalf("Finding 2: memA's original 429 window disturbed: got %v (cooling=%v), want %v",
+			aU, c, memACooldown)
+	}
+
+	// --- (b) genuine pooled refresh: pool phantom present -> still cools ---
+	addon2, _, prPtr2 := setupPoolSplitHostWithPlainCred(t)
+	client2 := setupAddonConn(addon2, "auth.example.com:443")
+	pr2 := prPtr2.Load()
+	if got, _ := pr2.ResolveActive("codex_pool"); got != "memA" {
+		t.Fatalf("pre-condition active = %q, want memA", got)
+	}
+
+	// The agent holds the POOL refresh phantom and POSTs it. The token-host
+	// expansion swaps it to memA's real refresh token AND (post-swap)
+	// records the per-flow pool-usage tag because the pool phantom WAS
+	// genuinely present.
+	poolReq := newTestFlow(client2, "POST", testOAuthTokenURL)
+	poolReq.Request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	poolReq.Request.Body = refreshGrantBody("codex_pool")
+
+	addon2.Requestheaders(poolReq)
+	addon2.Request(poolReq)
+
+	if strings.Contains(string(poolReq.Request.Body), "SLUICE_PHANTOM:codex_pool.refresh") {
+		t.Fatalf("genuine pooled refresh: pool phantom not swapped; body=%q",
+			string(poolReq.Request.Body))
+	}
+	if m, ok := addon2.flowInjected.Peek(poolReq.Id); !ok || m != "memA" {
+		t.Fatalf("Finding 2 over-restriction: a genuine pooled refresh (pool "+
+			"phantom actually swapped) was NOT tagged; got member=%q ok=%v "+
+			"(the legit split-host pooled-refresh path must still tag)", m, ok)
+	}
+
+	// memA's pooled refresh invalid_grants -> memA must still be cooled and
+	// the pool must fail over to memB.
+	poolResp := newPoolRespFlowBody(client2, 401, "A-refresh-old",
+		[]byte(`{"error":"invalid_grant"}`))
+	pool, member, _, _, ok := addon2.poolForResponse(poolResp)
+	if !ok || pool != "codex_pool" || member != "memA" {
+		t.Fatalf("Finding 2 over-restriction: genuine pooled refresh not attributed; "+
+			"got ok=%v pool=%q member=%q, want codex_pool/memA", ok, pool, member)
+	}
+	addon2.Response(poolResp)
+	if _, cooling := pr2.CooldownUntil("memA"); !cooling {
+		t.Fatal("Finding 2 over-restriction: genuine pooled member memA not cooled " +
+			"after its own invalid_grant")
+	}
+	if active, _ := pr2.ResolveActive("codex_pool"); active != "memB" {
+		t.Fatalf("Finding 2 over-restriction: pool did not fail over; active = %q, want memB", active)
 	}
 }

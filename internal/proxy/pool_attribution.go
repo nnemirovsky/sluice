@@ -120,6 +120,32 @@ func (m *flowInjectedMember) Peek(flowID uuid.UUID) (string, bool) {
 	return e.member, true
 }
 
+// Delete removes the tag for the given flow ID if present. It is a no-op
+// when flowID is uuid.Nil or no entry exists.
+//
+// Finding 1: the API-host failover path uses a NON-consuming Peek (a
+// destination can map to multiple candidate pools and a consuming Recover
+// inside that loop would let the first pool steal a later pool's tag, the
+// round-12 bug). Because Peek does not delete, a COMPLETED pooled request's
+// tag would otherwise linger for the full flowAttrTTL (5 min). Under
+// sustained pooled traffic that makes Tag's opportunistic whole-map sweep
+// O(n) on every new request and lets the map grow unboundedly within the
+// TTL window. The buffered Response handler calls Delete keyed by f.Id once
+// it has finished poolForResponse (API-host AND token-endpoint use happen
+// within that single poolForResponse call), so a completed request's tag is
+// freed immediately instead of waiting out the TTL. The TTL + Tag sweep
+// remain as a backstop for flows that never complete a buffered Response
+// (streamed responses, abandoned/aborted flows whose Response callback never
+// fires).
+func (m *flowInjectedMember) Delete(flowID uuid.UUID) {
+	if flowID == uuid.Nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.entries, flowID)
+}
+
 // refreshAttrTTL is how long a real-refresh-token -> member tag is retained.
 // An OAuth refresh round-trip (agent POSTs refresh_token, upstream answers
 // with rotated tokens) completes in well under a second in practice; a
