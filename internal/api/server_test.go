@@ -36,6 +36,22 @@ func newTestStore(t *testing.T) *store.Store {
 	return s
 }
 
+// seedCred registers a static credential in credential_meta so a binding
+// referencing it passes the live-credential-or-pool existence check that
+// AddBinding / AddRuleAndBinding now enforce. The real REST flows always
+// create the credential before binding (POST /api/credentials registers
+// credential_meta before the paired binding; POST /api/bindings binds to a
+// pre-existing credential), so seeding here mirrors production rather than
+// weakening the test.
+func seedCred(t *testing.T, st *store.Store, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		if err := st.AddCredentialMeta(n, "static", ""); err != nil {
+			t.Fatalf("seed credential meta %q: %v", n, err)
+		}
+	}
+}
+
 // enableHTTPChannel inserts an enabled HTTP channel row (type=1) in the store.
 func enableHTTPChannel(t *testing.T, st *store.Store) {
 	t.Helper()
@@ -986,6 +1002,7 @@ func TestGetApiRulesExport_BindingEnvVar(t *testing.T) {
 	st := newTestStore(t)
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
+	seedCred(t, st, "openai_key")
 
 	// Add a binding with env_var set.
 	if _, err := st.AddBinding("api.openai.com", "openai_key", store.BindingOpts{
@@ -1336,6 +1353,7 @@ func TestPostApiCredentials_DuplicateBinding(t *testing.T) {
 	srv.SetVault(v)
 
 	// Seed an existing binding on (existing_cred, api.example.com).
+	seedCred(t, st, "existing_cred")
 	if _, err := st.AddBinding("api.example.com", "existing_cred", store.BindingOpts{}); err != nil {
 		t.Fatalf("seed binding: %v", err)
 	}
@@ -1408,6 +1426,7 @@ func TestDeleteApiCredentials_Success(t *testing.T) {
 	if _, err := v.Add("my_key", "value"); err != nil {
 		t.Fatalf("add: %v", err)
 	}
+	seedCred(t, st, "my_key")
 	if _, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{}); err != nil {
 		t.Fatalf("add binding: %v", err)
 	}
@@ -1463,6 +1482,7 @@ func TestDeleteApiCredentials_ConcurrentRace(t *testing.T) {
 	if _, err := v.Add("racer", "value"); err != nil {
 		t.Fatalf("add: %v", err)
 	}
+	seedCred(t, st, "racer")
 	if _, err := st.AddBinding("api.example.com", "racer", store.BindingOpts{}); err != nil {
 		t.Fatalf("add binding: %v", err)
 	}
@@ -2019,6 +2039,7 @@ func TestDeleteApiCredentials_MissingVaultSecretIsNotFatal(t *testing.T) {
 		if _, err := v.Add("dup", "value"); err != nil {
 			t.Fatalf("iter %d: add: %v", iter, err)
 		}
+		seedCred(t, st, "dup")
 		if _, err := st.AddBinding("api.example.com", "dup", store.BindingOpts{}); err != nil {
 			t.Fatalf("iter %d: add binding: %v", iter, err)
 		}
@@ -2208,6 +2229,7 @@ func TestPostApiBindings_Success(t *testing.T) {
 	t.Setenv("SLUICE_API_TOKEN", "tok")
 	handler := newTestHandler(t, srv, st)
 
+	seedCred(t, st, "my_key")
 	body := `{"destination": "api.example.com", "credential": "my_key", "ports": [443], "header": "Authorization", "template": "Bearer {value}"}`
 	req := httptest.NewRequest("POST", "/api/bindings", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer tok")
@@ -2246,6 +2268,7 @@ func TestPostApiBindings_PropagatesProtocolsAndPortsToRule(t *testing.T) {
 	t.Setenv("SLUICE_API_TOKEN", "tok")
 	handler := newTestHandler(t, srv, st)
 
+	seedCred(t, st, "my_key")
 	body := `{"destination":"api.example.com","credential":"my_key","ports":[443,8443],"protocols":["tcp"]}`
 	req := httptest.NewRequest("POST", "/api/bindings", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer tok")
@@ -2335,6 +2358,7 @@ func TestPatchApiBindingsId_RejectsUnknownProtocol(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "cred")
 	_, bindingID, err := st.AddRuleAndBinding(
 		"allow",
 		store.RuleOpts{Destination: "api.example.com", Source: store.BindingAddSourcePrefix + "cred"},
@@ -2368,6 +2392,7 @@ func TestDeleteApiBindings_Success(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{})
 	if err != nil {
 		t.Fatalf("add binding: %v", err)
@@ -2941,6 +2966,7 @@ func TestPostApiBindings_WithEnvVar(t *testing.T) {
 	t.Setenv("SLUICE_API_TOKEN", "tok")
 	handler := newTestHandler(t, srv, st)
 
+	seedCred(t, st, "my_key")
 	body := `{"destination": "api.example.com", "credential": "my_key", "ports": [443], "env_var": "MY_API_KEY"}`
 	req := httptest.NewRequest("POST", "/api/bindings", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer tok")
@@ -2970,6 +2996,7 @@ func TestGetApiBindings_ReturnsEnvVar(t *testing.T) {
 	srv := api.NewServer(st, nil, nil, "")
 
 	// Create a binding with env_var directly in the store.
+	seedCred(t, st, "my_key")
 	_, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{
 		Ports:  []int{443},
 		EnvVar: "EXAMPLE_KEY",
@@ -3008,6 +3035,7 @@ func TestGetApiBindings_OmitsEmptyEnvVar(t *testing.T) {
 	srv := api.NewServer(st, nil, nil, "")
 
 	// Create a binding without env_var.
+	seedCred(t, st, "my_key")
 	_, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{})
 	if err != nil {
 		t.Fatalf("add binding: %v", err)
@@ -3119,6 +3147,7 @@ func TestPostApiBindings_WithContainerManager(t *testing.T) {
 	mgr := &mockContainerMgr{}
 	srv.SetContainerManager(mgr)
 
+	seedCred(t, st, "openai_key")
 	body := `{"destination":"api.openai.com","credential":"openai_key","ports":[443],"env_var":"OPENAI_API_KEY"}`
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/bindings", strings.NewReader(body))
@@ -3142,6 +3171,7 @@ func TestDeleteApiBindingsId_ClearsEnvVar(t *testing.T) {
 	defer func() { _ = st.Close() }()
 
 	// Create a binding with env_var.
+	seedCred(t, st, "openai_key")
 	id, err := st.AddBinding("api.openai.com", "openai_key", store.BindingOpts{
 		Ports:  []int{443},
 		EnvVar: "OPENAI_API_KEY",
@@ -3182,6 +3212,7 @@ func TestPatchApiBindingsId_Success(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{
 		Ports:    []int{443},
 		Header:   "Authorization",
@@ -3227,6 +3258,7 @@ func TestPatchApiBindingsId_MultipleFields(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{
 		Ports: []int{443},
 	})
@@ -3291,6 +3323,7 @@ func TestPatchApiBindingsId_InvalidBody(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{})
 	if err != nil {
 		t.Fatalf("add binding: %v", err)
@@ -3321,6 +3354,7 @@ func TestPatchApiBindingsId_DestinationSyncsPairedRule(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	ruleID, bindingID, err := st.AddRuleAndBinding(
 		"allow",
 		store.RuleOpts{
@@ -3380,6 +3414,7 @@ func TestPatchApiBindingsId_EnvVar(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{})
 	if err != nil {
 		t.Fatalf("add binding: %v", err)
@@ -3426,6 +3461,7 @@ func TestPatchApiBindingsId_EmptyDestinationRejected(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{})
 	if err != nil {
 		t.Fatalf("add binding: %v", err)
@@ -3456,6 +3492,7 @@ func TestPatchApiBindingsId_EmptyBodyRejected(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{})
 	if err != nil {
 		t.Fatalf("add binding: %v", err)
@@ -3485,6 +3522,7 @@ func TestPatchApiBindingsId_DuplicateDestinationRejected(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	if _, err := st.AddBinding("api.a.com", "my_key", store.BindingOpts{}); err != nil {
 		t.Fatalf("add first binding: %v", err)
 	}
@@ -3518,6 +3556,7 @@ func TestPatchApiBindingsId_ClearsEnvVar(t *testing.T) {
 	mgr := &mockContainerMgr{}
 	srv.SetContainerManager(mgr)
 
+	seedCred(t, st, "my_key")
 	id, err := st.AddBinding("api.example.com", "my_key", store.BindingOpts{
 		EnvVar: "OLD_KEY",
 	})
@@ -3560,6 +3599,7 @@ func TestDeleteApiBindingsId_CleansUpPairedRule(t *testing.T) {
 	enableHTTPChannel(t, st)
 	srv := api.NewServer(st, nil, nil, "")
 
+	seedCred(t, st, "my_key")
 	ruleID, bindingID, err := st.AddRuleAndBinding(
 		"allow",
 		store.RuleOpts{
@@ -3612,6 +3652,7 @@ func TestDeleteApiCredentials_CleansUpBindingAddRules(t *testing.T) {
 	if _, err := v.Add("my_key", "s3cr3t"); err != nil {
 		t.Fatalf("seed credential: %v", err)
 	}
+	seedCred(t, st, "my_key")
 	if _, _, err := st.AddRuleAndBinding(
 		"allow",
 		store.RuleOpts{

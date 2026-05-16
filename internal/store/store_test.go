@@ -26,6 +26,21 @@ func newTestStore(t *testing.T) *Store {
 	return s
 }
 
+// mustAddCred registers a static credential so a subsequent AddBinding /
+// AddRuleAndBinding referencing it passes the live-credential-or-pool
+// existence check. Real callers (CLI "cred add", REST, Telegram) always
+// create the credential before binding to it; these binding-CRUD tests
+// previously relied on the store accepting a free-form credential name with
+// no backing row. The existence check now enforces the same invariant the
+// production paths already satisfy, so the fixture mirrors reality rather
+// than weakening the test.
+func mustAddCred(t *testing.T, s *Store, name string) {
+	t.Helper()
+	if err := s.AddCredentialMeta(name, "static", ""); err != nil {
+		t.Fatalf("add credential meta %q: %v", name, err)
+	}
+}
+
 // --- Schema migration tests ---
 
 func TestNewCreatesSchema(t *testing.T) {
@@ -758,6 +773,7 @@ func TestConfigUpdateVaultProviderClearFields(t *testing.T) {
 
 func TestBindingCRUD(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_api_key")
 	id, err := s.AddBinding("api.example.com", "my_api_key", BindingOpts{
 		Ports:     []int{443},
 		Header:    "Authorization",
@@ -807,6 +823,7 @@ func TestBindingCRUD(t *testing.T) {
 
 func TestBindingMultipleProtocols(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "mail_cred")
 	_, err := s.AddBinding("mail.example.com", "mail_cred", BindingOpts{
 		Ports:     []int{993, 587},
 		Protocols: []string{"imap", "smtp"},
@@ -822,6 +839,7 @@ func TestBindingMultipleProtocols(t *testing.T) {
 
 func TestBindingNoProtocols(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "key")
 	_, err := s.AddBinding("api.example.com", "key", BindingOpts{
 		Ports:  []int{443},
 		Header: "Authorization",
@@ -847,6 +865,7 @@ func TestBindingValidation(t *testing.T) {
 
 func TestUpdateBindingSingleField(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{
 		Ports:    []int{443},
 		Header:   "Authorization",
@@ -883,6 +902,7 @@ func TestUpdateBindingSingleField(t *testing.T) {
 
 func TestUpdateBindingMultipleFields(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{
 		Ports:     []int{443},
 		Header:    "Authorization",
@@ -936,6 +956,7 @@ func TestUpdateBindingMultipleFields(t *testing.T) {
 
 func TestUpdateBindingClearFields(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{
 		Ports:    []int{443},
 		Header:   "Authorization",
@@ -980,6 +1001,7 @@ func TestUpdateBindingNotFound(t *testing.T) {
 
 func TestUpdateBindingEmptyOpts(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{Ports: []int{443}})
 	if err != nil {
 		t.Fatalf("add: %v", err)
@@ -996,6 +1018,7 @@ func TestUpdateBindingEmptyOpts(t *testing.T) {
 
 func TestUpdateBindingEmptyDestination(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{})
 	if err != nil {
 		t.Fatalf("add: %v", err)
@@ -1011,6 +1034,7 @@ func TestUpdateBindingEmptyDestination(t *testing.T) {
 // This is distinct from passing nil (which means "no change").
 func TestUpdateBindingClearPortsAndProtocols(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{
 		Ports:     []int{443, 8080},
 		Protocols: []string{"http", "grpc"},
@@ -1049,6 +1073,8 @@ func TestUpdateBindingClearPortsAndProtocols(t *testing.T) {
 // allowed because they resolve to the same phantom value.
 func TestUpdateBindingEnvVar(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
+	mustAddCred(t, s, "other_cred")
 	id, err := s.AddBinding("api.example.com", "my_key", BindingOpts{})
 	if err != nil {
 		t.Fatalf("add: %v", err)
@@ -1308,6 +1334,7 @@ func TestRuleExistsProtocolScoped(t *testing.T) {
 
 func TestBindingExists(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	_, _ = s.AddBinding("api.example.com", "my_key", BindingOpts{})
 
 	exists, _ := s.BindingExists("api.example.com", "my_key")
@@ -2753,6 +2780,8 @@ func TestAddChannelWithoutOpts(t *testing.T) {
 
 func TestListBindingsByCredential(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred_a")
+	mustAddCred(t, s, "cred_b")
 	_, _ = s.AddBinding("api.one.com", "cred_a", BindingOpts{Ports: []int{443}})
 	_, _ = s.AddBinding("api.two.com", "cred_a", BindingOpts{Ports: []int{443}})
 	_, _ = s.AddBinding("api.three.com", "cred_b", BindingOpts{Ports: []int{443}})
@@ -2776,6 +2805,8 @@ func TestListBindingsByCredential(t *testing.T) {
 
 func TestRemoveBindingsByCredential(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred_a")
+	mustAddCred(t, s, "cred_b")
 	_, _ = s.AddBinding("api.one.com", "cred_a", BindingOpts{})
 	_, _ = s.AddBinding("api.two.com", "cred_a", BindingOpts{})
 	_, _ = s.AddBinding("api.three.com", "cred_b", BindingOpts{})
@@ -2840,6 +2871,7 @@ func TestIsEmpty(t *testing.T) {
 
 func TestIsEmptyWithBinding(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred")
 	_, _ = s.AddBinding("test.com", "cred", BindingOpts{})
 
 	empty, err := s.IsEmpty()
@@ -2866,6 +2898,7 @@ func TestIsEmptyWithUpstream(t *testing.T) {
 
 func TestAddRuleAndBinding(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "api_key")
 	ruleID, bindingID, err := s.AddRuleAndBinding(
 		"allow",
 		RuleOpts{Destination: "api.example.com", Ports: []int{443}, Name: "api access"},
@@ -3465,6 +3498,7 @@ func TestCredentialMetaCRUDRoundTrip(t *testing.T) {
 
 func TestBindingEnvVarMigration(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "key")
 
 	// Verify the env_var column exists by inserting and reading back.
 	_, err := s.AddBinding("api.example.com", "key", BindingOpts{
@@ -3489,6 +3523,7 @@ func TestBindingEnvVarMigration(t *testing.T) {
 
 func TestBindingEnvVarEmpty(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "key")
 
 	// Binding without env_var should have empty string.
 	_, err := s.AddBinding("api.example.com", "key", BindingOpts{
@@ -3505,6 +3540,7 @@ func TestBindingEnvVarEmpty(t *testing.T) {
 
 func TestAddBindingWithEnvVar(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "openai_key")
 
 	id, err := s.AddBinding("api.openai.com", "openai_key", BindingOpts{
 		Ports:  []int{443},
@@ -3536,6 +3572,9 @@ func TestAddBindingWithEnvVar(t *testing.T) {
 
 func TestAddBindingEnvVarUniqueness(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "openai_key")
+	mustAddCred(t, s, "other_key")
+	mustAddCred(t, s, "telegram_bot")
 
 	// First binding with env_var should succeed.
 	_, err := s.AddBinding("api.openai.com", "openai_key", BindingOpts{
@@ -3587,6 +3626,9 @@ func TestAddBindingEnvVarUniquenessConcurrent(t *testing.T) {
 	s := newTestStore(t)
 
 	const workers = 20
+	for i := 0; i < workers; i++ {
+		mustAddCred(t, s, fmt.Sprintf("cred-%d", i))
+	}
 	var (
 		wg       sync.WaitGroup
 		successM sync.Mutex
@@ -3646,6 +3688,9 @@ func TestAddBindingEnvVarUniquenessConcurrent(t *testing.T) {
 
 func TestListBindingsWithEnvVar(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "openai_key")
+	mustAddCred(t, s, "github_key")
+	mustAddCred(t, s, "telegram_bot")
 
 	// Add bindings with and without env_var.
 	_, _ = s.AddBinding("api.openai.com", "openai_key", BindingOpts{
@@ -3690,7 +3735,10 @@ func TestListBindingsWithEnvVarEmpty(t *testing.T) {
 	}
 
 	// Add binding without env_var.
-	_, _ = s.AddBinding("api.example.com", "key", BindingOpts{Ports: []int{443}})
+	mustAddCred(t, s, "key")
+	if _, err := s.AddBinding("api.example.com", "key", BindingOpts{Ports: []int{443}}); err != nil {
+		t.Fatalf("add binding without env_var: %v", err)
+	}
 
 	bindings, err = s.ListBindingsWithEnvVar()
 	if err != nil {
@@ -3703,6 +3751,7 @@ func TestListBindingsWithEnvVarEmpty(t *testing.T) {
 
 func TestAddRuleAndBindingWithEnvVar(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "openai_key")
 	_, bindingID, err := s.AddRuleAndBinding(
 		"allow",
 		RuleOpts{Destination: "api.openai.com", Ports: []int{443}},
@@ -3727,6 +3776,8 @@ func TestAddRuleAndBindingWithEnvVar(t *testing.T) {
 
 func TestAddRuleAndBindingEnvVarUniqueness(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "openai_key")
+	mustAddCred(t, s, "other_key")
 
 	// First should succeed.
 	_, _, err := s.AddRuleAndBinding(
@@ -3753,6 +3804,8 @@ func TestAddRuleAndBindingEnvVarUniqueness(t *testing.T) {
 
 func TestListBindingsByCredentialWithEnvVar(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "openai_key")
+	mustAddCred(t, s, "other_key")
 	_, _ = s.AddBinding("api.openai.com", "openai_key", BindingOpts{
 		Ports:  []int{443},
 		EnvVar: "OPENAI_API_KEY",
@@ -3775,6 +3828,7 @@ func TestListBindingsByCredentialWithEnvVar(t *testing.T) {
 
 func TestBindingEnvVarMigrationDown(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "key")
 
 	// Add a binding with env_var to verify data exists.
 	_, err := s.AddBinding("api.example.com", "key", BindingOpts{
@@ -3825,6 +3879,12 @@ func TestBindingEnvVarMigrationDown(t *testing.T) {
 
 func TestAddBindingEnvVarFormatValidation(t *testing.T) {
 	s := newTestStore(t)
+	// The valid sub-cases use the env var string as the credential name, so
+	// seed those credentials; invalid cases fail input validation before the
+	// existence check is reached.
+	mustAddCred(t, s, "OPENAI_API_KEY")
+	mustAddCred(t, s, "my_key")
+	mustAddCred(t, s, "_HIDDEN")
 
 	tests := []struct {
 		name   string
@@ -3871,6 +3931,7 @@ func TestAddBindingEnvVarFormatValidation(t *testing.T) {
 // return ErrBindingDuplicate.
 func TestAddBindingDuplicateRejected(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	if _, err := s.AddBinding("api.example.com", "my_key", BindingOpts{}); err != nil {
 		t.Fatalf("first add: %v", err)
 	}
@@ -3891,6 +3952,7 @@ func TestAddBindingDuplicateRejected(t *testing.T) {
 // leaving a partially-applied rule behind.
 func TestAddRuleAndBindingDuplicateRejected(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	if _, err := s.AddBinding("api.example.com", "my_key", BindingOpts{}); err != nil {
 		t.Fatalf("seed binding: %v", err)
 	}
@@ -3966,6 +4028,7 @@ func TestRemoveRuleByBindingPair(t *testing.T) {
 // binding destination change + paired rule update + returned ruleFound flag.
 func TestUpdateBindingWithRuleSync(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 	ruleID, bindingID, err := s.AddRuleAndBinding(
 		"allow",
 		RuleOpts{
@@ -4023,6 +4086,7 @@ func TestUpdateBindingWithRuleSync(t *testing.T) {
 // authorize the old one, breaking the new port and leaking the old.
 func TestUpdateBindingWithRuleSyncPropagatesPortsAndProtocols(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred")
 	ruleID, bindingID, err := s.AddRuleAndBinding(
 		"allow",
 		RuleOpts{
@@ -4114,6 +4178,7 @@ func TestUpdateBindingWithRuleSyncPropagatesPortsAndProtocols(t *testing.T) {
 // paired-rule sync path validates port ranges before touching the rule.
 func TestUpdateBindingWithRuleSyncRejectsInvalidPorts(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred")
 	_, bindingID, err := s.AddRuleAndBinding(
 		"allow",
 		RuleOpts{
@@ -4181,6 +4246,7 @@ func TestAddRuleAndBindingRejectsInvalidPorts(t *testing.T) {
 // connection time. Mirrors the TOML import validator.
 func TestAddRuleAndBindingRejectsUnknownProtocol(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred")
 
 	// Rule-level typo.
 	_, _, err := s.AddRuleAndBinding(
@@ -4226,6 +4292,7 @@ func TestAddRuleAndBindingRejectsUnknownProtocol(t *testing.T) {
 // for the standalone AddBinding path.
 func TestAddBindingRejectsUnknownProtocol(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred")
 
 	_, err := s.AddBinding("api.example.com", "cred", BindingOpts{Protocols: []string{"htp"}})
 	if err == nil || !strings.Contains(err.Error(), "unknown protocol") {
@@ -4242,6 +4309,7 @@ func TestAddBindingRejectsUnknownProtocol(t *testing.T) {
 // path rejects unknown protocols before any transaction runs.
 func TestUpdateBindingWithRuleSyncRejectsUnknownProtocol(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred")
 	_, bindingID, err := s.AddRuleAndBinding(
 		"allow",
 		RuleOpts{
@@ -4278,6 +4346,7 @@ func TestUpdateBindingWithRuleSyncRejectsUnknownProtocol(t *testing.T) {
 // scope drifted from what the remaining rule authorized.
 func TestUpdateBindingWithRuleSyncUpdatesBothSourcePrefixes(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred")
 
 	// Seed the first rule via AddRuleAndBinding with the cred-add prefix.
 	// This mirrors "sluice cred add --destination" creating the initial
@@ -4351,6 +4420,7 @@ func TestUpdateBindingWithRuleSyncUpdatesBothSourcePrefixes(t *testing.T) {
 // iteration 9 finding 2.
 func TestRemoveBindingWithRuleCleanupCaseInsensitive(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 
 	// Add a binding via AddBinding (no paired rule) so we can seed the
 	// paired rule at a different case without fighting the atomic
@@ -4401,6 +4471,7 @@ func TestRemoveBindingWithRuleCleanupCaseInsensitive(t *testing.T) {
 // RemoveBindingWithRuleCleanup. Regression for codex iteration 9 finding 2.
 func TestUpdateBindingWithRuleSyncCaseInsensitive(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 
 	bindingID, err := s.AddBinding("api.example.com", "my_key", BindingOpts{})
 	if err != nil {
@@ -4538,6 +4609,7 @@ func TestAddRuleAndBindingValidationErrorsAreTagged(t *testing.T) {
 // AddRuleAndBinding test for the update path.
 func TestUpdateBindingWithRuleSyncValidationErrorsAreTagged(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred")
 	_, bindingID, err := s.AddRuleAndBinding(
 		"allow",
 		RuleOpts{
@@ -4586,6 +4658,7 @@ func TestUpdateBindingWithRuleSyncValidationErrorsAreTagged(t *testing.T) {
 // 6 finding 1.
 func TestAddBindingCaseInsensitiveDuplicate(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 
 	if _, err := s.AddBinding("api.example.com", "my_key", BindingOpts{}); err != nil {
 		t.Fatalf("first add: %v", err)
@@ -4621,6 +4694,7 @@ func TestAddBindingCaseInsensitiveDuplicate(t *testing.T) {
 // duplicate is detected so no orphan rule remains.
 func TestAddRuleAndBindingCaseInsensitiveDuplicate(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "my_key")
 
 	if _, _, err := s.AddRuleAndBinding(
 		"allow",
@@ -4661,6 +4735,7 @@ func TestAddRuleAndBindingCaseInsensitiveDuplicate(t *testing.T) {
 // callers can map them to 400. Regression for codex iteration 6 finding 3.
 func TestAddBindingValidation(t *testing.T) {
 	s := newTestStore(t)
+	mustAddCred(t, s, "cred")
 
 	cases := []struct {
 		name string

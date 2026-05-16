@@ -313,6 +313,90 @@ func TestRemovePoolIfUnreferenced_BindingBeforeRemovalRefuses(t *testing.T) {
 	}
 }
 
+// TestAddBinding_AfterPoolRemovedRefuses closes the CREATION half of the
+// bind/remove TOCTOU. RemovePoolIfUnreferenced guards the removal side
+// (refuses to delete a referenced pool); this verifies the symmetric
+// creation guard: once a pool is gone, AddBinding / AddRuleAndBinding that
+// names it must fail and persist NOTHING, so a later same-named credential
+// cannot silently inherit a stale binding.
+//
+// Fail-before: the binding INSERT had no existence check, so a binding
+// pointing at the just-deleted pool committed (and the rule in the
+// AddRuleAndBinding case leaked). Pass-after: the in-transaction
+// credential/pool existence check rejects both paths and rolls back.
+func TestAddBinding_AfterPoolRemovedRefuses(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "a")
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"a"}); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+
+	// A binding for the LIVE pool must still succeed (don't break the
+	// legitimate path).
+	if _, err := s.AddBinding("live.example.com", "p", BindingOpts{Ports: []int{443}}); err != nil {
+		t.Fatalf("AddBinding for live pool should succeed: %v", err)
+	}
+
+	// A binding for a LIVE plain credential must still succeed.
+	mustAddCred(t, s, "plain_cred")
+	if _, err := s.AddBinding("plain.example.com", "plain_cred", BindingOpts{Ports: []int{443}}); err != nil {
+		t.Fatalf("AddBinding for live credential should succeed: %v", err)
+	}
+
+	// Remove the pool (no binding references it after we also clear the
+	// live.example.com one, mirroring an operator deleting an unused pool).
+	if n, err := s.RemoveBindingsByCredential("p"); err != nil || n != 1 {
+		t.Fatalf("clear pool binding: n=%d err=%v", n, err)
+	}
+	removed, err := s.RemovePoolIfUnreferenced("p")
+	if err != nil || !removed {
+		t.Fatalf("RemovePoolIfUnreferenced: removed=%v err=%v", removed, err)
+	}
+
+	// AddBinding referencing the now-deleted pool must FAIL and insert no row.
+	_, err = s.AddBinding("api.example.com", "p", BindingOpts{Ports: []int{443}})
+	if err == nil {
+		t.Fatal("AddBinding committed a binding pointing at a deleted pool (TOCTOU creation half open)")
+	}
+	if !errors.Is(err, ErrBindingCredentialMissing) {
+		t.Errorf("want ErrBindingCredentialMissing, got %v", err)
+	}
+	if !errors.Is(err, ErrBindingValidation) {
+		t.Errorf("want the error wrapped under ErrBindingValidation for 400 mapping, got %v", err)
+	}
+
+	// AddRuleAndBinding referencing the deleted pool must also FAIL and leave
+	// no orphan rule behind (transaction rolled back).
+	rulesBefore, _ := s.ListRules(RuleFilter{Verdict: "allow"})
+	_, _, err = s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{Destination: "api.example.com", Source: BindingAddSourcePrefix + "p"},
+		"p",
+		BindingOpts{Ports: []int{443}},
+	)
+	if err == nil {
+		t.Fatal("AddRuleAndBinding committed a binding pointing at a deleted pool")
+	}
+	if !errors.Is(err, ErrBindingCredentialMissing) {
+		t.Errorf("want ErrBindingCredentialMissing, got %v", err)
+	}
+
+	// No binding row references the dead pool.
+	dead, err := s.ListBindingsByCredential("p")
+	if err != nil {
+		t.Fatalf("ListBindingsByCredential: %v", err)
+	}
+	if len(dead) != 0 {
+		t.Errorf("expected 0 bindings for deleted pool, got %d", len(dead))
+	}
+	// No orphan rule from the rolled-back AddRuleAndBinding.
+	rulesAfter, _ := s.ListRules(RuleFilter{Verdict: "allow"})
+	if len(rulesAfter) != len(rulesBefore) {
+		t.Errorf("AddRuleAndBinding left an orphan rule: before=%d after=%d",
+			len(rulesBefore), len(rulesAfter))
+	}
+}
+
 // TestRemovePoolIfUnreferenced_ConcurrentIsInternallyConsistent stresses the
 // two write paths concurrently. SQLite serializes write transactions, so the
 // atomic removal can only land in one of two self-consistent terminal

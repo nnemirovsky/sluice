@@ -558,6 +558,9 @@ func TestHandleCredListWithBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := db.AddCredentialMeta("mykey", "static", ""); err != nil {
+		t.Fatalf("add credential meta: %v", err)
+	}
 	_, err = db.AddBinding("api.example.com", "mykey", store.BindingOpts{
 		Ports:    []int{443},
 		Header:   "Authorization",
@@ -613,6 +616,9 @@ func TestHandleCredRemoveWithBindings(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if err := db.AddCredentialMeta("cleanup_key", "static", ""); err != nil {
+		t.Fatalf("add credential meta: %v", err)
 	}
 	_, err = db.AddBinding("api.cleanup.com", "cleanup_key", store.BindingOpts{
 		Ports:  []int{443},
@@ -1535,6 +1541,9 @@ func TestHandleCredListShowsEnvVar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := db.AddCredentialMeta("my_api_key", "static", ""); err != nil {
+		t.Fatalf("add credential meta: %v", err)
+	}
 	_, err = db.AddBinding("api.example.com", "my_api_key", store.BindingOpts{
 		Ports:  []int{443},
 		Header: "Authorization",
@@ -1573,6 +1582,9 @@ func TestHandleCredListHidesEnvVarWhenEmpty(t *testing.T) {
 	db, err := store.New(dbPath)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if err := db.AddCredentialMeta("no_env_cred", "static", ""); err != nil {
+		t.Fatalf("add credential meta: %v", err)
 	}
 	_, err = db.AddBinding("api.example.com", "no_env_cred", store.BindingOpts{
 		Ports: []int{443},
@@ -2030,6 +2042,9 @@ func TestHandleCredRemoveCleansUpBindingAddRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := db.AddCredentialMeta("bind_cleanup_key", "static", ""); err != nil {
+		t.Fatalf("add credential meta: %v", err)
+	}
 	if _, _, err := db.AddRuleAndBinding(
 		"allow",
 		store.RuleOpts{
@@ -2135,6 +2150,9 @@ func TestHandleCredAddMultipleDestinationsMidLoopRollback(t *testing.T) {
 	db, err := store.New(dbPath)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
+	}
+	if err := db.AddCredentialMeta("mid_rollback_key", "static", ""); err != nil {
+		t.Fatalf("add credential meta: %v", err)
 	}
 	if _, err := db.AddBinding("api.second.com", "mid_rollback_key", store.BindingOpts{}); err != nil {
 		t.Fatalf("pre-seed blocking binding: %v", err)

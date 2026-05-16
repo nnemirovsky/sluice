@@ -1538,7 +1538,12 @@ func TestCredRemoveWithContainerManager(t *testing.T) {
 	// Add with env_var, then remove. InjectEnvVars should be called with
 	// an empty value for the removed env var.
 	_, _ = vaultStore.Add("test_cred", "value")
-	_, _ = s.AddBinding("api.example.com", "test_cred", store.BindingOpts{EnvVar: "TEST_API_KEY"})
+	if err := s.AddCredentialMeta("test_cred", "static", ""); err != nil {
+		t.Fatalf("add credential meta: %v", err)
+	}
+	if _, err := s.AddBinding("api.example.com", "test_cred", store.BindingOpts{EnvVar: "TEST_API_KEY"}); err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
 
 	result := h.Handle(&Command{Name: "cred", Args: []string{"remove", "test_cred"}})
 	if !strings.Contains(result, "Removed credential") {
@@ -1569,7 +1574,12 @@ func TestCredRotateWithContainerManager(t *testing.T) {
 
 	// Add first with env_var binding.
 	_, _ = vaultStore.Add("rotate_key", "old_value")
-	_, _ = s.AddBinding("api.example.com", "rotate_key", store.BindingOpts{EnvVar: "ROTATE_KEY"})
+	if err := s.AddCredentialMeta("rotate_key", "static", ""); err != nil {
+		t.Fatalf("add credential meta: %v", err)
+	}
+	if _, err := s.AddBinding("api.example.com", "rotate_key", store.BindingOpts{EnvVar: "ROTATE_KEY"}); err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
 
 	result := h.Handle(&Command{Name: "cred", Args: []string{"rotate", "rotate_key", "new_value"}})
 	if !strings.Contains(result, "Rotated credential") {
@@ -1956,11 +1966,16 @@ func TestRebuildResolverWithBindings(t *testing.T) {
 	h.SetResolverPtr(resolverPtr)
 
 	// Add a binding.
-	_, _ = s.AddBinding("api.example.com", "my_cred", store.BindingOpts{
+	if err := s.AddCredentialMeta("my_cred", "static", ""); err != nil {
+		t.Fatalf("add credential meta: %v", err)
+	}
+	if _, err := s.AddBinding("api.example.com", "my_cred", store.BindingOpts{
 		Ports:    []int{443},
 		Header:   "Authorization",
 		Template: "Bearer {value}",
-	})
+	}); err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
 
 	if err := h.rebuildResolver(); err != nil {
 		t.Fatalf("rebuildResolver: %v", err)

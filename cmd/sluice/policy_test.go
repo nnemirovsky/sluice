@@ -741,6 +741,9 @@ func TestHandlePolicyExportMatchesStore(t *testing.T) {
 	_, _ = db.AddRule("allow", store.RuleOpts{Tool: "github__list_*", Name: "read-only github"})
 	_, _ = db.AddRule("deny", store.RuleOpts{Pattern: "(?i)(sk-[a-zA-Z0-9_-]{20,})", Name: "api_key_leak"})
 	_, _ = db.AddRule("redact", store.RuleOpts{Pattern: "(?i)(sk-[a-zA-Z0-9_-]{20,})", Replacement: "[REDACTED]", Name: "api_key_response"})
+	if err := db.AddCredentialMeta("my_key", "static", ""); err != nil {
+		t.Fatalf("add credential meta: %v", err)
+	}
 	_, _ = db.AddBinding("api.example.com", "my_key", store.BindingOpts{
 		Ports:    []int{443},
 		Header:   "Authorization",
@@ -1318,6 +1321,9 @@ func TestPolicyExportContainsExpectedSections(t *testing.T) {
 	_, _ = db.AddRule("allow", store.RuleOpts{Destination: "api.example.com", Ports: []int{443}, Name: "API"})
 	_, _ = db.AddRule("deny", store.RuleOpts{Destination: "evil.example.com"})
 	_, _ = db.AddRule("allow", store.RuleOpts{Tool: "github__list_*"})
+	if err := db.AddCredentialMeta("my_key", "static", ""); err != nil {
+		t.Fatalf("add credential meta: %v", err)
+	}
 	_, _ = db.AddBinding("api.example.com", "my_key", store.BindingOpts{
 		Ports:  []int{443},
 		Header: "Authorization",

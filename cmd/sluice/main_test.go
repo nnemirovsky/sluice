@@ -565,6 +565,11 @@ func TestReadBindings(t *testing.T) {
 	}
 
 	// Add bindings.
+	for _, c := range []string{"my_key", "gh_key"} {
+		if err := db.AddCredentialMeta(c, "static", ""); err != nil {
+			t.Fatalf("add credential meta %q: %v", c, err)
+		}
+	}
 	_, _ = db.AddBinding("api.example.com", "my_key", store.BindingOpts{
 		Ports:    []int{443},
 		Header:   "Authorization",
@@ -1371,6 +1376,9 @@ func TestStandaloneModeCredentialInjection(t *testing.T) {
 
 	// Add a binding. In standalone mode, credential injection still works
 	// because the MITM proxy handles it, not the container manager.
+	if err := db.AddCredentialMeta("my_api_key", "static", ""); err != nil {
+		t.Fatalf("add credential meta: %v", err)
+	}
 	_, _ = db.AddBinding("api.example.com", "my_api_key", store.BindingOpts{
 		Ports:    []int{443},
 		Header:   "Authorization",
@@ -1465,6 +1473,9 @@ func TestInjectEnvVarsFromStore(t *testing.T) {
 	if _, addErr := vs.Add("openai_key", "sk-real-secret"); addErr != nil {
 		t.Fatal(addErr)
 	}
+	if err := db.AddCredentialMeta("openai_key", "static", ""); err != nil {
+		t.Fatalf("add credential meta: %v", err)
+	}
 
 	_, bindErr := db.AddBinding("api.openai.com", "openai_key", store.BindingOpts{
 		Ports:    []int{443},
@@ -1526,6 +1537,11 @@ func TestInjectEnvVarsFromStoreMultipleBindings(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	// Add two bindings with env_var.
+	for _, c := range []string{"openai_key", "tg_bot", "gh_token"} {
+		if err := db.AddCredentialMeta(c, "static", ""); err != nil {
+			t.Fatalf("add credential meta %q: %v", c, err)
+		}
+	}
 	_, _ = db.AddBinding("api.openai.com", "openai_key", store.BindingOpts{
 		Ports:    []int{443},
 		Header:   "Authorization",

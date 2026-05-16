@@ -609,11 +609,23 @@ func (h *CommandHandler) credAdd(name, value, envVar string) string {
 		return fmt.Sprintf("Failed to add credential: %v", err)
 	}
 
-	// If env_var is specified and we have a store, create a binding with the env_var.
+	// If env_var is specified and we have a store, create a binding with the
+	// env_var. Register the credential in credential_meta FIRST (mirrors the
+	// CLI "cred add" path): AddBinding now requires its credential to resolve
+	// to a live credential or pool, and a binding with no backing
+	// credential_meta row is exactly the stale-binding state that guard
+	// prevents. A Telegram-added credential is always a static API key.
 	if envVar != "" && h.store != nil {
 		h.reloadMu.Lock()
-		_, err := h.store.AddBinding("*", name, store.BindingOpts{EnvVar: envVar})
+		metaErr := h.store.AddCredentialMeta(name, "static", "")
+		var err error
+		if metaErr == nil {
+			_, err = h.store.AddBinding("*", name, store.BindingOpts{EnvVar: envVar})
+		}
 		h.reloadMu.Unlock()
+		if metaErr != nil {
+			return fmt.Sprintf("Added credential %s but failed to register credential metadata: %v", name, metaErr)
+		}
 		if err != nil {
 			return fmt.Sprintf("Added credential %s but failed to create binding with env_var: %v", name, err)
 		}

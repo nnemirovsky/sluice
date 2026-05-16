@@ -7,6 +7,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -646,6 +647,14 @@ func (s *Store) AddBinding(destination, credential string, opts BindingOpts) (in
 		}
 	}()
 
+	// The credential must resolve to a live credential or a live pool.
+	// Runs on the same tx as the INSERT so a concurrent pool/credential
+	// delete cannot interleave between the check and the write, closing
+	// the creation half of the bind/remove TOCTOU.
+	if err := assertBindingCredentialExistsTx(tx, credential); err != nil {
+		return 0, err
+	}
+
 	// Uniqueness check runs on the same tx as the INSERT so the single
 	// connection serializes them. Without this, concurrent callers could
 	// both observe no collision and then both insert the same env_var
@@ -703,6 +712,47 @@ var ErrBindingDuplicate = fmt.Errorf("binding already exists for credential/dest
 // this sentinel every store failure collapses into a 400, hiding real
 // server faults from clients.
 var ErrBindingValidation = fmt.Errorf("binding validation failed")
+
+// ErrBindingCredentialMissing is returned by AddBinding / AddRuleAndBinding
+// when the named credential does not exist as either a live credential
+// (credential_meta) or a live pool (credential_pools). It is wrapped under
+// ErrBindingValidation so the API layer maps it to a 400, but callers that
+// want to detect this specific case (e.g. to print "create the credential
+// or pool first") can test with errors.Is on this sentinel.
+//
+// This closes the creation half of the bind/remove TOCTOU:
+// RemovePoolIfUnreferenced refuses to delete a pool that a binding still
+// references, and this check refuses to create a binding for a credential
+// or pool that no longer exists. The existence check and the binding INSERT
+// run in the same transaction so a concurrent pool/credential delete cannot
+// interleave between them and leave a binding pointing at a vanished name.
+var ErrBindingCredentialMissing = fmt.Errorf("binding references a credential or pool that does not exist")
+
+// assertBindingCredentialExistsTx verifies, inside the caller's transaction,
+// that the binding's credential refers to either a live credential
+// (credential_meta) OR a live pool (credential_pools). A binding's
+// credential column is a free-form name that resolves at proxy time to one
+// of those two namespaces, so accepting a name that matches neither would
+// persist a permanently dead binding (and could later be silently inherited
+// by a same-named credential/pool created afterwards). Run on the same tx as
+// the INSERT so the check and the write are atomic against a concurrent
+// pool/credential delete.
+func assertBindingCredentialExistsTx(tx *sql.Tx, credential string) error {
+	var one int
+	err := tx.QueryRow(
+		`SELECT 1 WHERE EXISTS (SELECT 1 FROM credential_meta WHERE name = ?)
+		            OR EXISTS (SELECT 1 FROM credential_pools WHERE name = ?)`,
+		credential, credential,
+	).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: %w: credential %q is neither a live credential nor a live pool (create it first)",
+			ErrBindingValidation, ErrBindingCredentialMissing, credential)
+	}
+	if err != nil {
+		return fmt.Errorf("check credential/pool existence for %q: %w", credential, err)
+	}
+	return nil
+}
 
 // isBindingUniqueViolation detects the SQLite UNIQUE constraint violation
 // that indicates a duplicate binding on (credential, destination).
@@ -1675,6 +1725,16 @@ func (s *Store) AddRuleAndBinding(
 		return 0, 0, fmt.Errorf("insert rule: %w", err)
 	}
 	ruleID, _ = res.LastInsertId()
+
+	// The credential must resolve to a live credential or a live pool.
+	// Same tx as the rule + binding inserts so a concurrent pool/credential
+	// delete cannot interleave and leave a binding pointing at a vanished
+	// name (creation half of the bind/remove TOCTOU). cred add
+	// --destination commits the credential_meta row in its own prior
+	// transaction, so the just-created credential is already visible here.
+	if err = assertBindingCredentialExistsTx(tx, credential); err != nil {
+		return 0, 0, err
+	}
 
 	// Validate and check env_var uniqueness before inserting (uses tx to
 	// avoid deadlock with the single-connection pool).

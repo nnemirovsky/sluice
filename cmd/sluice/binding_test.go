@@ -27,6 +27,16 @@ func setupBindingDB(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("create test DB: %v", err)
 	}
+	// Seed the credentials these tests bind to. AddBinding /
+	// AddRuleAndBinding now require the referenced credential (or pool) to
+	// exist, mirroring the real flow where "sluice cred add" creates the
+	// credential before "sluice binding add" binds to it. Without this, the
+	// binding-CLI tests would be exercising an impossible state.
+	for _, c := range []string{"mycred", "cred_a", "cred_b"} {
+		if err := db.AddCredentialMeta(c, "static", ""); err != nil {
+			t.Fatalf("seed credential meta %q: %v", c, err)
+		}
+	}
 	_ = db.Close()
 	return dbPath
 }
