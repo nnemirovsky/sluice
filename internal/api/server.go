@@ -1276,7 +1276,18 @@ func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request
 	// exists where credential_meta is gone but bindings/rules survive
 	// (the partially-deleted-credential bug this fixes).
 	if _, _, _, err := s.store.RemoveCredentialFully(name); err != nil {
-		writeError(w, http.StatusConflict, "failed to remove credential store state (vault secret + all store rows left intact so the credential is not partially deleted): "+err.Error(), "")
+		// Only the fail-closed pool-member guard is a client conflict
+		// (the operator must take the credential out of its pool first);
+		// map that — and only that — to 409. Store faults (tx
+		// begin/exec/commit failures) are server errors: returning 409
+		// for them would hide a backend failure as a client mistake and
+		// is inconsistent with the binding handlers (4xx for typed
+		// validation/conflict only, 500 for store faults).
+		status := http.StatusInternalServerError
+		if errors.Is(err, store.ErrCredentialInUseByPool) {
+			status = http.StatusConflict
+		}
+		writeError(w, status, "failed to remove credential store state (vault secret + all store rows left intact so the credential is not partially deleted): "+err.Error(), "")
 		return
 	}
 

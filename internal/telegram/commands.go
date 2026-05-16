@@ -609,17 +609,23 @@ func (h *CommandHandler) credAdd(name, value, envVar string) string {
 		return fmt.Sprintf("Failed to add credential: %v", err)
 	}
 
-	// If env_var is specified and we have a store, create a binding with the
-	// env_var. Register the credential in credential_meta FIRST (mirrors the
-	// CLI "cred add" path): AddBinding now requires its credential to resolve
-	// to a live credential or pool, and a binding with no backing
-	// credential_meta row is exactly the stale-binding state that guard
-	// prevents. A Telegram-added credential is always a static API key.
-	if envVar != "" && h.store != nil {
+	// Register the credential in credential_meta for EVERY Telegram add when
+	// a store is configured, mirroring the CLI and REST "cred add" paths
+	// (which always register a credential_meta row for static creds). A
+	// Telegram-added credential is always a static API key. This must run
+	// even when no --env-var is given: AddBinding (used by a later API/CLI
+	// `binding add`) now requires its credential to resolve to a live
+	// credential or pool, and a credential with no backing credential_meta
+	// row is exactly the state that guard rejects — so a Telegram-only
+	// `/cred add foo bar` would otherwise be unbindable, and pool-name
+	// collisions for it would not be rejected. AddCredentialMeta is an
+	// upsert, so the env-var sub-path below does not double-insert.
+	if h.store != nil {
 		h.reloadMu.Lock()
 		metaErr := h.store.AddCredentialMeta(name, "static", "")
 		var err error
-		if metaErr == nil {
+		// If env_var is specified, also create a binding with the env_var.
+		if metaErr == nil && envVar != "" {
 			_, err = h.store.AddBinding("*", name, store.BindingOpts{EnvVar: envVar})
 		}
 		h.reloadMu.Unlock()

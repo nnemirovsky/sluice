@@ -1533,6 +1533,113 @@ func TestDeleteApiCredentials_ConcurrentRace(t *testing.T) {
 	}
 }
 
+// TestDeleteApiCredentials_PoolGuardVsStoreFault is the round-22 Finding 3
+// fail-before/pass-after regression. The REST cred-remove handler must map
+// ONLY the fail-closed pool-member guard to 409; a genuine store fault
+// (tx begin/exec/commit failure) must be 500, not a client conflict.
+// Before the fix every RemoveCredentialFully error became 409.
+func TestDeleteApiCredentials_PoolGuardVsStoreFault(t *testing.T) {
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+
+	// Case 1: removing a live pool member is a client conflict -> 409.
+	t.Run("live pool member is 409", func(t *testing.T) {
+		st := newTestStore(t)
+		enableHTTPChannel(t, st)
+		v := newTestVault(t)
+		srv := api.NewServer(st, nil, nil, "")
+		srv.SetVault(v)
+		var mu sync.Mutex
+		srv.SetEnginePtr(new(atomic.Pointer[policy.Engine]), &mu)
+
+		if _, err := v.Add("m", "value"); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+		// Pools require oauth credentials, so register oauth credential_meta
+		// rows for the members (mirrors the store package's seedOAuthCred).
+		for _, n := range []string{"m", "n"} {
+			if err := st.AddCredentialMeta(n, "oauth", "https://auth.example.com/token"); err != nil {
+				t.Fatalf("seed oauth cred %q: %v", n, err)
+			}
+		}
+		if err := st.CreatePoolWithMembers("p", "failover", []string{"m", "n"}); err != nil {
+			t.Fatalf("create pool: %v", err)
+		}
+
+		handler := newTestHandler(t, srv, st)
+		req := httptest.NewRequest("DELETE", "/api/credentials/m", nil)
+		req.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("live pool member removal: expected 409, got %d (%s)", rec.Code, rec.Body.String())
+		}
+		// The guard refused, so the vault secret must still be present.
+		if names, _ := v.List(); len(names) != 1 || names[0] != "m" {
+			t.Errorf("vault secret should be intact after a refused removal, got %v", names)
+		}
+	})
+
+	// Case 2: a store fault inside RemoveCredentialFully (here: the DB is
+	// closed so tx Begin fails) must be 500, NOT 409. Pre-fix this was 409.
+	t.Run("store fault is 500", func(t *testing.T) {
+		st := newTestStore(t)
+		enableHTTPChannel(t, st)
+		v := newTestVault(t)
+		srv := api.NewServer(st, nil, nil, "")
+		srv.SetVault(v)
+		var mu sync.Mutex
+		srv.SetEnginePtr(new(atomic.Pointer[policy.Engine]), &mu)
+
+		if _, err := v.Add("solo", "value"); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+		seedCred(t, st, "solo")
+		handler := newTestHandler(t, srv, st)
+
+		// Force a store fault: closing the DB makes tx Begin fail with a
+		// non-guard error inside RemoveCredentialFully.
+		if err := st.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+
+		req := httptest.NewRequest("DELETE", "/api/credentials/solo", nil)
+		req.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("store fault: expected 500, got %d (%s)", rec.Code, rec.Body.String())
+		}
+	})
+
+	// Case 3: a normal removal (no pool, healthy store) still succeeds 204.
+	t.Run("normal removal is 204", func(t *testing.T) {
+		st := newTestStore(t)
+		enableHTTPChannel(t, st)
+		v := newTestVault(t)
+		srv := api.NewServer(st, nil, nil, "")
+		srv.SetVault(v)
+		var mu sync.Mutex
+		srv.SetEnginePtr(new(atomic.Pointer[policy.Engine]), &mu)
+
+		if _, err := v.Add("plain", "value"); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+		seedCred(t, st, "plain")
+		handler := newTestHandler(t, srv, st)
+
+		req := httptest.NewRequest("DELETE", "/api/credentials/plain", nil)
+		req.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("normal removal: expected 204, got %d (%s)", rec.Code, rec.Body.String())
+		}
+	})
+}
+
 // TestPostApiCredentials_ConcurrentRace verifies that two concurrent POST
 // requests for the same credential name serialize cleanly: one succeeds
 // with 201, the other returns 409. Before the fix, PostApiCredentials

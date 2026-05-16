@@ -80,13 +80,18 @@ type QUICProxy struct {
 	// for that destination over QUIC (Finding 2). Optional: nil means
 	// no pools are configured and every binding name is taken verbatim.
 	//
-	// QUIC pool support is intentionally limited to active-member
-	// expansion. The per-request OAuth refresh attribution (Risk R1),
-	// pool-stable phantom keying (Risk R3), and 429/401 auto-failover
-	// implemented in the HTTP-MITM addon are NOT replicated here: the
-	// QUIC injection path is a simpler buffered header/body swap with
-	// no response-side OAuth interception. A pool binding over QUIC
-	// injects the CURRENT active member's real credential; member
+	// QUIC supports request-side pool injection: active-member
+	// expansion (the vault lookup uses the pool's current active
+	// member) AND the Risk R3 pool-stable access phantom (the
+	// agent-facing access token is a synthetic JWT keyed on the POOL
+	// name via buildPooledOAuthPhantomPairs, byte-identical to the HTTP
+	// path so it never changes when the active member is switched).
+	// ONLY the response-side capabilities are NOT available on QUIC:
+	// per-request OAuth refresh attribution (Risk R1) and the Phase-2
+	// 429/401 auto-failover both require response-side OAuth
+	// interception, which the buffered QUIC injection path does not do.
+	// A pool binding over QUIC therefore injects the CURRENT active
+	// member's real credential and a pool-stable phantom; member
 	// rotation happens only when the HTTP path (or an operator) flips
 	// the active member. See CLAUDE.md "Credential pools" for the
 	// authoritative HTTP-vs-QUIC capability matrix.
@@ -579,10 +584,13 @@ func (q *QUICProxy) buildHandler(upstreamHost string, destPort int, checker *Req
 // unresolvable pool returns the pool name unchanged so the downstream
 // provider.Get fails cleanly (no injection) rather than panicking.
 //
-// QUIC-LIMITED: this performs ONLY active-member expansion. The HTTP path's
-// per-request refresh attribution (R1), pool-stable phantom (R3), and
-// 429/401 auto-failover are not implemented on QUIC; the active member is
-// whatever the HTTP path / operator last selected. Documented in CLAUDE.md.
+// QUIC-LIMITED: this helper performs only active-member expansion (the
+// secret-name resolution). The R3 pool-stable access phantom IS implemented
+// on QUIC via resolvePoolTarget + buildPooledOAuthPhantomPairs in
+// buildPhantomPairs; only the response-side capabilities — per-request OAuth
+// refresh attribution (R1) and the Phase-2 429/401 auto-failover — are not
+// available on QUIC (no response-side OAuth interception). The active member
+// is whatever the HTTP path / operator last selected. Documented in CLAUDE.md.
 func (q *QUICProxy) resolvePoolMember(name string) string {
 	if q.poolResolver == nil {
 		return name

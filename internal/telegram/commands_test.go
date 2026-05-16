@@ -850,6 +850,31 @@ func TestCredAddWithoutEnvVar(t *testing.T) {
 	if len(bindings) != 0 {
 		t.Errorf("expected 0 bindings with env_var, got %d", len(bindings))
 	}
+
+	// Finding 1 (round-22): a Telegram `/cred add` WITHOUT --env-var must
+	// still register a credential_meta row, mirroring the CLI/REST paths.
+	// Before the fix AddCredentialMeta only ran on the --env-var sub-path,
+	// so a plain Telegram add left credential_meta empty and the credential
+	// could never be bound later (the round-21 store-level binding guard
+	// rejects a credential with no backing meta row).
+	meta, err := s.GetCredentialMeta("my_key")
+	if err != nil {
+		t.Fatalf("get credential meta: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("expected a credential_meta row for a no-env-var Telegram cred add, got none")
+	}
+	if meta.CredType != "static" {
+		t.Errorf("expected cred_type static, got %q", meta.CredType)
+	}
+
+	// And it must therefore be bindable via the same store-level path the
+	// API/CLI `binding add` uses. Pre-fix this fails with the
+	// ErrBindingCredentialMissing guard because no meta row exists.
+	if _, err := s.AddBinding("api.example.com", "my_key", store.BindingOpts{}); err != nil {
+		t.Fatalf("AddBinding for a Telegram-added credential should succeed once "+
+			"credential_meta is registered, got: %v", err)
+	}
 }
 
 func TestHandleMCPNoArgs(t *testing.T) {

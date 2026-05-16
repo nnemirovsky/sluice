@@ -1416,6 +1416,16 @@ func TestRemoveCredentialFullyRefusesLivePoolMember(t *testing.T) {
 		t.Error("credential_meta deleted for a refused live pool member")
 	}
 
+	// Round-22 Finding 3: the live-pool-member refusal must be the typed
+	// ErrCredentialInUseByPool sentinel so the REST layer can map ONLY this
+	// case to 409 (and tx/SQL/commit faults to 500) via errors.Is. Before
+	// the fix the guard returned a bare fmt.Errorf with no sentinel, so the
+	// REST handler had to blanket-map every RemoveCredentialFully error to
+	// 409 — hiding store faults as client conflicts.
+	if !errors.Is(err, ErrCredentialInUseByPool) {
+		t.Fatalf("live-pool-member refusal must wrap ErrCredentialInUseByPool, got: %v", err)
+	}
+
 	// A free (non-member) credential still removes cleanly.
 	seedOAuthCred(t, s, "free")
 	if md, _, _, ferr := s.RemoveCredentialFully("free"); ferr != nil || !md {

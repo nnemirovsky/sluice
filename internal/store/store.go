@@ -728,6 +728,19 @@ var ErrBindingValidation = fmt.Errorf("binding validation failed")
 // interleave between them and leave a binding pointing at a vanished name.
 var ErrBindingCredentialMissing = fmt.Errorf("binding references a credential or pool that does not exist")
 
+// ErrCredentialInUseByPool is returned (wrapped) by the fail-closed
+// pool-member guard in deleteCredentialMetaGuardedTx — and therefore by
+// RemoveCredentialMeta, RemoveCredentialMetaCAS, and RemoveCredentialFully —
+// when a credential cannot be removed because it is still a live member of
+// one or more pools. It is a typed sentinel so callers can distinguish this
+// client-facing conflict (the operator must take the credential out of the
+// pool first) from genuine store faults (transaction begin/exec/commit
+// failures). The REST layer maps errors.Is(err, ErrCredentialInUseByPool) to
+// 409 Conflict and every other RemoveCredentialFully error to 500; the CLI
+// and Telegram paths treat any non-nil error as the fail-closed refusal and
+// leave all state intact regardless of which kind it is.
+var ErrCredentialInUseByPool = fmt.Errorf("credential is a live member of a pool")
+
 // assertBindingCredentialExistsTx verifies, inside the caller's transaction,
 // that the binding's credential refers to either a live credential
 // (credential_meta) OR a live pool (credential_pools). A binding's
@@ -1968,7 +1981,7 @@ func deleteCredentialMetaGuardedTx(tx *sql.Tx, name, deleteSQL string, deleteArg
 	).Scan(&pool)
 	switch memErr {
 	case nil:
-		return 0, fmt.Errorf("credential %q is a member of pool %q; remove it from the pool first (sluice pool remove <p>, or recreate the pool without it)", name, pool)
+		return 0, fmt.Errorf("%w: credential %q is a member of pool %q; remove it from the pool first (sluice pool remove <p>, or recreate the pool without it)", ErrCredentialInUseByPool, name, pool)
 	case sql.ErrNoRows:
 		// not a pool member; safe to remove
 	default:
