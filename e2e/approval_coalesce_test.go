@@ -136,6 +136,14 @@ func startGatedVerdictServer(t *testing.T, verdict string) (*httptest.Server, *g
 	g := newGatedVerdictServer(verdict)
 	srv := newIPv4Server(t, g)
 	t.Cleanup(srv.Close)
+	// Registered AFTER srv.Close so it runs BEFORE it (cleanups are LIFO):
+	// a failing assertion anywhere in the test (e.g. the coalescing-window
+	// checks) would otherwise leave the first approval handler parked on
+	// <-g.release, and httptest's srv.Close() blocks on that in-flight
+	// request until the global test timeout. Release() is sync.Once-guarded
+	// so the happy-path explicit release plus this cleanup release is safe
+	// (the second close is a no-op).
+	t.Cleanup(g.Release)
 	return srv, g
 }
 

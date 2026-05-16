@@ -1820,21 +1820,10 @@ func (s *Store) ListCredentialMeta() ([]CredentialMeta, error) {
 // RemoveCredentialMeta deletes a credential metadata row by name. Returns true
 // if a row was deleted.
 //
-// Store-layer invariant enforcement (protects every caller, not just the CLI):
-//
-//   - Pool-member integrity: removal is REFUSED (fail-closed) when the
-//     credential is still a live member of one or more pools. Deleting it
-//     would leave a credential_pool_members row pointing at a missing
-//     credential, so the pool would resolve to an uninjectable credential.
-//     The operator must remove it from the pool first. The CLI grew a guard
-//     for this earlier, but the REST API and Telegram paths call this method
-//     directly and bypassed it; pushing the guard here closes all paths.
-//   - Health-row cleanup: the per-credential credential_health row is keyed
-//     by credential name and is not tied to credential_meta by a foreign
-//     key, so a bare meta delete would leave a stale cooldown behind.
-//     Recreating a same-named credential would then inherit that stale
-//     cooldown on the next resolver seed. The health row is deleted in the
-//     same transaction as the meta row so the two never diverge.
+// The fail-closed pool-member guard and the credential_health cleanup are
+// enforced for every caller (CLI, REST API, Telegram) via the shared
+// deleteCredentialMetaGuardedTx helper, which RemoveCredentialMetaCAS also
+// routes through so the bare-delete and CAS-rollback paths cannot diverge.
 func (s *Store) RemoveCredentialMeta(name string) (bool, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -1842,6 +1831,41 @@ func (s *Store) RemoveCredentialMeta(name string) (bool, error) {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	n, err := deleteCredentialMetaGuardedTx(tx, name, "DELETE FROM credential_meta WHERE name = ?", []any{name})
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit: %w", err)
+	}
+	return n > 0, nil
+}
+
+// deleteCredentialMetaGuardedTx is the single guarded credential_meta delete
+// path shared by RemoveCredentialMeta and RemoveCredentialMetaCAS so the two
+// can never diverge on the pool-member integrity guard or the health-row
+// cleanup. It must be called inside an open transaction; the caller commits.
+//
+// Invariants enforced here for EVERY removal path (bare delete and CAS
+// rollback alike):
+//
+//   - Pool-member integrity (fail-closed): removal is REFUSED when the
+//     credential is still a live member of one or more pools. Deleting it
+//     would leave a credential_pool_members row pointing at a missing
+//     credential. This also closes the add-rollback TOCTOU: a concurrent
+//     pool-create can claim the just-added credential between insert and
+//     rollback, so the CAS rollback must honour the same guard. When the
+//     guard refuses, the meta row stays (it IS a live pool member, which is
+//     correct) and an informative error is returned so the caller surfaces
+//     it instead of silently leaving inconsistent state.
+//   - Health-row cleanup: the per-credential credential_health row is keyed
+//     by credential name and is not FK-tied to credential_meta, so a bare
+//     meta delete would leave a stale cooldown a same-named recreation would
+//     inherit. The health row is deleted in the same transaction.
+//
+// deleteSQL/deleteArgs let the CAS caller add its compare-and-swap predicate
+// to the meta delete while sharing the guard and health cleanup.
+func deleteCredentialMetaGuardedTx(tx *sql.Tx, name, deleteSQL string, deleteArgs []any) (int64, error) {
 	// Fail-closed pool-member guard. Same semantics as the CLI guard in
 	// `sluice cred remove`: a credential that is a live pool member cannot
 	// be removed until it is taken out of the pool.
@@ -1851,27 +1875,24 @@ func (s *Store) RemoveCredentialMeta(name string) (bool, error) {
 	).Scan(&pool)
 	switch memErr {
 	case nil:
-		return false, fmt.Errorf("credential %q is a member of pool %q; remove it from the pool first (sluice pool remove <p>, or recreate the pool without it)", name, pool)
+		return 0, fmt.Errorf("credential %q is a member of pool %q; remove it from the pool first (sluice pool remove <p>, or recreate the pool without it)", name, pool)
 	case sql.ErrNoRows:
 		// not a pool member; safe to remove
 	default:
-		return false, fmt.Errorf("check pool membership for %q: %w", name, memErr)
+		return 0, fmt.Errorf("check pool membership for %q: %w", name, memErr)
 	}
 
-	res, err := tx.Exec("DELETE FROM credential_meta WHERE name = ?", name)
+	res, err := tx.Exec(deleteSQL, deleteArgs...)
 	if err != nil {
-		return false, fmt.Errorf("delete credential meta: %w", err)
+		return 0, fmt.Errorf("delete credential meta: %w", err)
 	}
 	// Drop the health row in the same transaction so a removed credential
 	// never leaves a stale cooldown that a same-named recreation inherits.
 	if _, err := tx.Exec("DELETE FROM credential_health WHERE credential = ?", name); err != nil {
-		return false, fmt.Errorf("delete credential health: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("commit: %w", err)
+		return 0, fmt.Errorf("delete credential health: %w", err)
 	}
 	n, _ := res.RowsAffected()
-	return n > 0, nil
+	return n, nil
 }
 
 // RemoveCredentialMetaCAS deletes a credential metadata row only when its
@@ -1915,15 +1936,22 @@ func (s *Store) RemoveCredentialMetaCAS(name, expectedType, expectedTokenURL str
 		return false, false, nil
 	}
 
-	res, err := tx.Exec("DELETE FROM credential_meta WHERE name = ? AND cred_type = ? AND COALESCE(token_url, '') = ?",
-		name, expectedType, expectedTokenURL)
-	if err != nil {
-		return false, false, fmt.Errorf("delete credential meta: %w", err)
+	// Route the actual delete through the shared guarded helper so the
+	// CAS rollback path enforces the SAME fail-closed pool-member guard and
+	// the SAME credential_health cleanup as RemoveCredentialMeta. A
+	// concurrent pool-create can claim the just-added credential between
+	// our insert and this rollback (TOCTOU); the guard refuses the delete
+	// in that case, surfacing an informative error and leaving the meta row
+	// in place (it IS a live pool member, which is the correct state).
+	n, gErr := deleteCredentialMetaGuardedTx(tx, name,
+		"DELETE FROM credential_meta WHERE name = ? AND cred_type = ? AND COALESCE(token_url, '') = ?",
+		[]any{name, expectedType, expectedTokenURL})
+	if gErr != nil {
+		return false, false, gErr
 	}
 	if commitErr := tx.Commit(); commitErr != nil {
 		return false, false, fmt.Errorf("commit: %w", commitErr)
 	}
-	n, _ := res.RowsAffected()
 	return n > 0, true, nil
 }
 

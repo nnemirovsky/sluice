@@ -2,6 +2,7 @@ package store
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -511,5 +512,87 @@ func TestAddCredentialMetaRejectsPoolNameCollision(t *testing.T) {
 	// name that already exists as a credential.
 	if err := s.CreatePoolWithMembers("not_a_pool", "failover", []string{"acct_a"}); err == nil {
 		t.Fatal("expected CreatePoolWithMembers to reject a name that is already a credential")
+	}
+}
+
+// TestRemoveCredentialMetaCASGuardsLivePoolMember is the round-10 Finding 1
+// regression. The cred-add rollback path (RemoveCredentialMetaCAS) must apply
+// the SAME fail-closed pool-member guard and the SAME credential_health
+// cleanup as RemoveCredentialMeta. Interleave being defended:
+//
+//	cred add inserts credential_meta("c")  ->  a concurrent caller creates a
+//	pool that claims "c"  ->  a later step in the original add flow fails  ->
+//	the CAS rollback runs. A blind CAS delete here would orphan the
+//	credential_pool_members row (pool -> missing credential). The shared
+//	guarded helper must refuse the delete and surface an informative error.
+func TestRemoveCredentialMetaCASGuardsLivePoolMember(t *testing.T) {
+	s := newTestStore(t)
+
+	// cred add inserted the meta row (oauth, with the seed token URL).
+	seedOAuthCred(t, s, "c")
+	seedOAuthCred(t, s, "sibling")
+
+	// Concurrent pool-create claims "c" between the insert and the rollback.
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"c", "sibling"}); err != nil {
+		t.Fatalf("CreatePoolWithMembers: %v", err)
+	}
+
+	// The original add flow failed; its rollback fires RemoveCredentialMetaCAS
+	// with the values it inserted. The pool-member guard must REFUSE.
+	removed, noConcurrent, err := s.RemoveCredentialMetaCAS("c", "oauth", "https://auth.example.com/token")
+	if err == nil {
+		t.Fatal("expected CAS rollback to refuse a live pool member (Finding 1)")
+	}
+	if removed || noConcurrent {
+		t.Fatalf("CAS rollback reported removed=%v noConcurrent=%v on a refused delete; want false,false", removed, noConcurrent)
+	}
+	if !strings.Contains(err.Error(), "member of pool") {
+		t.Fatalf("CAS refusal error is not informative about pool membership: %v", err)
+	}
+	// The meta row must survive (it IS a live pool member — correct state),
+	// so the pool does not resolve to a missing credential.
+	if m, gerr := s.GetCredentialMeta("c"); gerr != nil || m == nil {
+		t.Fatalf("CAS rollback deleted a live pool member's meta row: %+v, %v", m, gerr)
+	}
+	pools, perr := s.PoolsForMember("c")
+	if perr != nil || len(pools) != 1 || pools[0] != "p" {
+		t.Fatalf("PoolsForMember(c) = %v, %v; want [p] (no orphan)", pools, perr)
+	}
+
+	// A normal rollback (no pool claim) must still delete meta + health row
+	// and leave no stale cooldown for a same-named recreation.
+	seedOAuthCred(t, s, "lone")
+	until := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	if err := s.SetCredentialHealth("lone", "cooldown", until, "429 from a prior add attempt"); err != nil {
+		t.Fatalf("SetCredentialHealth(lone): %v", err)
+	}
+	removed, noConcurrent, err = s.RemoveCredentialMetaCAS("lone", "oauth", "https://auth.example.com/token")
+	if err != nil || !removed || !noConcurrent {
+		t.Fatalf("RemoveCredentialMetaCAS(lone) = %v,%v,%v; want true,true,nil", removed, noConcurrent, err)
+	}
+	if m, _ := s.GetCredentialMeta("lone"); m != nil {
+		t.Fatalf("CAS rollback left a meta row for a non-member: %+v", m)
+	}
+	if h, herr := s.GetCredentialHealth("lone"); herr != nil || h != nil {
+		t.Fatalf("CAS rollback left a stale cooldown row: %+v, %v", h, herr)
+	}
+
+	// CAS predicate is still honoured: a concurrent overwrite (different
+	// cred_type) must not be deleted by a stale-expectation rollback, even
+	// when the credential is free of any pool.
+	seedOAuthCred(t, s, "raced")
+	// A concurrent writer overwrote "raced" as a static credential.
+	if _, err := s.db.Exec("UPDATE credential_meta SET cred_type = 'static', token_url = NULL WHERE name = ?", "raced"); err != nil {
+		t.Fatalf("simulate concurrent overwrite: %v", err)
+	}
+	removed, noConcurrent, err = s.RemoveCredentialMetaCAS("raced", "oauth", "https://auth.example.com/token")
+	if err != nil {
+		t.Fatalf("CAS with stale expectation errored: %v", err)
+	}
+	if removed || noConcurrent {
+		t.Fatalf("CAS deleted a concurrently-overwritten row: removed=%v noConcurrent=%v; want false,false", removed, noConcurrent)
+	}
+	if m, _ := s.GetCredentialMeta("raced"); m == nil {
+		t.Fatal("CAS wiped a concurrent writer's row despite the predicate mismatch")
 	}
 }
