@@ -817,7 +817,7 @@ func (s *Server) setupInjection(cfg Config, _ net.Listener) error {
 	s.mailProxy = NewMailProxy(cfg.Provider, &caCert)
 
 	// QUIC proxy for HTTP/3 MITM credential injection over UDP.
-	qp, qpErr := NewQUICProxy(caCert, cfg.Provider, &s.resolver, cfg.Audit, cfg.QUICBlockRules, cfg.QUICRedactRules)
+	qp, qpErr := NewQUICProxy(caCert, cfg.Provider, &s.resolver, &s.poolResolver, cfg.Audit, cfg.QUICBlockRules, cfg.QUICRedactRules)
 	if qpErr != nil {
 		log.Printf("QUIC proxy disabled: %v", qpErr)
 	} else {

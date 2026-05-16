@@ -185,7 +185,17 @@ const maxProxyBody = 16 << 20
 // pairs for the access and (optionally) refresh tokens. The caller's
 // raw secret is released before returning. On parse failure the secret
 // is still released and an error is returned.
-func buildOAuthPhantomPairs(name string, secret vault.SecureBytes, logPrefix string) ([]phantomPair, error) {
+//
+// onRefreshInject, when supplied (variadic; at most the first element is
+// used), is called with the credential's real refresh token before the
+// swap injects it into the outbound refresh-grant request body. This is
+// the PLAIN-credential analogue of buildPooledOAuthPhantomPairs'
+// onRefreshInject: it lets the caller record a realRefreshToken -> name
+// attribution tag so a plain OAuth refresh whose token URL is shared with
+// a pool can be told apart from a genuine pooled refresh on the response
+// side (Finding 1). Plain callers that have no attribution context
+// (ws.go, quic.go) simply omit it.
+func buildOAuthPhantomPairs(name string, secret vault.SecureBytes, logPrefix string, onRefreshInject ...func(realRefresh string)) ([]phantomPair, error) {
 	cred, err := vault.ParseOAuth(secret.Bytes())
 	secret.Release()
 	if err != nil {
@@ -202,6 +212,14 @@ func buildOAuthPhantomPairs(name string, secret vault.SecureBytes, logPrefix str
 		secret:              accessSecret,
 	}}
 	if cred.RefreshToken != "" {
+		// Record the plain R1 join: this exact real refresh token is
+		// about to be injected for the plain credential `name`. The
+		// token-endpoint response recovers this value to attribute the
+		// rotated tokens back to `name` rather than fail-closing as if
+		// it were an unrecoverable pooled refresh.
+		if len(onRefreshInject) > 0 && onRefreshInject[0] != nil {
+			onRefreshInject[0](cred.RefreshToken)
+		}
 		refreshSecret := vault.NewSecureBytes(cred.RefreshToken)
 		refreshPhantom := []byte(oauthPhantomRefresh(name, cred.RefreshToken))
 		refreshEncoded := encodePhantomForPair(refreshPhantom)

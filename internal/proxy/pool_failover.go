@@ -287,15 +287,42 @@ func (a *SluiceAddon) poolForResponse(f *mitmproxy.Flow) (pool, activeMember, pr
 				if ownerPool := pr.PoolForMember(owner); ownerPool != "" {
 					return ownerPool, owner, proto, pr, true
 				}
-				// owner is no longer in any pool (membership change
-				// raced the failure); the refresh-attr tag still proves
-				// THIS request used the pool, so fall through to the
-				// active-member fallback below for a still-meaningful
-				// attribution.
-				if active, aok := pr.ResolveActive(pool); aok && active != "" {
+				// owner is not in any pool. Two cases now collapse here
+				// because the refresh-attr map is no longer pool-only:
+				//
+				//  (1) Round-19 Finding 1: the PLAIN-credential injection
+				//      path tags realRefresh -> <plain name> too (so the
+				//      2xx persist path can attribute a plain refresh on a
+				//      shared token URL 1:1). A plain refresh must NEVER
+				//      cool a pool member.
+				//  (2) A genuine pooled member whose membership raced the
+				//      failure (it left the pool between inject and
+				//      response).
+				//
+				// The refresh-attr tag alone can no longer tell them
+				// apart, so it is NOT sufficient evidence for the
+				// active-member fallback. Require the independent
+				// pool-usage proof (flowInjected, set post-swap ONLY when
+				// a pool phantom was actually present in this request):
+				// case (2) still has it; case (1) never does. Without it,
+				// fall through to the no-evidence path below, which
+				// returns ok=false and cools nothing.
+				injected, injOK := "", false
+				if f.Id != uuid.Nil {
+					injected, injOK = a.flowInjected.Peek(f.Id)
+				}
+				if !injOK || injected == "" {
 					log.Printf("[POOL-FAILOVER] pool %q: token-endpoint failure "+
-						"owner %q left the pool (membership raced); falling back "+
-						"to active member %q", pool, owner, active)
+						"owner %q is not a pool member and no flow-injection "+
+						"pool-usage tag exists; treating as a plain credential "+
+						"sharing this token URL (not cooling any member)", pool, owner)
+					// Plain credential (round-19 Finding 1): do not cool.
+					// Fall through to the no-evidence return below.
+				} else if active, aok := pr.ResolveActive(pool); aok && active != "" {
+					log.Printf("[POOL-FAILOVER] pool %q: token-endpoint failure "+
+						"owner %q left the pool (membership raced, flow-injection "+
+						"tag confirms pooled usage); falling back to active "+
+						"member %q", pool, owner, active)
 					return pool, active, proto, pr, true
 				}
 			}

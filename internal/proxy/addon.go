@@ -1004,6 +1004,25 @@ func (a *SluiceAddon) resolveOAuthResponseAttribution(f *mitmproxy.Flow, matched
 	}
 	realRefresh := extractRequestRefreshToken(reqBody, reqCT)
 	member, ok := a.refreshAttr.Recover(realRefresh)
+	if ok && pr.PoolForMember(member) == "" {
+		// Finding 1: the injected refresh token was tagged under a name
+		// that is NOT a pool member. That tag is only ever recorded by
+		// the PLAIN-credential injection path (buildOAuthPhantomPairs'
+		// onRefreshInject in buildPhantomPairs), so this response is a
+		// normal refresh for the plain OAuth credential `member` that
+		// merely shares its token URL with a pool. Attribute 1:1: the
+		// agent receives the plain credential's own phantom and the
+		// rotated tokens are persisted to the plain credential's own
+		// vault entry. This is NOT the pooled fail-closed path — the
+		// refresh token uniquely identified a plain credential, so there
+		// is no guessing and no R1 violation. The genuine pooled
+		// fail-closed branch below is reached only when recovery fails
+		// entirely or resolves to an actual pool member.
+		log.Printf("[ADDON-OAUTH] Finding 1: token URL shared with pool %q but the injected "+
+			"refresh token attributes to plain credential %q; persisting 1:1 to %q",
+			poolName, member, member)
+		return oauthRespAttribution{phantomName: member, persistMember: member}
+	}
 	if !ok {
 		// Recovery failed AND a pool shares this token URL (the
 		// poolName == "" plain-only case already returned above with a
@@ -1551,7 +1570,17 @@ func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, req
 				pairs = append(pairs, oauthPairs...)
 				continue
 			}
-			oauthPairs, parseErr := buildOAuthPhantomPairs(name, secret, "ADDON-INJECT")
+			// Finding 1: tag the real refresh token under the PLAIN
+			// credential name so a plain OAuth refresh whose token URL
+			// is shared with a pool is recoverable on the response side
+			// and attributed 1:1 (its own phantom + vault write) instead
+			// of being mistaken for an unrecoverable pooled refresh and
+			// fail-closed. PoolForMember(name) is "" for a plain cred, so
+			// the response path can tell it apart from a pooled member.
+			oauthPairs, parseErr := buildOAuthPhantomPairs(name, secret, "ADDON-INJECT",
+				func(realRefresh string) {
+					a.refreshAttr.Tag(realRefresh, name)
+				})
 			if parseErr != nil {
 				continue
 			}
@@ -1599,6 +1628,47 @@ func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, req
 			if pr != nil {
 				for _, credName := range idx.MatchAll(reqURL) {
 					poolName := pr.PoolForMember(credName)
+					if poolName == "" {
+						// Finding 1: plain (non-pool) OAuth credential
+						// whose token URL matches this request but whose
+						// own API binding is on a DIFFERENT host (split
+						// host), so the CONNECT-host loop above produced
+						// no pairs for it. Without this, the plain
+						// credential's SLUICE_PHANTOM:<name>.refresh would
+						// travel upstream verbatim (refresh fails) and —
+						// when a pool shares this token URL — no plain
+						// attribution tag would be recorded, so the
+						// response side would fail-close the plain
+						// refresh as if it were an unrecoverable pooled
+						// refresh. Expand it here, recording the plain
+						// realRefreshToken -> name tag so the response
+						// path attributes it 1:1 to the plain credential.
+						if covered[credName] {
+							continue
+						}
+						secret, err := a.provider.Get(credName)
+						if err != nil {
+							log.Printf("[ADDON-INJECT] token-host plain oauth %q lookup failed: %v",
+								credName, err)
+							continue
+						}
+						if !vault.IsOAuth(secret.Bytes()) {
+							secret.Release()
+							continue
+						}
+						oauthPairs, parseErr := buildOAuthPhantomPairs(credName, secret, "ADDON-INJECT",
+							func(realRefresh string) {
+								a.refreshAttr.Tag(realRefresh, credName)
+							})
+						if parseErr != nil {
+							continue
+						}
+						covered[credName] = true
+						log.Printf("[ADDON-INJECT] token-host phantom expansion for plain oauth %q (%s)",
+							credName, reqURL.Host)
+						pairs = append(pairs, oauthPairs...)
+						continue
+					}
 					// Gate on the POOL namespace only. covered[member] is
 					// deliberately NOT consulted here: a plain direct
 					// binding for the active member on this same token
@@ -1606,7 +1676,7 @@ func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, req
 					// pool-keyed phantoms the agent actually holds, so
 					// suppressing on it would leak SLUICE_PHANTOM:<pool>.*
 					// upstream unswapped (Finding 1, round-9).
-					if poolName == "" || poolEmitted[poolName] {
+					if poolEmitted[poolName] {
 						continue
 					}
 					poolEmitted[poolName] = true

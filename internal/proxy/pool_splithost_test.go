@@ -687,3 +687,245 @@ func TestFinding2_PlainOAuthOnSharedTokenURLDoesNotTagOrCoolPool(t *testing.T) {
 		t.Fatalf("Finding 2 over-restriction: pool did not fail over; active = %q, want memB", active)
 	}
 }
+
+// TestFinding1Round19_PlainCredRefreshOnSharedTokenURLPersistsNormally is the
+// round-19 Finding 1 regression. A PLAIN (non-pool) OAuth credential whose
+// token URL is shared with a pool refreshes normally: its own phantom is in
+// the request body, NO pool phantom. Before this fix,
+// resolveOAuthResponseAttribution saw "a pool shares this token URL" +
+// refreshAttr.Recover failing (no pooled tag, because the plain injection
+// path never recorded one) and took the pooled fail-closed branch — it
+// SKIPPED the plain credential's vault write AND rewrote the response with
+// the POOL phantom instead of the plain credential's own phantom. That
+// breaks a legitimate standalone credential that merely shares an OAuth
+// issuer with a pool.
+//
+// The fix tags the plain credential's real refresh token under the PLAIN
+// name (PoolForMember == "" distinguishes it from a pooled member) on the
+// request side, so the response side recovers it and attributes 1:1.
+func TestFinding1Round19_PlainCredRefreshOnSharedTokenURLPersistsNormally(t *testing.T) {
+	addon, provider, prPtr := setupPoolSplitHostWithPlainCred(t)
+	client := setupAddonConn(addon, "auth.example.com:443")
+	pr := prPtr.Load()
+
+	// Sanity: the pool's active member is memA and idx.Match returns the
+	// plain credential first (the collision the round-9/16 bug rode on).
+	if got, _ := pr.ResolveActive("codex_pool"); got != "memA" {
+		t.Fatalf("pre-condition active = %q, want memA", got)
+	}
+
+	// The agent refreshes the PLAIN credential. Its body carries the plain
+	// credential's OWN refresh phantom (SLUICE_PHANTOM:aaa_plain.refresh),
+	// NOT any pool phantom. The token-host expansion swaps it to the plain
+	// credential's real refresh token and tags plain-refresh-old -> aaa_plain.
+	reqFlow := newTestFlow(client, "POST", testOAuthTokenURL)
+	reqFlow.Request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqFlow.Request.Body = []byte(
+		"grant_type=refresh_token&refresh_token=SLUICE_PHANTOM:aaa_plain.refresh",
+	)
+
+	addon.Requestheaders(reqFlow)
+	addon.Request(reqFlow)
+
+	// (req) The plain phantom must be swapped to the plain credential's REAL
+	// refresh token (proves the token-host plain expansion fired) and the
+	// pool's real refresh token must NOT appear (no pool involvement).
+	reqBody := string(reqFlow.Request.Body)
+	if strings.Contains(reqBody, "SLUICE_PHANTOM:aaa_plain.refresh") {
+		t.Fatalf("plain refresh phantom not swapped on the token host; body=%q", reqBody)
+	}
+	if !strings.Contains(reqBody, "plain-refresh-old") {
+		t.Fatalf("plain credential's real refresh token not injected; body=%q", reqBody)
+	}
+	if strings.Contains(reqBody, "A-refresh-old") || strings.Contains(reqBody, "B-refresh-old") {
+		t.Fatalf("a pool member's real refresh token leaked into a PLAIN refresh; body=%q", reqBody)
+	}
+
+	// No pool-usage tag may have been recorded (no pool phantom present).
+	if m, ok := addon.flowInjected.Peek(reqFlow.Id); ok {
+		t.Fatalf("plain refresh acquired a flowInjected pool-usage tag (member=%q)", m)
+	}
+
+	// The upstream returns rotated tokens for the PLAIN credential.
+	respFlow := newPoolReqRespFlow(client, reqFlow.Request.Body, mustJSON(t, map[string]interface{}{
+		"access_token":  "plain-access-rotated-1",
+		"refresh_token": "plain-refresh-rotated-1",
+		"expires_in":    3600,
+	}))
+	addon.Response(respFlow)
+	waitAddonPersist(t, addon)
+
+	// (persist) The PLAIN credential's vault entry MUST hold the rotated
+	// tokens — NOT skipped (the round-9/16 fail-closed bug skipped it).
+	credPlain, err := vault.ParseOAuth([]byte(provider.creds["aaa_plain"]))
+	if err != nil {
+		t.Fatalf("parse aaa_plain: %v", err)
+	}
+	if credPlain.RefreshToken != "plain-refresh-rotated-1" ||
+		credPlain.AccessToken != "plain-access-rotated-1" {
+		t.Fatalf("Finding 1 round-19: plain credential refresh NOT persisted "+
+			"(fail-closed mis-applied); got access=%q refresh=%q want "+
+			"plain-access-rotated-1/plain-refresh-rotated-1",
+			credPlain.AccessToken, credPlain.RefreshToken)
+	}
+
+	// The pool members' vault entries MUST be untouched.
+	credA, _ := vault.ParseOAuth([]byte(provider.creds["memA"]))
+	if credA.RefreshToken != "A-refresh-old" {
+		t.Fatalf("Finding 1 round-19: plain refresh misfiled into pool member memA; got %q",
+			credA.RefreshToken)
+	}
+
+	// (phantom) The agent must receive the PLAIN credential's OWN phantom,
+	// NOT the pool-stable phantom (the round-9/16 bug rewrote with the pool
+	// phantom).
+	agentBody := string(respFlow.Response.Body)
+	if strings.Contains(agentBody, "plain-access-rotated-1") ||
+		strings.Contains(agentBody, "plain-refresh-rotated-1") {
+		t.Fatalf("Finding 1 round-19: real rotated plain tokens leaked to agent; body=%q", agentBody)
+	}
+	if !strings.Contains(agentBody, "SLUICE_PHANTOM:aaa_plain.refresh") {
+		t.Fatalf("Finding 1 round-19: agent did not receive the plain credential's "+
+			"own refresh phantom; body=%q", agentBody)
+	}
+	if !strings.Contains(agentBody, "SLUICE_PHANTOM:aaa_plain.access") {
+		t.Fatalf("Finding 1 round-19: agent did not receive the plain credential's "+
+			"own access phantom; body=%q", agentBody)
+	}
+	if strings.Contains(agentBody, poolStablePhantomAccess("codex_pool")) ||
+		strings.Contains(agentBody, "SLUICE_PHANTOM:codex_pool.refresh") {
+		t.Fatalf("Finding 1 round-19: response rewritten with the POOL phantom for a "+
+			"PLAIN refresh; body=%q", agentBody)
+	}
+}
+
+// TestFinding2Round19_QUICPoolBindingExpandsToActiveMember is the round-19
+// Finding 2 regression. A binding that NAMES A POOL must work over QUIC.
+// Before this fix the QUIC injection path was constructed with only the
+// binding resolver and called provider.Get(<bound name>) directly — for a
+// pool-named binding that is provider.Get(<pool>), but no vault secret is
+// stored under a pool name, so injection failed for that destination over
+// QUIC. The fix wires the pool resolver into QUICProxy and expands a pool
+// binding to its ACTIVE member (ResolveActive) before provider.Get,
+// mirroring the HTTP-MITM chokepoint.
+//
+// QUIC-LIMITED scope (documented in CLAUDE.md): only active-member
+// expansion is implemented on QUIC. The asserts below also pin the
+// documented boundary — the phantom stays keyed on the POOL name (stable
+// across member switches) and switching the active member changes only the
+// injected SECRET, never the phantom; per-request refresh attribution and
+// 429/401 auto-failover are HTTP-path only and are NOT exercised here.
+func TestFinding2Round19_QUICPoolBindingExpandsToActiveMember(t *testing.T) {
+	caCert, _, err := GenerateCA()
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+
+	const poolName = "codex_pool"
+	provider := &addonWritableProvider{
+		creds: map[string]string{
+			"memA": poolMemberCred(t, "A-access-old", "A-refresh-old"),
+			"memB": poolMemberCred(t, "B-access-old", "B-refresh-old"),
+		},
+	}
+
+	// The binding NAMES THE POOL, not a member.
+	bindings := []vault.Binding{{
+		Destination: "api.example.com",
+		Ports:       []int{443},
+		Credential:  poolName,
+	}}
+	br, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatalf("NewBindingResolver: %v", err)
+	}
+	var brPtr atomic.Pointer[vault.BindingResolver]
+	brPtr.Store(br)
+
+	pool := store.Pool{Name: poolName, Strategy: store.PoolStrategyFailover}
+	pool.Members = []store.PoolMember{
+		{Credential: "memA", Position: 0},
+		{Credential: "memB", Position: 1},
+	}
+	var prPtr atomic.Pointer[vault.PoolResolver]
+	prPtr.Store(vault.NewPoolResolver([]store.Pool{pool}, nil))
+
+	qp, err := NewQUICProxy(caCert, provider, &brPtr, &prPtr, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewQUICProxy: %v", err)
+	}
+
+	// resolvePoolMember must expand the pool name to the active member.
+	if got := qp.resolvePoolMember(poolName); got != "memA" {
+		t.Fatalf("Finding 2: resolvePoolMember(%q) = %q, want active member memA", poolName, got)
+	}
+	if got := qp.resolvePoolMember("memA"); got != "memA" {
+		t.Fatalf("resolvePoolMember must pass a plain/member name through; got %q", got)
+	}
+
+	// buildPhantomPairs must NOT fail with provider.Get(<pool>) "not found";
+	// it must inject the ACTIVE member's (memA) real OAuth tokens while
+	// keying the phantom on the POOL name (stable across member switches).
+	pairs := qp.buildPhantomPairs("api.example.com", 443)
+	if len(pairs) == 0 {
+		t.Fatal("Finding 2: buildPhantomPairs returned no pairs for a pool-named " +
+			"binding over QUIC (pool->member expansion missing — provider.Get(<pool>) failed)")
+	}
+	var sawPoolAccessPhantom, sawPoolRefreshPhantom, sawMemAAccess, sawMemARefresh bool
+	for _, p := range pairs {
+		ps := string(p.phantom)
+		switch ps {
+		case "SLUICE_PHANTOM:" + poolName + ".access":
+			sawPoolAccessPhantom = true
+		case "SLUICE_PHANTOM:" + poolName + ".refresh":
+			sawPoolRefreshPhantom = true
+		}
+		switch p.secret.String() {
+		case "A-access-old":
+			sawMemAAccess = true
+		case "A-refresh-old":
+			sawMemARefresh = true
+		}
+		if strings.HasPrefix(ps, "SLUICE_PHANTOM:memA") || strings.HasPrefix(ps, "SLUICE_PHANTOM:memB") {
+			t.Fatalf("Finding 2 QUIC-limit: phantom keyed on a MEMBER name (%q) — must "+
+				"be keyed on the POOL name so it is stable across member switches", ps)
+		}
+	}
+	releasePhantomPairs(pairs)
+	if !sawPoolAccessPhantom || !sawPoolRefreshPhantom {
+		t.Fatalf("Finding 2: pool-keyed phantoms missing (access=%v refresh=%v)",
+			sawPoolAccessPhantom, sawPoolRefreshPhantom)
+	}
+	if !sawMemAAccess || !sawMemARefresh {
+		t.Fatalf("Finding 2: active member memA's real OAuth tokens not injected "+
+			"(access=%v refresh=%v)", sawMemAAccess, sawMemARefresh)
+	}
+
+	// Documented QUIC boundary: flipping the active member changes ONLY the
+	// injected secret; the phantom the agent holds stays pool-keyed and
+	// byte-identical (no per-request attribution / failover on QUIC, but
+	// the active member IS honored).
+	prPtr.Load().MarkCooldown("memA", time.Now().Add(time.Minute), "429")
+	if got := qp.resolvePoolMember(poolName); got != "memB" {
+		t.Fatalf("Finding 2: after cooling memA, resolvePoolMember = %q, want memB", got)
+	}
+	pairs2 := qp.buildPhantomPairs("api.example.com", 443)
+	var sawMemBRefresh, stillPoolKeyed bool
+	for _, p := range pairs2 {
+		if p.secret.String() == "B-refresh-old" {
+			sawMemBRefresh = true
+		}
+		if string(p.phantom) == "SLUICE_PHANTOM:"+poolName+".refresh" {
+			stillPoolKeyed = true
+		}
+	}
+	releasePhantomPairs(pairs2)
+	if !sawMemBRefresh {
+		t.Fatal("Finding 2: after failover the new active member memB's real refresh " +
+			"token was not injected over QUIC")
+	}
+	if !stillPoolKeyed {
+		t.Fatal("Finding 2 QUIC-limit: phantom changed across member switch — it must " +
+			"stay keyed on the pool name (R3-style stability) even on QUIC")
+	}
+}
