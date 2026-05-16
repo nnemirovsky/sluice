@@ -168,33 +168,53 @@ func (a *SluiceAddon) poolForResponse(f *mitmproxy.Flow) (pool, activeMember, pr
 	// then header refinement); for the common unscoped-binding case the
 	// result is still https-equivalent so behavior is unchanged.
 	proto = a.detectRequestProtocol(f, port).String()
+
+	// Round-12: recover the per-flow injected member ONCE, with a
+	// NON-consuming Peek, before iterating the matching credentials.
+	// CredentialsForDestination(dest:port) can return MULTIPLE matching
+	// pools for one destination, but the request-side header injection used
+	// exactly ONE binding (the first match). Two concrete bugs the old
+	// per-pool consuming Recover had:
+	//
+	//  1. flowInjected.Recover is single-use. Calling it inside the loop let
+	//     the FIRST matching pool consume the tag even when the tag belonged
+	//     to a LATER pool; the earlier pool then hit the blind ResolveActive
+	//     fallback (cooling an unrelated pool) and the later — correct —
+	//     pool could no longer see its own tag.
+	//  2. With no per-flow tag at all (a plain binding was used, or the
+	//     request never went through pooled injection), the old code blindly
+	//     cooled ResolveActive(boundName) for ANY matching pool even though
+	//     this request never used that pool.
+	//
+	// Mirror how the token-endpoint path was hardened: a single
+	// non-consuming Peek, and attribute a pool ONLY when the injected member
+	// PROVES this request used THAT specific pool. No blind ResolveActive
+	// fallback — without proof, skip the pool (no cooldown).
+	injected := ""
+	if f != nil && f.Id != uuid.Nil {
+		if m, ok := a.flowInjected.Peek(f.Id); ok {
+			injected = m
+		}
+	}
 	for _, boundName := range res.CredentialsForDestination(host, port, proto) {
 		if !pr.IsPool(boundName) {
 			continue
 		}
 		// Attribute the failover to the member that backed THIS request
 		// when it was SENT, recovered by flow ID from the injection-time
-		// tag. ResolveActive at response time is unsafe under concurrency:
-		// a sibling request's 429 may have already switched the active
-		// member, so attributing by response-time active would cool an
-		// innocent member and park both accounts (Finding 1). Fall back to
-		// ResolveActive only when no per-flow tag exists (e.g. the request
-		// never went through the pooled injection path).
-		if f != nil && f.Id != uuid.Nil {
-			if injected, ok := a.flowInjected.Recover(f.Id); ok && injected != "" {
-				// Only honor the tag if the injected member is still a
-				// member of this pool (a membership change could have
-				// raced); otherwise fall through to ResolveActive.
-				if pr.PoolForMember(injected) == boundName {
-					return boundName, injected, proto, pr, true
-				}
-			}
+		// tag. ResolveActive at response time is unsafe under concurrency
+		// (a sibling request's 429 may have already switched the active
+		// member; cooling response-time-active would park an innocent
+		// member, Finding 1) AND unsound without proof of pool usage
+		// (cooling the active member of a merely dest-matching pool the
+		// request never used, round-12). Only attribute when the per-flow
+		// injected member resolves to THIS pool; otherwise skip it (no
+		// cooldown). If the injected member left this pool (membership
+		// raced), there is no longer a sound member to attribute to, so
+		// likewise skip rather than blind-fall-back.
+		if injected != "" && pr.PoolForMember(injected) == boundName {
+			return boundName, injected, proto, pr, true
 		}
-		member, mok := pr.ResolveActive(boundName)
-		if !mok || member == "" {
-			continue
-		}
-		return boundName, member, proto, pr, true
 	}
 
 	// Token-endpoint path. An OAuth refresh hits the credential's token-URL

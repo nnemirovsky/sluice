@@ -86,6 +86,40 @@ func (m *flowInjectedMember) Recover(flowID uuid.UUID) (string, bool) {
 	return e.member, true
 }
 
+// Peek returns the member tagged for the given flow ID WITHOUT removing the
+// entry. Returns ("", false) when no live tag exists.
+//
+// Peek exists for poolForResponse's API-host failover path. That path
+// iterates CredentialsForDestination(dest:port), which can return MULTIPLE
+// matching pools for one destination. A consuming Recover inside that loop
+// would let the FIRST matching pool consume the tag even when the tag
+// actually belongs to a LATER pool, starving the true owner and forcing a
+// blind ResolveActive on an unrelated pool (the round-12 bug). A single
+// non-consuming Peek before/independent of the loop serves the whole
+// iteration so attribution is decided once, by membership, against the one
+// pool the injected member actually belongs to.
+//
+// poolForResponse is invoked exactly once per response (one flow ->
+// one Response callback -> one poolForResponse call), so not deleting the
+// entry here does not re-attribute across responses; the entry is bounded
+// by flowAttrTTL and the opportunistic sweep in Tag. The consuming Recover
+// is retained for any caller that requires exactly-once semantics.
+func (m *flowInjectedMember) Peek(flowID uuid.UUID) (string, bool) {
+	if flowID == uuid.Nil {
+		return "", false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[flowID]
+	if !ok {
+		return "", false
+	}
+	if time.Now().After(e.expires) {
+		return "", false
+	}
+	return e.member, true
+}
+
 // refreshAttrTTL is how long a real-refresh-token -> member tag is retained.
 // An OAuth refresh round-trip (agent POSTs refresh_token, upstream answers
 // with rotated tokens) completes in well under a second in practice; a

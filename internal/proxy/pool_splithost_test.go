@@ -349,6 +349,11 @@ func TestFinding3_ProtocolScopedPooledBindingFailoverLookup(t *testing.T) {
 	f.Request.URL.Host = "grpc.example.com"
 	f.Request.Header.Set("Content-Type", "application/grpc")
 	f.Response.Header.Set("Content-Type", "application/grpc")
+	// A genuine pooled gRPC request carries the injection-time flow tag
+	// (addon.go buildPhantomPairs flowInjected.Tag). Post-round-12 the
+	// API-host failover path requires that pool-usage evidence instead of
+	// blind-falling-back to ResolveActive, so model production.
+	addon.flowInjected.Tag(f.Id, "gA")
 
 	// Sanity: detectRequestProtocol must classify this as gRPC, and the
 	// hardcoded-"https" lookup would have missed the grpc-scoped binding.

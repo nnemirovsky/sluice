@@ -113,7 +113,14 @@ func TestFailoverSynchronousHealthSwap(t *testing.T) {
 		gotCalled <- struct{}{}
 	})
 
-	addon.Response(newPoolRespFlow(client, 429, []byte(`{"error":"rate_limited"}`)))
+	f := newPoolRespFlow(client, 429, []byte(`{"error":"rate_limited"}`))
+	// A genuine pooled request always carries the injection-time flow tag
+	// (addon.go buildPhantomPairs / Finding-4 token-host expansion call
+	// flowInjected.Tag). Post-round-12 the API-host failover path requires
+	// that pool-usage evidence and no longer blind-falls-back to
+	// ResolveActive, so a realistic regression must tag like production.
+	addon.flowInjected.Tag(f.Id, "memA")
+	addon.Response(f)
 
 	// Synchronous: by the time Response returns the swap is already done.
 	if active, _ := pr.ResolveActive("codex_pool"); active != "memB" {
@@ -151,7 +158,9 @@ func TestFailoverCooldownTTLAndLazyRecovery(t *testing.T) {
 
 	// Auth failure (401) -> memA cools down for AuthFailCooldown.
 	before := time.Now()
-	addon.Response(newPoolRespFlow(client, 401, nil))
+	f401 := newPoolRespFlow(client, 401, nil)
+	addon.flowInjected.Tag(f401.Id, "memA") // production injection-time tag
+	addon.Response(f401)
 	until, cooling := pr.CooldownUntil("memA")
 	if !cooling {
 		t.Fatal("memA should be cooling down after 401")
@@ -215,8 +224,10 @@ func TestFailoverNoticeNonBlocking(t *testing.T) {
 		}()
 	})
 
+	fnb := newPoolRespFlow(client, 429, nil)
+	addon.flowInjected.Tag(fnb.Id, "memA") // production injection-time tag
 	start := time.Now()
-	addon.Response(newPoolRespFlow(client, 429, nil))
+	addon.Response(fnb)
 	elapsed := time.Since(start)
 	if elapsed > 200*time.Millisecond {
 		t.Fatalf("Response blocked %v on failover callback; must be non-blocking", elapsed)
@@ -273,7 +284,9 @@ func TestFailoverAuditEvent(t *testing.T) {
 	addon.auditLog = logger
 	client := setupAddonConn(addon, "auth.example.com:443")
 
-	addon.Response(newPoolRespFlow(client, 429, []byte(`{"error":"rate_limited"}`)))
+	fae := newPoolRespFlow(client, 429, []byte(`{"error":"rate_limited"}`))
+	addon.flowInjected.Tag(fae.Id, "memA") // production injection-time tag
+	addon.Response(fae)
 
 	if err := logger.Close(); err != nil {
 		t.Fatalf("logger close: %v", err)
@@ -317,6 +330,7 @@ func TestPoolForResponseResolvesActiveMember(t *testing.T) {
 	addon, _, prPtr := setupPoolAddon(t, "memA", "memB")
 	client := setupAddonConn(addon, "auth.example.com:443")
 	f := newPoolRespFlow(client, 429, nil)
+	addon.flowInjected.Tag(f.Id, "memA") // production injection-time tag
 
 	pool, member, _, pr, ok := addon.poolForResponse(f)
 	if !ok {
