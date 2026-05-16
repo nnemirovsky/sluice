@@ -952,22 +952,24 @@ func (a *SluiceAddon) resolveOAuthResponseAttribution(f *mitmproxy.Flow, matched
 	realRefresh := extractRequestRefreshToken(reqBody, reqCT)
 	member, ok := a.refreshAttr.Recover(realRefresh)
 	if !ok {
-		// Recovery failed. The refresh may legitimately belong to a plain
-		// OAuth credential that shares this token URL (not a pool member);
-		// only attribute to that plain credential when the
-		// deterministic-first match itself is NOT pooled AND no per-member
-		// refresh tag was recorded for it (a pooled refresh always records
-		// a tag in buildPooledMemberPairs, so a missing tag means this was
-		// not a pooled refresh). Otherwise fail closed: never misfile a
-		// pooled member's rotated tokens under the wrong entry (R1).
-		if matchedCred != "" && pr.PoolForMember(matchedCred) == "" {
-			log.Printf("[ADDON-OAUTH] token URL shared with pool %q but no pooled "+
-				"refresh tag; attributing to plain credential %q", poolName, matchedCred)
-			return oauthRespAttribution{phantomName: matchedCred, persistMember: matchedCred}
-		}
-		log.Printf("[ADDON-OAUTH] R1 fail-closed: pooled token URL for pool %q but owning member "+
-			"could not be recovered from the injected refresh token; skipping vault write "+
-			"(next refresh will retry)", poolName)
+		// Recovery failed AND a pool shares this token URL (the
+		// poolName == "" plain-only case already returned above with a
+		// normal 1:1 persist to matchedCred). We cannot prove this
+		// response is not a pooled refresh: a pooled refresh always
+		// records a tag in buildPooledMemberPairs, but that tag can
+		// expire (refreshAttrTTL) or be consumed before a slow response
+		// comes back, so a missing tag is NOT evidence of "plain, not
+		// pooled". Attributing to the deterministic-first plain
+		// credential here would misfile a pooled member's rotated tokens
+		// under the plain entry — exactly the R1 ("never guess")
+		// violation. Strict fail-closed: skip the vault write. The agent
+		// still receives phantoms (the swap ran), and the next refresh
+		// cycle re-tags and persists correctly. A genuinely plain-only
+		// token URL is unaffected because it never reaches here.
+		log.Printf("[ADDON-OAUTH] R1 fail-closed: token URL shared with pool %q but the "+
+			"owning member could not be recovered from the injected refresh token "+
+			"(no live tag); skipping vault write to avoid misfiling a pooled refresh "+
+			"under the wrong credential (next refresh will retry)", poolName)
 		return oauthRespAttribution{phantomName: poolName, pooled: true, skipPersist: true}
 	}
 	// The recovered member's own pool is authoritative (a membership change

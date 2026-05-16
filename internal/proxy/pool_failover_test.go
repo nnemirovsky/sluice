@@ -336,6 +336,12 @@ func TestPoolForResponseResolvesActiveMember(t *testing.T) {
 // binding is on api.openai.com, the OAuth refresh hits auth.openai.com. The
 // CONNECT-host reverse mapping in poolForResponse therefore CANNOT match a
 // token-endpoint response — only the token-URL-index path can.
+//
+// poolName/memberA/memberB are parameterized on purpose: this is a general
+// split-host pool fixture and a multi-pool test may legitimately pass other
+// names. unparam only sees the current callers all using codex_pool/memA/memB.
+//
+//nolint:unparam
 func setupPoolAddonSplitHost(t *testing.T, poolName, memberA, memberB string) (*SluiceAddon, *atomic.Pointer[vault.PoolResolver]) {
 	t.Helper()
 
@@ -399,10 +405,19 @@ func TestTokenEndpointHostFailoverOnPooledMember(t *testing.T) {
 		t.Fatalf("pre-failover active = %q, want memA", got)
 	}
 
+	// A genuine pooled refresh ALWAYS goes through pass-2, which records
+	// the real-refresh -> member attribution tag (buildPooledMemberPairs).
+	// Model that so the response carries recoverable pool-usage evidence —
+	// post-Finding-3 a token-endpoint failure with NO pool-usage evidence
+	// is intentionally NOT failed over (it could be a plain credential
+	// merely sharing the token URL), so a realistic pooled-refresh
+	// regression must tag like production does.
+	addon.refreshAttr.Tag("A-refresh-old", "memA")
+
 	// Sanity: the CONNECT-host reverse mapping alone must NOT match here
 	// (this is exactly the gap CRITICAL-2 describes). poolForResponse must
 	// still succeed via the token-URL index path.
-	f := newPoolRespFlow(client, 400, []byte(`{"error":"invalid_grant"}`))
+	f := newPoolRespFlowBody(client, 400, "A-refresh-old", []byte(`{"error":"invalid_grant"}`))
 	pool, member, _, _, ok := addon.poolForResponse(f)
 	if !ok {
 		t.Fatal("poolForResponse: token-endpoint response on a pooled member must be attributed (CRITICAL-2 fix); got ok=false")
@@ -419,7 +434,8 @@ func TestTokenEndpointHostFailoverOnPooledMember(t *testing.T) {
 	})
 
 	// A token-endpoint invalid_grant must cool memA and switch to memB.
-	addon.Response(newPoolRespFlow(client, 400, []byte(`{"error":"invalid_grant"}`)))
+	// Peek (failover path) does not consume the tag, so it is still live.
+	addon.Response(newPoolRespFlowBody(client, 400, "A-refresh-old", []byte(`{"error":"invalid_grant"}`)))
 
 	if active, _ := pr.ResolveActive("codex_pool"); active != "memB" {
 		t.Fatalf("post-failover active = %q, want memB (token-endpoint auth failure must fail over)", active)
@@ -643,30 +659,85 @@ func TestTokenEndpointFailover3MemberAttributesMiddleMember(t *testing.T) {
 	}
 }
 
-// TestTokenEndpointFailoverFallsBackToActiveMember asserts the documented
-// fallback: when the real refresh token cannot be recovered from the body
-// (no attribution tag — e.g. the request was not driven through pass-2),
-// poolForResponse cools the ACTIVE member, never blindly idx.Match's first
-// index entry.
-func TestTokenEndpointFailoverFallsBackToActiveMember(t *testing.T) {
+// TestTokenEndpointFailoverFailClosedWithoutPoolUsageEvidence is the
+// Finding 3 regression. A token-endpoint 401 / invalid_grant on a token URL
+// that a pool shares must NOT cool a pool member when there is no evidence
+// the failing request actually used the pool. The pre-Finding-3 code
+// blindly fell back to the pool's ACTIVE member on a missing tag, so a
+// PLAIN (non-pool) OAuth credential that merely shares the token URL would,
+// on its own invalid_grant, cool an unrelated active pool member and park
+// it. The fix returns ok=false unless a refreshAttr OR flowInjected tag
+// proves the request went through the pooled injection path.
+//
+// This test MUST fail before the fix: the old active-member fallback cools
+// memB even though nothing tied the failing request to the pool.
+func TestTokenEndpointFailoverFailClosedWithoutPoolUsageEvidence(t *testing.T) {
 	addon, prPtr := setupPoolAddonSplitHost(t, "codex_pool", "memA", "memB")
 	client := setupAddonConn(addon, "auth.example.com:443")
 	pr := prPtr.Load()
 
-	// memA cooled -> memB active. NO refreshAttr tag is recorded, and the
-	// body's refresh token is not in the attribution map, so Peek misses.
+	// memA cooled -> memB active. NO refreshAttr tag, NO flowInjected tag:
+	// the failing request carries zero evidence it used the pool (this is
+	// exactly the shape of a plain non-pool OAuth credential that merely
+	// shares the token URL hitting its own invalid_grant).
+	memBPre, _ := pr.CooldownUntil("memB")
 	pr.MarkCooldown("memA", time.Now().Add(90*time.Second), "429")
 	if got, _ := pr.ResolveActive("codex_pool"); got != "memB" {
 		t.Fatalf("active = %q, want memB", got)
 	}
 
-	f := newPoolRespFlowBody(client, 400, "untagged-refresh", []byte(`{"error":"invalid_grant"}`))
+	f := newPoolRespFlowBody(client, 400, "unrelated-plain-refresh", []byte(`{"error":"invalid_grant"}`))
+	pool, member, _, _, ok := addon.poolForResponse(f)
+	if ok {
+		t.Fatalf("poolForResponse must fail closed (ok=false) with no pool-usage "+
+			"evidence; got ok=true pool=%q member=%q — Finding 3: a plain credential "+
+			"sharing the token URL would cool an unrelated active pool member", pool, member)
+	}
+
+	// Drive the full Response path and assert NO pool member was cooled.
+	addon.Response(f)
+	if _, cooling := pr.CooldownUntil("memB"); cooling {
+		t.Fatal("memB (active member) was cooled by an unattributed shared-token-URL " +
+			"failure — Finding 3 over-application of the fallback")
+	}
+	if bU, _ := pr.CooldownUntil("memB"); !bU.Equal(memBPre) {
+		t.Fatalf("memB cooldown changed (%v -> %v) despite no pool-usage evidence", memBPre, bU)
+	}
+	// memA's original 429 window must be untouched too.
+	if aU, c := pr.CooldownUntil("memA"); !c {
+		t.Fatal("memA should still be on its original 429 window")
+	} else if time.Until(aU) < 60*time.Second {
+		t.Fatalf("memA 429 window was shortened/cleared: %s left", time.Until(aU))
+	}
+}
+
+// TestTokenEndpointFailoverFlowInjectedTagFailsOver is the companion to the
+// fail-closed test: when the refreshAttr tag is absent but the
+// injection-time flowInjected tag IS present (genuine pooled usage proven
+// by the flow ID), the failover MUST still cool the injected member. This
+// guards against over-restricting the Finding 3 fix.
+func TestTokenEndpointFailoverFlowInjectedTagFailsOver(t *testing.T) {
+	addon, prPtr := setupPoolAddonSplitHost(t, "codex_pool", "memA", "memB")
+	client := setupAddonConn(addon, "auth.example.com:443")
+	pr := prPtr.Load()
+
+	pr.MarkCooldown("memA", time.Now().Add(90*time.Second), "429")
+	if got, _ := pr.ResolveActive("codex_pool"); got != "memB" {
+		t.Fatalf("active = %q, want memB", got)
+	}
+
+	// No refreshAttr tag (e.g. it expired), but the request DID go through
+	// the pooled injection path, so flowInjected carries memB for this flow.
+	f := newPoolRespFlowBody(client, 400, "expired-refresh", []byte(`{"error":"invalid_grant"}`))
+	addon.flowInjected.Tag(f.Id, "memB")
+
 	pool, member, _, _, ok := addon.poolForResponse(f)
 	if !ok {
-		t.Fatal("poolForResponse: expected attribution via active-member fallback")
+		t.Fatal("poolForResponse: a flow-injection-tagged pooled refresh must still fail over")
 	}
 	if pool != "codex_pool" || member != "memB" {
-		t.Fatalf("fallback got pool=%q member=%q, want codex_pool/memB (active member, NOT idx.Match's memA)", pool, member)
+		t.Fatalf("got pool=%q member=%q, want codex_pool/memB (flowInjected tag is "+
+			"valid pool-usage evidence — Finding 3 must not over-restrict)", pool, member)
 	}
 }
 

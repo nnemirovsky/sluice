@@ -236,11 +236,7 @@ func (a *SluiceAddon) poolForResponse(f *mitmproxy.Flow) (pool, activeMember, pr
 	if idx := a.oauthIndex.Load(); idx != nil && f.Request != nil {
 		matches := idx.MatchAll(f.Request.URL)
 		pool := ""
-		matched := ""
 		for _, c := range matches {
-			if matched == "" {
-				matched = c // preserve the deterministic-first as last resort
-			}
 			if p := pr.PoolForMember(c); p != "" {
 				pool = p
 				break
@@ -259,29 +255,56 @@ func (a *SluiceAddon) poolForResponse(f *mitmproxy.Flow) (pool, activeMember, pr
 					return ownerPool, owner, proto, pr, true
 				}
 				// owner is no longer in any pool (membership change
-				// raced the failure); fall through to the active-member
-				// fallback below for a still-meaningful attribution.
-			}
-			// Fallback ONLY when the real refresh token cannot be
-			// extracted / attributed: cool the ACTIVE member rather
-			// than blindly the first index entry. The active member is
-			// the one whose token was most likely just injected, so it
-			// is strictly better than idx.Match's deterministic-first.
-			if active, aok := pr.ResolveActive(pool); aok && active != "" {
-				log.Printf("[POOL-FAILOVER] pool %q: could not attribute "+
-					"token-endpoint failure via injected refresh token; "+
-					"falling back to active member %q", pool, active)
-				return pool, active, proto, pr, true
-			}
-			// Last resort: a pooled index match if any (preserves prior
-			// behavior when even ResolveActive cannot decide; better than
-			// no attribution at all).
-			for _, c := range matches {
-				if pr.PoolForMember(c) != "" {
-					return pool, c, proto, pr, true
+				// raced the failure); the refresh-attr tag still proves
+				// THIS request used the pool, so fall through to the
+				// active-member fallback below for a still-meaningful
+				// attribution.
+				if active, aok := pr.ResolveActive(pool); aok && active != "" {
+					log.Printf("[POOL-FAILOVER] pool %q: token-endpoint failure "+
+						"owner %q left the pool (membership raced); falling back "+
+						"to active member %q", pool, owner, active)
+					return pool, active, proto, pr, true
 				}
 			}
-			return pool, matched, proto, pr, true
+			// Finding 3: the refresh-attr tag could not attribute this
+			// failure. A blind ResolveActive / first-index fallback here
+			// over-applies the cooldown: a PLAIN (non-pool) OAuth
+			// credential that merely SHARES this token URL with a pool
+			// would, on its own 401 / invalid_grant, cool an unrelated
+			// active pool member even though the failing request never
+			// used the pool. The active-member fallback is only sound
+			// when there is independent evidence THIS request actually
+			// went through the pooled injection path. The injection-time
+			// flow tag (set by buildPooledMemberPairs' sibling
+			// flowInjected.Tag) is exactly that evidence and is keyed by
+			// flow ID, so it survives a missing/expired refresh-attr tag
+			// for a genuinely pooled refresh.
+			if f.Id != uuid.Nil {
+				if injected, iok := a.flowInjected.Recover(f.Id); iok && injected != "" {
+					if injPool := pr.PoolForMember(injected); injPool != "" {
+						return injPool, injected, proto, pr, true
+					}
+					// The injected member left the pool but the flow tag
+					// still proves this request used the pool: cool the
+					// pool's current active member.
+					if active, aok := pr.ResolveActive(pool); aok && active != "" {
+						log.Printf("[POOL-FAILOVER] pool %q: token-endpoint failure "+
+							"injected member %q left the pool; falling back to "+
+							"active member %q", pool, injected, active)
+						return pool, active, proto, pr, true
+					}
+				}
+			}
+			// No refresh-attr tag AND no flow-injection tag: there is no
+			// evidence this request used the pool. It is most likely a
+			// plain OAuth credential that only happens to share the token
+			// URL. Return ok=false so NO pool member is cooled (a blind
+			// fallback here would park an innocent active member).
+			log.Printf("[POOL-FAILOVER] pool %q: token-endpoint failure on a "+
+				"shared token URL with no pooled-usage evidence (no refresh-attr "+
+				"or flow-injection tag); not cooling any member (likely a plain "+
+				"OAuth credential sharing this token URL)", pool)
+			return "", "", "", nil, false
 		}
 	}
 	return "", "", "", nil, false

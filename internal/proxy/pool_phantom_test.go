@@ -418,3 +418,202 @@ func TestChokepointPlainCredentialUnchanged(t *testing.T) {
 		t.Errorf("plain cred phantom changed; body=%q", body)
 	}
 }
+
+// plainCredWithTokenURL builds a plain (non-pool) OAuth credential envelope
+// with an explicit token URL.
+func plainCredWithTokenURL(t *testing.T, access, refresh, tokenURL string) string {
+	t.Helper()
+	c := &vault.OAuthCredential{
+		AccessToken:  access,
+		RefreshToken: refresh,
+		TokenURL:     tokenURL,
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("marshal oauth cred: %v", err)
+	}
+	return string(data)
+}
+
+// TestR1FailClosedPlainCredFirstMatchSharesPoolTokenURL is the Copilot
+// Finding 1 regression. A PLAIN (non-pool) OAuth credential sorts FIRST in
+// credential_meta and shares the SAME token URL as a pool. A pooled refresh
+// response arrives whose owning member cannot be recovered (no live
+// refresh-attr tag — it expired, or the response is slow). idx.Match
+// returns the plain credential (first index entry). Before the fix,
+// resolveOAuthResponseAttribution took the "matchedCred not pooled" branch
+// and persisted the rotated POOLED tokens under the PLAIN credential's
+// vault entry — an R1 ("never guess") violation that misfiles one pool
+// member's rotated tokens under an unrelated plain credential.
+//
+// The fix: once ANY pool shares the token URL and the owning member cannot
+// be recovered, skip persistence entirely (fail closed). The swap still
+// runs so the agent never sees real tokens. A genuinely plain-only token
+// URL (no pool sharing) must still persist normally — covered by the
+// sub-test below so the fix is not over-restrictive.
+//
+// MUST fail before the fix: the plain credential's vault entry would be
+// overwritten with the pooled refresh's rotated tokens.
+func TestR1FailClosedPlainCredFirstMatchSharesPoolTokenURL(t *testing.T) {
+	const poolName = "codex_pool"
+	// "aaa_plain" sorts/indexes before the pool members so idx.Match (first
+	// entry) returns it — exactly the Finding 1 collision shape.
+	provider := &addonWritableProvider{
+		creds: map[string]string{
+			"aaa_plain": poolMemberCred(t, "plain-access-old", "plain-refresh-old"),
+			"memA":      poolMemberCred(t, "A-access-old", "A-refresh-old"),
+			"memB":      poolMemberCred(t, "B-access-old", "B-refresh-old"),
+		},
+	}
+	bindings := []vault.Binding{{
+		Destination: "auth.example.com",
+		Ports:       []int{443},
+		Credential:  poolName,
+	}}
+	resolver, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatalf("NewBindingResolver: %v", err)
+	}
+	var resolverPtr atomic.Pointer[vault.BindingResolver]
+	resolverPtr.Store(resolver)
+
+	addon := NewSluiceAddon(WithResolver(&resolverPtr), WithProvider(provider))
+	addon.persistDone = make(chan struct{}, 10)
+
+	// aaa_plain is FIRST in the metas slice -> first index entry -> what
+	// idx.Match returns for testOAuthTokenURL.
+	addon.UpdateOAuthIndex([]store.CredentialMeta{
+		{Name: "aaa_plain", CredType: "oauth", TokenURL: testOAuthTokenURL},
+		{Name: "memA", CredType: "oauth", TokenURL: testOAuthTokenURL},
+		{Name: "memB", CredType: "oauth", TokenURL: testOAuthTokenURL},
+	})
+	pool := store.Pool{Name: poolName, Strategy: store.PoolStrategyFailover}
+	pool.Members = []store.PoolMember{
+		{Credential: "memA", Position: 0},
+		{Credential: "memB", Position: 1},
+	}
+	var prPtr atomic.Pointer[vault.PoolResolver]
+	prPtr.Store(vault.NewPoolResolver([]store.Pool{pool}, nil))
+	addon.SetPoolResolver(&prPtr)
+
+	client := setupAddonConn(addon, "auth.example.com:443")
+
+	// Precondition: idx.Match returns the plain credential (first entry),
+	// while MatchAll reveals a pool also shares the token URL.
+	if idx := addon.oauthIndex.Load(); idx != nil {
+		u, _ := url.Parse(testOAuthTokenURL)
+		if m, _ := idx.Match(u); m != "aaa_plain" {
+			t.Fatalf("precondition: idx.Match must return the plain first entry, got %q", m)
+		}
+	}
+
+	beforePlain := provider.creds["aaa_plain"]
+	beforeA := provider.creds["memA"]
+	beforeB := provider.creds["memB"]
+
+	// A pooled refresh response. NO refresh-attr tag is recorded (it
+	// expired / the response is slow), so the owning member cannot be
+	// recovered. The body's refresh token is untracked.
+	resp := newPoolReqRespFlow(client,
+		[]byte("grant_type=refresh_token&refresh_token=untracked-pooled-refresh"),
+		mustJSON(t, map[string]interface{}{
+			"access_token":  "rotated-pooled-access",
+			"refresh_token": "rotated-pooled-refresh",
+			"expires_in":    3600,
+		}))
+	addon.Response(resp)
+
+	// No vault persist must have been scheduled to ANYONE.
+	select {
+	case <-addon.persistDone:
+		t.Fatal("R1 fail-closed violated (Finding 1): a vault persist was scheduled " +
+			"for a pooled refresh whose owner could not be recovered, while a plain " +
+			"credential sorted first and shared the token URL")
+	default:
+	}
+	if provider.creds["aaa_plain"] != beforePlain {
+		t.Fatal("Finding 1: pooled refresh tokens were misfiled under the PLAIN " +
+			"credential 'aaa_plain' (R1 'never guess' violation)")
+	}
+	if provider.creds["memA"] != beforeA || provider.creds["memB"] != beforeB {
+		t.Fatal("Finding 1: pooled refresh tokens were written to a pool member " +
+			"without a recovered owner (must fail closed)")
+	}
+
+	// Agent must still be protected: the real rotated tokens are swapped to
+	// the pool-stable phantoms even though nothing was persisted.
+	body := string(resp.Response.Body)
+	if strings.Contains(body, "rotated-pooled-access") || strings.Contains(body, "rotated-pooled-refresh") {
+		t.Errorf("fail-closed must still strip real tokens; body=%q", body)
+	}
+	if !strings.Contains(body, poolStablePhantomAccess(poolName)) {
+		t.Errorf("fail-closed response missing pool-stable phantom; body=%q", body)
+	}
+}
+
+// TestR1PlainOnlyTokenURLStillPersists is the no-regression companion to
+// Finding 1: a plain OAuth credential whose token URL is NOT shared by any
+// pool must still persist its rotated tokens normally. The fix only skips
+// persistence when a pool shares the token URL, so this 1:1 plain path is
+// unchanged.
+func TestR1PlainOnlyTokenURLStillPersists(t *testing.T) {
+	const plainTokenURL = "https://plain-only.example.com/oauth/token"
+	provider := &addonWritableProvider{
+		creds: map[string]string{
+			// A pool exists but on a DIFFERENT token URL, so it does not
+			// share plainTokenURL.
+			"plainCred": plainCredWithTokenURL(t, "p-access-old", "p-refresh-old", plainTokenURL),
+			"memA":      poolMemberCred(t, "A-access-old", "A-refresh-old"),
+			"memB":      poolMemberCred(t, "B-access-old", "B-refresh-old"),
+		},
+	}
+	bindings := []vault.Binding{{
+		Destination: "plain-only.example.com",
+		Ports:       []int{443},
+		Credential:  "plainCred",
+	}}
+	resolver, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatalf("NewBindingResolver: %v", err)
+	}
+	var resolverPtr atomic.Pointer[vault.BindingResolver]
+	resolverPtr.Store(resolver)
+
+	addon := NewSluiceAddon(WithResolver(&resolverPtr), WithProvider(provider))
+	addon.persistDone = make(chan struct{}, 10)
+	addon.UpdateOAuthIndex([]store.CredentialMeta{
+		{Name: "plainCred", CredType: "oauth", TokenURL: plainTokenURL},
+		// Pool members on the OTHER token URL (testOAuthTokenURL).
+		{Name: "memA", CredType: "oauth", TokenURL: testOAuthTokenURL},
+		{Name: "memB", CredType: "oauth", TokenURL: testOAuthTokenURL},
+	})
+	pool := store.Pool{Name: "codex_pool", Strategy: store.PoolStrategyFailover}
+	pool.Members = []store.PoolMember{
+		{Credential: "memA", Position: 0},
+		{Credential: "memB", Position: 1},
+	}
+	var prPtr atomic.Pointer[vault.PoolResolver]
+	prPtr.Store(vault.NewPoolResolver([]store.Pool{pool}, nil))
+	addon.SetPoolResolver(&prPtr)
+
+	client := setupAddonConn(addon, "plain-only.example.com:443")
+	resp := newTestResponseFlow(client, plainTokenURL, 200, mustJSON(t, map[string]interface{}{
+		"access_token":  "p-real-access-NEW",
+		"refresh_token": "p-real-refresh-NEW",
+		"expires_in":    3600,
+	}), "application/json")
+	addon.Response(resp)
+	waitAddonPersist(t, addon)
+
+	// The plain credential's vault entry must now hold the rotated tokens.
+	updated := provider.creds["plainCred"]
+	if !strings.Contains(updated, "p-real-access-NEW") || !strings.Contains(updated, "p-real-refresh-NEW") {
+		t.Fatalf("plain-only token URL must still persist rotated tokens to the "+
+			"plain credential (no Finding 1 over-restriction); vault=%q", updated)
+	}
+	// Agent still gets phantoms, not the real rotated tokens.
+	body := string(resp.Response.Body)
+	if strings.Contains(body, "p-real-access-NEW") || strings.Contains(body, "p-real-refresh-NEW") {
+		t.Errorf("plain-only: real token leaked to agent; body=%q", body)
+	}
+}

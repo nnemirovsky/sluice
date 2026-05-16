@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1402,5 +1403,113 @@ func TestBrokerCoalesceCrossChannelFirstWins(t *testing.T) {
 	}
 	if first.resp != ResponseAlwaysAllow && first.resp != ResponseDeny {
 		t.Fatalf("unexpected response %v", first.resp)
+	}
+}
+
+// TestBrokerResolveDetachLostWakeup deterministically forces the exact
+// resolve/detach interleave from Copilot Finding 2: the primary's Resolve
+// has deleted the waiter but the coalesced subscriber's deadline fires in
+// the window before the fan-out send. Pre-fix, Resolve sent AFTER releasing
+// b.mu, so the subscriber's detachSub (no waiter found) + non-blocking read
+// (subCh still empty) returned a spurious ResponseDeny and the buffered
+// allow was dropped — a coalesced caller wrongly denied. Post-fix the
+// fan-out send happens INSIDE the locked resolution section, so the
+// subscriber's detachSub serializes against it via b.mu: by the time the
+// subscriber's non-blocking read runs, the allow is already buffered on its
+// cap-1 chan and it returns ResponseAllowOnce.
+//
+// The interleave is forced with two test-only seams (no sleeps for the
+// critical ordering):
+//   - subDeadlineGate parks the subscriber at the very top of waitSub's
+//     deadline branch (before detachSub) until the test releases it.
+//   - resolveAfterDeleteHook fires inside Resolve right after the waiter is
+//     deleted (lock held), and is where the test releases the subscriber so
+//     its detach/read races the fan-out exactly in the lost-wakeup window.
+func TestBrokerResolveDetachLostWakeup(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const dest = "lostwakeup.example.com"
+	const port = 443
+
+	// Long-lived primary so it stays pending while the sub attaches.
+	primaryOut := make(chan result, 1)
+	go func() {
+		resp, err := broker.Request(dest, port, "https", 5*time.Second)
+		primaryOut <- result{resp, err}
+	}()
+	var primaryID string
+	for {
+		reqs := ch.getRequests()
+		if len(reqs) == 1 {
+			primaryID = reqs[0].ID
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Park the subscriber at the start of its deadline branch.
+	subAtGate := make(chan struct{})
+	releaseSub := make(chan struct{})
+	var gateOnce sync.Once
+	broker.subDeadlineGate = func() {
+		gateOnce.Do(func() { close(subAtGate) })
+		<-releaseSub
+	}
+
+	// Subscriber with a very short timeout: it attaches, coalesces onto the
+	// primary, then its deadline fires and it blocks in subDeadlineGate.
+	subOut := make(chan result, 1)
+	go func() {
+		resp, err := broker.Request(dest, port, "https", 20*time.Millisecond)
+		subOut <- result{resp, err}
+	}()
+	// Wait for it to coalesce (count == 2) so it is in w.subs when Resolve
+	// deletes the waiter — the precondition for the lost-wakeup window.
+	for broker.CoalescedCount(primaryID) < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	// Wait until the subscriber's deadline has fired and it is parked at the
+	// gate (still attached, detachSub not yet called).
+	<-subAtGate
+
+	// Inside Resolve, after the waiter is deleted (lock held), release the
+	// parked subscriber so its detachSub + non-blocking read races the
+	// fan-out send exactly in the lost-wakeup window. Yield generously so
+	// the subscriber goroutine is scheduled and (post-fix) blocks on b.mu
+	// inside detachSub before this hook returns and Resolve performs the
+	// under-lock fan-out send.
+	broker.resolveAfterDeleteHook = func() {
+		close(releaseSub)
+		for i := 0; i < 1000; i++ {
+			runtime.Gosched()
+		}
+	}
+
+	if !broker.Resolve(primaryID, ResponseAllowOnce) {
+		t.Fatal("Resolve returned false for primary")
+	}
+
+	pr := <-primaryOut
+	if pr.resp != ResponseAllowOnce {
+		t.Fatalf("primary: expected ResponseAllowOnce, got %v (err %v)", pr.resp, pr.err)
+	}
+
+	select {
+	case sr := <-subOut:
+		// The whole point of Finding 2: the coalesced subscriber whose
+		// deadline fired in the resolve window must observe the operator's
+		// ALLOW, not a spurious timeout deny.
+		if sr.resp != ResponseAllowOnce {
+			t.Fatalf("coalesced subscriber wrongly got %v (err %v); want ResponseAllowOnce "+
+				"— lost-wakeup: Resolve deleted the waiter then the sub's deadline "+
+				"fired before the fan-out send (Finding 2)", sr.resp, sr.err)
+		}
+		if sr.err != nil {
+			t.Fatalf("coalesced subscriber got ALLOW but with error %v; the resolved "+
+				"decision must come back clean", sr.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("coalesced subscriber never returned (deadlock?)")
 	}
 }

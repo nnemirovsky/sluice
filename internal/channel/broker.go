@@ -70,6 +70,22 @@ type Broker struct {
 
 	// nowFunc is used for testing to control time. If nil, time.Now is used.
 	nowFunc func() time.Time
+
+	// resolveAfterDeleteHook is a test-only seam invoked inside Resolve
+	// immediately after the waiter has been deleted from b.waiters and the
+	// coalesced count recorded, but before the primary/subscriber response
+	// sends. It runs while b.mu is held (post-fix the sends are also under
+	// the lock), so a test can drive a coalesced subscriber's deadline path
+	// concurrently and assert it cannot observe a lost wakeup. nil in
+	// production.
+	resolveAfterDeleteHook func()
+
+	// subDeadlineGate is a test-only seam invoked at the very top of
+	// waitSub's deadline branch, before detachSub. A test uses it to park a
+	// coalesced subscriber exactly at the start of its timeout-handling path
+	// so the resolve/detach interleave can be forced deterministically
+	// without sleeps. nil in production.
+	subDeadlineGate func()
 }
 
 // waiter tracks a pending approval request and its response channel.
@@ -391,6 +407,9 @@ func (b *Broker) waitSub(primaryID string, subCh chan Response, deadlineC <-chan
 		b.detachSub(primaryID, subCh)
 		return ResponseDeny, fmt.Errorf("approval broker shutting down")
 	case <-deadlineC:
+		if b.subDeadlineGate != nil {
+			b.subDeadlineGate()
+		}
 		b.detachSub(primaryID, subCh)
 		// The primary may have resolved between the deadline firing and
 		// the detach completing. The sub chan is buffered (cap 1), so a
@@ -544,18 +563,35 @@ func (b *Broker) Resolve(id string, resp Response) bool {
 			delete(b.dedupIndex, w.dedupKey)
 		}
 		b.recordCoalescedLocked(id, w.count)
+
+		if b.resolveAfterDeleteHook != nil {
+			b.resolveAfterDeleteHook()
+		}
+
+		// Deliver the primary response and fan it to every coalesced
+		// subscriber WHILE STILL HOLDING b.mu. The primary ch and every
+		// sub chan are buffered cap-1 and receive exactly one value, so
+		// these sends cannot block — holding the lock here is safe and
+		// closes the resolve/detach lost-wakeup window: a subscriber
+		// whose deadline fires takes b.mu in detachSub, so it serializes
+		// against this section. It therefore either detaches BEFORE this
+		// runs (removed from w.subs, gets no send, returns its own
+		// timeout — correct, it never coalesced under this decision) or
+		// AFTER (the response is already buffered on its cap-1 chan, and
+		// waitSub's post-detach non-blocking read picks it up instead of
+		// denying an approved request). There is no instant where a sub
+		// can observe "waiter gone AND response not yet sent".
+		w.ch <- resp
+		for _, sub := range w.subs {
+			sub <- resp
+		}
 	}
 	b.mu.Unlock()
 
 	if ok {
-		w.ch <- resp
-		// Fan the same response to every coalesced subscriber. All sub
-		// chans are buffered (cap 1), so a send to a subscriber that
-		// already timed out and detached never blocks.
-		for _, sub := range w.subs {
-			sub <- resp
-		}
-		// Cancel on all channels so they can clean up (e.g. edit message).
+		// Cancel on all channels so they can clean up (e.g. edit
+		// message). This calls into channel implementations that may do
+		// blocking network I/O, so it must stay OUTSIDE b.mu.
 		b.cancelOnChannels(id)
 	}
 	return ok
