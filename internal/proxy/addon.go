@@ -1003,8 +1003,8 @@ func (a *SluiceAddon) resolveOAuthResponseAttribution(f *mitmproxy.Flow, matched
 		reqBody = f.Request.Body
 	}
 	realRefresh := extractRequestRefreshToken(reqBody, reqCT)
-	member, ok := a.refreshAttr.Recover(realRefresh)
-	if ok && pr.PoolForMember(member) == "" {
+	member, capPool, capEpoch, capPooled, ok := a.refreshAttr.RecoverIdentity(realRefresh)
+	if ok && !capPooled && pr.PoolForMember(member) == "" {
 		// Finding 1: the injected refresh token was tagged under a name
 		// that is NOT a pool member. That tag is only ever recorded by
 		// the PLAIN-credential injection path (buildOAuthPhantomPairs'
@@ -1044,13 +1044,33 @@ func (a *SluiceAddon) resolveOAuthResponseAttribution(f *mitmproxy.Flow, matched
 			"under the wrong credential (next refresh will retry)", poolName)
 		return oauthRespAttribution{phantomName: poolName, pooled: true, skipPersist: true}
 	}
-	// The recovered member's own pool is authoritative (a membership change
-	// could have raced; attribute to whatever pool the member is in now).
-	if mp := pr.PoolForMember(member); mp != "" {
-		poolName = mp
+	// Finding 2 (round 20): the recovered tag is pooled. Do NOT trust the
+	// member's CURRENT pool (pr.PoolForMember / IdentityForMember as they
+	// stand now) — that races a membership change. Validate the pool
+	// identity captured AT INJECTION TIME against the live membership. The
+	// pool whose phantom was actually swapped into this request is capPool
+	// at generation capEpoch; if the member was removed and re-added (a
+	// strictly greater epoch) or moved to a different pool between
+	// injection and this response, attributing/persisting against the new
+	// generation rewrites the response with the wrong-generation pool
+	// phantom and misfiles the rotated tokens. That is the documented
+	// fail-closed/stale case: keep the agent-facing phantom keyed on the
+	// CAPTURED pool (so the swap that already ran stays byte-consistent)
+	// but skip the vault write and the pooled audit attribution.
+	livePool, liveEpoch, liveOK := pr.IdentityForMember(member)
+	if !liveOK || livePool != capPool || liveEpoch != capEpoch {
+		log.Printf("[ADDON-OAUTH] Finding 2 stale: pooled refresh for member %q was injected "+
+			"under pool %q epoch %d but the live membership is %q epoch %d (ok=%v); "+
+			"membership raced (member removed/re-added) — skipping vault write and "+
+			"pooled attribution to avoid misfiling against the wrong generation",
+			member, capPool, capEpoch, livePool, liveEpoch, liveOK)
+		return oauthRespAttribution{phantomName: capPool, pooled: true, skipPersist: true}
 	}
-	log.Printf("[ADDON-OAUTH] R1 attributed pooled refresh to member %q (pool %q)", member, poolName)
-	return oauthRespAttribution{phantomName: poolName, persistMember: member, pooled: true}
+	// Same generation: the captured identity still matches the live
+	// membership, so the response genuinely belongs to capPool at capEpoch.
+	log.Printf("[ADDON-OAUTH] R1 attributed pooled refresh to member %q (pool %q epoch %d)",
+		member, capPool, capEpoch)
+	return oauthRespAttribution{phantomName: capPool, persistMember: member, pooled: true}
 }
 
 // processOAuthResponseIfMatching performs OAuth token phantom swap on the
@@ -1731,10 +1751,28 @@ func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, req
 // token-endpoint failover path). Shared by the CONNECT-host binding loop and
 // the Finding 4 token-host expansion so both record attribution identically.
 func (a *SluiceAddon) buildPooledMemberPairs(poolName, member string, secret vault.SecureBytes) ([]phantomPair, error) {
+	// Finding 2 (round 20): capture the pool identity (pool name +
+	// membership epoch) as observed RIGHT NOW, at injection time, and pin
+	// it to the refresh-attribution tag. The 2xx persist path validates
+	// this captured identity against the live membership before persisting
+	// so a response that arrives after the member was removed and re-added
+	// (a strictly greater epoch) is not silently misfiled against the new
+	// generation. Fall back to the resolveInjectionTarget poolName with a
+	// sentinel epoch if the resolver cannot supply an identity (e.g. the
+	// member just left): the response path's mismatch check then fails
+	// closed rather than guessing.
+	idPool, idEpoch := poolName, int64(-1)
+	if a.poolResolver != nil {
+		if pr := a.poolResolver.Load(); pr != nil {
+			if p, e, ok := pr.IdentityForMember(member); ok {
+				idPool, idEpoch = p, e
+			}
+		}
+	}
 	return buildPooledOAuthPhantomPairs(
 		poolName, member, secret, "ADDON-INJECT",
 		func(realRefresh string) {
-			a.refreshAttr.Tag(realRefresh, member)
+			a.refreshAttr.TagPooled(realRefresh, member, idPool, idEpoch)
 		},
 	)
 }

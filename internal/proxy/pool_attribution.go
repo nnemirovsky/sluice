@@ -172,8 +172,29 @@ type refreshAttribution struct {
 	entries map[string]refreshAttrEntry
 }
 
+// refreshAttrEntry records the member a real refresh token was injected for,
+// plus the INJECTION-TIME pool identity (Finding 2, round 20).
+//
+// Storing only the member name was insufficient: a token-endpoint response
+// arriving after the member was removed and re-added into the same-named pool
+// (a strictly greater membership epoch — the round-18 mechanism) would be
+// attributed via the member's CURRENT pool generation rather than the pool
+// whose phantom was actually swapped into the request. That rewrites the
+// response with the wrong-generation pool phantom and persists/audits against
+// the wrong epoch. The entry therefore captures {pool, epoch} as observed at
+// injection time so the response path can detect a raced membership change
+// and fail closed instead of silently misfiling.
+//
+// Plain (non-pooled) OAuth credentials carry the sentinel pool=="" /
+// epoch==-1 (round-19 Finding 1: a plain refresh on a shared token URL is
+// attributed 1:1 and must never be treated as pooled). pooled reports
+// whether this is a pooled tag so a plain entry with no identity is not
+// confused with a pooled entry whose identity happened to be zero-valued.
 type refreshAttrEntry struct {
 	member  string
+	pool    string
+	epoch   int64
+	pooled  bool
 	expires time.Time
 }
 
@@ -181,28 +202,46 @@ func newRefreshAttribution() *refreshAttribution {
 	return &refreshAttribution{entries: make(map[string]refreshAttrEntry)}
 }
 
-// Tag records that the given real refresh token was injected for member.
-// Called from the pass-2 phantom swap when the phantom being replaced is a
-// pooled credential's `.refresh` phantom. A best-effort opportunistic sweep
-// of expired entries keeps the map bounded without a background goroutine.
-func (r *refreshAttribution) Tag(realRefreshToken, member string) {
-	if realRefreshToken == "" || member == "" {
+func (r *refreshAttribution) tag(realRefreshToken string, e refreshAttrEntry) {
+	if realRefreshToken == "" || e.member == "" {
 		return
 	}
 	now := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.entries) > 0 {
-		for k, e := range r.entries {
-			if now.After(e.expires) {
+		for k, en := range r.entries {
+			if now.After(en.expires) {
 				delete(r.entries, k)
 			}
 		}
 	}
-	r.entries[realRefreshToken] = refreshAttrEntry{
-		member:  member,
-		expires: now.Add(refreshAttrTTL),
-	}
+	e.expires = now.Add(refreshAttrTTL)
+	r.entries[realRefreshToken] = e
+}
+
+// Tag records that the given real refresh token was injected for a PLAIN
+// (non-pooled) OAuth credential. The entry carries the sentinel identity
+// (pool=="", epoch==-1, pooled==false) so the 2xx persist path attributes it
+// 1:1 (round-19 Finding 1) and never runs the pooled epoch-staleness check.
+func (r *refreshAttribution) Tag(realRefreshToken, member string) {
+	r.tag(realRefreshToken, refreshAttrEntry{member: member, epoch: -1})
+}
+
+// TagPooled records that the given real refresh token was injected for a
+// POOL member, capturing the pool identity (pool name + membership epoch)
+// observed at injection time. The 2xx persist path validates this captured
+// identity against the live membership before persisting: if the member was
+// removed and re-added (a strictly greater epoch) or moved to a different
+// pool between injection and response, the response is treated as the
+// documented fail-closed/stale case (Finding 2, round 20).
+func (r *refreshAttribution) TagPooled(realRefreshToken, member, pool string, epoch int64) {
+	r.tag(realRefreshToken, refreshAttrEntry{
+		member: member,
+		pool:   pool,
+		epoch:  epoch,
+		pooled: true,
+	})
 }
 
 // Recover returns the member tagged for the given real refresh token and
@@ -215,20 +254,30 @@ func (r *refreshAttribution) Tag(realRefreshToken, member string) {
 // refresh token, so the tag is dead after one use and must be deleted to
 // bound the map.
 func (r *refreshAttribution) Recover(realRefreshToken string) (string, bool) {
+	member, _, _, _, ok := r.RecoverIdentity(realRefreshToken)
+	return member, ok
+}
+
+// RecoverIdentity is Recover plus the injection-time pool identity. It is
+// single-use (deletes the entry) and used by the 2xx persist path so it can
+// validate the captured {pool, epoch} against the live membership before
+// persisting (Finding 2, round 20). For a plain entry pooled is false and
+// pool/epoch carry the sentinel.
+func (r *refreshAttribution) RecoverIdentity(realRefreshToken string) (member, pool string, epoch int64, pooled, ok bool) {
 	if realRefreshToken == "" {
-		return "", false
+		return "", "", -1, false, false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	e, ok := r.entries[realRefreshToken]
-	if !ok {
-		return "", false
+	e, found := r.entries[realRefreshToken]
+	if !found {
+		return "", "", -1, false, false
 	}
 	delete(r.entries, realRefreshToken)
 	if time.Now().After(e.expires) {
-		return "", false
+		return "", "", -1, false, false
 	}
-	return e.member, true
+	return e.member, e.pool, e.epoch, e.pooled, true
 }
 
 // Peek returns the member tagged for the given real refresh token WITHOUT

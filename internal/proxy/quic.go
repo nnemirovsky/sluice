@@ -598,6 +598,37 @@ func (q *QUICProxy) resolvePoolMember(name string) string {
 	return member
 }
 
+// resolvePoolTarget classifies a binding name. When name is a configured
+// pool, isPool is true and member is the pool's current active member (or
+// "" when the pool is empty/unresolvable). For a plain credential (or when
+// no pool resolver is configured) isPool is false and member == name.
+//
+// Finding 1 (R3 on QUIC): this is the QUIC analogue of
+// SluiceAddon.resolveInjectionTarget. It is required so the QUIC OAuth path
+// can route a pooled binding through buildPooledOAuthPhantomPairs — which
+// keys the agent-facing access phantom on the POOL name (a pool-stable
+// synthetic JWT) rather than re-signing the active member's real JWT. The
+// latter changes the agent-held phantom on every member switch, violating
+// the R3 pool-stable access-token guarantee. Only phantom stability +
+// active-member-secret selection is replicated on QUIC; the documented QUIC
+// limitation (no response-side R1 attribution, no 429/401 failover) stands.
+func (q *QUICProxy) resolvePoolTarget(name string) (member string, isPool bool) {
+	if q.poolResolver == nil {
+		return name, false
+	}
+	pr := q.poolResolver.Load()
+	if pr == nil || !pr.IsPool(name) {
+		return name, false
+	}
+	m, ok := pr.ResolveActive(name)
+	if !ok || m == "" {
+		// Empty/unresolvable pool: keep the pool name so the caller's
+		// provider.Get fails cleanly (no injection) instead of panicking.
+		return "", true
+	}
+	return m, true
+}
+
 // buildPhantomPairs resolves credentials bound to the destination and returns
 // phantom/secret pairs sorted by phantom length descending.
 //
@@ -610,23 +641,42 @@ func (q *QUICProxy) buildPhantomPairs(host string, port int) []phantomPair {
 	var pairs []phantomPair
 	if res := q.resolver.Load(); res != nil {
 		for _, boundName := range res.CredentialsForDestination(host, port, ProtoQUIC.String()) {
-			// Finding 2: expand a pool-named binding to its active
-			// member before the vault lookup. The phantom the agent
-			// holds is keyed on the BOUND name (pool name when pooled,
-			// so it is stable across member switches); only the injected
-			// secret comes from the active member's vault entry.
-			secretName := q.resolvePoolMember(boundName)
+			// Finding 1/2: classify the binding. A pooled binding
+			// resolves to its active member for the vault lookup, but
+			// the agent-facing phantom MUST stay keyed on the POOL name
+			// so it is byte-identical across member switches (R3).
+			member, isPool := q.resolvePoolTarget(boundName)
+			secretName := member
+			if isPool && member == "" {
+				// Empty/unresolvable pool: keep the pool name so the
+				// provider.Get below fails cleanly (no injection).
+				secretName = boundName
+			}
 			secret, err := q.provider.Get(secretName)
 			if err != nil {
 				log.Printf("[QUIC-MITM] credential %q lookup failed: %v", secretName, err)
 				continue
 			}
 			// Check if this is an OAuth credential. If so, build two phantom
-			// pairs (access + refresh) instead of one static pair. The
-			// phantom is keyed on boundName so a pooled OAuth member swap
-			// does not change the phantom the agent already holds.
+			// pairs (access + refresh) instead of one static pair.
 			if vault.IsOAuth(secret.Bytes()) {
-				oauthPairs, parseErr := buildOAuthPhantomPairs(boundName, secret, "QUIC-MITM")
+				var oauthPairs []phantomPair
+				var parseErr error
+				if isPool {
+					// Finding 1 (R3 on QUIC): pool-stable synthetic-JWT
+					// access phantom keyed on the POOL name, refresh
+					// phantom is the deterministic SLUICE_PHANTOM:<pool>
+					// .refresh string, secrets are the ACTIVE member's
+					// real tokens. Byte-identical to the HTTP path so the
+					// agent-held phantom never changes on a member switch.
+					// onRefreshInject is nil: QUIC has no response-side
+					// R1 attribution (documented limitation).
+					oauthPairs, parseErr = buildPooledOAuthPhantomPairs(
+						boundName, secretName, secret, "QUIC-MITM", nil,
+					)
+				} else {
+					oauthPairs, parseErr = buildOAuthPhantomPairs(boundName, secret, "QUIC-MITM")
+				}
 				if parseErr != nil {
 					continue
 				}

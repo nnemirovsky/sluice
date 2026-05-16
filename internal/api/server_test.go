@@ -1988,6 +1988,97 @@ func TestDeleteApiCredentials_CascadesToMeta(t *testing.T) {
 	}
 }
 
+// TestDeleteApiCredentials_MissingVaultSecretIsNotFatal is the Finding 4
+// regression. Two concurrent DELETEs WITHOUT a reloadMu wired both pass the
+// vault.List() existence check, both run the (idempotent) store cleanup, and
+// both call vault.Remove. The loser's vault.Remove returns an os.IsNotExist
+// error because the winner already deleted the .age file. Before the fix the
+// REST handler treated that as a hard HTTP 500 — AFTER the store-side
+// cleanup (meta/bindings/rules) had committed and BEFORE the engine
+// recompile — so the live policy was left stale and the API could not be
+// used to finish a previous partial cleanup. The CLI and Telegram paths
+// already treat os.IsNotExist as success; the REST path must match.
+//
+// Invariant asserted over many interleavings: NO 500 ever (a 500 means the
+// loser aborted after wiping store state, the exact bug), at least one 204,
+// and the final state is fully clean in BOTH the vault and the store.
+func TestDeleteApiCredentials_MissingVaultSecretIsNotFatal(t *testing.T) {
+	for iter := 0; iter < 50; iter++ {
+		st := newTestStore(t)
+		enableHTTPChannel(t, st)
+		v := newTestVault(t)
+		srv := api.NewServer(st, nil, nil, "")
+		srv.SetVault(v)
+		// Deliberately do NOT wire reloadMu (SetEnginePtr): that is what
+		// lets both concurrent handlers pass the List() check and race on
+		// vault.Remove, so the loser hits the os.IsNotExist path the fix
+		// targets. An engine pointer alone (no mutex) still exercises
+		// recompileEngine after the store cleanup.
+		srv.SetEnginePtr(new(atomic.Pointer[policy.Engine]), nil)
+
+		if _, err := v.Add("dup", "value"); err != nil {
+			t.Fatalf("iter %d: add: %v", iter, err)
+		}
+		if _, err := st.AddBinding("api.example.com", "dup", store.BindingOpts{}); err != nil {
+			t.Fatalf("iter %d: add binding: %v", iter, err)
+		}
+
+		t.Setenv("SLUICE_API_TOKEN", "tok")
+		handler := newTestHandler(t, srv, st)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		codes := make([]int, 2)
+		bodies := make([]string, 2)
+		for i := 0; i < 2; i++ {
+			idx := i
+			go func() {
+				defer wg.Done()
+				req := httptest.NewRequest("DELETE", "/api/credentials/dup", nil)
+				req.Header.Set("Authorization", "Bearer tok")
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, req)
+				codes[idx] = rec.Code
+				bodies[idx] = rec.Body.String()
+			}()
+		}
+		wg.Wait()
+
+		has204 := false
+		for i, c := range codes {
+			switch c {
+			case http.StatusNoContent:
+				has204 = true
+			case http.StatusNotFound:
+				// Loser blocked at the List() precondition (the winner
+				// committed first) — acceptable, no store wipe happened.
+			case http.StatusInternalServerError:
+				t.Fatalf("iter %d: Finding 4: DELETE returned 500 (%q) — an "+
+					"already-missing vault secret must NOT be fatal after the "+
+					"store cleanup committed", iter, bodies[i])
+			default:
+				t.Fatalf("iter %d: unexpected status %d (%q)", iter, c, bodies[i])
+			}
+		}
+		if !has204 {
+			t.Fatalf("iter %d: expected at least one 204, got %v", iter, codes)
+		}
+
+		// Final state must be fully clean in BOTH stores (no partial
+		// cleanup left behind by a fail-closed loser).
+		if names, err := v.List(); err != nil {
+			t.Fatalf("iter %d: vault list: %v", iter, err)
+		} else if len(names) != 0 {
+			t.Fatalf("iter %d: vault not clean: %v", iter, names)
+		}
+		if b, err := st.ListBindings(); err != nil {
+			t.Fatalf("iter %d: list bindings: %v", iter, err)
+		} else if len(b) != 0 {
+			t.Fatalf("iter %d: bindings not clean: %d", iter, len(b))
+		}
+	}
+}
+
 func TestPostApiCredentials_StaticWithMetaCreated(t *testing.T) {
 	st := newTestStore(t)
 	enableHTTPChannel(t, st)

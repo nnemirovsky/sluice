@@ -315,8 +315,142 @@ func (s *Store) ListPools() ([]Pool, error) {
 	return result, nil
 }
 
+// PoolReferencedError is returned by RemovePoolIfUnreferenced when one or
+// more bindings still reference the pool by name. It carries the blocking
+// bindings so the caller can render an actionable message. The whole check +
+// delete runs in ONE transaction, so a concurrent "binding add <pool>" can
+// no longer commit in a window between a pre-check and the pool delete.
+type PoolReferencedError struct {
+	Pool     string
+	Bindings []BindingRow
+}
+
+func (e *PoolReferencedError) Error() string {
+	return fmt.Sprintf("pool %q is still referenced by %d binding(s)", e.Pool, len(e.Bindings))
+}
+
+// RemovePoolIfUnreferenced atomically refuses to delete a pool that any
+// binding still references and otherwise deletes it (members + health rows +
+// epoch bump, identical to RemovePool). The binding-reference check and the
+// delete happen in the SAME transaction (Finding 3): the previous design ran
+// the check in the CLI layer and the delete in a separate store transaction,
+// so a concurrent "binding add <pool>" could commit after the check saw zero
+// references but before the pool row was deleted, leaving a binding pointing
+// at a non-existent pool. SQLite serializes write transactions, so once this
+// tx holds the write lock a concurrent binding insert either committed before
+// (and is seen by the SELECT, refusing removal) or blocks until after the
+// pool delete commits (and then fails its own pool-existence guard).
+//
+// Returns (false, nil) when the pool does not exist, (true, nil) on success,
+// and a *PoolReferencedError when bindings block the removal.
+func (s *Store) RemovePoolIfUnreferenced(name string) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	brows, err := tx.Query(
+		"SELECT id, destination, ports, credential, header, template, protocols, env_var, created_at FROM bindings WHERE credential = ? ORDER BY id",
+		name,
+	)
+	if err != nil {
+		return false, fmt.Errorf("check bindings referencing pool %q: %w", name, err)
+	}
+	refs, err := scanBindings(brows)
+	if err != nil {
+		return false, fmt.Errorf("scan bindings referencing pool %q: %w", name, err)
+	}
+	if len(refs) > 0 {
+		return false, &PoolReferencedError{Pool: name, Bindings: refs}
+	}
+
+	n, err := removePoolTx(tx, name)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit: %w", err)
+	}
+	return n > 0, nil
+}
+
+// removePoolTx performs the pool deletion (pool row + cascade members +
+// epoch bump + orphaned health-row cleanup) inside the caller's transaction.
+// Shared by RemovePool and RemovePoolIfUnreferenced so the two stay in sync.
+// Returns the number of pool rows deleted (0 = pool did not exist).
+func removePoolTx(tx *sql.Tx, name string) (int64, error) {
+	// Snapshot the pool's members before the cascade wipes the membership
+	// rows so we know whose health rows to consider for cleanup.
+	mrows, err := tx.Query(
+		"SELECT credential FROM credential_pool_members WHERE pool = ?", name,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("list members of pool %q: %w", name, err)
+	}
+	var members []string
+	for mrows.Next() {
+		var c string
+		if scanErr := mrows.Scan(&c); scanErr != nil {
+			_ = mrows.Close()
+			return 0, fmt.Errorf("scan pool member: %w", scanErr)
+		}
+		members = append(members, c)
+	}
+	if mrowsErr := mrows.Err(); mrowsErr != nil {
+		_ = mrows.Close()
+		return 0, fmt.Errorf("iterate pool members: %w", mrowsErr)
+	}
+	_ = mrows.Close()
+
+	res, err := tx.Exec("DELETE FROM credential_pools WHERE name = ?", name)
+	if err != nil {
+		return 0, fmt.Errorf("delete pool %q: %w", name, err)
+	}
+	n, _ := res.RowsAffected()
+
+	if n > 0 {
+		// Advance the membership epoch on removal too. A guarded write or a
+		// MarkCooldown still carrying this pool generation's epoch will no
+		// longer find a matching (credential, pool, epoch) row once the
+		// CASCADE has wiped the membership, so a late failover cannot
+		// resurrect the removed member's cooldown for a re-created successor.
+		if _, err := bumpMembershipEpochTx(tx); err != nil {
+			return 0, err
+		}
+		// The CASCADE has now removed this pool's credential_pool_members
+		// rows. For each former member, drop its health row UNLESS it is
+		// still a member of some OTHER pool (the membership query runs
+		// post-cascade, so any remaining row means another pool still owns
+		// the credential and its cooldown stays meaningful).
+		for _, c := range members {
+			var stillPooled int
+			err := tx.QueryRow(
+				"SELECT 1 FROM credential_pool_members WHERE credential = ? LIMIT 1", c,
+			).Scan(&stillPooled)
+			switch {
+			case errors.Is(err, sql.ErrNoRows):
+				if _, delErr := tx.Exec(
+					"DELETE FROM credential_health WHERE credential = ?", c,
+				); delErr != nil {
+					return 0, fmt.Errorf("delete health for former pool member %q: %w", c, delErr)
+				}
+			case err != nil:
+				return 0, fmt.Errorf("check residual pool membership for %q: %w", c, err)
+			default:
+				// Still a member of another pool; leave its health row.
+			}
+		}
+	}
+	return n, nil
+}
+
 // RemovePool deletes a pool and (via ON DELETE CASCADE) its members. Returns
-// true if a pool row was deleted.
+// true if a pool row was deleted. It is unconditional (no binding-reference
+// guard) — retained for single-generation callers (tests, internal seeding)
+// that have already established no binding references the pool. Production
+// removal via the CLI uses RemovePoolIfUnreferenced so the reference check
+// and the delete are atomic (Finding 3).
 //
 // The members' credential_health rows are deleted in the SAME transaction so
 // a cooled member taken out with its pool does not leave a stale durable
@@ -334,69 +468,10 @@ func (s *Store) RemovePool(name string) (bool, error) {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Snapshot the pool's members before the cascade wipes the membership
-	// rows so we know whose health rows to consider for cleanup.
-	mrows, err := tx.Query(
-		"SELECT credential FROM credential_pool_members WHERE pool = ?", name,
-	)
+	n, err := removePoolTx(tx, name)
 	if err != nil {
-		return false, fmt.Errorf("list members of pool %q: %w", name, err)
+		return false, err
 	}
-	var members []string
-	for mrows.Next() {
-		var c string
-		if scanErr := mrows.Scan(&c); scanErr != nil {
-			_ = mrows.Close()
-			return false, fmt.Errorf("scan pool member: %w", scanErr)
-		}
-		members = append(members, c)
-	}
-	if mrowsErr := mrows.Err(); mrowsErr != nil {
-		_ = mrows.Close()
-		return false, fmt.Errorf("iterate pool members: %w", mrowsErr)
-	}
-	_ = mrows.Close()
-
-	res, err := tx.Exec("DELETE FROM credential_pools WHERE name = ?", name)
-	if err != nil {
-		return false, fmt.Errorf("delete pool %q: %w", name, err)
-	}
-	n, _ := res.RowsAffected()
-
-	if n > 0 {
-		// Advance the membership epoch on removal too. A guarded write or a
-		// MarkCooldown still carrying this pool generation's epoch will no
-		// longer find a matching (credential, pool, epoch) row once the
-		// CASCADE has wiped the membership, so a late failover cannot
-		// resurrect the removed member's cooldown for a re-created successor.
-		if _, err := bumpMembershipEpochTx(tx); err != nil {
-			return false, err
-		}
-		// The CASCADE has now removed this pool's credential_pool_members
-		// rows. For each former member, drop its health row UNLESS it is
-		// still a member of some OTHER pool (the membership query runs
-		// post-cascade, so any remaining row means another pool still owns
-		// the credential and its cooldown stays meaningful).
-		for _, c := range members {
-			var stillPooled int
-			err := tx.QueryRow(
-				"SELECT 1 FROM credential_pool_members WHERE credential = ? LIMIT 1", c,
-			).Scan(&stillPooled)
-			switch {
-			case errors.Is(err, sql.ErrNoRows):
-				if _, delErr := tx.Exec(
-					"DELETE FROM credential_health WHERE credential = ?", c,
-				); delErr != nil {
-					return false, fmt.Errorf("delete health for former pool member %q: %w", c, delErr)
-				}
-			case err != nil:
-				return false, fmt.Errorf("check residual pool membership for %q: %w", c, err)
-			default:
-				// Still a member of another pool; leave its health row.
-			}
-		}
-	}
-
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("commit: %w", err)
 	}

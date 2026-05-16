@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -871,11 +872,18 @@ func TestFinding2Round19_QUICPoolBindingExpandsToActiveMember(t *testing.T) {
 		t.Fatal("Finding 2: buildPhantomPairs returned no pairs for a pool-named " +
 			"binding over QUIC (pool->member expansion missing — provider.Get(<pool>) failed)")
 	}
+	// Finding 1 (round 20): the pooled OAuth access phantom is the
+	// pool-stable SYNTHETIC JWT keyed on the pool name (poolStablePhantomAccess),
+	// NOT the literal "SLUICE_PHANTOM:<pool>.access" string. The earlier
+	// assertion only held because these access tokens are non-JWT and the
+	// old code fell back to the static string — a coincidence that masked
+	// the R3 violation. Assert the real pool-stable phantom here.
+	wantPoolAccess := poolStablePhantomAccess(poolName)
 	var sawPoolAccessPhantom, sawPoolRefreshPhantom, sawMemAAccess, sawMemARefresh bool
 	for _, p := range pairs {
 		ps := string(p.phantom)
 		switch ps {
-		case "SLUICE_PHANTOM:" + poolName + ".access":
+		case wantPoolAccess:
 			sawPoolAccessPhantom = true
 		case "SLUICE_PHANTOM:" + poolName + ".refresh":
 			sawPoolRefreshPhantom = true
@@ -927,5 +935,126 @@ func TestFinding2Round19_QUICPoolBindingExpandsToActiveMember(t *testing.T) {
 	if !stillPoolKeyed {
 		t.Fatal("Finding 2 QUIC-limit: phantom changed across member switch — it must " +
 			"stay keyed on the pool name (R3-style stability) even on QUIC")
+	}
+}
+
+// makeTestJWT builds a structurally valid (header.payload.sig) JWT whose
+// payload varies by sub. resignJWT re-signs header+payload of the *real*
+// token, so two members with DIFFERENT JWT payloads produce DIFFERENT
+// re-signed phantoms under the buggy buildOAuthPhantomPairs(boundName,...)
+// path — which is exactly the R3 violation Finding 1 targets. The earlier
+// QUIC test used non-JWT access strings, so resignJWT returned "" and the
+// static SLUICE_PHANTOM:<pool>.access fallback masked the bug.
+func makeTestJWT(t *testing.T, sub string) string {
+	t.Helper()
+	hdr := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	pl := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"` + sub + `","iss":"real-idp"}`))
+	sig := base64.RawURLEncoding.EncodeToString([]byte("real-signature-for-" + sub))
+	return hdr + "." + pl + "." + sig
+}
+
+// TestFinding1Round20_QUICPoolAccessPhantomStableAcrossMemberSwitch asserts
+// the R3 pool-stable access-token guarantee on the QUIC path: the
+// agent-facing access phantom must be byte-identical across a member switch
+// (it is keyed on the POOL name via poolStablePhantomAccess), while the
+// injected real token must be the *active* member's. Before the fix the
+// QUIC path used buildOAuthPhantomPairs(boundName,...) which re-signed the
+// active member's REAL JWT, so the phantom changed on every member switch.
+func TestFinding1Round20_QUICPoolAccessPhantomStableAcrossMemberSwitch(t *testing.T) {
+	caCert, _, err := GenerateCA()
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+
+	const poolName = "codex_pool"
+	jwtA := makeTestJWT(t, "member-A")
+	jwtB := makeTestJWT(t, "member-B")
+	provider := &addonWritableProvider{
+		creds: map[string]string{
+			"memA": poolMemberCred(t, jwtA, "A-refresh"),
+			"memB": poolMemberCred(t, jwtB, "B-refresh"),
+		},
+	}
+
+	bindings := []vault.Binding{{
+		Destination: "api.example.com",
+		Ports:       []int{443},
+		Credential:  poolName,
+	}}
+	br, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatalf("NewBindingResolver: %v", err)
+	}
+	var brPtr atomic.Pointer[vault.BindingResolver]
+	brPtr.Store(br)
+
+	pool := store.Pool{Name: poolName, Strategy: store.PoolStrategyFailover}
+	pool.Members = []store.PoolMember{
+		{Credential: "memA", Position: 0},
+		{Credential: "memB", Position: 1},
+	}
+	var prPtr atomic.Pointer[vault.PoolResolver]
+	prPtr.Store(vault.NewPoolResolver([]store.Pool{pool}, nil))
+
+	qp, err := NewQUICProxy(caCert, provider, &brPtr, &prPtr, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewQUICProxy: %v", err)
+	}
+
+	accessPhantomFor := func(t *testing.T, wantSecret string) string {
+		t.Helper()
+		pairs := qp.buildPhantomPairs("api.example.com", 443)
+		defer releasePhantomPairs(pairs)
+		var accessPhantom string
+		var sawWantSecret bool
+		for _, p := range pairs {
+			ps := string(p.phantom)
+			// The access phantom is the one whose real secret is a JWT
+			// (the refresh phantom carries the *-refresh secret).
+			if strings.Count(ps, ".") == 2 && !strings.HasPrefix(ps, "SLUICE_PHANTOM:") {
+				accessPhantom = ps
+			}
+			if p.secret.String() == wantSecret {
+				sawWantSecret = true
+			}
+			if strings.HasPrefix(ps, "SLUICE_PHANTOM:memA") ||
+				strings.HasPrefix(ps, "SLUICE_PHANTOM:memB") {
+				t.Fatalf("phantom keyed on a MEMBER name (%q)", ps)
+			}
+		}
+		if accessPhantom == "" {
+			t.Fatal("no JWT-shaped access phantom found in pairs")
+		}
+		if !sawWantSecret {
+			t.Fatalf("active member's real access token %q not injected", wantSecret)
+		}
+		return accessPhantom
+	}
+
+	// Active member memA: phantom must be the pool-stable synthetic JWT,
+	// real injected secret must be memA's JWT.
+	phantom1 := accessPhantomFor(t, jwtA)
+
+	// Independently confirm it is exactly the pool-stable synthetic JWT
+	// (not a re-sign of memA's real JWT).
+	wantStable := poolStablePhantomAccess(poolName)
+	if phantom1 != wantStable {
+		t.Fatalf("access phantom is not the pool-stable synthetic JWT\n got: %q\nwant: %q",
+			phantom1, wantStable)
+	}
+
+	// Flip the active member to memB.
+	prPtr.Load().MarkCooldown("memA", time.Now().Add(time.Minute), "429")
+	if got := qp.resolvePoolMember(poolName); got != "memB" {
+		t.Fatalf("after cooling memA, active member = %q, want memB", got)
+	}
+
+	// After the switch the agent-facing access phantom MUST be
+	// byte-identical (R3), while the injected real token is now memB's JWT.
+	phantom2 := accessPhantomFor(t, jwtB)
+	if phantom2 != phantom1 {
+		t.Fatalf("Finding 1 (R3 on QUIC): agent-facing access phantom CHANGED across "+
+			"a member switch — must be byte-identical\nbefore: %q\n after: %q",
+			phantom1, phantom2)
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"strings"
@@ -281,21 +282,24 @@ func handlePoolRemove(args []string) error {
 	// name would silently inherit the stale bindings. This mirrors the
 	// fail-closed pool-membership guard in "sluice cred remove": refuse
 	// with an actionable error instead of cascading or orphaning.
-	refs, err := db.ListBindingsByCredential(name)
+	//
+	// Finding 3: the reference check and the pool delete MUST be atomic.
+	// RemovePoolIfUnreferenced folds both into ONE store transaction so a
+	// concurrent "sluice binding add <pool>" cannot commit in a window
+	// between a separate pre-check and the delete and leave a binding
+	// pointing at a now-deleted pool. The store method is the authoritative
+	// atomic gate; this CLI layer only formats its typed error.
+	removed, err := db.RemovePoolIfUnreferenced(name)
 	if err != nil {
-		return fmt.Errorf("check bindings referencing pool %q: %w", name, err)
-	}
-	if len(refs) > 0 {
-		details := make([]string, len(refs))
-		for i, b := range refs {
-			details[i] = fmt.Sprintf("[%d] %s", b.ID, b.Destination)
+		var refErr *store.PoolReferencedError
+		if errors.As(err, &refErr) {
+			details := make([]string, len(refErr.Bindings))
+			for i, b := range refErr.Bindings {
+				details[i] = fmt.Sprintf("[%d] %s", b.ID, b.Destination)
+			}
+			return fmt.Errorf("pool %q is still referenced by %d binding(s): %s; rebind or remove these bindings first (sluice binding remove <id>, which also clears the auto-created allow rule), then retry pool remove",
+				name, len(refErr.Bindings), strings.Join(details, ", "))
 		}
-		return fmt.Errorf("pool %q is still referenced by %d binding(s): %s; rebind or remove these bindings first (sluice binding remove <id>, which also clears the auto-created allow rule), then retry pool remove",
-			name, len(refs), strings.Join(details, ", "))
-	}
-
-	removed, err := db.RemovePool(name)
-	if err != nil {
 		return err
 	}
 	if !removed {

@@ -107,6 +107,24 @@ func poolMemberCred(t *testing.T, access, refresh string) string {
 	return string(data)
 }
 
+// tagPooledForTest records a pooled refresh-attribution tag the same way the
+// production injection path does (buildPooledMemberPairs): it captures the
+// member's CURRENT pool+epoch identity from the live resolver and pins it to
+// the tag via TagPooled. Tests that previously called the bare member-only
+// refreshAttr.Tag to simulate a pooled injection must use this so the
+// Finding 2 (round 20) injection-time-identity validation in the 2xx persist
+// path sees a faithful, same-generation entry (and still fails closed when a
+// genuine membership race is simulated).
+func tagPooledForTest(t *testing.T, addon *SluiceAddon, prPtr *atomic.Pointer[vault.PoolResolver], realRefresh, member string) {
+	t.Helper()
+	pr := prPtr.Load()
+	pool, epoch, ok := pr.IdentityForMember(member)
+	if !ok {
+		t.Fatalf("tagPooledForTest: %q has no pool identity in the live resolver", member)
+	}
+	addon.refreshAttr.TagPooled(realRefresh, member, pool, epoch)
+}
+
 // setupPoolAddon wires a SluiceAddon with a two-member pool bound to
 // auth.example.com. Both members share testOAuthTokenURL (the Risk R1
 // collision shape: two Codex accounts behind one OpenAI token endpoint).
@@ -220,7 +238,13 @@ func TestR3PoolPhantomByteIdenticalAcrossMemberSwitch(t *testing.T) {
 	// Member A active. Request body carries A's real refresh token (as if
 	// pass-2 already swapped it), upstream returns A's rotated tokens.
 	reqA := []byte("grant_type=refresh_token&refresh_token=A-refresh-old")
-	addon.refreshAttr.Tag("A-refresh-old", "codexA")
+	// Faithfully mirror what the production pooled injection path records
+	// (buildPooledMemberPairs -> TagPooled with the resolver's
+	// injection-time pool+epoch identity), not the bare member-only Tag
+	// the old single-arg API used. Finding 2 (round 20): the 2xx persist
+	// path now validates the captured {pool, epoch} against the live
+	// membership, so a faithful test must record the pooled identity.
+	tagPooledForTest(t, addon, prPtr, "A-refresh-old", "codexA")
 	respA := mustJSON(t, map[string]interface{}{
 		"access_token":  "A-real-access-NEW-aaaaaaaa",
 		"refresh_token": "A-real-refresh-NEW-aaaaaaaa",
@@ -245,7 +269,7 @@ func TestR3PoolPhantomByteIdenticalAcrossMemberSwitch(t *testing.T) {
 	}
 
 	reqB := []byte("grant_type=refresh_token&refresh_token=B-refresh-old")
-	addon.refreshAttr.Tag("B-refresh-old", "codexB")
+	tagPooledForTest(t, addon, prPtr, "B-refresh-old", "codexB")
 	respB := mustJSON(t, map[string]interface{}{
 		"access_token":  "B-real-access-NEW-bbbbbbbbbbbb",
 		"refresh_token": "B-real-refresh-NEW-bbbbbbbbbbbb",
@@ -265,6 +289,123 @@ func TestR3PoolPhantomByteIdenticalAcrossMemberSwitch(t *testing.T) {
 	}
 	if strings.Contains(bodyB, "B-real-access-NEW-bbbbbbbbbbbb") {
 		t.Fatal("real access token leaked in member-B response")
+	}
+}
+
+// poolResolverGen builds a single-pool resolver generation with an explicit
+// membership epoch (the round-18 mechanism). Re-running with a higher epoch
+// simulates the member being removed and re-added under the same name.
+func poolResolverGen(pool, member string, epoch int64) *vault.PoolResolver {
+	p := store.Pool{Name: pool, Strategy: store.PoolStrategyFailover}
+	p.Members = []store.PoolMember{{Credential: member, Position: 0, Epoch: epoch}}
+	return vault.NewPoolResolver([]store.Pool{p}, nil)
+}
+
+// TestFinding2Round20_StalePooledRefreshNotMisfiledAcrossEpoch asserts the
+// injection-time pool+epoch capture. A pooled refresh is tagged for member M
+// in pool P at epoch e1. Before the token-endpoint response arrives, M is
+// removed and re-added into the SAME pool P at a strictly greater epoch e2
+// (the round-18 membership-epoch bump). The 2xx persist path must NOT rewrite
+// the response/persist against the new generation e2 (fail-closed/stale): the
+// agent still gets a pool-stable phantom (the swap ran, no real token leaks)
+// but the vault write is skipped and no persist signal fires.
+//
+// Fail-before: the old code did `pr.PoolForMember(member)` at response time
+// (current membership), attributing/persisting against e2. Pass-after: the
+// captured {P, e1} no longer matches live {P, e2}, so it fails closed.
+//
+// The test also asserts a genuine SAME-generation pooled refresh (no
+// membership race) still attributes and persists correctly (no regression of
+// round-9/16/18/19).
+func TestFinding2Round20_StalePooledRefreshNotMisfiledAcrossEpoch(t *testing.T) {
+	const poolName = "codex_pool"
+	addon, provider, prPtr := setupPoolAddon(t, "codexA", "codexB")
+
+	// Pin the resolver to generation epoch 1 (single member codexA for a
+	// crisp identity; codexB stays a registered OAuth cred sharing the
+	// token URL so the pooled-token-URL path is exercised).
+	gen1 := poolResolverGen(poolName, "codexA", 1)
+	prPtr.Store(gen1)
+	p1, e1, ok := gen1.IdentityForMember("codexA")
+	if !ok || e1 != 1 {
+		t.Fatalf("precondition: gen1 identity = (%q,%d,%v), want (codex_pool,1,true)", p1, e1, ok)
+	}
+
+	client := setupAddonConn(addon, "auth.example.com:443")
+
+	// --- Stale case: tag under epoch 1, then swap to epoch 2 before resp.
+	addon.refreshAttr.TagPooled("A-refresh-old", "codexA", p1, e1)
+
+	// Remove + re-add codexA into the SAME pool at epoch 2 (membership
+	// raced between injection and response).
+	gen2 := poolResolverGen(poolName, "codexA", 2)
+	prPtr.Store(gen2)
+	if _, e2, _ := gen2.IdentityForMember("codexA"); e2 != 2 {
+		t.Fatalf("precondition: gen2 epoch = %d, want 2", e2)
+	}
+
+	respStale := mustJSON(t, map[string]interface{}{
+		"access_token":  "A-real-access-STALE",
+		"refresh_token": "A-real-refresh-STALE",
+		"expires_in":    3600,
+	})
+	fStale := newPoolReqRespFlow(client,
+		[]byte("grant_type=refresh_token&refresh_token=A-refresh-old"), respStale)
+	addon.Response(fStale)
+
+	// Fail-closed: NO persist must fire (drain timeout, not the 5s
+	// waitAddonPersist which would falsely fail on a correct skip).
+	select {
+	case <-addon.persistDone:
+		t.Fatal("Finding 2: a STALE pooled refresh (injected epoch 1, live epoch 2) " +
+			"was persisted — must fail closed and skip the vault write")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// Vault entry for codexA must be UNTOUCHED (not misfiled against e2).
+	credA, err := vault.ParseOAuth([]byte(provider.creds["codexA"]))
+	if err != nil {
+		t.Fatalf("parse codexA: %v", err)
+	}
+	if credA.AccessToken != "A-access-old" || credA.RefreshToken != "A-refresh-old" {
+		t.Fatalf("Finding 2 VIOLATION: stale pooled refresh misfiled rotated tokens "+
+			"against the new generation; vault access=%q refresh=%q",
+			credA.AccessToken, credA.RefreshToken)
+	}
+
+	// The agent still receives the pool-stable phantom (swap ran) and the
+	// real upstream token never leaks.
+	staleBody := string(fStale.Response.Body)
+	if !strings.Contains(staleBody, poolStablePhantomAccess(poolName)) {
+		t.Fatalf("Finding 2: stale response missing pool-stable phantom (swap must "+
+			"still run so the agent never sees real tokens); body=%q", staleBody)
+	}
+	if strings.Contains(staleBody, "A-real-access-STALE") {
+		t.Fatal("Finding 2: real upstream access token leaked to the agent on the stale path")
+	}
+
+	// --- Same-generation case: tag and respond under the SAME live epoch.
+	// Must attribute + persist normally (no regression).
+	cur := prPtr.Load()
+	pCur, eCur, _ := cur.IdentityForMember("codexA")
+	addon.refreshAttr.TagPooled("A-refresh-old", "codexA", pCur, eCur)
+	respOK := mustJSON(t, map[string]interface{}{
+		"access_token":  "A-real-access-FRESH",
+		"refresh_token": "A-real-refresh-FRESH",
+		"expires_in":    3600,
+	})
+	fOK := newPoolReqRespFlow(client,
+		[]byte("grant_type=refresh_token&refresh_token=A-refresh-old"), respOK)
+	addon.Response(fOK)
+	waitAddonPersist(t, addon)
+
+	credA2, err := vault.ParseOAuth([]byte(provider.creds["codexA"]))
+	if err != nil {
+		t.Fatalf("parse codexA after fresh: %v", err)
+	}
+	if credA2.AccessToken != "A-real-access-FRESH" || credA2.RefreshToken != "A-real-refresh-FRESH" {
+		t.Fatalf("regression: genuine same-generation pooled refresh did not persist; "+
+			"vault access=%q refresh=%q", credA2.AccessToken, credA2.RefreshToken)
 	}
 }
 

@@ -1283,7 +1283,17 @@ func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request
 	// Store removal already succeeded above (the pool-membership gate
 	// passed and credential_meta+health+bindings+rules are gone atomically).
 	// Only now is it safe to delete the vault secret.
-	if err := s.vault.Remove(name); err != nil {
+	//
+	// Finding 4: an already-missing vault secret is NOT a failure. The
+	// store cleanup has already committed; treating os.IsNotExist as a
+	// hard 500 here would abort BEFORE the engine recompile / resolver
+	// rebuild, leaving the live policy stale until a manual reload — and
+	// it makes using the API to finish a previous partial cleanup
+	// impossible. The CLI (cmd/sluice/cred.go) and Telegram
+	// (internal/telegram/commands.go) paths already treat os.IsNotExist as
+	// success and continue; match them. Any OTHER vault error is still a
+	// hard 500 (do not swallow real failures).
+	if err := s.vault.Remove(name); err != nil && !os.IsNotExist(err) {
 		writeError(w, http.StatusInternalServerError, "failed to remove credential: "+err.Error(), "")
 		return
 	}

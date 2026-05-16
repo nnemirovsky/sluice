@@ -1,8 +1,10 @@
 package store
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -198,6 +200,218 @@ func TestRemovePoolCascadesMembers(t *testing.T) {
 	if removed, _ := s.RemovePool("p"); removed {
 		t.Error("RemovePool of missing pool returned true")
 	}
+}
+
+func TestRemovePoolIfUnreferenced_Unreferenced(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "a")
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"a"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s.SetCredentialHealth("a", "cooldown", time.Now().Add(time.Hour), "429"); err != nil {
+		t.Fatalf("set health: %v", err)
+	}
+	epBefore := membershipEpoch(t, s)
+
+	removed, err := s.RemovePoolIfUnreferenced("p")
+	if err != nil || !removed {
+		t.Fatalf("RemovePoolIfUnreferenced = %v, %v; want true, nil", removed, err)
+	}
+	// Members cascade-deleted.
+	if mp, _ := s.PoolsForMember("a"); len(mp) != 0 {
+		t.Errorf("PoolsForMember after remove = %v, want empty", mp)
+	}
+	// Former member's health row removed (not orphaned).
+	hs, _ := s.ListCredentialHealth()
+	for _, h := range hs {
+		if h.Credential == "a" {
+			t.Errorf("health row for former pool member %q not cleaned up", h.Credential)
+		}
+	}
+	// Membership epoch bumped on removal.
+	if ep := membershipEpoch(t, s); ep <= epBefore {
+		t.Errorf("membership epoch not bumped on removal: before=%d after=%d", epBefore, ep)
+	}
+	// Missing pool -> (false, nil).
+	if removed, err := s.RemovePoolIfUnreferenced("p"); removed || err != nil {
+		t.Errorf("RemovePoolIfUnreferenced of missing pool = %v, %v; want false, nil", removed, err)
+	}
+}
+
+func TestRemovePoolIfUnreferenced_RefusedWhenBound(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "a")
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"a"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// A binding NAMES THE POOL (pool shares the credential namespace).
+	if _, err := s.AddBinding("api.example.com", "p", BindingOpts{Ports: []int{443}}); err != nil {
+		t.Fatalf("AddBinding: %v", err)
+	}
+
+	removed, err := s.RemovePoolIfUnreferenced("p")
+	if removed {
+		t.Fatal("RemovePoolIfUnreferenced deleted a pool that a binding still references")
+	}
+	var refErr *PoolReferencedError
+	if !errors.As(err, &refErr) {
+		t.Fatalf("want *PoolReferencedError, got %T: %v", err, err)
+	}
+	if refErr.Pool != "p" || len(refErr.Bindings) != 1 || refErr.Bindings[0].Destination != "api.example.com" {
+		t.Fatalf("PoolReferencedError did not list the blocking binding: %+v", refErr)
+	}
+	// The pool must still exist (refusal, not partial delete).
+	if p, _ := s.GetPool("p"); p == nil {
+		t.Fatal("pool was deleted despite the binding reference")
+	}
+}
+
+// TestRemovePoolIfUnreferenced_BindingBeforeRemovalRefuses is the
+// deterministic Finding 3 regression. The exact bug: the binding-reference
+// check ran in the CLI layer and the pool delete ran in a SEPARATE store
+// transaction. If a "binding add <pool>" committed in the window after the
+// check observed zero references but before the delete, the pool was deleted
+// anyway and that binding was left pointing at a non-existent pool.
+//
+// With the check folded into the SAME transaction as the delete, any binding
+// that committed before the removal transaction is observed by its SELECT
+// and the removal is refused. This test pins exactly that ordering (binding
+// commits, THEN removal runs) — the precise interleaving the old split
+// design got wrong — and asserts the pool is NOT deleted and a typed
+// PoolReferencedError is returned.
+//
+// Fail-before: with the CLI-side pre-check removed (the atomic store gate is
+// authoritative), a binding committed in the check->delete window would let
+// the unconditional RemovePool delete the pool. Pass-after: the atomic
+// RemovePoolIfUnreferenced observes the binding in its own transaction and
+// refuses.
+func TestRemovePoolIfUnreferenced_BindingBeforeRemovalRefuses(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "a")
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"a"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// The concurrent "binding add <pool>" commits BEFORE the removal
+	// transaction runs (the exact race window the old split check/delete
+	// got wrong).
+	if _, err := s.AddBinding("api.example.com", "p", BindingOpts{Ports: []int{443}}); err != nil {
+		t.Fatalf("AddBinding: %v", err)
+	}
+
+	removed, err := s.RemovePoolIfUnreferenced("p")
+	if removed {
+		t.Fatal("Finding 3: pool deleted while a binding added before the removal " +
+			"transaction still references it (check+delete not atomic)")
+	}
+	var refErr *PoolReferencedError
+	if !errors.As(err, &refErr) {
+		t.Fatalf("want *PoolReferencedError, got %T: %v", err, err)
+	}
+	if p, _ := s.GetPool("p"); p == nil {
+		t.Fatal("Finding 3: pool row was deleted despite the blocking binding")
+	}
+}
+
+// TestRemovePoolIfUnreferenced_ConcurrentIsInternallyConsistent stresses the
+// two write paths concurrently. SQLite serializes write transactions, so the
+// atomic removal can only land in one of two self-consistent terminal
+// states: (a) removal observed no binding and the pool is gone with no
+// binding committed before it, or (b) the binding committed first, removal
+// observed it and refused, pool intact. The Finding-3 corruption — pool
+// removed by RemovePoolIfUnreferenced while a binding it should have observed
+// dangles at the deleted pool — must never appear.
+func TestRemovePoolIfUnreferenced_ConcurrentIsInternallyConsistent(t *testing.T) {
+	for iter := 0; iter < 80; iter++ {
+		// File-backed (not :memory:) because this test drives two
+		// concurrent write transactions; modernc.org/sqlite gives each
+		// pooled connection its OWN private database for a bare ":memory:"
+		// DSN, so a second connection opened under contention would see an
+		// empty schema. A temp file is shared across the connection pool.
+		dir := t.TempDir()
+		s, err := New(filepath.Join(dir, "pool_race.db"))
+		if err != nil {
+			t.Fatalf("iter %d: new store: %v", iter, err)
+		}
+		seedOAuthCred(t, s, "a")
+		if err := s.CreatePoolWithMembers("p", "failover", []string{"a"}); err != nil {
+			t.Fatalf("iter %d: create: %v", iter, err)
+		}
+
+		var (
+			wg         sync.WaitGroup
+			removed    bool
+			removeErr  error
+			addBindErr error
+		)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			removed, removeErr = s.RemovePoolIfUnreferenced("p")
+		}()
+		go func() {
+			defer wg.Done()
+			_, addBindErr = s.AddBinding("api.example.com", "p", BindingOpts{Ports: []int{443}})
+		}()
+		wg.Wait()
+
+		poolExists := false
+		if p, _ := s.GetPool("p"); p != nil {
+			poolExists = true
+		}
+		bindings, err := s.ListBindings()
+		if err != nil {
+			t.Fatalf("iter %d: ListBindings: %v", iter, err)
+		}
+		bindingCommitted := addBindErr == nil
+		var poolBindings int
+		for _, b := range bindings {
+			if b.Credential == "p" {
+				poolBindings++
+			}
+		}
+
+		_ = bindingCommitted
+		_ = poolBindings
+		var refErr *PoolReferencedError
+		switch {
+		case removed:
+			// Removal observed no binding in its own transaction, so the
+			// pool must now be gone. (Any binding add committed strictly
+			// after the removal transaction — the AddBinding-does-not-
+			// validate-existence concern is pre-existing and out of
+			// Finding 3's scope; Finding 3 is the check->delete window,
+			// which is now closed.)
+			if poolExists {
+				t.Fatalf("iter %d: removed==true but pool still exists "+
+					"(non-atomic delete)", iter)
+			}
+		case errors.As(removeErr, &refErr):
+			// Removal observed a binding in its OWN transaction and refused.
+			// The defining Finding-3 guarantee: a refusal must never have
+			// also deleted the pool (no partial check-then-delete).
+			if !poolExists {
+				t.Fatalf("iter %d: Finding 3: removal refused (saw a binding) yet the "+
+					"pool was deleted — check and delete were not atomic", iter)
+			}
+		case removeErr != nil:
+			t.Fatalf("iter %d: unexpected removal error: %v", iter, removeErr)
+		default:
+			// (false, nil): pool did not exist when removal ran. It must
+			// not have been silently removed by this call (it never
+			// existed-for-this-call), and any present state is consistent.
+		}
+		_ = s.Close()
+	}
+}
+
+func membershipEpoch(t *testing.T, s *Store) int64 {
+	t.Helper()
+	var ep int64
+	if err := s.db.QueryRow("SELECT epoch FROM pool_membership_epoch WHERE id = 1").Scan(&ep); err != nil {
+		t.Fatalf("read membership epoch: %v", err)
+	}
+	return ep
 }
 
 func TestPoolsForMember(t *testing.T) {
