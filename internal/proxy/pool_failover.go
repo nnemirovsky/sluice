@@ -76,12 +76,12 @@ func failoverReasonTag(class failoverClass, statusCode int, bodyTag string) stri
 // "invalid_grant" in unrelated prose). bodyTag returns the matched body
 // token (for the audit reason) when the decision came from the body.
 func classifyFailover(statusCode int, body []byte, isTokenEndpoint bool) (class failoverClass, bodyTag string) {
-	switch {
-	case statusCode == 429:
+	switch statusCode {
+	case 429:
 		return failoverRateLimited, ""
-	case statusCode == 401:
+	case 401:
 		return failoverAuthFailure, ""
-	case statusCode == 403:
+	case 403:
 		if bodyContainsAny(body, "insufficient_quota", "quota_exceeded", "quota exhausted", "rate_limit_exceeded") {
 			return failoverRateLimited, ""
 		}

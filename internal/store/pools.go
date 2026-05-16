@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -59,7 +60,7 @@ func parseHealthTime(s sql.NullString) time.Time {
 func (s *Store) PoolExists(name string) (bool, error) {
 	var one int
 	err := s.db.QueryRow("SELECT 1 FROM credential_pools WHERE name = ?", name).Scan(&one)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
@@ -79,7 +80,7 @@ func validatePoolMemberTx(tx *sql.Tx, credential string) error {
 	err := tx.QueryRow(
 		"SELECT cred_type, token_url FROM credential_meta WHERE name = ?", credential,
 	).Scan(&credType, &tokenURL)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("credential %q does not exist (add it with --type oauth first)", credential)
 	}
 	if err != nil {
@@ -133,13 +134,14 @@ func (s *Store) CreatePoolWithMembers(name, strategy string, members []string) e
 
 	// Namespace mutual-exclusion: a pool must not shadow a credential.
 	var credName string
-	switch err := tx.QueryRow("SELECT name FROM credential_meta WHERE name = ?", name).Scan(&credName); {
-	case err == nil:
+	collErr := tx.QueryRow("SELECT name FROM credential_meta WHERE name = ?", name).Scan(&credName)
+	switch {
+	case collErr == nil:
 		return fmt.Errorf("name %q is already a credential; pool and credential names share one namespace", name)
-	case err == sql.ErrNoRows:
+	case errors.Is(collErr, sql.ErrNoRows):
 		// ok
 	default:
-		return fmt.Errorf("check name collision for %q: %w", name, err)
+		return fmt.Errorf("check name collision for %q: %w", name, collErr)
 	}
 
 	if _, err := tx.Exec(
@@ -173,7 +175,7 @@ func (s *Store) GetPool(name string) (*Pool, error) {
 	err := s.db.QueryRow(
 		"SELECT name, strategy, created_at FROM credential_pools WHERE name = ?", name,
 	).Scan(&p.Name, &p.Strategy, &p.CreatedAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -328,7 +330,7 @@ func (s *Store) GetCredentialHealth(credential string) (*CredentialHealth, error
 		"SELECT credential, status, cooldown_until, last_failure_reason, updated_at FROM credential_health WHERE credential = ?",
 		credential,
 	).Scan(&h.Credential, &h.Status, &cu, &reason, &h.UpdatedAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

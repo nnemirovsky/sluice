@@ -34,8 +34,9 @@ func poolMemberCred(t *testing.T, access, refresh string) string {
 // setupPoolAddon wires a SluiceAddon with a two-member pool bound to
 // auth.example.com. Both members share testOAuthTokenURL (the Risk R1
 // collision shape: two Codex accounts behind one OpenAI token endpoint).
-func setupPoolAddon(t *testing.T, poolName, memberA, memberB string) (*SluiceAddon, *addonWritableProvider, *atomic.Pointer[vault.PoolResolver]) {
+func setupPoolAddon(t *testing.T, memberA, memberB string) (*SluiceAddon, *addonWritableProvider, *atomic.Pointer[vault.PoolResolver]) {
 	t.Helper()
+	const poolName = "codex_pool"
 
 	provider := &addonWritableProvider{
 		creds: map[string]string{
@@ -131,7 +132,7 @@ func TestR3PoolPhantomByteIdenticalAcrossMemberSwitch(t *testing.T) {
 	// End-to-end: the access phantom the agent receives in a token-endpoint
 	// response must be identical when member A is active and after failover
 	// to member B (members have DIFFERENT real access tokens).
-	addon, _, prPtr := setupPoolAddon(t, "codex_pool", "codexA", "codexB")
+	addon, _, prPtr := setupPoolAddon(t, "codexA", "codexB")
 	client := setupAddonConn(addon, "auth.example.com:443")
 
 	// Member A active. Request body carries A's real refresh token (as if
@@ -189,7 +190,7 @@ func TestR3PoolPhantomByteIdenticalAcrossMemberSwitch(t *testing.T) {
 // response is persisted to B's vault entry, never A's, even though both
 // members share one token URL (OAuthIndex.Match is 1:1 and collides).
 func TestR1RefreshAttributionByInjectedRefreshToken(t *testing.T) {
-	addon, provider, prPtr := setupPoolAddon(t, "codex_pool", "memA", "memB")
+	addon, provider, prPtr := setupPoolAddon(t, "memA", "memB")
 	client := setupAddonConn(addon, "auth.example.com:443")
 
 	// --- Member A round-trip via the real pass-2 path. ---
@@ -260,7 +261,7 @@ func TestR1RefreshAttributionByInjectedRefreshToken(t *testing.T) {
 // is still swapped to phantoms (agent safe) but ZERO vault writes occur — no
 // guess, no fallback to OAuthIndex.Match.
 func TestR1FailClosedWhenMemberTagMissing(t *testing.T) {
-	addon, provider, _ := setupPoolAddon(t, "codex_pool", "memA", "memB")
+	addon, provider, _ := setupPoolAddon(t, "memA", "memB")
 	client := setupAddonConn(addon, "auth.example.com:443")
 
 	beforeA := provider.creds["memA"]

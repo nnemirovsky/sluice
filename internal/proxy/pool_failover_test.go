@@ -87,7 +87,7 @@ func TestClassifyFailover(t *testing.T) {
 // pooled destination, the very NEXT ResolveActive call returns the next
 // member — without any reliance on the 2s store-reconcile watcher (Risk I1).
 func TestFailoverSynchronousHealthSwap(t *testing.T) {
-	addon, _, prPtr := setupPoolAddon(t, "codex_pool", "memA", "memB")
+	addon, _, prPtr := setupPoolAddon(t, "memA", "memB")
 	client := setupAddonConn(addon, "auth.example.com:443")
 
 	pr := prPtr.Load()
@@ -134,7 +134,7 @@ func TestFailoverCooldownTTLAndLazyRecovery(t *testing.T) {
 		t.Fatalf("AuthFailCooldown = %v, want 300s", vault.AuthFailCooldown)
 	}
 
-	addon, _, prPtr := setupPoolAddon(t, "codex_pool", "memA", "memB")
+	addon, _, prPtr := setupPoolAddon(t, "memA", "memB")
 	client := setupAddonConn(addon, "auth.example.com:443")
 	pr := prPtr.Load()
 
@@ -162,7 +162,7 @@ func TestFailoverCooldownTTLAndLazyRecovery(t *testing.T) {
 // TestFailoverNoopForNonPooledAndSuccess asserts the failover path is a
 // no-op for a successful response and never invokes the callback.
 func TestFailoverNoopForSuccessfulResponse(t *testing.T) {
-	addon, _, prPtr := setupPoolAddon(t, "codex_pool", "memA", "memB")
+	addon, _, prPtr := setupPoolAddon(t, "memA", "memB")
 	client := setupAddonConn(addon, "auth.example.com:443")
 
 	called := false
@@ -191,7 +191,7 @@ func TestFailoverNoopForSuccessfulResponse(t *testing.T) {
 // assert Response itself never waits on callback-internal work by having the
 // callback spawn the slow part and return immediately, mirroring main.go).
 func TestFailoverNoticeNonBlocking(t *testing.T) {
-	addon, _, _ := setupPoolAddon(t, "codex_pool", "memA", "memB")
+	addon, _, _ := setupPoolAddon(t, "memA", "memB")
 	client := setupAddonConn(addon, "auth.example.com:443")
 
 	done := make(chan struct{})
@@ -221,7 +221,7 @@ func TestFailoverNoticeNonBlocking(t *testing.T) {
 // TestFailoverNonPooledDestinationIgnored asserts a response whose
 // destination is NOT bound to a pool never triggers failover.
 func TestFailoverNonPooledDestinationIgnored(t *testing.T) {
-	addon, _, _ := setupPoolAddon(t, "codex_pool", "memA", "memB")
+	addon, _, _ := setupPoolAddon(t, "memA", "memB")
 	// Connect to a destination with no pooled binding.
 	client := setupAddonConn(addon, "unrelated.example.com:443")
 
@@ -258,7 +258,7 @@ func TestFailoverAuditEvent(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = logger.Close() })
 
-	addon, _, _ := setupPoolAddon(t, "codex_pool", "memA", "memB")
+	addon, _, _ := setupPoolAddon(t, "memA", "memB")
 	addon.auditLog = logger
 	client := setupAddonConn(addon, "auth.example.com:443")
 
@@ -303,7 +303,7 @@ func TestFailoverAuditEvent(t *testing.T) {
 // TestPoolForResponseResolvesActiveMember sanity-checks the destination ->
 // pool reverse mapping used by handlePoolFailover.
 func TestPoolForResponseResolvesActiveMember(t *testing.T) {
-	addon, _, prPtr := setupPoolAddon(t, "codex_pool", "memA", "memB")
+	addon, _, prPtr := setupPoolAddon(t, "memA", "memB")
 	client := setupAddonConn(addon, "auth.example.com:443")
 	f := newPoolRespFlow(client, 429, nil)
 

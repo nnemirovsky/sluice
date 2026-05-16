@@ -865,8 +865,9 @@ func TestBrokerChannelErrorDoesNotBlockOthers(t *testing.T) {
 // dest:port and waits until the broker reports all n have attached to a
 // single primary waiter. It returns the primary request ID and a channel
 // that yields each call's (resp, err) result.
-func fireCoalescedBurst(t *testing.T, broker *Broker, ch *mockChannel, dest string, port, n int, timeout time.Duration) (string, <-chan result) {
+func fireCoalescedBurst(t *testing.T, broker *Broker, ch *mockChannel, dest string, n int, timeout time.Duration) (string, <-chan result) {
 	t.Helper()
+	const port = 443
 	type res = result
 	out := make(chan res, n)
 	for i := 0; i < n; i++ {
@@ -905,7 +906,7 @@ func TestBrokerCoalesceOneBroadcastFanToAll(t *testing.T) {
 	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
 
 	const n = 8
-	primaryID, out := fireCoalescedBurst(t, broker, ch, "cas.example.com", 443, n, 5*time.Second)
+	primaryID, out := fireCoalescedBurst(t, broker, ch, "cas.example.com", n, 5*time.Second)
 
 	// Exactly one prompt was broadcast for the whole burst.
 	if got := len(ch.getRequests()); got != 1 {
@@ -942,7 +943,7 @@ func TestBrokerCoalesceDenyFanOut(t *testing.T) {
 	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
 
 	const n = 5
-	primaryID, out := fireCoalescedBurst(t, broker, ch, "deny.example.com", 443, n, 5*time.Second)
+	primaryID, out := fireCoalescedBurst(t, broker, ch, "deny.example.com", n, 5*time.Second)
 	broker.Resolve(primaryID, ResponseDeny)
 
 	for i := 0; i < n; i++ {
@@ -962,7 +963,7 @@ func TestBrokerCoalesceTimeoutFanOut(t *testing.T) {
 	// every subscriber. The primary itself returns the timeout error;
 	// subscribers receive Deny via the fan-out (nil err, like any
 	// terminal resolution). Every caller must end up denied.
-	_, out := fireCoalescedBurst(t, broker, ch, "slowburst.example.com", 443, n, 80*time.Millisecond)
+	_, out := fireCoalescedBurst(t, broker, ch, "slowburst.example.com", n, 80*time.Millisecond)
 
 	timeoutErrs := 0
 	for i := 0; i < n; i++ {
@@ -984,7 +985,7 @@ func TestBrokerCoalesceShutdownFanOut(t *testing.T) {
 	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
 
 	const n = 6
-	_, out := fireCoalescedBurst(t, broker, ch, "shutdown.example.com", 443, n, 5*time.Second)
+	_, out := fireCoalescedBurst(t, broker, ch, "shutdown.example.com", n, 5*time.Second)
 	broker.CancelAll()
 
 	for i := 0; i < n; i++ {
