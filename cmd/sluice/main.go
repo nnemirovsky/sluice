@@ -347,14 +347,23 @@ func main() {
 		}
 	}
 
+	// Process-wide shared pool health. CRITICAL-1: every PoolResolver
+	// generation (startup + every SIGHUP / data_version reload) is built
+	// against THIS single PoolHealth, so a failover cooldown recorded via
+	// MarkCooldown on any generation is observed by ResolveActive on the
+	// current generation regardless of how many resolver pointer swaps
+	// happened in between, and the cooldown never depends on the detached
+	// durable SetCredentialHealth write succeeding.
+	sharedPoolHealth := vault.NewPoolHealth()
+
 	// Populate the initial credential pool resolver at startup so pool
 	// expansion works for pools defined before the first SIGHUP. Always
 	// store a non-nil resolver (empty when no pools) so the addon never
 	// has to nil-check before ResolveActive (non-pool names passthrough).
 	if db != nil {
-		if pr, perr := loadPoolResolver(db); perr != nil {
+		if pr, perr := loadPoolResolver(db, sharedPoolHealth); perr != nil {
 			log.Printf("pool resolver init failed: %v", perr)
-			srv.StorePool(vault.NewPoolResolver(nil, nil))
+			srv.StorePool(vault.NewPoolResolverShared(nil, nil, sharedPoolHealth))
 		} else {
 			srv.StorePool(pr)
 		}
@@ -737,12 +746,14 @@ func main() {
 			log.Printf("reload oauth index failed: %v", metaErr)
 		}
 
-		// Rebuild and atomically swap the credential pool resolver.
-		// Membership changes (pool create/remove) take effect here;
-		// durable health rows are reloaded too, which only reconciles
-		// the in-memory health that Phase 2 failover already updated
-		// synchronously on the response path.
-		if pr, perr := loadPoolResolver(db); perr != nil {
+		// Rebuild and atomically swap the credential pool resolver. The
+		// new generation is built against the SAME process-wide
+		// sharedPoolHealth (CRITICAL-1), so membership changes (pool
+		// create/remove) take effect here while live failover cooldowns
+		// recorded in memory survive the swap with zero dependency on the
+		// detached durable write. Reloading health rows only seeds the
+		// shared map monotonically (never shortens a live cooldown).
+		if pr, perr := loadPoolResolver(db, sharedPoolHealth); perr != nil {
 			log.Printf("reload pool resolver failed: %v", perr)
 		} else {
 			srv.StorePool(pr)
@@ -875,11 +886,13 @@ func readBindings(db *store.Store) ([]vault.Binding, error) {
 }
 
 // loadPoolResolver builds a vault.PoolResolver from the store's pool,
-// member, and credential-health tables. A non-nil resolver is always
-// returned on success (empty when no pools), so callers can store it
-// unconditionally and the addon never has to nil-check before
-// ResolveActive (a non-pool name is an identity passthrough).
-func loadPoolResolver(db *store.Store) (*vault.PoolResolver, error) {
+// member, and credential-health tables, bound to the process-wide shared
+// PoolHealth (CRITICAL-1) so failover cooldowns survive every resolver
+// pointer swap. A non-nil resolver is always returned on success (empty
+// when no pools), so callers can store it unconditionally and the addon
+// never has to nil-check before ResolveActive (a non-pool name is an
+// identity passthrough).
+func loadPoolResolver(db *store.Store, shared *vault.PoolHealth) (*vault.PoolResolver, error) {
 	pools, err := db.ListPools()
 	if err != nil {
 		return nil, fmt.Errorf("list pools: %w", err)
@@ -888,7 +901,7 @@ func loadPoolResolver(db *store.Store) (*vault.PoolResolver, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list credential health: %w", err)
 	}
-	return vault.NewPoolResolver(pools, health), nil
+	return vault.NewPoolResolverShared(pools, health, shared), nil
 }
 
 // injectEnvVarsFromStore reads bindings with env_var set from the store,

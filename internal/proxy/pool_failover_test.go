@@ -426,3 +426,320 @@ func TestTokenEndpointHostFailoverOnPooledMember(t *testing.T) {
 		t.Fatalf("class = %v, want auth-failure", got.Class)
 	}
 }
+
+// newPoolRespFlowBody builds a token-endpoint response flow whose REQUEST
+// body carries the given (already pass-2-swapped) real refresh token, so
+// poolForResponse can recover the true owning member via the refresh
+// attribution map (the CRITICAL-2 join key).
+func newPoolRespFlowBody(client *mitmproxy.ClientConn, status int, realRefresh string, respBody []byte) *mitmproxy.Flow {
+	u, _ := url.Parse(testOAuthTokenURL)
+	reqHdr := make(http.Header)
+	reqHdr.Set("Content-Type", "application/x-www-form-urlencoded")
+	respHdr := make(http.Header)
+	respHdr.Set("Content-Type", "application/json")
+	return &mitmproxy.Flow{
+		Id:          uuid.NewV4(),
+		ConnContext: &mitmproxy.ConnContext{ClientConn: client},
+		Request: &mitmproxy.Request{
+			Method: "POST",
+			URL:    u,
+			Header: reqHdr,
+			Body:   []byte("grant_type=refresh_token&refresh_token=" + realRefresh),
+		},
+		Response: &mitmproxy.Response{
+			StatusCode: status,
+			Header:     respHdr,
+			Body:       respBody,
+		},
+	}
+}
+
+// TestTokenEndpointFailoverAttributesInjectedMemberNotFirstIndex is the
+// CRITICAL-2 regression. Both members share one token URL, so
+// OAuthIndex.Match deterministically returns the FIRST index entry (memA)
+// regardless of which member's refresh token is in the request body. The
+// failing/active member here is memB (not the first index entry). The bug:
+// the failover path attributed by idx.Match and cooled the WRONG member
+// (memA), leaving the dead memB active so the pool thrashed the broken
+// account forever. The fix recovers the true owner from the injected real
+// refresh token (refreshAttribution.Peek), the SAME join key the 2xx
+// persist path uses.
+//
+// This test MUST fail before the fix: idx.Match -> memA, so memA would be
+// (re-)cooled and memB left untouched/active.
+func TestTokenEndpointFailoverAttributesInjectedMemberNotFirstIndex(t *testing.T) {
+	addon, prPtr := setupPoolAddonSplitHost(t, "codex_pool", "memA", "memB")
+	client := setupAddonConn(addon, "auth.example.com:443")
+	pr := prPtr.Load()
+
+	// memA is first index AND would be first active. Cool memA via an API
+	// 429 path so memB becomes the active member (the realistic precursor:
+	// memA rate-limited on api host, traffic rolled to memB).
+	memACooldown := time.Now().Add(90 * time.Second)
+	pr.MarkCooldown("memA", memACooldown, "429")
+	if got, _ := pr.ResolveActive("codex_pool"); got != "memB" {
+		t.Fatalf("after cooling memA, active = %q, want memB", got)
+	}
+
+	// pass-2 injected memB's real refresh token into this refresh request;
+	// mirror that by tagging the attribution map (what the real Request()
+	// pass-2 swap does) and putting memB's real refresh in the body.
+	addon.refreshAttr.Tag("B-refresh-old", "memB")
+
+	// Sanity: idx.Match alone returns memA (the collision the bug rode on).
+	if idx := addon.oauthIndex.Load(); idx != nil {
+		u, _ := url.Parse(testOAuthTokenURL)
+		if matched, _ := idx.Match(u); matched != "memA" {
+			t.Fatalf("precondition: idx.Match must return first entry memA, got %q", matched)
+		}
+	}
+
+	// poolForResponse must now attribute the failure to memB (the injected
+	// member), NOT memA (the first index entry).
+	f := newPoolRespFlowBody(client, 400, "B-refresh-old", []byte(`{"error":"invalid_grant"}`))
+	pool, member, _, ok := addon.poolForResponse(f)
+	if !ok {
+		t.Fatal("poolForResponse: token-endpoint failure on a pooled member must be attributed")
+	}
+	if pool != "codex_pool" || member != "memB" {
+		t.Fatalf("got pool=%q member=%q, want codex_pool/memB (CRITICAL-2: must attribute the INJECTED member, not idx.Match's first entry)", pool, member)
+	}
+
+	var got FailoverEvent
+	gotCalled := make(chan struct{}, 1)
+	addon.SetOnFailover(func(ev FailoverEvent) {
+		got = ev
+		gotCalled <- struct{}{}
+	})
+
+	addon.Response(newPoolRespFlowBody(client, 400, "B-refresh-old", []byte(`{"error":"invalid_grant"}`)))
+
+	// memB must now be cooled with the long auth-failure TTL.
+	bUntil, bCooling := pr.CooldownUntil("memB")
+	if !bCooling {
+		t.Fatal("memB must be in cooldown after its own invalid_grant (CRITICAL-2)")
+	}
+	if time.Until(bUntil) < vault.AuthFailCooldown-30*time.Second {
+		t.Fatalf("memB cooldown TTL = %s, want ~%s (auth-failure)", time.Until(bUntil), vault.AuthFailCooldown)
+	}
+
+	// memA must be UNTOUCHED: still cooling on its ORIGINAL 90s 429 window,
+	// NOT re-cooled with memB's 300s auth-failure TTL. The bug re-cooled
+	// memA here; the fix must leave memA's cooldown exactly as it was.
+	aUntil, aCooling := pr.CooldownUntil("memA")
+	if !aCooling {
+		t.Fatal("memA should still be cooling on its original 429 window")
+	}
+	if aUntil.Sub(memACooldown).Abs() > time.Second {
+		t.Fatalf("memA cooldown was modified: got %s, want original %s (innocent member must not be re-cooled — CRITICAL-2)",
+			aUntil.Format(time.RFC3339Nano), memACooldown.Format(time.RFC3339Nano))
+	}
+
+	select {
+	case <-gotCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("onFailover callback not invoked")
+	}
+	if got.From != "memB" {
+		t.Fatalf("FailoverEvent.From = %q, want memB (the correctly-attributed failing member)", got.From)
+	}
+	if got.Pool != "codex_pool" || got.Reason != "invalid_grant" || got.Class != failoverAuthFailure {
+		t.Fatalf("FailoverEvent = %+v, want pool=codex_pool reason=invalid_grant class=auth-failure", got)
+	}
+}
+
+// setupPoolAddonSplitHost3 is setupPoolAddonSplitHost with three members,
+// all sharing one token URL on a host distinct from the pool binding host.
+func setupPoolAddonSplitHost3(t *testing.T, poolName, a, b, c string) (*SluiceAddon, *atomic.Pointer[vault.PoolResolver]) {
+	t.Helper()
+	provider := &addonWritableProvider{
+		creds: map[string]string{
+			a: poolMemberCred(t, a+"-access", a+"-refresh"),
+			b: poolMemberCred(t, b+"-access", b+"-refresh"),
+			c: poolMemberCred(t, c+"-access", c+"-refresh"),
+		},
+	}
+	bindings := []vault.Binding{{
+		Destination: "api.example.com",
+		Ports:       []int{443},
+		Credential:  poolName,
+	}}
+	resolver, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatalf("NewBindingResolver: %v", err)
+	}
+	var resolverPtr atomic.Pointer[vault.BindingResolver]
+	resolverPtr.Store(resolver)
+
+	addon := NewSluiceAddon(WithResolver(&resolverPtr), WithProvider(provider))
+	addon.persistDone = make(chan struct{}, 10)
+
+	metas := []store.CredentialMeta{
+		{Name: a, CredType: "oauth", TokenURL: testOAuthTokenURL},
+		{Name: b, CredType: "oauth", TokenURL: testOAuthTokenURL},
+		{Name: c, CredType: "oauth", TokenURL: testOAuthTokenURL},
+	}
+	addon.UpdateOAuthIndex(metas)
+
+	pool := store.Pool{Name: poolName, Strategy: store.PoolStrategyFailover}
+	pool.Members = []store.PoolMember{
+		{Credential: a, Position: 0},
+		{Credential: b, Position: 1},
+		{Credential: c, Position: 2},
+	}
+	var prPtr atomic.Pointer[vault.PoolResolver]
+	prPtr.Store(vault.NewPoolResolver([]store.Pool{pool}, nil))
+	addon.SetPoolResolver(&prPtr)
+	return addon, &prPtr
+}
+
+// TestTokenEndpointFailover3MemberAttributesMiddleMember is the 3-member
+// CRITICAL-2 variant: memA (first index) and memC are cooled, memB is
+// active and refreshing. idx.Match still returns memA (first entry). The
+// fix must cool memB (the injected member) and leave memA/memC's distinct
+// cooldown windows untouched.
+func TestTokenEndpointFailover3MemberAttributesMiddleMember(t *testing.T) {
+	addon, prPtr := setupPoolAddonSplitHost3(t, "codex_pool", "memA", "memB", "memC")
+	client := setupAddonConn(addon, "auth.example.com:443")
+	pr := prPtr.Load()
+
+	aUntil0 := time.Now().Add(45 * time.Second)
+	cUntil0 := time.Now().Add(75 * time.Second)
+	pr.MarkCooldown("memA", aUntil0, "429")
+	pr.MarkCooldown("memC", cUntil0, "403")
+	if got, _ := pr.ResolveActive("codex_pool"); got != "memB" {
+		t.Fatalf("active = %q, want memB", got)
+	}
+
+	addon.refreshAttr.Tag("memB-refresh", "memB")
+
+	f := newPoolRespFlowBody(client, 401, "memB-refresh", []byte(`{"error":"invalid_token"}`))
+	pool, member, _, ok := addon.poolForResponse(f)
+	if !ok || pool != "codex_pool" || member != "memB" {
+		t.Fatalf("poolForResponse got ok=%v pool=%q member=%q, want codex_pool/memB", ok, pool, member)
+	}
+
+	addon.Response(newPoolRespFlowBody(client, 401, "memB-refresh", []byte(`{"error":"invalid_token"}`)))
+
+	if _, cooling := pr.CooldownUntil("memB"); !cooling {
+		t.Fatal("memB must be cooled after its own 401")
+	}
+	if aU, c := pr.CooldownUntil("memA"); !c || aU.Sub(aUntil0).Abs() > time.Second {
+		t.Fatalf("memA cooldown changed: got %v (cooling=%v), want original %v", aU, c, aUntil0)
+	}
+	if cU, c := pr.CooldownUntil("memC"); !c || cU.Sub(cUntil0).Abs() > time.Second {
+		t.Fatalf("memC cooldown changed: got %v (cooling=%v), want original %v", cU, c, cUntil0)
+	}
+}
+
+// TestTokenEndpointFailoverFallsBackToActiveMember asserts the documented
+// fallback: when the real refresh token cannot be recovered from the body
+// (no attribution tag — e.g. the request was not driven through pass-2),
+// poolForResponse cools the ACTIVE member, never blindly idx.Match's first
+// index entry.
+func TestTokenEndpointFailoverFallsBackToActiveMember(t *testing.T) {
+	addon, prPtr := setupPoolAddonSplitHost(t, "codex_pool", "memA", "memB")
+	client := setupAddonConn(addon, "auth.example.com:443")
+	pr := prPtr.Load()
+
+	// memA cooled -> memB active. NO refreshAttr tag is recorded, and the
+	// body's refresh token is not in the attribution map, so Peek misses.
+	pr.MarkCooldown("memA", time.Now().Add(90*time.Second), "429")
+	if got, _ := pr.ResolveActive("codex_pool"); got != "memB" {
+		t.Fatalf("active = %q, want memB", got)
+	}
+
+	f := newPoolRespFlowBody(client, 400, "untagged-refresh", []byte(`{"error":"invalid_grant"}`))
+	pool, member, _, ok := addon.poolForResponse(f)
+	if !ok {
+		t.Fatal("poolForResponse: expected attribution via active-member fallback")
+	}
+	if pool != "codex_pool" || member != "memB" {
+		t.Fatalf("fallback got pool=%q member=%q, want codex_pool/memB (active member, NOT idx.Match's memA)", pool, member)
+	}
+}
+
+// TestServerStorePoolConcurrentMarkCooldown is the CRITICAL-1 integration
+// regression at the real production code path: Server.StorePool's atomic
+// pointer swap (the SIGHUP / data_version reload) racing handlePoolFailover's
+// lock-free MarkCooldown. With the shared-PoolHealth fix the cooldown can
+// never be lost across the swap. Run with -race.
+func TestServerStorePoolConcurrentMarkCooldown(t *testing.T) {
+	srv := &Server{} // addon nil: StorePool's `if s.addon != nil` guards it.
+	shared := vault.NewPoolHealth()
+	pool := store.Pool{Name: "p", Strategy: store.PoolStrategyFailover}
+	pool.Members = []store.PoolMember{
+		{Credential: "m0", Position: 0},
+		{Credential: "m1", Position: 1},
+		{Credential: "m2", Position: 2},
+	}
+	srv.StorePool(vault.NewPoolResolverShared([]store.Pool{pool}, nil, shared))
+
+	const iters = 400
+	far := 10 * time.Minute
+	done := make(chan struct{})
+
+	// Reload loop: rebuild + StorePool (the real atomic swap), bound to the
+	// SAME shared health, exactly like loadPoolResolver -> StorePool.
+	go func() {
+		for i := 0; i < iters; i++ {
+			srv.StorePool(vault.NewPoolResolverShared([]store.Pool{pool}, nil, shared))
+		}
+		close(done)
+	}()
+
+	// Failover loop: MarkCooldown on whatever resolver is live now (often
+	// one about to be replaced), with NO ReloadMu held — exactly the
+	// handlePoolFailover discipline.
+	for i := 0; i < iters; i++ {
+		pr := srv.poolResolver.Load()
+		pr.MarkCooldown(pool.Members[i%3].Credential, time.Now().Add(far), "429")
+	}
+	<-done
+
+	latest := srv.poolResolver.Load()
+	for _, m := range pool.Members {
+		if _, cooling := latest.CooldownUntil(m.Credential); !cooling {
+			t.Fatalf("cooldown for %q lost across Server.StorePool swaps (CRITICAL-1)", m.Credential)
+		}
+	}
+}
+
+// TestServerStorePoolStaleGenerationCooldownNotLost is the deterministic
+// CRITICAL-1 regression that MergeLiveCooldowns' one-generation-back
+// chaining provably cannot rescue. A reference to a generation is captured,
+// TWO StorePool swaps happen (so the captured pointer is two generations
+// stale and was already merged forward BEFORE the cooldown), THEN
+// MarkCooldown is applied to that stale generation. Pre-fix, the cooldown
+// was applied to a private health map that no live generation points at and
+// that was merged forward before the mark — permanently invisible. The
+// shared-PoolHealth fix makes it visible because every generation mutates
+// the SAME map. A credential ("z") cooled by nothing else makes the
+// assertion unambiguous.
+func TestServerStorePoolStaleGenerationCooldownNotLost(t *testing.T) {
+	srv := &Server{}
+	shared := vault.NewPoolHealth()
+	pool := store.Pool{Name: "p", Strategy: store.PoolStrategyFailover}
+	pool.Members = []store.PoolMember{
+		{Credential: "y", Position: 0},
+		{Credential: "z", Position: 1},
+	}
+	srv.StorePool(vault.NewPoolResolverShared([]store.Pool{pool}, nil, shared))
+
+	stale := srv.poolResolver.Load() // generation N
+	srv.StorePool(vault.NewPoolResolverShared([]store.Pool{pool}, nil, shared))
+	srv.StorePool(vault.NewPoolResolverShared([]store.Pool{pool}, nil, shared))
+	// "z" has never been cooled; mark it on the two-generations-stale ref.
+	stale.MarkCooldown("z", time.Now().Add(10*time.Minute), "401")
+
+	cur := srv.poolResolver.Load()
+	if _, cooling := cur.CooldownUntil("z"); !cooling {
+		t.Fatal("cooldown applied to a two-generations-stale resolver was lost " +
+			"(CRITICAL-1: MergeLiveCooldowns chains only one generation back and " +
+			"runs before the late mark; only shared-PoolHealth survives this)")
+	}
+	// And it must steer ResolveActive on the live generation.
+	if got, _ := cur.ResolveActive("p"); got != "y" {
+		t.Fatalf("ResolveActive = %q, want y (z cooled via stale-gen mark)", got)
+	}
+}

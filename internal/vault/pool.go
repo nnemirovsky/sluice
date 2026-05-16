@@ -25,6 +25,65 @@ type memberHealth struct {
 	reason        string
 }
 
+// PoolHealth is the mutex-guarded credential cooldown map. It is
+// deliberately a SEPARATE object from PoolResolver so it can outlive any
+// single resolver generation.
+//
+// CRITICAL-1: pool membership is immutable per resolver, but a membership
+// change (or any unrelated DB write triggering the 2s data_version
+// watcher, or a SIGHUP) rebuilds a fresh PoolResolver that the server
+// atomically pointer-swaps. Phase 2 failover's MarkCooldown runs on the
+// response path WITHOUT holding ReloadMu, so a MarkCooldown landing on the
+// old generation between a swap's snapshot and store could be lost; and a
+// merge that chains only one generation back loses a cooldown permanently
+// if the detached durable SetCredentialHealth write fails.
+//
+// The fix: construct ONE PoolHealth at process start and inject the SAME
+// instance into every NewPoolResolver. MarkCooldown on any generation and
+// ResolveActive on the current generation then mutate/read the SAME
+// underlying map under the SAME mutex, so a cooldown can never be lost
+// across a pointer swap and never depends on a durable write succeeding.
+// Store rows still seed the map at startup (Seed) for cross-restart
+// durability, and the seed is monotonic (never shortens a live in-memory
+// cooldown).
+type PoolHealth struct {
+	mu     sync.RWMutex
+	health map[string]memberHealth
+}
+
+// NewPoolHealth returns an empty shared health map. Call this exactly once
+// per process and thread the result through every NewPoolResolver so all
+// resolver generations share one cooldown view.
+func NewPoolHealth() *PoolHealth {
+	return &PoolHealth{health: make(map[string]memberHealth)}
+}
+
+// Seed merges store-persisted cooldown rows into the shared map. It is
+// monotonic: a store row never shortens or clears a live in-memory
+// cooldown (the in-memory value is authoritative because Phase 2 failover
+// updates it synchronously and the durable write is best-effort/detached).
+// Expired rows are ignored. Safe to call on every resolver rebuild.
+func (ph *PoolHealth) Seed(healthRows []store.CredentialHealth) {
+	if ph == nil {
+		return
+	}
+	now := time.Now()
+	ph.mu.Lock()
+	defer ph.mu.Unlock()
+	for _, h := range healthRows {
+		if h.Status != "cooldown" || h.CooldownUntil.IsZero() || !h.CooldownUntil.After(now) {
+			continue
+		}
+		existing, ok := ph.health[h.Credential]
+		if !ok || h.CooldownUntil.After(existing.cooldownUntil) {
+			ph.health[h.Credential] = memberHealth{
+				cooldownUntil: h.CooldownUntil,
+				reason:        h.LastFailureReason,
+			}
+		}
+	}
+}
+
 // PoolResolver maps a pool name to its currently active member. It is the
 // single chokepoint every credential consumer routes through (injection
 // passes, OAuthIndex.Has gating, persist attribution), so a pool name is
@@ -33,28 +92,56 @@ type memberHealth struct {
 // Locking discipline: pool membership is immutable for the lifetime of a
 // PoolResolver instance (membership changes rebuild a fresh resolver that
 // the server atomically pointer-swaps). Health, by contrast, is mutated
-// synchronously on the response path during Phase 2 failover, so the health
-// map is guarded by mu. ResolveActive takes mu.RLock; MarkCooldown takes
-// mu.Lock. Readers therefore always observe a consistent active member even
-// while a concurrent response is recording a failover.
+// synchronously on the response path during Phase 2 failover and MUST
+// survive resolver pointer swaps, so it lives in a SHARED *PoolHealth
+// (one instance per process, injected into every generation). ResolveActive
+// takes the shared RLock; MarkCooldown takes the shared Lock. A failover
+// recorded on any generation is therefore visible to ResolveActive on the
+// current generation regardless of how many reloads happened in between,
+// and a cooldown can never be lost across a swap (CRITICAL-1).
 type PoolResolver struct {
 	// pools maps pool name -> ordered member credential names.
 	pools map[string][]string
 	// memberOf maps a credential name -> the pools that contain it.
 	memberOf map[string][]string
 
-	mu     sync.RWMutex
-	health map[string]memberHealth
+	// health is the shared, swap-surviving cooldown map. Never nil after
+	// NewPoolResolver (a fresh PoolHealth is allocated when none is given,
+	// preserving the old single-generation behavior for ad-hoc callers).
+	health *PoolHealth
 }
 
-// NewPoolResolver builds a resolver from store snapshots. Health rows with
-// status "cooldown" and a future cooldown_until seed the in-memory health
-// map; healthy rows and expired cooldowns are treated as eligible.
+// NewPoolResolver builds a resolver from store snapshots with a PRIVATE
+// per-instance health map. Use this for short-lived throwaway resolvers
+// (CLI `pool` subcommands that build a resolver, print, and discard it).
+// The long-lived proxy server MUST use NewPoolResolverShared so cooldowns
+// survive resolver pointer swaps (CRITICAL-1). Health rows with status
+// "cooldown" and a future cooldown_until seed the map; healthy rows and
+// expired cooldowns are treated as eligible.
 func NewPoolResolver(pools []store.Pool, healthRows []store.CredentialHealth) *PoolResolver {
+	return NewPoolResolverShared(pools, healthRows, nil)
+}
+
+// NewPoolResolverShared builds a resolver that shares the given PoolHealth
+// across every resolver generation. Pass the process-wide *PoolHealth here
+// (NewPoolHealth, created once) so MarkCooldown on any generation and
+// ResolveActive on the current generation operate on the SAME mutex-guarded
+// map — a cooldown can never be lost across an atomic pointer swap and
+// never depends on the detached durable write succeeding (CRITICAL-1).
+// When shared is nil a fresh private PoolHealth is allocated, preserving
+// the old single-generation semantics for ad-hoc callers.
+//
+// healthRows seed the (possibly shared) map monotonically: an existing
+// live in-memory cooldown is never shortened by a store row. Seeding the
+// shared map on every rebuild is therefore safe and idempotent.
+func NewPoolResolverShared(pools []store.Pool, healthRows []store.CredentialHealth, shared *PoolHealth) *PoolResolver {
+	if shared == nil {
+		shared = NewPoolHealth()
+	}
 	pr := &PoolResolver{
 		pools:    make(map[string][]string, len(pools)),
 		memberOf: make(map[string][]string),
-		health:   make(map[string]memberHealth),
+		health:   shared,
 	}
 	for _, p := range pools {
 		members := make([]string, 0, len(p.Members))
@@ -64,37 +151,29 @@ func NewPoolResolver(pools []store.Pool, healthRows []store.CredentialHealth) *P
 		}
 		pr.pools[p.Name] = members
 	}
-	for _, h := range healthRows {
-		if h.Status == "cooldown" && !h.CooldownUntil.IsZero() {
-			pr.health[h.Credential] = memberHealth{
-				cooldownUntil: h.CooldownUntil,
-				reason:        h.LastFailureReason,
-			}
-		}
-	}
+	shared.Seed(healthRows)
 	return pr
 }
 
-// IsPool reports whether name is a configured pool.
+// IsPool reports whether name is a configured pool. Pool membership is
+// immutable for a resolver instance (a membership change builds a fresh
+// resolver), so no lock is needed.
 func (pr *PoolResolver) IsPool(name string) bool {
 	if pr == nil {
 		return false
 	}
-	pr.mu.RLock()
-	defer pr.mu.RUnlock()
 	_, ok := pr.pools[name]
 	return ok
 }
 
 // PoolForMember returns the first pool that contains the given credential,
 // or "" if the credential is not a pool member. Used by the response path to
-// attribute a failover/refresh to its pool for audit + Telegram.
+// attribute a failover/refresh to its pool for audit + Telegram. Membership
+// is immutable per instance, so no lock is needed.
 func (pr *PoolResolver) PoolForMember(credential string) string {
 	if pr == nil {
 		return ""
 	}
-	pr.mu.RLock()
-	defer pr.mu.RUnlock()
 	if pools := pr.memberOf[credential]; len(pools) > 0 {
 		return pools[0]
 	}
@@ -103,13 +182,12 @@ func (pr *PoolResolver) PoolForMember(credential string) string {
 
 // Members returns the ordered member list for a pool (copy), or nil. Exposed
 // as an introspection surface for tests and potential future `pool status`
-// detail output; not on any hot path.
+// detail output; not on any hot path. Membership is immutable per instance,
+// so no lock is needed.
 func (pr *PoolResolver) Members(pool string) []string {
 	if pr == nil {
 		return nil
 	}
-	pr.mu.RLock()
-	defer pr.mu.RUnlock()
 	m, ok := pr.pools[pool]
 	if !ok {
 		return nil
@@ -128,8 +206,6 @@ func (pr *PoolResolver) ResolveActive(name string) (member string, ok bool) {
 	if pr == nil {
 		return name, true
 	}
-	pr.mu.RLock()
-	defer pr.mu.RUnlock()
 
 	members, isPool := pr.pools[name]
 	if !isPool {
@@ -140,11 +216,17 @@ func (pr *PoolResolver) ResolveActive(name string) (member string, ok bool) {
 		return "", false
 	}
 
+	// Read the shared health map under its RLock. A concurrent failover's
+	// MarkCooldown takes the same map's write lock, so this observes a
+	// consistent cooldown view regardless of resolver generation.
+	pr.health.mu.RLock()
+	defer pr.health.mu.RUnlock()
+
 	now := time.Now()
 	var soonest string
 	var soonestUntil time.Time
 	for _, m := range members {
-		h, tracked := pr.health[m]
+		h, tracked := pr.health.health[m]
 		if !tracked || h.cooldownUntil.IsZero() || !h.cooldownUntil.After(now) {
 			return m, true
 		}
@@ -167,49 +249,56 @@ func (pr *PoolResolver) MarkCooldown(credential string, until time.Time, reason 
 	if pr == nil {
 		return
 	}
-	pr.mu.Lock()
-	defer pr.mu.Unlock()
+	// Mutate the SHARED health map. Because every resolver generation points
+	// at the same *PoolHealth, a MarkCooldown that lands on an
+	// about-to-be-replaced generation is still observed by ResolveActive on
+	// the new generation — the pointer swap no longer races the cooldown
+	// (CRITICAL-1). Monotonic clear/set semantics are unchanged: a zero/past
+	// `until` clears the cooldown (recovery).
+	pr.health.mu.Lock()
+	defer pr.health.mu.Unlock()
 	if until.IsZero() || !until.After(time.Now()) {
-		delete(pr.health, credential)
+		delete(pr.health.health, credential)
 		return
 	}
-	pr.health[credential] = memberHealth{cooldownUntil: until, reason: reason}
+	pr.health.health[credential] = memberHealth{cooldownUntil: until, reason: reason}
 }
 
-// MergeLiveCooldowns carries forward still-active in-memory cooldowns from a
-// previous resolver into this freshly built one. It MUST be called before the
-// new resolver is atomically swapped in.
+// MergeLiveCooldowns is retained for API compatibility but is now a
+// near-no-op. CRITICAL-1's race and permanent-loss bugs were fixed by
+// making the cooldown map a process-wide shared *PoolHealth that every
+// resolver generation points at (NewPoolResolverShared), so a cooldown
+// recorded via MarkCooldown on any generation is already visible to
+// ResolveActive on the new generation — there is nothing to "carry
+// forward" because both generations mutate the SAME map under the SAME
+// mutex. The pointer swap can no longer lose a cooldown, and durability no
+// longer depends on the detached store write succeeding.
 //
-// Why this exists: Phase 2 failover records the active member's cooldown
-// synchronously in the in-memory health map (MarkCooldown) and only persists
-// SetCredentialHealth to the store from a detached best-effort goroutine. Any
-// reload (SIGHUP, or the 2s data_version watcher firing on ANY unrelated DB
-// write — a policy add, a cred update, an audit row) rebuilds the resolver
-// from store rows alone via NewPoolResolver. Without this merge, a reload that
-// races ahead of (or outlives a failed) durable write would seed health only
-// from the store and silently resurrect a member that was just cooled down in
-// memory, defeating the I1 synchronous-failover guarantee for the full
-// cooldown TTL (60s/300s) — or permanently if the async store write failed.
-//
-// Merge policy: for every member that this resolver still knows about (so a
-// cooldown for a credential removed from all pools is correctly dropped), the
-// later of the store-seeded expiry and the previous in-memory expiry wins.
-// Expired cooldowns on either side are not carried. This is monotonic: a live
-// cooldown can never be shortened or erased by an unrelated reload.
+// When prev and pr happen to share the same *PoolHealth (the normal server
+// path) this is a pure no-op. The only case where it still does work is a
+// defensive one: prev was built with a DIFFERENT (e.g. nil-defaulted)
+// PoolHealth than pr — then still-live cooldowns are copied forward
+// monotonically and orphaned members dropped, exactly as before, so the
+// old single-generation callers are not regressed.
 func (pr *PoolResolver) MergeLiveCooldowns(prev *PoolResolver) {
-	if pr == nil || prev == nil {
+	if pr == nil || prev == nil || prev.health == nil || pr.health == nil {
+		return
+	}
+	if pr.health == prev.health {
+		// Shared health map: both generations already see the same
+		// cooldowns. Nothing to do — this is the CRITICAL-1 fix.
 		return
 	}
 	now := time.Now()
-	prev.mu.RLock()
-	prevHealth := make(map[string]memberHealth, len(prev.health))
-	for k, v := range prev.health {
+	prev.health.mu.RLock()
+	prevHealth := make(map[string]memberHealth, len(prev.health.health))
+	for k, v := range prev.health.health {
 		prevHealth[k] = v
 	}
-	prev.mu.RUnlock()
+	prev.health.mu.RUnlock()
 
-	pr.mu.Lock()
-	defer pr.mu.Unlock()
+	pr.health.mu.Lock()
+	defer pr.health.mu.Unlock()
 	for cred, ph := range prevHealth {
 		if ph.cooldownUntil.IsZero() || !ph.cooldownUntil.After(now) {
 			continue // expired in the old resolver; nothing to carry
@@ -219,9 +308,9 @@ func (pr *PoolResolver) MergeLiveCooldowns(prev *PoolResolver) {
 		if _, stillMember := pr.memberOf[cred]; !stillMember {
 			continue
 		}
-		existing, ok := pr.health[cred]
+		existing, ok := pr.health.health[cred]
 		if !ok || ph.cooldownUntil.After(existing.cooldownUntil) {
-			pr.health[cred] = ph
+			pr.health.health[cred] = ph
 		}
 	}
 }
@@ -234,9 +323,9 @@ func (pr *PoolResolver) CooldownUntil(credential string) (time.Time, bool) {
 	if pr == nil {
 		return time.Time{}, false
 	}
-	pr.mu.RLock()
-	defer pr.mu.RUnlock()
-	h, ok := pr.health[credential]
+	pr.health.mu.RLock()
+	defer pr.health.mu.RUnlock()
+	h, ok := pr.health.health[credential]
 	if !ok || h.cooldownUntil.IsZero() || !h.cooldownUntil.After(time.Now()) {
 		return time.Time{}, false
 	}

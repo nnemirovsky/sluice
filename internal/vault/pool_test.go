@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -195,4 +196,89 @@ func TestNilPoolResolverSafe(t *testing.T) {
 		t.Error("nil IsPool = true")
 	}
 	pr.MarkCooldown("x", time.Now(), "") // must not panic
+}
+
+// TestSharedHealthSurvivesResolverRebuild is the CRITICAL-1 regression:
+// when the long-lived path rebuilds the resolver against the SAME shared
+// PoolHealth (every SIGHUP / data_version reload), a cooldown recorded on
+// the OLD generation must be visible to ResolveActive on the NEW
+// generation — with zero dependency on the detached durable store write.
+func TestSharedHealthSurvivesResolverRebuild(t *testing.T) {
+	shared := NewPoolHealth()
+	gen1 := NewPoolResolverShared([]store.Pool{mkPool("pool", "a", "b")}, nil, shared)
+
+	// Failover cools "a" on gen1. The store write has NOT landed (best
+	// effort/detached), so a rebuild sees no health rows.
+	gen1.MarkCooldown("a", time.Now().Add(120*time.Second), "429")
+
+	// Reload rebuilds a fresh generation from store rows alone (empty),
+	// against the SAME shared health.
+	gen2 := NewPoolResolverShared([]store.Pool{mkPool("pool", "a", "b")}, nil, shared)
+
+	if got, _ := gen2.ResolveActive("pool"); got != "b" {
+		t.Fatalf("gen2 active = %q, want b (cooldown on gen1 must survive the rebuild — CRITICAL-1)", got)
+	}
+	// And a MarkCooldown that lands on the OLD generation AFTER gen2 exists
+	// must still be observed by gen2 (no lost update across the swap).
+	gen1.MarkCooldown("b", time.Now().Add(120*time.Second), "401")
+	if _, cooling := gen2.CooldownUntil("b"); !cooling {
+		t.Fatal("MarkCooldown on old generation not visible on new generation — CRITICAL-1 lost-update race")
+	}
+}
+
+// TestSharedHealthConcurrentMarkCooldownVsRebuild stresses the CRITICAL-1
+// race: MarkCooldown on rotating "old" generations racing continuous
+// resolver rebuilds (the StorePool/reload swap) against one shared health.
+// Run with -race. The invariant: a cooldown that was set is NEVER lost —
+// every credential we cooled is still cooling when observed through the
+// latest generation.
+func TestSharedHealthConcurrentMarkCooldownVsRebuild(t *testing.T) {
+	shared := NewPoolHealth()
+	pool := mkPool("pool", "m0", "m1", "m2", "m3")
+
+	var cur struct {
+		sync.RWMutex
+		pr *PoolResolver
+	}
+	cur.pr = NewPoolResolverShared([]store.Pool{pool}, nil, shared)
+
+	const iters = 400
+	far := 10 * time.Minute
+	done := make(chan struct{})
+
+	// Rebuilder: continuously swaps in a fresh generation bound to the
+	// SAME shared health (models StorePool's reload swap).
+	go func() {
+		for i := 0; i < iters; i++ {
+			fresh := NewPoolResolverShared([]store.Pool{pool}, nil, shared)
+			cur.Lock()
+			cur.pr = fresh
+			cur.Unlock()
+		}
+		close(done)
+	}()
+
+	// Marker: cools members on whatever generation is current at the time
+	// (often an about-to-be-replaced one). Every cooldown uses a far-future
+	// expiry so it must still be live at the assertion.
+	members := pool.Members
+	for i := 0; i < iters; i++ {
+		cur.RLock()
+		g := cur.pr
+		cur.RUnlock()
+		m := members[i%len(members)].Credential
+		g.MarkCooldown(m, time.Now().Add(far), "429")
+	}
+	<-done
+
+	// Observe through the latest generation: every member we cooled must
+	// still be cooling. None lost across any swap.
+	cur.RLock()
+	latest := cur.pr
+	cur.RUnlock()
+	for _, m := range members {
+		if _, cooling := latest.CooldownUntil(m.Credential); !cooling {
+			t.Fatalf("cooldown for %q was lost across resolver swaps (CRITICAL-1 race)", m.Credential)
+		}
+	}
 }
