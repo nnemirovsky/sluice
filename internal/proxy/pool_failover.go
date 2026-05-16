@@ -93,10 +93,17 @@ func classifyFailover(statusCode int, body []byte, isTokenEndpoint bool) (class 
 		// a non-token-endpoint with an unrelated body still resolves to
 		// failoverNone there (the body is only trusted on a real token URL).
 	}
-	// Non-2xx-status path. Only a real token-endpoint body may be classified
-	// (invalid_grant/invalid_token), and only when the status is not a 2xx
-	// success. A 2xx token response is a healthy refresh, never a failover.
-	if isTokenEndpoint && (statusCode < 200 || statusCode > 299) {
+	// 4xx-client-error token-endpoint path. Only a real token-endpoint body
+	// may be classified (invalid_grant/invalid_token), and only on a 4xx
+	// CLIENT error. A 2xx token response is a healthy refresh, never a
+	// failover; a 5xx is a server-side error and is a documented NO-OP (a
+	// transient upstream outage is not evidence the member's account is
+	// exhausted or revoked — failing over would just spread the outage
+	// across every account in the pool, see README + the failoverNone doc).
+	// Restricting to [400,500) keeps every existing correct path (400/403
+	// invalid_grant -> auth-failure) while excluding 5xx whose body happens
+	// to echo "invalid_grant"/"invalid_token".
+	if isTokenEndpoint && statusCode >= 400 && statusCode < 500 {
 		if bodyContainsAny(body, "invalid_grant") {
 			return failoverAuthFailure, "invalid_grant"
 		}

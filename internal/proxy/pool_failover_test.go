@@ -76,6 +76,28 @@ func TestClassifyFailover(t *testing.T) {
 		{"500 server error -> noop", 500, `oops`, false, failoverNone, ""},
 		{"502 -> noop", 502, ``, false, failoverNone, ""},
 		{"404 -> noop", 404, ``, false, failoverNone, ""},
+		// Round-17 Finding 2: a token-endpoint 5xx whose body happens to
+		// contain invalid_grant/invalid_token must STAY a no-op. A server-side
+		// error is not evidence the member's account is exhausted/revoked
+		// (README + the failoverNone doc). The OLD non-2xx check
+		// (statusCode < 200 || statusCode > 299) wrongly classified these as
+		// auth-failure and cooled an innocent member. The fix restricts the
+		// body classification to 4xx CLIENT errors only.
+		{"token-endpoint 503 invalid_grant -> noop", 503, `{"error":"invalid_grant"}`, true, failoverNone, ""},
+		{"token-endpoint 500 invalid_grant -> noop", 500, `{"error":"invalid_grant"}`, true, failoverNone, ""},
+		{"token-endpoint 502 invalid_token -> noop", 502, `{"error":"invalid_token"}`, true, failoverNone, ""},
+		// The 4xx token-endpoint paths are UNAFFECTED by the fix.
+		{"token-endpoint 400 invalid_grant still auth", 400, `{"error":"invalid_grant"}`, true, failoverAuthFailure, "invalid_grant"},
+		{"token-endpoint 403 invalid_grant still auth", 403, `{"error":"invalid_grant"}`, true, failoverAuthFailure, "invalid_grant"},
+		{"token-endpoint 499 invalid_token still auth", 499, `{"error":"invalid_token"}`, true, failoverAuthFailure, "invalid_token"},
+		// 401/429 are explicit status cases ABOVE the body check; unaffected.
+		{"401 still auth (unaffected)", 401, ``, true, failoverAuthFailure, "401"},
+		{"429 still rate-limited (unaffected)", 429, `{"error":"invalid_grant"}`, true, failoverRateLimited, "429"},
+		// 2xx is still a no-op even with an invalid_grant-looking body.
+		{"2xx invalid_grant body still noop", 200, `{"error":"invalid_grant"}`, true, failoverNone, ""},
+		// Non-token-endpoint 4xx with invalid_grant body is still a no-op
+		// (the body is only trusted on a real token URL).
+		{"non-token-endpoint 400 invalid_grant -> noop", 400, `{"error":"invalid_grant"}`, false, failoverNone, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

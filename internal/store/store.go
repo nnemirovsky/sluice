@@ -1983,6 +1983,21 @@ func (s *Store) RemoveCredentialFully(name string) (metaDeleted bool, bindings, 
 		return false, 0, 0, err
 	}
 
+	// Round-17 Finding 1: deleteCredentialMetaGuardedTx only drops the
+	// credential_health row when the meta DELETE affected a row (CAS no-op
+	// semantics, correct for RemoveCredentialMetaCAS — see that helper's
+	// comment). But this is the FULL-removal path: if a prior partial
+	// cleanup already removed credential_meta, n==0 and the guarded helper
+	// leaves a stale credential_health row behind, so a later same-named
+	// credential would inherit the dead cooldown. Full removal must wipe
+	// the named credential's health UNCONDITIONALLY in the same tx,
+	// regardless of whether a meta row existed. This does NOT alter
+	// deleteCredentialMetaGuardedTx's behavior, so the round-11
+	// RemoveCredentialMetaCAS no-op invariant is unchanged.
+	if _, err := tx.Exec("DELETE FROM credential_health WHERE credential = ?", name); err != nil {
+		return false, 0, 0, fmt.Errorf("delete credential health for %q: %w", name, err)
+	}
+
 	bres, err := tx.Exec("DELETE FROM bindings WHERE credential = ?", name)
 	if err != nil {
 		return false, 0, 0, fmt.Errorf("delete bindings by credential %q: %w", name, err)

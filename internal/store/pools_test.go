@@ -970,3 +970,128 @@ func TestRemoveCredentialFullyRefusesLivePoolMember(t *testing.T) {
 		t.Fatalf("RemoveCredentialFully(free) = %v, %v; want true, nil", md, ferr)
 	}
 }
+
+// TestRemoveCredentialFullyCleansHealthOnPartialCleanupFinish is the round-17
+// Finding 1 fail-before/pass-after regression. Pre-state simulates a prior
+// PARTIAL cleanup: credential_meta for "x" is ALREADY absent, but a stale
+// credential_health cooldown row plus a binding and an auto-created allow
+// rule survived. deleteCredentialMetaGuardedTx only drops the health row when
+// the meta DELETE affected a row (n>0, CAS no-op semantics), so the OLD
+// RemoveCredentialFully left the stale health row behind (n==0 here) and a
+// later same-named credential would inherit the dead cooldown. The fix adds
+// an UNCONDITIONAL health delete for the named credential in the full-removal
+// tx. Pass-after: health, binding, and rule for "x" are all gone, so a later
+// same-named pool member inherits NO stale cooldown.
+func TestRemoveCredentialFullyCleansHealthOnPartialCleanupFinish(t *testing.T) {
+	s := newTestStore(t)
+
+	// Bindings + rules require a credential_meta row to be created via the
+	// normal path; seed it, wire the binding/rule/health, THEN delete ONLY
+	// the meta row directly to reproduce the "prior partial cleanup" state
+	// (meta gone, health + binding + rule still present).
+	seedOAuthCred(t, s, "x")
+	until := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	if err := s.SetCredentialHealth("x", "cooldown", until, "429"); err != nil {
+		t.Fatalf("SetCredentialHealth: %v", err)
+	}
+	if _, _, err := s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{Destination: "api.example.com", Ports: []int{443}, Source: CredAddSourcePrefix + "x"},
+		"x",
+		BindingOpts{Ports: []int{443}, Header: "Authorization", Template: "Bearer {value}"},
+	); err != nil {
+		t.Fatalf("AddRuleAndBinding: %v", err)
+	}
+	// Simulate the prior partial cleanup: meta row gone, everything else left.
+	if _, err := s.db.Exec("DELETE FROM credential_meta WHERE name = ?", "x"); err != nil {
+		t.Fatalf("simulate partial cleanup (delete meta): %v", err)
+	}
+	if m, _ := s.GetCredentialMeta("x"); m != nil {
+		t.Fatalf("precondition: credential_meta should be absent, got %+v", m)
+	}
+	if h, _ := s.GetCredentialHealth("x"); h == nil {
+		t.Fatal("precondition: stale credential_health row must still be present")
+	}
+
+	// Finishing the partial cleanup. metaDeleted is false (meta already
+	// gone), but bindings/rules AND the stale health row must be swept.
+	metaDeleted, bn, rn, err := s.RemoveCredentialFully("x")
+	if err != nil {
+		t.Fatalf("RemoveCredentialFully: %v", err)
+	}
+	if metaDeleted {
+		t.Error("metaDeleted = true, want false (meta was already gone)")
+	}
+	if bn != 1 {
+		t.Errorf("bindings removed = %d, want 1", bn)
+	}
+	if rn != 1 {
+		t.Errorf("rules removed = %d, want 1", rn)
+	}
+	if h, _ := s.GetCredentialHealth("x"); h != nil {
+		t.Errorf("stale credential_health survived partial-cleanup finish: %+v", h)
+	}
+	if b, _ := s.ListBindingsByCredential("x"); len(b) != 0 {
+		t.Errorf("bindings survived: %+v", b)
+	}
+	rules, _ := s.ListRules(RuleFilter{Type: "network"})
+	for _, r := range rules {
+		if r.Source == CredAddSourcePrefix+"x" {
+			t.Errorf("auto-created rule survived: %+v", r)
+		}
+	}
+
+	// A later same-named credential added to a pool must inherit NO stale
+	// cooldown: ListCredentialHealth (what loadPoolResolver seeds from)
+	// carries no row for "x".
+	seedOAuthCred(t, s, "x")
+	seedOAuthCred(t, s, "y")
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"x", "y"}); err != nil {
+		t.Fatalf("CreatePoolWithMembers: %v", err)
+	}
+	hrows, err := s.ListCredentialHealth()
+	if err != nil {
+		t.Fatalf("ListCredentialHealth: %v", err)
+	}
+	for _, r := range hrows {
+		if r.Credential == "x" {
+			t.Fatalf("same-named credential inherited a stale cooldown: %+v", r)
+		}
+	}
+}
+
+// TestRemoveCredentialMetaCASNoOpLeavesHealthIntact pins the round-11
+// invariant the Finding 1 fix MUST NOT regress: a CAS no-op (a concurrent
+// writer changed cred_type/token_url so the guarded meta DELETE matches 0
+// rows) must leave the credential_health row UNTOUCHED. The fix added the
+// unconditional health delete ONLY in RemoveCredentialFully, not in the
+// shared deleteCredentialMetaGuardedTx helper, so RemoveCredentialMetaCAS's
+// no-op semantics are unchanged.
+func TestRemoveCredentialMetaCASNoOpLeavesHealthIntact(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "c")
+	until := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	if err := s.SetCredentialHealth("c", "cooldown", until, "429"); err != nil {
+		t.Fatalf("SetCredentialHealth: %v", err)
+	}
+
+	// CAS with MISMATCHED expected values: a "concurrent writer" effectively
+	// owns the row, so the delete is a no-op and the health row it owns must
+	// be left intact.
+	removed, noConcurrent, err := s.RemoveCredentialMetaCAS("c", "static", "https://wrong.example/token")
+	if err != nil {
+		t.Fatalf("RemoveCredentialMetaCAS: %v", err)
+	}
+	if removed {
+		t.Error("removed = true on a mismatched CAS (should be a no-op)")
+	}
+	if noConcurrent {
+		t.Error("noConcurrent = true; expected the concurrent-writer signal")
+	}
+	if m, _ := s.GetCredentialMeta("c"); m == nil {
+		t.Error("credential_meta wrongly deleted by a mismatched CAS")
+	}
+	if h, _ := s.GetCredentialHealth("c"); h == nil {
+		t.Error("credential_health wrongly deleted by a CAS no-op (round-11 invariant regressed)")
+	}
+}
