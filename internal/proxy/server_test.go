@@ -5043,3 +5043,93 @@ func TestPersistApprovalRuleSinglePersistUnchanged(t *testing.T) {
 		t.Error("expected engine pointer to be swapped after persist")
 	}
 }
+
+// TestPersistApprovalRuleRowPresentEngineStale is the Finding 1 regression.
+// A prior persist may have written the rule row (AddRule) and then failed at
+// LoadFromStore/Validate before the engine pointer swapped: the durable store
+// has the rule but the live engine still evaluates dest:port as the default
+// verdict. A later coalesced caller hitting the HasApprovalRule fast path must
+// NOT just return true off the row's presence — it must make the live engine
+// current first, otherwise callers skip the safety-net per-request checker
+// while the live engine has not learned the rule.
+func TestPersistApprovalRuleRowPresentEngineStale(t *testing.T) {
+	st, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	// Compile a STALE engine snapshot (empty store: no rules).
+	staleEng, err := policy.LoadFromStore(st)
+	if err != nil {
+		t.Fatalf("LoadFromStore (stale): %v", err)
+	}
+	// Sanity: the stale engine does not yet rule-match the destination.
+	if v, src := staleEng.EvaluateDetailed("stale.example.com", 443); src == policy.RuleMatch && v == policy.Allow {
+		t.Fatal("precondition: stale engine unexpectedly already allows the destination via a rule")
+	}
+
+	// Simulate the partial-persist window: the row IS in the store, but the
+	// live engine pointer still points at the stale snapshot.
+	if _, err := st.AddRule("allow", store.RuleOpts{
+		Destination: "stale.example.com", Ports: []int{443}, Source: "approval",
+	}); err != nil {
+		t.Fatalf("AddRule: %v", err)
+	}
+	if has, herr := st.HasApprovalRule("allow", "stale.example.com", 443); herr != nil || !has {
+		t.Fatalf("precondition: expected row present, got has=%v err=%v", has, herr)
+	}
+
+	engPtr := new(atomic.Pointer[policy.Engine])
+	engPtr.Store(staleEng)
+	var reloadMu sync.Mutex
+	r := &policyRuleSet{engine: engPtr, reloadMu: &reloadMu, store: st}
+
+	if !r.persistApprovalRule("allow", "stale.example.com", 443) {
+		t.Fatal("persistApprovalRule returned false")
+	}
+
+	// The live engine must have been swapped to one that reflects the rule;
+	// the stale pointer must no longer be installed.
+	if engPtr.Load() == staleEng {
+		t.Fatal("engine pointer not swapped: stale engine still live (callers would skip the safety-net checker)")
+	}
+	if v, srcM := engPtr.Load().EvaluateDetailed("stale.example.com", 443); srcM != policy.RuleMatch || v != policy.Allow {
+		t.Fatalf("live engine still stale after persist: verdict=%v source=%v, want Allow/RuleMatch", v, srcM)
+	}
+
+	// No duplicate insert may have happened (the row was already there).
+	rules, err := st.ListRules(store.RuleFilter{})
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
+	matches := 0
+	for _, ru := range rules {
+		if ru.Destination == "stale.example.com" && ru.Source == "approval" {
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("expected exactly 1 persisted approval rule, got %d", matches)
+	}
+
+	// Idempotent path: row present AND engine now current -> fast-path, still
+	// returns true, still no duplicate insert, engine unchanged.
+	curEng := engPtr.Load()
+	if !r.persistApprovalRule("allow", "stale.example.com", 443) {
+		t.Fatal("second persistApprovalRule returned false")
+	}
+	if engPtr.Load() != curEng {
+		t.Error("engine pointer swapped on the idempotent fast path (row present AND engine current)")
+	}
+	rules, _ = st.ListRules(store.RuleFilter{})
+	matches = 0
+	for _, ru := range rules {
+		if ru.Destination == "stale.example.com" && ru.Source == "approval" {
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("idempotent fast path inserted a duplicate: %d rules", matches)
+	}
+}

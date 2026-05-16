@@ -527,7 +527,40 @@ func (r *policyRuleSet) persistApprovalRule(verdict, dest string, port int) bool
 	if exists, existsErr := r.store.HasApprovalRule(verdict, dest, port); existsErr != nil {
 		log.Printf("[WARN] failed to check existing %s rule for %s:%d: %v", verdict, dest, port, existsErr)
 	} else if exists {
-		log.Printf("[approval] %s rule for %s:%d already present; skipping duplicate persist", verdict, dest, port)
+		// The row is present, but a prior persist may have written the row
+		// (AddRule) and then failed at LoadFromStore/Validate before the
+		// engine pointer swapped. In that window the durable store has the
+		// rule while the live engine still evaluates dest:port as ask. Only
+		// fast-path when the CURRENT live engine already reflects the rule;
+		// otherwise recompile/swap so the engine is guaranteed current
+		// before we report success. Without this, a coalesced caller that
+		// trusts the row would skip the safety-net per-request checker even
+		// though the live engine has not yet learned the rule.
+		if eng := r.engine.Load(); eng != nil {
+			v, src := eng.EvaluateDetailed(dest, port)
+			want := policy.Allow
+			if verdict == "deny" {
+				want = policy.Deny
+			}
+			if src == policy.RuleMatch && v == want {
+				log.Printf("[approval] %s rule for %s:%d already present and live engine current; skipping duplicate persist", verdict, dest, port)
+				return true
+			}
+		}
+		// Row present but engine stale: recompile from the store (the row
+		// is already there, so no duplicate AddRule) and swap so subsequent
+		// callers see a current engine.
+		log.Printf("[approval] %s rule for %s:%d present but live engine stale; recompiling", verdict, dest, port)
+		newEng, recompErr := policy.LoadFromStore(r.store)
+		if recompErr != nil {
+			log.Printf("[WARN] failed to recompile engine for stale %s rule %s:%d: %v", verdict, dest, port, recompErr)
+			return false
+		}
+		if valErr := newEng.Validate(); valErr != nil {
+			log.Printf("[WARN] engine validation failed for stale %s rule %s:%d: %v", verdict, dest, port, valErr)
+			return false
+		}
+		r.engine.Store(newEng)
 		return true
 	}
 	if _, storeErr := r.store.AddRule(verdict, store.RuleOpts{Destination: dest, Ports: []int{port}, Source: "approval"}); storeErr != nil {

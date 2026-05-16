@@ -1738,14 +1738,41 @@ func (s *Store) AddCredentialMeta(name, credType, tokenURL string) error {
 	if credType == "oauth" && tokenURL == "" {
 		return fmt.Errorf("token_url is required for oauth credentials")
 	}
-	_, err := s.db.Exec(
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Namespace mutual-exclusion: a credential must not shadow a pool. Pool
+	// and credential names share one namespace so a bound destination
+	// resolves unambiguously to either a pool or a plain credential. This is
+	// the store-layer counterpart to the pool-side check in
+	// CreatePoolWithMembers; enforcing it here protects every credential
+	// creation path (CLI, REST API, any future caller), not just the CLI.
+	// The check and the insert run in one transaction so a concurrent
+	// CreatePoolWithMembers cannot interleave between them.
+	var poolName string
+	collErr := tx.QueryRow("SELECT name FROM credential_pools WHERE name = ?", name).Scan(&poolName)
+	switch collErr {
+	case nil:
+		return fmt.Errorf("name %q is already a credential pool; pool and credential names share one namespace", name)
+	case sql.ErrNoRows:
+		// ok
+	default:
+		return fmt.Errorf("check pool name collision for %q: %w", name, collErr)
+	}
+
+	if _, err := tx.Exec(
 		`INSERT INTO credential_meta (name, cred_type, token_url)
 		 VALUES (?, ?, ?)
 		 ON CONFLICT(name) DO UPDATE SET cred_type = excluded.cred_type, token_url = excluded.token_url`,
 		name, credType, nilIfEmpty(tokenURL),
-	)
-	if err != nil {
+	); err != nil {
 		return fmt.Errorf("insert credential meta: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }
@@ -1792,10 +1819,56 @@ func (s *Store) ListCredentialMeta() ([]CredentialMeta, error) {
 
 // RemoveCredentialMeta deletes a credential metadata row by name. Returns true
 // if a row was deleted.
+//
+// Store-layer invariant enforcement (protects every caller, not just the CLI):
+//
+//   - Pool-member integrity: removal is REFUSED (fail-closed) when the
+//     credential is still a live member of one or more pools. Deleting it
+//     would leave a credential_pool_members row pointing at a missing
+//     credential, so the pool would resolve to an uninjectable credential.
+//     The operator must remove it from the pool first. The CLI grew a guard
+//     for this earlier, but the REST API and Telegram paths call this method
+//     directly and bypassed it; pushing the guard here closes all paths.
+//   - Health-row cleanup: the per-credential credential_health row is keyed
+//     by credential name and is not tied to credential_meta by a foreign
+//     key, so a bare meta delete would leave a stale cooldown behind.
+//     Recreating a same-named credential would then inherit that stale
+//     cooldown on the next resolver seed. The health row is deleted in the
+//     same transaction as the meta row so the two never diverge.
 func (s *Store) RemoveCredentialMeta(name string) (bool, error) {
-	res, err := s.db.Exec("DELETE FROM credential_meta WHERE name = ?", name)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Fail-closed pool-member guard. Same semantics as the CLI guard in
+	// `sluice cred remove`: a credential that is a live pool member cannot
+	// be removed until it is taken out of the pool.
+	var pool string
+	memErr := tx.QueryRow(
+		"SELECT pool FROM credential_pool_members WHERE credential = ? ORDER BY pool LIMIT 1", name,
+	).Scan(&pool)
+	switch memErr {
+	case nil:
+		return false, fmt.Errorf("credential %q is a member of pool %q; remove it from the pool first (sluice pool remove <p>, or recreate the pool without it)", name, pool)
+	case sql.ErrNoRows:
+		// not a pool member; safe to remove
+	default:
+		return false, fmt.Errorf("check pool membership for %q: %w", name, memErr)
+	}
+
+	res, err := tx.Exec("DELETE FROM credential_meta WHERE name = ?", name)
 	if err != nil {
 		return false, fmt.Errorf("delete credential meta: %w", err)
+	}
+	// Drop the health row in the same transaction so a removed credential
+	// never leaves a stale cooldown that a same-named recreation inherits.
+	if _, err := tx.Exec("DELETE FROM credential_health WHERE credential = ?", name); err != nil {
+		return false, fmt.Errorf("delete credential health: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil

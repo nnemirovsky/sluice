@@ -403,3 +403,113 @@ func TestMigration000006DownUp(t *testing.T) {
 		}
 	}
 }
+
+// TestRemoveCredentialMetaBlocksLivePoolMember is the Finding 3 regression.
+// The pool-member integrity guard must live in the store layer so the REST
+// API and Telegram removal paths (which call RemoveCredentialMeta directly,
+// bypassing the CLI guard) cannot orphan a credential_pool_members row.
+func TestRemoveCredentialMetaBlocksLivePoolMember(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "member")
+	seedOAuthCred(t, s, "other")
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"member", "other"}); err != nil {
+		t.Fatalf("CreatePoolWithMembers: %v", err)
+	}
+
+	// Store-level removal of a live pool member must be refused.
+	removed, err := s.RemoveCredentialMeta("member")
+	if err == nil {
+		t.Fatal("expected RemoveCredentialMeta to refuse a live pool member (Finding 3)")
+	}
+	if removed {
+		t.Fatal("RemoveCredentialMeta reported removed=true for a refused removal")
+	}
+	// The meta row must still be present (refusal must not delete anything).
+	m, gerr := s.GetCredentialMeta("member")
+	if gerr != nil || m == nil {
+		t.Fatalf("credential meta deleted despite refusal: %+v, %v", m, gerr)
+	}
+	// And the member row must still point at a real credential.
+	pools, perr := s.PoolsForMember("member")
+	if perr != nil || len(pools) != 1 || pools[0] != "p" {
+		t.Fatalf("PoolsForMember(member) = %v, %v; want [p] (no dangling change)", pools, perr)
+	}
+
+	// Removing a NON-member credential still works.
+	seedOAuthCred(t, s, "free")
+	removed, err = s.RemoveCredentialMeta("free")
+	if err != nil || !removed {
+		t.Fatalf("RemoveCredentialMeta(free) = %v, %v; want true, nil", removed, err)
+	}
+}
+
+// TestRemoveCredentialMetaCleansHealthRow is the Finding 2 regression.
+// credential_health is keyed by name and not FK-tied to credential_meta, so a
+// bare meta delete would leave a stale cooldown that a recreated same-named
+// credential inherits on the next resolver seed.
+func TestRemoveCredentialMetaCleansHealthRow(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "x")
+
+	// Seed a cooldown for x.
+	until := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	if err := s.SetCredentialHealth("x", "cooldown", until, "429 rate limited"); err != nil {
+		t.Fatalf("SetCredentialHealth: %v", err)
+	}
+	if h, _ := s.GetCredentialHealth("x"); h == nil || h.Status != "cooldown" {
+		t.Fatalf("precondition: expected x in cooldown, got %+v", h)
+	}
+
+	// Remove the credential. The health row must go with it.
+	removed, err := s.RemoveCredentialMeta("x")
+	if err != nil || !removed {
+		t.Fatalf("RemoveCredentialMeta(x) = %v, %v; want true, nil", removed, err)
+	}
+	if h, herr := s.GetCredentialHealth("x"); herr != nil || h != nil {
+		t.Fatalf("stale health row survived removal: %+v, %v", h, herr)
+	}
+
+	// Recreate the same-named credential and add it to a fresh pool. It must
+	// NOT inherit the old cooldown — GetCredentialHealth is nil (= healthy).
+	seedOAuthCred(t, s, "x")
+	seedOAuthCred(t, s, "y")
+	if err := s.CreatePoolWithMembers("fresh", "failover", []string{"x", "y"}); err != nil {
+		t.Fatalf("CreatePoolWithMembers(fresh): %v", err)
+	}
+	if h, herr := s.GetCredentialHealth("x"); herr != nil || h != nil {
+		t.Fatalf("recreated credential inherited a stale cooldown: %+v, %v", h, herr)
+	}
+}
+
+// TestAddCredentialMetaRejectsPoolNameCollision is the Finding 4 regression.
+// The pool-vs-credential namespace mutual-exclusion must be enforced in the
+// store so the REST API and any other AddCredentialMeta caller cannot create
+// a credential whose name collides with an existing pool.
+func TestAddCredentialMetaRejectsPoolNameCollision(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "acct_a")
+	seedOAuthCred(t, s, "acct_b")
+	if err := s.CreatePoolWithMembers("codex", "failover", []string{"acct_a", "acct_b"}); err != nil {
+		t.Fatalf("CreatePoolWithMembers: %v", err)
+	}
+
+	// A credential named "codex" collides with the existing pool.
+	if err := s.AddCredentialMeta("codex", "oauth", "https://auth.example.com/token"); err == nil {
+		t.Fatal("expected AddCredentialMeta to reject a name that collides with an existing pool (Finding 4)")
+	}
+	// No credential_meta row may have been written.
+	if m, _ := s.GetCredentialMeta("codex"); m != nil {
+		t.Fatalf("credential_meta row leaked for colliding name: %+v", m)
+	}
+
+	// A non-colliding name still succeeds.
+	if err := s.AddCredentialMeta("not_a_pool", "static", ""); err != nil {
+		t.Fatalf("AddCredentialMeta(not_a_pool) = %v, want nil", err)
+	}
+
+	// The reverse direction still holds: CreatePoolWithMembers rejects a
+	// name that already exists as a credential.
+	if err := s.CreatePoolWithMembers("not_a_pool", "failover", []string{"acct_a"}); err == nil {
+		t.Fatal("expected CreatePoolWithMembers to reject a name that is already a credential")
+	}
+}
