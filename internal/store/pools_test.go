@@ -836,3 +836,137 @@ func TestSetCredentialHealthIfPoolMemberValidates(t *testing.T) {
 		t.Error("invalid status accepted")
 	}
 }
+
+// TestRemoveCredentialFullyAtomicHappyPath is the round-15 Finding 2
+// happy-path regression. RemoveCredentialFully must, in ONE transaction,
+// delete credential_meta, credential_health, every binding on the
+// credential, and every auto-created allow rule (cred-add:/binding-add:).
+func TestRemoveCredentialFullyAtomicHappyPath(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "c")
+
+	until := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	if err := s.SetCredentialHealth("c", "cooldown", until, "429"); err != nil {
+		t.Fatalf("SetCredentialHealth: %v", err)
+	}
+	if _, _, err := s.AddRuleAndBinding(
+		"allow",
+		RuleOpts{Destination: "api.example.com", Ports: []int{443}, Source: CredAddSourcePrefix + "c"},
+		"c",
+		BindingOpts{Ports: []int{443}, Header: "Authorization", Template: "Bearer {value}"},
+	); err != nil {
+		t.Fatalf("AddRuleAndBinding: %v", err)
+	}
+
+	metaDeleted, bn, rn, err := s.RemoveCredentialFully("c")
+	if err != nil {
+		t.Fatalf("RemoveCredentialFully: %v", err)
+	}
+	if !metaDeleted {
+		t.Error("metaDeleted = false, want true")
+	}
+	if bn != 1 {
+		t.Errorf("bindings removed = %d, want 1", bn)
+	}
+	if rn != 1 {
+		t.Errorf("rules removed = %d, want 1", rn)
+	}
+	if m, _ := s.GetCredentialMeta("c"); m != nil {
+		t.Errorf("credential_meta survived: %+v", m)
+	}
+	if h, _ := s.GetCredentialHealth("c"); h != nil {
+		t.Errorf("credential_health survived: %+v", h)
+	}
+	if b, _ := s.ListBindingsByCredential("c"); len(b) != 0 {
+		t.Errorf("bindings survived: %+v", b)
+	}
+	rules, _ := s.ListRules(RuleFilter{Type: "network"})
+	for _, r := range rules {
+		if r.Source == CredAddSourcePrefix+"c" {
+			t.Errorf("auto-created rule survived: %+v", r)
+		}
+	}
+}
+
+// TestRemoveCredentialFullyRollsBackOnRuleFailure is the round-15 Finding 2
+// fail-before/pass-after regression. The OLD removal path committed the
+// credential_meta (+health) delete in its OWN transaction, then removed
+// bindings/rules in SEPARATE statements: a binding/rule failure left
+// meta+health gone while the vault secret + partial store state survived (a
+// partially-deleted credential). RemoveCredentialFully folds all four
+// deletes into ONE transaction, so a rule-delete failure must roll the
+// WHOLE unit back: credential_meta, credential_health, and bindings must
+// ALL still be present, and a clear error returned.
+//
+// The failure is forced deterministically by dropping the `rules` table
+// before the call, so the in-tx rules DELETE errors AFTER the meta+health
+// +bindings deletes have run inside the same (uncommitted) transaction.
+func TestRemoveCredentialFullyRollsBackOnRuleFailure(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "c")
+
+	until := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	if err := s.SetCredentialHealth("c", "cooldown", until, "429"); err != nil {
+		t.Fatalf("SetCredentialHealth: %v", err)
+	}
+	if _, err := s.AddBinding("api.example.com", "c", BindingOpts{
+		Ports: []int{443}, Header: "Authorization", Template: "Bearer {value}",
+	}); err != nil {
+		t.Fatalf("AddBinding: %v", err)
+	}
+
+	// Force the in-tx rules DELETE to fail.
+	if _, err := s.db.Exec("DROP TABLE rules"); err != nil {
+		t.Fatalf("drop rules table: %v", err)
+	}
+
+	metaDeleted, _, _, err := s.RemoveCredentialFully("c")
+	if err == nil {
+		t.Fatal("RemoveCredentialFully succeeded despite a forced rule-delete failure")
+	}
+	if metaDeleted {
+		t.Error("metaDeleted = true on a rolled-back removal")
+	}
+
+	// The WHOLE store unit must have rolled back: meta, health, and the
+	// binding must all still be present.
+	if m, _ := s.GetCredentialMeta("c"); m == nil {
+		t.Error("credential_meta was deleted despite the tx rolling back (partial-delete bug)")
+	}
+	if h, _ := s.GetCredentialHealth("c"); h == nil {
+		t.Error("credential_health was deleted despite the tx rolling back (partial-delete bug)")
+	}
+	if b, _ := s.ListBindingsByCredential("c"); len(b) != 1 {
+		t.Errorf("binding count = %d, want 1 (binding deleted despite rollback)", len(b))
+	}
+}
+
+// TestRemoveCredentialFullyRefusesLivePoolMember pins that the fail-closed
+// pool-member guard still fires inside the atomic unit: a live pool member
+// removal is refused with NOTHING deleted (so callers leave the vault
+// secret intact).
+func TestRemoveCredentialFullyRefusesLivePoolMember(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "m")
+	seedOAuthCred(t, s, "n")
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"m", "n"}); err != nil {
+		t.Fatalf("CreatePoolWithMembers: %v", err)
+	}
+
+	metaDeleted, _, _, err := s.RemoveCredentialFully("m")
+	if err == nil {
+		t.Fatal("expected RemoveCredentialFully to refuse a live pool member")
+	}
+	if metaDeleted {
+		t.Error("metaDeleted = true for a refused removal")
+	}
+	if m, _ := s.GetCredentialMeta("m"); m == nil {
+		t.Error("credential_meta deleted for a refused live pool member")
+	}
+
+	// A free (non-member) credential still removes cleanly.
+	seedOAuthCred(t, s, "free")
+	if md, _, _, ferr := s.RemoveCredentialFully("free"); ferr != nil || !md {
+		t.Fatalf("RemoveCredentialFully(free) = %v, %v; want true, nil", md, ferr)
+	}
+}

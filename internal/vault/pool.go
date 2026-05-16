@@ -46,9 +46,30 @@ type memberHealth struct {
 // Store rows still seed the map at startup (Seed) for cross-restart
 // durability, and the seed is monotonic (never shortens a live in-memory
 // cooldown).
+// Finding 3 (round-15): a response handled by an OLD resolver generation can
+// call MarkCooldown AFTER a NEW generation already pruned non-members during
+// resolver rebuild (StorePool/MergeLiveCooldowns shared path). If that
+// credential was removed from every pool in the new generation, the
+// unguarded MarkCooldown would re-insert a stale in-memory cooldown that a
+// later same-named re-add inherits before its TTL. The fix is to store the
+// CURRENT generation's authoritative member set on the shared PoolHealth and
+// update it under the SAME mutex that guards the cooldown map, so the prune
+// (member-set replace) and a concurrent MarkCooldown cannot interleave to
+// leave a non-member cooldown entry behind. MarkCooldown, under the lock,
+// no-ops when the credential is not in currentMembers (and currentMembers is
+// non-nil). currentMembers stays nil until SetCurrentMembers is called the
+// first time (ad-hoc/private resolvers that never set it keep the old
+// permissive behavior, so single-generation callers are not regressed).
 type PoolHealth struct {
 	mu     sync.RWMutex
 	health map[string]memberHealth
+	// currentMembers is the authoritative member set of the CURRENT
+	// resolver generation. nil = "not tracked" (gate disabled, legacy
+	// permissive behavior). Non-nil but missing a credential = that
+	// credential is not a member of any pool in the current generation, so
+	// MarkCooldown must NOT write a cooldown for it (write-after-prune
+	// guard). Mutated only under mu, the same lock the cooldown map uses.
+	currentMembers map[string]struct{}
 }
 
 // NewPoolHealth returns an empty shared health map. Call this exactly once
@@ -56,6 +77,24 @@ type PoolHealth struct {
 // resolver generations share one cooldown view.
 func NewPoolHealth() *PoolHealth {
 	return &PoolHealth{health: make(map[string]memberHealth)}
+}
+
+// SetCurrentMembers atomically replaces the authoritative member set for the
+// current resolver generation. Called when a fresh generation takes over
+// (NewPoolResolverShared with a shared map, and the MergeLiveCooldowns
+// shared-path prune) so MarkCooldown can reject write-after-prune attempts
+// from a stale (old-generation) response path. The replace happens under the
+// same mutex as the cooldown writes, so a concurrent MarkCooldown either
+// observes the OLD member set entirely or the NEW one entirely — it can never
+// observe a half-updated set, and it can never slip a non-member cooldown in
+// between the prune and the member-set swap.
+func (ph *PoolHealth) SetCurrentMembers(members map[string]struct{}) {
+	if ph == nil {
+		return
+	}
+	ph.mu.Lock()
+	ph.currentMembers = members
+	ph.mu.Unlock()
 }
 
 // Seed merges store-persisted cooldown rows into the shared map. It is
@@ -135,6 +174,7 @@ func NewPoolResolver(pools []store.Pool, healthRows []store.CredentialHealth) *P
 // live in-memory cooldown is never shortened by a store row. Seeding the
 // shared map on every rebuild is therefore safe and idempotent.
 func NewPoolResolverShared(pools []store.Pool, healthRows []store.CredentialHealth, shared *PoolHealth) *PoolResolver {
+	explicitShared := shared != nil
 	if shared == nil {
 		shared = NewPoolHealth()
 	}
@@ -152,6 +192,22 @@ func NewPoolResolverShared(pools []store.Pool, healthRows []store.CredentialHeal
 		pr.pools[p.Name] = members
 	}
 	shared.Seed(healthRows)
+	// Finding 3 (round-15): on the server path (an explicit process-wide
+	// shared PoolHealth) publish THIS generation's authoritative member set
+	// so the write-after-prune gate in MarkCooldown is active from the very
+	// first generation onward, not only after the first MergeLiveCooldowns
+	// shared-path prune runs. The member-set replace and the cooldown writes
+	// share PoolHealth.mu, so a concurrent stale MarkCooldown observes either
+	// the old or the new set atomically. Ad-hoc/private resolvers (shared ==
+	// nil, e.g. CLI `pool` subcommands) leave currentMembers nil to preserve
+	// the old permissive single-generation behavior.
+	if explicitShared {
+		cm := make(map[string]struct{}, len(pr.memberOf))
+		for cred := range pr.memberOf {
+			cm[cred] = struct{}{}
+		}
+		shared.SetCurrentMembers(cm)
+	}
 	return pr
 }
 
@@ -257,7 +313,26 @@ func (pr *PoolResolver) MarkCooldown(credential string, until time.Time, reason 
 	// `until` clears the cooldown (recovery).
 	pr.health.mu.Lock()
 	defer pr.health.mu.Unlock()
-	if until.IsZero() || !until.After(time.Now()) {
+	// Finding 3 (round-15) write-after-prune guard. A response handled by an
+	// OLD resolver generation can reach this AFTER a NEW generation pruned
+	// non-members and swapped in its member set (both happen under THIS same
+	// mu, so we either see the pre-prune or post-prune state, never a torn
+	// one). If currentMembers is tracked (non-nil) and this credential is not
+	// in it, the credential belongs to no pool in the current generation:
+	// writing a cooldown would resurrect a non-member entry that a later
+	// same-named re-add inherits before its TTL. Skip the write. A clear
+	// (zero/past `until`) is always allowed through below — deleting a stale
+	// entry for a non-member is only ever beneficial. currentMembers == nil
+	// means the gate is disabled (ad-hoc/private resolver that never called
+	// SetCurrentMembers): preserve the old permissive behavior so
+	// single-generation callers are not regressed.
+	isClear := until.IsZero() || !until.After(time.Now())
+	if !isClear && pr.health.currentMembers != nil {
+		if _, isMember := pr.health.currentMembers[credential]; !isMember {
+			return
+		}
+	}
+	if isClear {
 		delete(pr.health.health, credential)
 		return
 	}
@@ -323,6 +398,18 @@ func (pr *PoolResolver) MergeLiveCooldowns(prev *PoolResolver) {
 				delete(pr.health.health, cred)
 			}
 		}
+		// Finding 3 (round-15): publish THIS generation's authoritative
+		// member set on the shared PoolHealth under the SAME lock as the
+		// prune above. After this, a MarkCooldown arriving from a stale
+		// old-generation response path sees the new member set and no-ops
+		// for any credential this generation no longer owns — the prune
+		// and the member-set swap are one atomic critical section, so no
+		// non-member cooldown can be slipped in between them.
+		cm := make(map[string]struct{}, len(pr.memberOf))
+		for cred := range pr.memberOf {
+			cm[cred] = struct{}{}
+		}
+		pr.health.currentMembers = cm
 		pr.health.mu.Unlock()
 		return
 	}

@@ -409,3 +409,107 @@ func TestSharedHealthConcurrentMarkCooldownVsRebuild(t *testing.T) {
 		}
 	}
 }
+
+// TestFinding3Round15_WriteAfterPruneGatedByMemberSet is the round-15
+// Finding 3 regression. A response handled by an OLD resolver generation can
+// call MarkCooldown AFTER a NEW generation already pruned non-members and
+// published its member set (StorePool -> MergeLiveCooldowns shared path /
+// NewPoolResolverShared). If that credential was removed from EVERY pool in
+// the new generation, the OLD unguarded MarkCooldown re-inserted a stale
+// in-memory cooldown that a later same-named re-add inherited before its TTL.
+//
+// The fix gates cooldown WRITES on the CURRENT generation's authoritative
+// member set, stored on the shared PoolHealth and checked under the SAME
+// mutex as the write, so the prune (member-set replace) and a concurrent
+// stale MarkCooldown cannot interleave to leave a non-member entry.
+//
+// Deterministic interleave (no sleeps): we explicitly order the operations
+// so the old-generation MarkCooldown(credX) executes AFTER the new
+// generation pruned credX. Fail-before: credX would be cooling. Pass-after:
+// credX has no cooldown, and a re-add before its TTL is healthy/active.
+func TestFinding3Round15_WriteAfterPruneGatedByMemberSet(t *testing.T) {
+	shared := NewPoolHealth()
+
+	// gen1 (OLD): pool {a, x}. A response that resolved through gen1 is
+	// still in flight and holds the gen1 *PoolResolver.
+	gen1 := NewPoolResolverShared([]store.Pool{mkPool("pool", "a", "x")}, nil, shared)
+
+	// gen2 (NEW): "x" was removed from the pool entirely (membership change
+	// -> resolver rebuild). StorePool's MergeLiveCooldowns shared-path prune
+	// runs and publishes gen2's member set (which no longer contains "x").
+	gen2 := NewPoolResolverShared([]store.Pool{mkPool("pool", "a")}, nil, shared)
+	gen2.MergeLiveCooldowns(gen1) // prune + publish current member set {a}
+
+	// INTERLEAVE: the stale, still-in-flight gen1 response NOW records a
+	// failover cooldown for "x" — AFTER gen2 already pruned it. The write
+	// must be gated out by the current member set.
+	gen1.MarkCooldown("x", time.Now().Add(300*time.Second), "failover:401")
+
+	if until, cooling := gen2.CooldownUntil("x"); cooling {
+		t.Fatalf("Finding 3 r15: write-after-prune resurrected a cooldown for non-member x: until=%v (must be gated by current member set)", until)
+	}
+	// Also assert through gen1's own view (same shared map): still no entry.
+	if _, cooling := gen1.CooldownUntil("x"); cooling {
+		t.Errorf("Finding 3 r15: stale gen1 MarkCooldown(x) leaked into the shared map despite x not being a current member")
+	}
+
+	// Re-add "x" to a fresh pool BEFORE its (would-be) TTL: it must be
+	// healthy and selectable, not skipped as still-cooling.
+	gen3 := NewPoolResolverShared([]store.Pool{mkPool("pool", "a"), mkPool("p2", "x", "d")}, nil, shared)
+	gen3.MergeLiveCooldowns(gen2)
+	if _, cooling := gen3.CooldownUntil("x"); cooling {
+		t.Errorf("Finding 3 r15: re-added x inherited a stale cooldown")
+	}
+	if got, ok := gen3.ResolveActive("p2"); !ok || got != "x" {
+		t.Errorf("Finding 3 r15: re-added x should be active in p2; got %q,%v want x,true", got, ok)
+	}
+
+	// MUST NOT regress CRITICAL-1: a LIVE member's synchronous cooldown
+	// recorded on an old generation across a benign StorePool still
+	// persists. "a" is a member in every generation here.
+	gen3.MarkCooldown("a", time.Now().Add(300*time.Second), "429")
+	gen4 := NewPoolResolverShared([]store.Pool{mkPool("pool", "a"), mkPool("p2", "x", "d")}, nil, shared)
+	gen4.MergeLiveCooldowns(gen3)
+	if _, cooling := gen4.CooldownUntil("a"); !cooling {
+		t.Fatalf("Finding 3 r15 regressed CRITICAL-1: a live member's cooldown was dropped across a benign StorePool")
+	}
+}
+
+// TestFinding3Round15_ConcurrentStaleMarkVsPruneUnderRace forces the prune
+// and the stale-generation MarkCooldown to run concurrently so `go test
+// -race` exercises the shared-mutex discipline (member-set replace and
+// cooldown write are one critical section). The deterministic post-condition
+// holds regardless of who wins the lock: a credential removed from every
+// pool in the new generation must never end up with a resurrected cooldown.
+func TestFinding3Round15_ConcurrentStaleMarkVsPruneUnderRace(t *testing.T) {
+	for iter := 0; iter < 50; iter++ {
+		shared := NewPoolHealth()
+		gen1 := NewPoolResolverShared([]store.Pool{mkPool("pool", "a", "x")}, nil, shared)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		// New generation rebuild + prune (drops "x").
+		go func() {
+			defer wg.Done()
+			gen2 := NewPoolResolverShared([]store.Pool{mkPool("pool", "a")}, nil, shared)
+			gen2.MergeLiveCooldowns(gen1)
+		}()
+		// Stale old-generation failover cooldown for the dropped member.
+		go func() {
+			defer wg.Done()
+			gen1.MarkCooldown("x", time.Now().Add(300*time.Second), "failover:401")
+		}()
+		wg.Wait()
+
+		// Observe the SHARED health map directly (CooldownUntil is read-only
+		// and does NOT prune). Build the observer WITH "x" as a member so a
+		// resurrected entry could NOT be hidden by an observer-side prune:
+		// if the write-after-prune gate worked, "x" was never written; if it
+		// failed, the stale cooldown is still here. No MergeLiveCooldowns is
+		// called, so this asserts the gate's effect, not the prune's.
+		observer := NewPoolResolverShared([]store.Pool{mkPool("p2", "x")}, nil, shared)
+		if _, cooling := observer.CooldownUntil("x"); cooling {
+			t.Fatalf("iter %d: non-member x ended up with a resurrected cooldown after the concurrent prune/mark race", iter)
+		}
+	}
+}

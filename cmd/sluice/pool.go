@@ -208,9 +208,27 @@ func handlePoolRotate(args []string) error {
 	// position order becomes active. The cooldown lapses on its own (lazy
 	// recovery, same as auto-failover), so a rotated-away member rejoins the
 	// rotation once its cooldown expires.
+	//
+	// Finding 1 (round-15): use the guarded SetCredentialHealthIfPoolMember,
+	// NOT the unconditional SetCredentialHealth. `active` was resolved from a
+	// snapshot taken above; another process could remove the pool (or this
+	// member from it) between that snapshot and this write. The unconditional
+	// upsert would then RESURRECT a credential_health row for a credential no
+	// longer a live pool member — a later same-named credential/pool would
+	// inherit the stale cooldown. The guarded variant performs the
+	// pool-membership check and the upsert in one transaction, so a raced
+	// removal makes the write a no-op (wrote=false) instead of resurrecting
+	// the row. wrote=false means the rotate raced a pool removal: nothing was
+	// persisted and the in-memory rotate is meaningless (the pool is gone),
+	// so surface that to the operator as a failed/stale rotate rather than
+	// silently claiming success.
 	until := time.Now().Add(vault.AuthFailCooldown)
-	if err := db.SetCredentialHealth(active, "cooldown", until, "manual rotate"); err != nil {
+	wrote, err := db.SetCredentialHealthIfPoolMember(active, "cooldown", until, "manual rotate")
+	if err != nil {
 		return err
+	}
+	if !wrote {
+		return fmt.Errorf("pool %q rotate raced a concurrent pool/member removal: %q is no longer a live member of pool %q, so nothing was persisted; re-check the pool with \"sluice pool list %s\"", name, active, name, name)
 	}
 
 	// Recompute the new active member for operator feedback.

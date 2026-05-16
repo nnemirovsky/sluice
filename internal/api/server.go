@@ -1263,46 +1263,26 @@ func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Store-first removal order (Finding 3, round-9). RemoveCredentialMeta
-	// is the authoritative, fail-closed pool-membership gate: it refuses
-	// inside its own transaction if the credential is still a live pool
-	// member. Run it BEFORE the vault delete (and before bindings/rules
-	// cleanup) so the vault secret is only destroyed once the store has
-	// accepted the removal. If it refuses, the vault secret, bindings, and
-	// rules are all left intact and no window exists where the secret is
-	// gone but credential_pool_members still references it.
-	if _, err := s.store.RemoveCredentialMeta(name); err != nil {
-		writeError(w, http.StatusConflict, "failed to remove credential metadata (vault secret left intact so a pool member is not orphaned): "+err.Error(), "")
+	// Store-first removal order (Finding 3, round-9 + Finding 2, round-15).
+	// RemoveCredentialFully is the authoritative, fail-closed
+	// pool-membership gate AND the atomic store-side cleanup: in one
+	// transaction it refuses if the credential is still a live pool member,
+	// otherwise deletes credential_meta, credential_health, all bindings on
+	// the credential, and all auto-created rules (cred-add:/binding-add:).
+	// It runs BEFORE the vault delete so the vault secret is only destroyed
+	// once the entire store unit has committed. If it refuses (or any of
+	// the store deletes fail), the whole tx rolls back: vault secret,
+	// bindings, rules, meta, and health are all left intact and no window
+	// exists where credential_meta is gone but bindings/rules survive
+	// (the partially-deleted-credential bug this fixes).
+	if _, _, _, err := s.store.RemoveCredentialFully(name); err != nil {
+		writeError(w, http.StatusConflict, "failed to remove credential store state (vault secret + all store rows left intact so the credential is not partially deleted): "+err.Error(), "")
 		return
-	}
-
-	// Remove associated bindings and auto-created rules next. If vault.Remove
-	// below fails, bindings/rules are already gone. This is a pre-existing
-	// ordering tradeoff: reversing it would orphan bindings when vault succeeds
-	// but SQLite fails. A transactional approach would require the vault to
-	// participate in the same transaction, which is not currently possible.
-	if _, err := s.store.RemoveBindingsByCredential(name); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to remove bindings: "+err.Error(), "")
-		return
-	}
-	// Rules may have been created by either "cred add --destination" (tagged
-	// cred-add:<name>) or by "binding add" against the same credential
-	// (tagged binding-add:<name>). Remove both so cleanup is symmetric with
-	// the CLI, otherwise orphan allow rules would persist after the
-	// credential is gone.
-	for _, src := range []string{
-		store.CredAddSourcePrefix + name,
-		store.BindingAddSourcePrefix + name,
-	} {
-		if _, err := s.store.RemoveRulesBySource(src); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to remove associated rules: "+err.Error(), "")
-			return
-		}
 	}
 
 	// Store removal already succeeded above (the pool-membership gate
-	// passed and credential_meta is gone). Only now is it safe to delete
-	// the vault secret.
+	// passed and credential_meta+health+bindings+rules are gone atomically).
+	// Only now is it safe to delete the vault secret.
 	if err := s.vault.Remove(name); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to remove credential: "+err.Error(), "")
 		return

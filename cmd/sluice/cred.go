@@ -614,16 +614,26 @@ func handleCredRemove(args []string) error {
 		}
 		defer func() { _ = db.Close() }()
 
-		// GATE: atomic, fail-closed pool-member guard. This MUST run before
-		// the vault delete. If the credential is still a live pool member,
-		// RemoveCredentialMeta returns an error inside its transaction and
-		// the vault secret below is never touched.
-		metaDeleted, rmMetaErr := db.RemoveCredentialMeta(name)
-		if rmMetaErr != nil {
-			return fmt.Errorf("remove credential metadata for %q (refusing to delete the vault secret so a pool member is not orphaned): %w", name, rmMetaErr)
+		// GATE + atomic store cleanup (Finding 2, round-15). This MUST run
+		// before the vault delete. RemoveCredentialFully runs the
+		// fail-closed pool-member guard AND deletes credential_meta,
+		// credential_health, all bindings on the credential, and all
+		// auto-created rules in ONE transaction. If the credential is still
+		// a live pool member (or any store delete fails) it returns an
+		// error with NOTHING removed and the vault secret below is never
+		// touched — no partially-deleted-credential window.
+		metaDeleted, rmBindings, rmRules, rmErr := db.RemoveCredentialFully(name)
+		if rmErr != nil {
+			return fmt.Errorf("remove credential store state for %q (refusing to delete the vault secret so the credential is not partially deleted): %w", name, rmErr)
 		}
 		if metaDeleted {
 			fmt.Printf("removed credential metadata for %q\n", name)
+		}
+		if rmRules > 0 {
+			fmt.Printf("removed %d auto-created rule(s) for credential %q\n", rmRules, name)
+		}
+		if rmBindings > 0 {
+			fmt.Printf("removed %d binding(s) for %q\n", rmBindings, name)
 		}
 	}
 
@@ -640,39 +650,9 @@ func handleCredRemove(args []string) error {
 		fmt.Printf("credential %q removed\n", name)
 	}
 
-	// Clean up associated bindings and auto-created rules. The DB handle
-	// was opened above for the membership gate; if the DB did not exist
-	// there is nothing to clean up.
-	if db == nil {
-		return nil
-	}
-
-	// Remove rules tagged either by "sluice cred add --destination"
-	// (cred-add:<name>) or by "sluice binding add" (binding-add:<name>).
-	// Both paths may have produced rules associated with this credential,
-	// and failing to clean up either set leaves orphan allow rules in
-	// the store.
-	var total int64
-	for _, src := range []string{
-		store.CredAddSourcePrefix + name,
-		store.BindingAddSourcePrefix + name,
-	} {
-		n, rmErr := db.RemoveRulesBySource(src)
-		if rmErr != nil {
-			log.Printf("warning: failed to remove rules with source %q for credential %q: %v", src, name, rmErr)
-			continue
-		}
-		total += n
-	}
-	if total > 0 {
-		fmt.Printf("removed %d auto-created rule(s) for credential %q\n", total, name)
-	}
-	removed, rmBindErr := db.RemoveBindingsByCredential(name)
-	if rmBindErr != nil {
-		log.Printf("warning: failed to remove bindings for %q: %v", name, rmBindErr)
-	} else if removed > 0 {
-		fmt.Printf("removed %d binding(s) for %q\n", removed, name)
-	}
+	// Bindings and auto-created rules were already removed atomically with
+	// credential_meta + health by RemoveCredentialFully above, before the
+	// vault secret was deleted. Nothing left to clean up here.
 	return nil
 }
 

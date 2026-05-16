@@ -1938,6 +1938,76 @@ func deleteCredentialMetaGuardedTx(tx *sql.Tx, name, deleteSQL string, deleteArg
 	return n, nil
 }
 
+// RemoveCredentialFully removes ALL store-side state for a credential as a
+// single atomic transaction: the fail-closed pool-member guard, the
+// credential_meta row, the credential_health row, every binding on the
+// credential, and every auto-created allow rule tagged cred-add:<name> or
+// binding-add:<name>. Either every one of these is gone on return or none is
+// (the tx rolls back as a unit).
+//
+// This is the round-15 Finding 2 fix. The previous REST/CLI/Telegram removal
+// paths deleted credential_meta (+ health) in its own committed transaction
+// and only THEN removed bindings and rules in separate statements. A failure
+// in the binding/rule cleanup left meta+health gone while the vault secret
+// and a partial set of bindings/rules survived: a partially-deleted
+// credential. Folding all four deletes into one tx removes that window.
+//
+// Ordering contract for callers (preserved from round-13): open/validate the
+// vault FIRST (an unopenable vault must abort before any store mutation),
+// then call RemoveCredentialFully, and only delete the vault secret AFTER
+// this returns nil. If the pool-member guard refuses, this returns a non-nil
+// error with NOTHING deleted, so the caller leaves the vault secret intact
+// and no window exists where the secret is gone but credential_pool_members
+// still references it.
+//
+// Returns metaDeleted=true when a credential_meta row was actually deleted
+// (false is a benign "already gone" — bindings/rules are still swept so a
+// previously partial cleanup is finished). bindings/rules are the counts
+// removed, for operator feedback.
+func (s *Store) RemoveCredentialFully(name string) (metaDeleted bool, bindings, rules int64, err error) {
+	if name == "" {
+		return false, 0, 0, fmt.Errorf("credential name is required")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, 0, 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Guarded meta+health delete (also runs the fail-closed pool-member
+	// guard). If the credential is still a live pool member this returns an
+	// error and the deferred Rollback discards everything — nothing is
+	// removed, exactly as the standalone RemoveCredentialMeta behaved.
+	n, err := deleteCredentialMetaGuardedTx(tx, name, "DELETE FROM credential_meta WHERE name = ?", []any{name})
+	if err != nil {
+		return false, 0, 0, err
+	}
+
+	bres, err := tx.Exec("DELETE FROM bindings WHERE credential = ?", name)
+	if err != nil {
+		return false, 0, 0, fmt.Errorf("delete bindings by credential %q: %w", name, err)
+	}
+	bn, _ := bres.RowsAffected()
+
+	var rn int64
+	for _, src := range []string{
+		CredAddSourcePrefix + name,
+		BindingAddSourcePrefix + name,
+	} {
+		rres, rerr := tx.Exec("DELETE FROM rules WHERE source = ?", src)
+		if rerr != nil {
+			return false, 0, 0, fmt.Errorf("delete rules by source %q: %w", src, rerr)
+		}
+		c, _ := rres.RowsAffected()
+		rn += c
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, 0, 0, fmt.Errorf("commit: %w", err)
+	}
+	return n > 0, bn, rn, nil
+}
+
 // RemoveCredentialMetaCAS deletes a credential metadata row only when its
 // current cred_type and token_url match the supplied expected values. It is
 // the compare-and-swap counterpart to RemoveCredentialMeta and is used during
