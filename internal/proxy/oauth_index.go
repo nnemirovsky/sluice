@@ -94,6 +94,32 @@ func (idx *OAuthIndex) Match(requestURL *url.URL) (credName string, ok bool) {
 	return "", false
 }
 
+// MatchAll returns every credential whose token endpoint matches the
+// request URL, in index order. Two pool members commonly share ONE token
+// URL (the documented Codex deployment: two OpenAI accounts, one
+// auth.openai.com), and a plain OAuth credential may share that same token
+// URL too. Match returns only the first index entry, which silently drops
+// the others; callers that must reason about pool membership (request-side
+// token-host phantom expansion, response-side attribution, token-endpoint
+// failover) need the full set so they can pick the pooled/correct member
+// instead of whichever name happened to sort first in credential_meta.
+func (idx *OAuthIndex) MatchAll(requestURL *url.URL) []string {
+	if idx == nil || requestURL == nil {
+		return nil
+	}
+	reqPath := normalizePath(requestURL.Path)
+	reqHost := normalizeHost(requestURL.Host, requestURL.Scheme)
+	var creds []string
+	for _, e := range idx.entries {
+		if e.tokenURL.Scheme == requestURL.Scheme &&
+			normalizeHost(e.tokenURL.Host, e.tokenURL.Scheme) == reqHost &&
+			normalizePath(e.tokenURL.Path) == reqPath {
+			creds = append(creds, e.credential)
+		}
+	}
+	return creds
+}
+
 // Len returns the number of entries in the index.
 func (idx *OAuthIndex) Len() int {
 	if idx == nil {

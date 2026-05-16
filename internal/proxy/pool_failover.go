@@ -149,10 +149,16 @@ func (a *SluiceAddon) poolForResponse(f *mitmproxy.Flow) (pool, activeMember str
 	if host == "" {
 		return "", "", nil, false
 	}
-	// The Response addon path is HTTP/HTTPS/HTTP2 (gRPC). Bindings without
-	// an explicit protocol list match any protocol; pass "https" so a
-	// protocol-scoped binding still resolves on the common case.
-	for _, boundName := range res.CredentialsForDestination(host, port, "https") {
+	// Finding 3: the failover binding lookup MUST use the same protocol the
+	// request-side injection (injectHeaders / buildPhantomPairs) used, not a
+	// hardcoded "https". A protocol-scoped pooled binding (grpc / http2 /
+	// any meta protocol) is invisible to a "https" lookup even though the
+	// credential WAS injected for it, so its 429/401 would never fail over.
+	// detectRequestProtocol mirrors the injection path exactly (URL scheme
+	// then header refinement); for the common unscoped-binding case the
+	// result is still https-equivalent so behavior is unchanged.
+	proto := a.detectRequestProtocol(f, port).String()
+	for _, boundName := range res.CredentialsForDestination(host, port, proto) {
 		if !pr.IsPool(boundName) {
 			continue
 		}
@@ -207,40 +213,65 @@ func (a *SluiceAddon) poolForResponse(f *mitmproxy.Flow) (pool, activeMember str
 	// for the persist path; a token-endpoint FAILURE does not rotate the
 	// refresh token and processOAuthResponseIfMatching is 2xx-only, so the
 	// tag is still live here.
+	//
+	// Finding 2: idx.Match returns only the FIRST index entry, and
+	// credential_meta is name-ordered. If a plain OAuth credential sorts
+	// before the pool members and shares the token URL, idx.Match returns
+	// the plain credential, pr.PoolForMember(matched) is "", the whole
+	// block is skipped, and a pooled token-host 401 / invalid_grant never
+	// fails over (no cooldown -> the broken member stays active forever).
+	// Use MatchAll and find ANY pool sharing this token URL so the gate is
+	// independent of which credential sorts first; the true owning member
+	// is still recovered from the per-member-unique injected refresh token.
 	if idx := a.oauthIndex.Load(); idx != nil && f.Request != nil {
-		if matched, mok := idx.Match(f.Request.URL); mok && matched != "" {
-			if pool := pr.PoolForMember(matched); pool != "" {
-				// Recover the TRUE owning member from the injected real
-				// refresh token in the buffered request body.
-				reqCT := ""
-				if f.Request.Header != nil {
-					reqCT = f.Request.Header.Get("Content-Type")
-				}
-				realRefresh := extractRequestRefreshToken(f.Request.Body, reqCT)
-				if owner, ok := a.refreshAttr.Peek(realRefresh); ok && owner != "" {
-					if ownerPool := pr.PoolForMember(owner); ownerPool != "" {
-						return ownerPool, owner, pr, true
-					}
-					// owner is no longer in any pool (membership change
-					// raced the failure); fall through to the active-member
-					// fallback below for a still-meaningful attribution.
-				}
-				// Fallback ONLY when the real refresh token cannot be
-				// extracted / attributed: cool the ACTIVE member rather
-				// than blindly the first index entry. The active member is
-				// the one whose token was most likely just injected, so it
-				// is strictly better than idx.Match's deterministic-first.
-				if active, aok := pr.ResolveActive(pool); aok && active != "" {
-					log.Printf("[POOL-FAILOVER] pool %q: could not attribute "+
-						"token-endpoint failure via injected refresh token; "+
-						"falling back to active member %q", pool, active)
-					return pool, active, pr, true
-				}
-				// Last resort: the index match (preserves prior behavior
-				// when even ResolveActive cannot decide; better than no
-				// attribution at all).
-				return pool, matched, pr, true
+		matches := idx.MatchAll(f.Request.URL)
+		pool := ""
+		matched := ""
+		for _, c := range matches {
+			if matched == "" {
+				matched = c // preserve the deterministic-first as last resort
 			}
+			if p := pr.PoolForMember(c); p != "" {
+				pool = p
+				break
+			}
+		}
+		if pool != "" {
+			// Recover the TRUE owning member from the injected real
+			// refresh token in the buffered request body.
+			reqCT := ""
+			if f.Request.Header != nil {
+				reqCT = f.Request.Header.Get("Content-Type")
+			}
+			realRefresh := extractRequestRefreshToken(f.Request.Body, reqCT)
+			if owner, ok := a.refreshAttr.Peek(realRefresh); ok && owner != "" {
+				if ownerPool := pr.PoolForMember(owner); ownerPool != "" {
+					return ownerPool, owner, pr, true
+				}
+				// owner is no longer in any pool (membership change
+				// raced the failure); fall through to the active-member
+				// fallback below for a still-meaningful attribution.
+			}
+			// Fallback ONLY when the real refresh token cannot be
+			// extracted / attributed: cool the ACTIVE member rather
+			// than blindly the first index entry. The active member is
+			// the one whose token was most likely just injected, so it
+			// is strictly better than idx.Match's deterministic-first.
+			if active, aok := pr.ResolveActive(pool); aok && active != "" {
+				log.Printf("[POOL-FAILOVER] pool %q: could not attribute "+
+					"token-endpoint failure via injected refresh token; "+
+					"falling back to active member %q", pool, active)
+				return pool, active, pr, true
+			}
+			// Last resort: a pooled index match if any (preserves prior
+			// behavior when even ResolveActive cannot decide; better than
+			// no attribution at all).
+			for _, c := range matches {
+				if pr.PoolForMember(c) != "" {
+					return pool, c, pr, true
+				}
+			}
+			return pool, matched, pr, true
 		}
 	}
 	return "", "", nil, false

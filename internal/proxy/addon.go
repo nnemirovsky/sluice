@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -741,7 +742,7 @@ func (a *SluiceAddon) Request(f *mitmproxy.Flow) {
 	proto := a.detectRequestProtocol(f, port)
 	protoStr := proto.String()
 
-	pairs := a.buildPhantomPairs(host, port, protoStr, f.Id)
+	pairs := a.buildPhantomPairs(host, port, protoStr, f.Id, f.Request.URL)
 	if len(pairs) == 0 && !a.hasPhantomPrefix(f) {
 		return
 	}
@@ -794,7 +795,7 @@ func (a *SluiceAddon) StreamRequestModifier(f *mitmproxy.Flow, in io.Reader) io.
 	proto := a.detectRequestProtocol(f, port)
 	protoStr := proto.String()
 
-	pairs := a.buildPhantomPairs(host, port, protoStr, f.Id)
+	pairs := a.buildPhantomPairs(host, port, protoStr, f.Id, f.Request.URL)
 	if len(pairs) == 0 {
 		return in
 	}
@@ -898,22 +899,48 @@ type oauthRespAttribution struct {
 // that survives two members sharing one token URL). When recovery fails it
 // returns skipPersist=true and never falls back to OAuthIndex.Match for the
 // persist target (R1: never guess).
+//
+// Finding 1: the caller passes the FIRST OAuthIndex match (Match is
+// name-ordered and token URLs are commonly shared). If a plain OAuth
+// credential sorts before the pool members and shares the token URL,
+// matchedCred is that plain credential and pr.PoolForMember(matchedCred)
+// returns "" — the old code then took the plain-credential identity branch
+// and a pooled refresh response was swapped/persisted under the plain
+// credential's phantom + vault entry. We therefore consult MatchAll: if ANY
+// credential sharing this token URL is a pool member, the response could be
+// a pooled refresh, so we recover the true owner from the injected refresh
+// token instead of trusting the deterministic-first match.
 func (a *SluiceAddon) resolveOAuthResponseAttribution(f *mitmproxy.Flow, matchedCred string) oauthRespAttribution {
 	pr := (*vault.PoolResolver)(nil)
 	if a.poolResolver != nil {
 		pr = a.poolResolver.Load()
 	}
+
+	// Determine whether this token URL has ANY pooled credential, not just
+	// whether the deterministic-first match happens to be one.
 	poolName := ""
 	if pr != nil {
 		poolName = pr.PoolForMember(matchedCred)
+		if poolName == "" && f.Request != nil {
+			if idx := a.oauthIndex.Load(); idx != nil {
+				for _, c := range idx.MatchAll(f.Request.URL) {
+					if p := pr.PoolForMember(c); p != "" {
+						poolName = p
+						break
+					}
+				}
+			}
+		}
 	}
 	if poolName == "" {
-		// Not a pooled token URL: unchanged 1:1 behavior.
+		// No pooled credential shares this token URL: unchanged 1:1
+		// behavior for the plain-credential case.
 		return oauthRespAttribution{phantomName: matchedCred, persistMember: matchedCred}
 	}
 
-	// Pooled token URL. Recover the owning member from the real refresh
-	// token sluice injected into this request's body (R1 join key).
+	// A pooled credential shares this token URL. Recover the owning member
+	// from the real refresh token sluice injected into this request's body
+	// (R1 join key — unique per member, unlike the shared token URL).
 	reqCT := ""
 	reqBody := []byte(nil)
 	if f.Request != nil {
@@ -925,10 +952,28 @@ func (a *SluiceAddon) resolveOAuthResponseAttribution(f *mitmproxy.Flow, matched
 	realRefresh := extractRequestRefreshToken(reqBody, reqCT)
 	member, ok := a.refreshAttr.Recover(realRefresh)
 	if !ok {
+		// Recovery failed. The refresh may legitimately belong to a plain
+		// OAuth credential that shares this token URL (not a pool member);
+		// only attribute to that plain credential when the
+		// deterministic-first match itself is NOT pooled AND no per-member
+		// refresh tag was recorded for it (a pooled refresh always records
+		// a tag in buildPooledMemberPairs, so a missing tag means this was
+		// not a pooled refresh). Otherwise fail closed: never misfile a
+		// pooled member's rotated tokens under the wrong entry (R1).
+		if matchedCred != "" && pr.PoolForMember(matchedCred) == "" {
+			log.Printf("[ADDON-OAUTH] token URL shared with pool %q but no pooled "+
+				"refresh tag; attributing to plain credential %q", poolName, matchedCred)
+			return oauthRespAttribution{phantomName: matchedCred, persistMember: matchedCred}
+		}
 		log.Printf("[ADDON-OAUTH] R1 fail-closed: pooled token URL for pool %q but owning member "+
 			"could not be recovered from the injected refresh token; skipping vault write "+
 			"(next refresh will retry)", poolName)
 		return oauthRespAttribution{phantomName: poolName, pooled: true, skipPersist: true}
+	}
+	// The recovered member's own pool is authoritative (a membership change
+	// could have raced; attribute to whatever pool the member is in now).
+	if mp := pr.PoolForMember(member); mp != "" {
+		poolName = mp
 	}
 	log.Printf("[ADDON-OAUTH] R1 attributed pooled refresh to member %q (pool %q)", member, poolName)
 	return oauthRespAttribution{phantomName: poolName, persistMember: member, pooled: true}
@@ -1384,16 +1429,24 @@ func (a *SluiceAddon) persistAddonOAuthTokens(credName string, realAccess, realR
 // destination. The caller must call releasePhantomPairs when done. flowID is
 // the go-mitmproxy Flow ID of the request being processed (uuid.Nil when no
 // flow is associated, e.g. the QUIC path); it is used to pin per-request
-// pool-member attribution for API-host failover (Finding 1).
-func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, flowID uuid.UUID) []phantomPair {
+// pool-member attribution for API-host failover (Finding 1). reqURL is the
+// outbound request URL (nil on the QUIC path, which has no parsed URL); it
+// is used to expand pooled OAuth credentials whose token endpoint matches
+// the request even when they are not bound to the CONNECT host (Finding 4,
+// the split-host token-refresh case).
+func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, flowID uuid.UUID, reqURL *url.URL) []phantomPair {
 	res := a.resolver.Load()
 	if res == nil {
 		return nil
 	}
 	boundCreds := res.CredentialsForDestination(host, port, proto)
-	if len(boundCreds) == 0 {
-		return nil
-	}
+
+	// covered tracks every credential name already turned into pairs by the
+	// CONNECT-host binding loop so the token-host expansion below does not
+	// double-inject a pool whose API host is also its token host (the
+	// common same-host Codex/OpenAI deployment, where this whole second
+	// pass is a no-op).
+	covered := make(map[string]bool, len(boundCreds))
 
 	var pairs []phantomPair
 	for _, boundName := range boundCreds {
@@ -1418,15 +1471,11 @@ func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, flo
 				if member != "" {
 					a.flowInjected.Tag(flowID, member)
 				}
-				oauthPairs, parseErr := buildPooledOAuthPhantomPairs(
-					poolName, member, secret, "ADDON-INJECT",
-					func(realRefresh string) {
-						a.refreshAttr.Tag(realRefresh, member)
-					},
-				)
+				oauthPairs, parseErr := a.buildPooledMemberPairs(poolName, member, secret)
 				if parseErr != nil {
 					continue
 				}
+				covered[member] = true
 				pairs = append(pairs, oauthPairs...)
 				continue
 			}
@@ -1434,6 +1483,7 @@ func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, flo
 			if parseErr != nil {
 				continue
 			}
+			covered[name] = true
 			pairs = append(pairs, oauthPairs...)
 			continue
 		}
@@ -1442,6 +1492,7 @@ func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, flo
 		// resolved name (== bound name for plain creds).
 		phantom := []byte(PhantomToken(name))
 		encoded := encodePhantomForPair(phantom)
+		covered[name] = true
 		pairs = append(pairs, phantomPair{
 			phantom:             phantom,
 			encodedPhantom:      encoded,
@@ -1450,12 +1501,89 @@ func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, flo
 		})
 	}
 
+	// Finding 4 (the crux): token-host phantom expansion. A pooled OAuth
+	// credential's refresh-grant POST goes to its token-URL host (e.g.
+	// auth.openai.com), which has NO pool binding — the pool binding lives
+	// on the API host (e.g. api.openai.com). The CONNECT-host loop above
+	// therefore produces no pairs for the token host, so the agent-held
+	// SLUICE_PHANTOM:<pool>.refresh would travel upstream verbatim and the
+	// refresh would fail (and Findings 1/2 attribution could never even
+	// trigger because no refresh-attribution tag would be recorded).
+	//
+	// Mirror what the existing pooled CONNECT-host path does, but key the
+	// expansion off OAuthIndex (token_url) instead of the binding resolver:
+	// for every pooled OAuth credential whose token endpoint matches this
+	// request, resolve the pool's active member and emit the pool-keyed
+	// phantom pairs + the flowInjected / refreshAttr tags (so R1 persist
+	// and token-endpoint failover work). MatchAll (not Match) is used so a
+	// plain OAuth credential that sorts before the pool members and shares
+	// the token URL cannot mask them.
+	if reqURL != nil {
+		if idx := a.oauthIndex.Load(); idx != nil {
+			pr := (*vault.PoolResolver)(nil)
+			if a.poolResolver != nil {
+				pr = a.poolResolver.Load()
+			}
+			if pr != nil {
+				seenPool := make(map[string]bool)
+				for _, credName := range idx.MatchAll(reqURL) {
+					poolName := pr.PoolForMember(credName)
+					if poolName == "" || seenPool[poolName] {
+						continue
+					}
+					seenPool[poolName] = true
+					member, ok := pr.ResolveActive(poolName)
+					if !ok || member == "" || covered[member] {
+						continue
+					}
+					secret, err := a.provider.Get(member)
+					if err != nil {
+						log.Printf("[ADDON-INJECT] token-host pool %q member %q lookup failed: %v",
+							poolName, member, err)
+						continue
+					}
+					if !vault.IsOAuth(secret.Bytes()) {
+						secret.Release()
+						continue
+					}
+					a.flowInjected.Tag(flowID, member)
+					oauthPairs, parseErr := a.buildPooledMemberPairs(poolName, member, secret)
+					if parseErr != nil {
+						continue
+					}
+					covered[member] = true
+					log.Printf("[ADDON-INJECT] token-host phantom expansion for pool %q -> member %q (%s)",
+						poolName, member, reqURL.Host)
+					pairs = append(pairs, oauthPairs...)
+				}
+			}
+		}
+	}
+
+	if len(pairs) == 0 {
+		return nil
+	}
+
 	// Sort by phantom length descending so longer tokens are replaced
 	// before shorter prefixes that could corrupt them.
 	sort.Slice(pairs, func(i, j int) bool {
 		return len(pairs[i].phantom) > len(pairs[j].phantom)
 	})
 	return pairs
+}
+
+// buildPooledMemberPairs builds the pool-keyed phantom pairs for one active
+// pool member and records the realRefreshToken -> member attribution tag
+// (the Risk R1 join key consumed by the 2xx persist path and the
+// token-endpoint failover path). Shared by the CONNECT-host binding loop and
+// the Finding 4 token-host expansion so both record attribution identically.
+func (a *SluiceAddon) buildPooledMemberPairs(poolName, member string, secret vault.SecureBytes) ([]phantomPair, error) {
+	return buildPooledOAuthPhantomPairs(
+		poolName, member, secret, "ADDON-INJECT",
+		func(realRefresh string) {
+			a.refreshAttr.Tag(realRefresh, member)
+		},
+	)
 }
 
 // releasePhantomPairs zeroes all secret values in the pairs slice.

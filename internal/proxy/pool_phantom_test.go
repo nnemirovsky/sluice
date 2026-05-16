@@ -160,6 +160,12 @@ func setupPoolAddon(t *testing.T, memberA, memberB string) (*SluiceAddon, *addon
 // refreshGrantBody is an RFC-6749 form-encoded refresh grant carrying the
 // pool-scoped refresh phantom. Pass-2 swaps the phantom for the active
 // member's real refresh token before the request leaves sluice.
+// poolName is parameterized on purpose: this is a general RFC-6749
+// refresh-grant body builder reused across pool tests, and a multi-pool
+// test legitimately passes a different name. unparam only sees the current
+// callers all using "codex_pool".
+//
+//nolint:unparam
 func refreshGrantBody(poolName string) []byte {
 	return []byte("grant_type=refresh_token&refresh_token=SLUICE_PHANTOM:" + poolName + ".refresh")
 }
