@@ -242,6 +242,29 @@ func handlePoolRemove(args []string) error {
 	}
 	defer func() { _ = db.Close() }()
 
+	// Reject the removal while any binding still references this pool by
+	// name. A pool shares the credential namespace, so a binding's
+	// "credential" column may hold the pool name (e.g. created via
+	// "sluice binding add <pool> --destination ..."). Deleting the pool
+	// out from under such bindings would leave them pointing at a
+	// non-existent credential (injection silently fails for those
+	// destinations) and, worse, a later credential created with the same
+	// name would silently inherit the stale bindings. This mirrors the
+	// fail-closed pool-membership guard in "sluice cred remove": refuse
+	// with an actionable error instead of cascading or orphaning.
+	refs, err := db.ListBindingsByCredential(name)
+	if err != nil {
+		return fmt.Errorf("check bindings referencing pool %q: %w", name, err)
+	}
+	if len(refs) > 0 {
+		details := make([]string, len(refs))
+		for i, b := range refs {
+			details[i] = fmt.Sprintf("[%d] %s", b.ID, b.Destination)
+		}
+		return fmt.Errorf("pool %q is still referenced by %d binding(s): %s; rebind or remove these bindings first (sluice binding remove <id>, which also clears the auto-created allow rule), then retry pool remove",
+			name, len(refs), strings.Join(details, ", "))
+	}
+
 	removed, err := db.RemovePool(name)
 	if err != nil {
 		return err
@@ -249,6 +272,6 @@ func handlePoolRemove(args []string) error {
 	if !removed {
 		return fmt.Errorf("pool %q not found", name)
 	}
-	fmt.Printf("pool %q removed (members and bindings referencing it are unaffected; remove stale bindings with 'sluice binding remove')\n", name)
+	fmt.Printf("pool %q removed\n", name)
 	return nil
 }

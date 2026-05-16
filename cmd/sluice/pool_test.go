@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -164,6 +165,111 @@ func TestCredRemoveBlockedForLivePoolMember(t *testing.T) {
 		t.Fatalf("credential acct_a was destroyed despite blocked removal: %v", gerr)
 	}
 	sb.Release()
+}
+
+// TestPoolRemoveBlockedWhileBindingReferencesIt asserts that "sluice pool
+// remove" refuses while a binding still references the pool by name, then
+// succeeds once the binding is gone. Without the guard the pool would be
+// deleted out from under the binding, leaving it pointing at a non-existent
+// credential (and silently re-applying to any later credential created with
+// the same name). Regression for Copilot round-7 finding.
+func TestPoolRemoveBlockedWhileBindingReferencesIt(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+	seedPoolCred(t, dbPath, dir, "acct_a")
+	seedPoolCred(t, dbPath, dir, "acct_b")
+	if err := handlePoolCommand([]string{"create", "--db", dbPath, "--members", "acct_a,acct_b", "codex"}); err != nil {
+		t.Fatalf("pool create: %v", err)
+	}
+
+	// binding add <pool> creates a binding whose credential == "codex" plus
+	// a paired auto-created allow rule tagged binding-add:codex.
+	if err := handleBindingCommand([]string{"add", "--db", dbPath, "--destination", "api.example.com", "codex"}); err != nil {
+		t.Fatalf("binding add: %v", err)
+	}
+
+	// pool remove must be refused while the binding references the pool.
+	err := handlePoolCommand([]string{"remove", "--db", dbPath, "codex"})
+	if err == nil {
+		t.Fatalf("pool remove with referencing binding: err = nil, want block error")
+	}
+	if !strings.Contains(err.Error(), "still referenced by") || !strings.Contains(err.Error(), "api.example.com") {
+		t.Fatalf("pool remove error = %v, want message naming the blocking binding", err)
+	}
+
+	// The pool must still exist (removal was refused before RemovePool).
+	db, derr := store.New(dbPath)
+	if derr != nil {
+		t.Fatalf("open db: %v", derr)
+	}
+	p, perr := db.GetPool("codex")
+	if perr != nil {
+		t.Fatalf("get pool after blocked remove: %v", perr)
+	}
+	if p == nil {
+		t.Fatalf("pool %q was deleted despite blocked removal", "codex")
+	}
+	_ = db.Close()
+
+	// Resolve the blocking binding id and remove it (clears the paired rule
+	// too via RemoveBindingWithRuleCleanup).
+	db2, derr2 := store.New(dbPath)
+	if derr2 != nil {
+		t.Fatalf("reopen db: %v", derr2)
+	}
+	refs, lerr := db2.ListBindingsByCredential("codex")
+	if lerr != nil || len(refs) != 1 {
+		t.Fatalf("list bindings: refs=%v err=%v", refs, lerr)
+	}
+	bindingID := refs[0].ID
+	_ = db2.Close()
+
+	if err := handleBindingCommand([]string{"remove", "--db", dbPath, strconv.FormatInt(bindingID, 10)}); err != nil {
+		t.Fatalf("binding remove: %v", err)
+	}
+
+	// With no binding referencing it, pool remove now succeeds.
+	out := captureStdout(t, func() {
+		if err := handlePoolCommand([]string{"remove", "--db", dbPath, "codex"}); err != nil {
+			t.Fatalf("pool remove after binding removed: %v", err)
+		}
+	})
+	if !strings.Contains(out, `pool "codex" removed`) {
+		t.Errorf("remove output = %q", out)
+	}
+
+	db3, derr3 := store.New(dbPath)
+	if derr3 != nil {
+		t.Fatalf("reopen db: %v", derr3)
+	}
+	gone, gerr := db3.GetPool("codex")
+	if gerr != nil {
+		t.Fatalf("get pool after successful remove: %v", gerr)
+	}
+	if gone != nil {
+		t.Fatalf("pool %q still exists after successful remove", "codex")
+	}
+	_ = db3.Close()
+}
+
+// TestPoolRemoveCleanWithoutReferencingBindings is the no-regression case:
+// a pool with no binding referencing it removes cleanly as before.
+func TestPoolRemoveCleanWithoutReferencingBindings(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+	seedPoolCred(t, dbPath, dir, "acct_a")
+	seedPoolCred(t, dbPath, dir, "acct_b")
+	if err := handlePoolCommand([]string{"create", "--db", dbPath, "--members", "acct_a,acct_b", "codex"}); err != nil {
+		t.Fatalf("pool create: %v", err)
+	}
+	out := captureStdout(t, func() {
+		if err := handlePoolCommand([]string{"remove", "--db", dbPath, "codex"}); err != nil {
+			t.Fatalf("pool remove (no bindings): %v", err)
+		}
+	})
+	if !strings.Contains(out, `pool "codex" removed`) {
+		t.Errorf("remove output = %q", out)
+	}
 }
 
 // TestCredRemoveFailsClosedWhenDBUnopenable asserts that when the policy DB
