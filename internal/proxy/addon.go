@@ -131,6 +131,15 @@ type SluiceAddon struct {
 	// attribution (Risk R1). Never nil after NewSluiceAddon.
 	refreshAttr *refreshAttribution
 
+	// flowInjected maps a go-mitmproxy Flow ID to the pool member whose
+	// credential was injected into THAT request at injection time. It is
+	// the per-request join key for API-host failover attribution (Finding
+	// 1): a 429/403-quota failover must cool the member that backed the
+	// request when it was SENT, not whoever is active when the response is
+	// processed (which races with a concurrent request's failover). Never
+	// nil after NewSluiceAddon.
+	flowInjected *flowInjectedMember
+
 	// onOAuthRefresh is called after an OAuth token refresh persist
 	// completes successfully. It receives the credential name so the
 	// caller can re-inject updated phantom env vars into the agent
@@ -183,6 +192,7 @@ func NewSluiceAddon(opts ...SluiceAddonOption) *SluiceAddon {
 	a := &SluiceAddon{
 		pendingCheckers: make(map[string][]*pendingCheck),
 		refreshAttr:     newRefreshAttribution(),
+		flowInjected:    newFlowInjectedMember(),
 	}
 	for _, o := range opts {
 		o(a)
@@ -650,6 +660,14 @@ func (a *SluiceAddon) injectHeaders(f *mitmproxy.Flow, host string, port int) {
 
 	f.Request.Header.Set(binding.Header, binding.FormatValue(extractInjectableSecret(a.oauthIndex.Load(), target.secretName, secret.String())))
 	if target.pooled {
+		// Pin the API-host failover attribution to the member that backed
+		// THIS request at send time. The response-side poolForResponse
+		// API-host branch reads this by flow ID so a concurrent request's
+		// failover (which switches the active member) cannot mis-attribute
+		// this request's 429/403 to the wrong member (Finding 1).
+		if target.secretName != "" {
+			a.flowInjected.Tag(f.Id, target.secretName)
+		}
 		log.Printf("[ADDON-INJECT] injected header %q for %s:%d (pool %q -> member %q)",
 			binding.Header, host, port, binding.Credential, target.secretName)
 	} else {
@@ -723,7 +741,7 @@ func (a *SluiceAddon) Request(f *mitmproxy.Flow) {
 	proto := a.detectRequestProtocol(f, port)
 	protoStr := proto.String()
 
-	pairs := a.buildPhantomPairs(host, port, protoStr)
+	pairs := a.buildPhantomPairs(host, port, protoStr, f.Id)
 	if len(pairs) == 0 && !a.hasPhantomPrefix(f) {
 		return
 	}
@@ -776,7 +794,7 @@ func (a *SluiceAddon) StreamRequestModifier(f *mitmproxy.Flow, in io.Reader) io.
 	proto := a.detectRequestProtocol(f, port)
 	protoStr := proto.String()
 
-	pairs := a.buildPhantomPairs(host, port, protoStr)
+	pairs := a.buildPhantomPairs(host, port, protoStr, f.Id)
 	if len(pairs) == 0 {
 		return in
 	}
@@ -1363,8 +1381,11 @@ func (a *SluiceAddon) persistAddonOAuthTokens(credName string, realAccess, realR
 }
 
 // buildPhantomPairs builds the sorted list of phantom/secret pairs for a
-// destination. The caller must call releasePhantomPairs when done.
-func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string) []phantomPair {
+// destination. The caller must call releasePhantomPairs when done. flowID is
+// the go-mitmproxy Flow ID of the request being processed (uuid.Nil when no
+// flow is associated, e.g. the QUIC path); it is used to pin per-request
+// pool-member attribution for API-host failover (Finding 1).
+func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, flowID uuid.UUID) []phantomPair {
 	res := a.resolver.Load()
 	if res == nil {
 		return nil
@@ -1391,6 +1412,12 @@ func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string) []p
 			if target.pooled {
 				poolName := target.phantomName
 				member := target.secretName
+				// Pin API-host failover attribution to this request's
+				// injected member (Finding 1). Idempotent with the
+				// pass-1 injectHeaders tag for the same flow.
+				if member != "" {
+					a.flowInjected.Tag(flowID, member)
+				}
 				oauthPairs, parseErr := buildPooledOAuthPhantomPairs(
 					poolName, member, secret, "ADDON-INJECT",
 					func(realRefresh string) {

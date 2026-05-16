@@ -103,6 +103,54 @@ func TestPoolCredentialNamespaceMutualExclusion(t *testing.T) {
 	}
 }
 
+// TestCreatePoolRejectsMemberAlreadyInAnotherPool is the Finding 5
+// regression. A credential may belong to at most one pool: proxy
+// attribution (PoolResolver.PoolForMember) maps a member back to a SINGLE
+// pool, so a token response for a second pool would be persisted/audited
+// against the first pool's phantom, leaving the agent with an
+// unreplaceable phantom. Adding a credential that already belongs to
+// another pool must fail, and the second pool must not be left behind.
+func TestCreatePoolRejectsMemberAlreadyInAnotherPool(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "shared")
+	seedOAuthCred(t, s, "solo")
+
+	if err := s.CreatePoolWithMembers("pool_one", "failover", []string{"shared"}); err != nil {
+		t.Fatalf("CreatePoolWithMembers(pool_one): %v", err)
+	}
+
+	// "shared" already belongs to pool_one; adding it to pool_two must fail.
+	err := s.CreatePoolWithMembers("pool_two", "failover", []string{"solo", "shared"})
+	if err == nil {
+		t.Fatal("expected error: credential already a member of another pool (Finding 5)")
+	}
+
+	// The second pool must not survive the rejected insert (tx rollback).
+	if exists, _ := s.PoolExists("pool_two"); exists {
+		t.Error("pool_two leaked after a member belonging to another pool was rejected")
+	}
+
+	// pool_one is untouched and "shared" is still only in pool_one.
+	pools, err := s.PoolsForMember("shared")
+	if err != nil {
+		t.Fatalf("PoolsForMember: %v", err)
+	}
+	if len(pools) != 1 || pools[0] != "pool_one" {
+		t.Fatalf("PoolsForMember(shared) = %v, want [pool_one] (one credential = at most one pool)", pools)
+	}
+
+	// Re-adding the same member to its OWN pool is rejected too (the pool
+	// already exists; this would be a duplicate pool name), but the
+	// single-pool invariant itself must not block recreating a fresh pool
+	// after the old one is removed.
+	if _, err := s.RemovePool("pool_one"); err != nil {
+		t.Fatalf("RemovePool: %v", err)
+	}
+	if err := s.CreatePoolWithMembers("pool_three", "failover", []string{"shared"}); err != nil {
+		t.Fatalf("after removing pool_one, re-adding shared to a new pool must succeed: %v", err)
+	}
+}
+
 func TestListPoolsOrdersMembers(t *testing.T) {
 	s := newTestStore(t)
 	for _, n := range []string{"a", "b", "c"} {
@@ -158,15 +206,29 @@ func TestPoolsForMember(t *testing.T) {
 	if err := s.CreatePoolWithMembers("p1", "failover", []string{"shared", "x"}); err != nil {
 		t.Fatalf("create p1: %v", err)
 	}
-	if err := s.CreatePoolWithMembers("p2", "failover", []string{"shared"}); err != nil {
-		t.Fatalf("create p2: %v", err)
+	// A credential belongs to at most one pool (Finding 5): adding "shared"
+	// to a second pool must be rejected.
+	if err := s.CreatePoolWithMembers("p2", "failover", []string{"shared"}); err == nil {
+		t.Fatal("expected p2 creation to fail: shared already belongs to p1")
 	}
+
+	// PoolsForMember still reports the (single) owning pool. It returns a
+	// slice because it also guards `cred remove` and must tolerate any
+	// pre-invariant rows; the live invariant keeps it to one entry.
 	pools, err := s.PoolsForMember("shared")
 	if err != nil {
 		t.Fatalf("PoolsForMember: %v", err)
 	}
-	if len(pools) != 2 || pools[0] != "p1" || pools[1] != "p2" {
-		t.Errorf("PoolsForMember(shared) = %v, want [p1 p2]", pools)
+	if len(pools) != 1 || pools[0] != "p1" {
+		t.Errorf("PoolsForMember(shared) = %v, want [p1] (one credential = at most one pool)", pools)
+	}
+	// "x" is also only in p1.
+	xpools, err := s.PoolsForMember("x")
+	if err != nil {
+		t.Fatalf("PoolsForMember(x): %v", err)
+	}
+	if len(xpools) != 1 || xpools[0] != "p1" {
+		t.Errorf("PoolsForMember(x) = %v, want [p1]", xpools)
 	}
 }
 

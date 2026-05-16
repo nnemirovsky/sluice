@@ -10,6 +10,7 @@ import (
 	mitmproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/vault"
+	uuid "github.com/satori/go.uuid"
 )
 
 // failoverClass is the result of classifying an upstream response for a
@@ -154,6 +155,24 @@ func (a *SluiceAddon) poolForResponse(f *mitmproxy.Flow) (pool, activeMember str
 	for _, boundName := range res.CredentialsForDestination(host, port, "https") {
 		if !pr.IsPool(boundName) {
 			continue
+		}
+		// Attribute the failover to the member that backed THIS request
+		// when it was SENT, recovered by flow ID from the injection-time
+		// tag. ResolveActive at response time is unsafe under concurrency:
+		// a sibling request's 429 may have already switched the active
+		// member, so attributing by response-time active would cool an
+		// innocent member and park both accounts (Finding 1). Fall back to
+		// ResolveActive only when no per-flow tag exists (e.g. the request
+		// never went through the pooled injection path).
+		if f != nil && f.Id != uuid.Nil {
+			if injected, ok := a.flowInjected.Recover(f.Id); ok && injected != "" {
+				// Only honor the tag if the injected member is still a
+				// member of this pool (a membership change could have
+				// raced); otherwise fall through to ResolveActive.
+				if pr.PoolForMember(injected) == boundName {
+					return boundName, injected, pr, true
+				}
+			}
 		}
 		member, mok := pr.ResolveActive(boundName)
 		if !mok || member == "" {

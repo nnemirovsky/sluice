@@ -659,6 +659,64 @@ func TestTokenEndpointFailoverFallsBackToActiveMember(t *testing.T) {
 	}
 }
 
+// TestAPIHostFailoverConcurrentAttributesInjectedMemberNotActive is the
+// Finding 1 regression. Two concurrent in-flight API-host requests are both
+// backed by member A (the active member at send time). request1's 429
+// arrives first: it cools A and the pool switches active to B. request2's
+// 429 then arrives. The bug attributed request2's 429 via response-time
+// pr.ResolveActive, which now returns B (already active after request1's
+// failover) — so B would be wrongly cooled too, parking BOTH accounts.
+//
+// The fix pins attribution to the member that was injected for THAT request
+// (recovered by flow ID from the injection-time tag). Both requests were
+// backed by A, so both 429s must be attributed to A; B must remain healthy
+// and active-eligible.
+//
+// This test MUST fail before the fix: with response-time ResolveActive,
+// request2's 429 cools B (active after request1's failover), so B ends up
+// in cooldown.
+func TestAPIHostFailoverConcurrentAttributesInjectedMemberNotActive(t *testing.T) {
+	addon, _, prPtr := setupPoolAddon(t, "memA", "memB")
+	client := setupAddonConn(addon, "auth.example.com:443")
+	pr := prPtr.Load()
+
+	if got, _ := pr.ResolveActive("codex_pool"); got != "memA" {
+		t.Fatalf("pre-failover active = %q, want memA", got)
+	}
+
+	// Two concurrent requests, both sent while memA was the active member,
+	// so pass-1/pass-2 injected memA's credential into both. Mirror that by
+	// tagging each flow's injected member as memA (what injectHeaders /
+	// buildPhantomPairs now record at injection time).
+	req1 := newPoolRespFlow(client, 429, []byte(`{"error":"rate_limited"}`))
+	req2 := newPoolRespFlow(client, 429, []byte(`{"error":"rate_limited"}`))
+	addon.flowInjected.Tag(req1.Id, "memA")
+	addon.flowInjected.Tag(req2.Id, "memA")
+
+	// request1's 429 arrives: cools memA, pool switches active to memB.
+	addon.Response(req1)
+	if _, cooling := pr.CooldownUntil("memA"); !cooling {
+		t.Fatal("memA must be cooling after request1's 429")
+	}
+	if got, _ := pr.ResolveActive("codex_pool"); got != "memB" {
+		t.Fatalf("after request1 failover, active = %q, want memB", got)
+	}
+
+	// request2's 429 arrives. memB is now the active member. The bug would
+	// attribute this to memB (response-time ResolveActive) and cool it. The
+	// fix attributes it to memA (request2's injected member, by flow ID).
+	addon.Response(req2)
+
+	if _, cooling := pr.CooldownUntil("memB"); cooling {
+		t.Fatal("memB was cooled by request2's 429 — attribution used " +
+			"response-time active member instead of the request's injected " +
+			"member (Finding 1). Both accounts are now parked.")
+	}
+	if got, _ := pr.ResolveActive("codex_pool"); got != "memB" {
+		t.Fatalf("active = %q, want memB (memB must stay healthy and active)", got)
+	}
+}
+
 // TestServerStorePoolConcurrentMarkCooldown is the CRITICAL-1 integration
 // regression at the real production code path: Server.StorePool's atomic
 // pointer swap (the SIGHUP / data_version reload) racing handlePoolFailover's

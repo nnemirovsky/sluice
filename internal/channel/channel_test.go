@@ -996,6 +996,110 @@ func TestBrokerCoalesceShutdownFanOut(t *testing.T) {
 	}
 }
 
+// TestBrokerCancelAllRetainsCoalescedCount is the Finding 2 regression.
+// CancelAll cleared the waiter map without retaining each waiter's final
+// coalesced count, so the shutdown CancelApproval edit saw
+// CoalescedCount==1 and dropped the "applied to N requests" suffix for a
+// burst that was pending at shutdown. The fix records the count under the
+// broker lock before the map is cleared, mirroring Resolve.
+//
+// Pre-fix this test fails: CoalescedCount after CancelAll returns 1.
+func TestBrokerCancelAllRetainsCoalescedCount(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const n = 7
+	primaryID, out := fireCoalescedBurst(t, broker, ch, "cancelcount.example.com", n, 5*time.Second)
+
+	broker.CancelAll()
+
+	// Drain so the goroutines finish (they all get a terminal Deny).
+	for i := 0; i < n; i++ {
+		<-out
+	}
+
+	if c := broker.CoalescedCount(primaryID); c != n {
+		t.Fatalf("after CancelAll, CoalescedCount(%s) = %d, want %d "+
+			"(the shutdown cancel edit would render \"applied to %d "+
+			"requests\"; pre-fix it renders just 1) — Finding 2",
+			primaryID, c, n, c)
+	}
+}
+
+// TestBrokerDetachedSubNotCounted is the Finding 3 regression. When a
+// coalesced subscriber times out and detaches, the waiter's count was NOT
+// decremented, so a later Resolve reported a CoalescedCount that still
+// included subscribers that had already given up — Telegram said "applied
+// to N" for more than were actually resolved by the tap. The fix
+// decrements the count on detach, never below 1 (the primary).
+//
+// Pre-fix this test fails: the retained count stays at the peak (1 + total
+// attached) instead of dropping by the number of detached subs.
+func TestBrokerDetachedSubNotCounted(t *testing.T) {
+	ch := newMockChannel(ChannelTelegram)
+	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))
+
+	const dest = "detachcount.example.com"
+	const port = 443
+
+	// Long-lived primary so it stays pending while subs come and go.
+	primaryOut := make(chan result, 1)
+	go func() {
+		resp, err := broker.Request(dest, port, "https", 5*time.Second)
+		primaryOut <- result{resp, err}
+	}()
+	var primaryID string
+	for {
+		reqs := ch.getRequests()
+		if len(reqs) == 1 {
+			primaryID = reqs[0].ID
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// k subscribers that each attach then time out and detach.
+	const k = 3
+	subOut := make(chan result, k)
+	for i := 0; i < k; i++ {
+		go func() {
+			resp, err := broker.Request(dest, port, "https", 30*time.Millisecond)
+			subOut <- result{resp, err}
+		}()
+	}
+	// Wait until all k have attached (count == 1 + k at the peak).
+	for broker.CoalescedCount(primaryID) < 1+k {
+		time.Sleep(time.Millisecond)
+	}
+	// Let every sub time out and detach.
+	for i := 0; i < k; i++ {
+		sr := <-subOut
+		if sr.resp != ResponseDeny || sr.err == nil {
+			t.Fatalf("sub %d should have timed out with Deny+err, got %v / %v", i, sr.resp, sr.err)
+		}
+	}
+	// All k detached; the primary alone remains.
+	if c := broker.CoalescedCount(primaryID); c != 1 {
+		t.Fatalf("after %d subs detached, live CoalescedCount = %d, want 1 "+
+			"(detached subs must not inflate the count) — Finding 3", k, c)
+	}
+
+	// Resolve the primary; the retained count must reflect only the
+	// primary (the k detached subs gave up before the decision).
+	if !broker.Resolve(primaryID, ResponseAllowOnce) {
+		t.Fatal("Resolve returned false for primary")
+	}
+	pr := <-primaryOut
+	if pr.resp != ResponseAllowOnce {
+		t.Fatalf("primary: expected AllowOnce, got %v", pr.resp)
+	}
+	if c := broker.CoalescedCount(primaryID); c != 1 {
+		t.Fatalf("retained CoalescedCount after resolve = %d, want 1 "+
+			"(Telegram would say \"applied to %d requests\" when only the "+
+			"primary was actually covered) — Finding 3", c, c)
+	}
+}
+
 func TestBrokerCoalesceSubTimeoutDoesNotBlockFanOut(t *testing.T) {
 	ch := newMockChannel(ChannelTelegram)
 	broker := NewBroker([]Channel{ch}, WithMaxPending(0), WithDestinationRateLimit(0, 0))

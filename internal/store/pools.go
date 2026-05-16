@@ -95,6 +95,28 @@ func validatePoolMemberTx(tx *sql.Tx, credential string) error {
 	return nil
 }
 
+// assertCredentialNotInAnotherPoolTx fails if the credential is already a
+// member of a pool other than newPool. A credential may belong to at most
+// one pool: proxy attribution (PoolResolver.PoolForMember) maps a member
+// back to a SINGLE pool, so a token response for a second pool would be
+// persisted/audited against the first pool's phantom, leaving the agent
+// with an unreplaceable phantom (Finding 5). Runs inside the supplied
+// transaction so the check and the member insert are atomic.
+func assertCredentialNotInAnotherPoolTx(tx *sql.Tx, credential, newPool string) error {
+	var existing string
+	err := tx.QueryRow(
+		"SELECT pool FROM credential_pool_members WHERE credential = ? AND pool != ? LIMIT 1",
+		credential, newPool,
+	).Scan(&existing)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("check existing pool membership for %q: %w", credential, err)
+	}
+	return fmt.Errorf("credential %q is already a member of pool %q; a credential may belong to at most one pool", credential, existing)
+}
+
 // CreatePoolWithMembers creates a pool and its ordered members atomically.
 // Member positions are assigned from the slice order (0-based). It enforces
 // the pool/credential namespace mutual-exclusion (a pool name must not
@@ -152,6 +174,9 @@ func (s *Store) CreatePoolWithMembers(name, strategy string, members []string) e
 
 	for i, m := range members {
 		if err := validatePoolMemberTx(tx, m); err != nil {
+			return err
+		}
+		if err := assertCredentialNotInAnotherPoolTx(tx, m, name); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(

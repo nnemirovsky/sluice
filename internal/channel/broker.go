@@ -417,6 +417,13 @@ func (b *Broker) detachSub(primaryID string, subCh chan Response) {
 	for i, c := range w.subs {
 		if c == subCh {
 			w.subs = append(w.subs[:i], w.subs[i+1:]...)
+			// A subscriber that timed out and detached is no longer
+			// covered by the primary's eventual decision, so it must not
+			// inflate the coalesced count. Decrement, never below 1 (the
+			// primary itself is always counted) (Finding 3).
+			if w.count > 1 {
+				w.count--
+			}
 			b.waiters[primaryID] = w
 			return
 		}
@@ -567,6 +574,12 @@ func (b *Broker) CancelAll() {
 	waiters := make(map[string]waiter, len(b.waiters))
 	for id, w := range b.waiters {
 		waiters[id] = w
+		// Retain each waiter's final coalesced count before the map is
+		// cleared, mirroring Resolve and the primary-timeout path. Without
+		// this the shutdown CancelApproval edit sees CoalescedCount==1 and
+		// omits "applied to N requests" for a burst that was pending at
+		// shutdown (Finding 2).
+		b.recordCoalescedLocked(id, w.count)
 	}
 	b.waiters = make(map[string]waiter)
 	b.dedupIndex = make(map[string]string)

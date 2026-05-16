@@ -61,9 +61,28 @@ func poolStablePhantomAccess(poolName string) string {
 	// expiry checks treat it as valid; iat is intentionally omitted so the
 	// payload is a pure function of the pool name (an iat would make the
 	// phantom time-varying and break byte-identity).
-	payload := base64.RawURLEncoding.EncodeToString([]byte(
-		`{"sub":"sluice-pool:` + poolName + `","iss":"sluice-phantom","exp":4102444800}`,
-	))
+	//
+	// The pool name is marshaled through encoding/json — never concatenated
+	// into the JSON string — so a name containing '"', '\', or control
+	// characters cannot produce an invalid JWT or inject extra claims
+	// (Finding 4). A fixed-field struct keeps the output deterministic and
+	// byte-stable for a given pool name (no map iteration ordering).
+	payloadJSON, err := json.Marshal(struct {
+		Sub string `json:"sub"`
+		Iss string `json:"iss"`
+		Exp int64  `json:"exp"`
+	}{
+		Sub: "sluice-pool:" + poolName,
+		Iss: "sluice-phantom",
+		Exp: 4102444800,
+	})
+	if err != nil {
+		// json.Marshal of a fixed struct with string/int fields cannot
+		// fail in practice; fall back to the static-form pool-stable
+		// phantom rather than emitting a malformed token.
+		return "SLUICE_PHANTOM:" + poolName + ".access"
+	}
+	payload := base64.RawURLEncoding.EncodeToString(payloadJSON)
 	signingInput := header + "." + payload
 	mac := hmac.New(sha256.New, phantomSigningKey)
 	mac.Write([]byte(signingInput))

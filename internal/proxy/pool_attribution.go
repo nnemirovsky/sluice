@@ -3,7 +3,88 @@ package proxy
 import (
 	"sync"
 	"time"
+
+	uuid "github.com/satori/go.uuid"
 )
+
+// flowAttrTTL bounds how long a flow-id -> injected-member tag is retained.
+// An HTTP request/response round-trip completes in well under a second in
+// practice; a generous TTL absorbs slow upstreams while still bounding the
+// map so a flow whose response never arrives cannot leak the tag forever.
+// The tag is also deleted on first successful lookup (single-use per flow).
+const flowAttrTTL = 5 * time.Minute
+
+// flowInjectedMember maps a go-mitmproxy Flow ID to the pool member whose
+// credential was injected into THAT request at injection time (pass-1 header
+// inject / pass-2 phantom swap in Requestheaders/Request).
+//
+// This is the join key for the API-host failover attribution bug (Finding
+// 1). A pooled API-host failover (HTTP 429 / 403-quota) must be attributed
+// to the member that was ACTIVE WHEN THE REQUEST WAS SENT, not the member
+// that happens to be active when the response is processed. With concurrent
+// in-flight requests both backed by member A, request1's 429 cools A and the
+// pool switches to B; if request2's 429 is then attributed via a
+// response-time ResolveActive it would wrongly cool B (now active) and park
+// both accounts. The flow ID is stable across Requestheaders -> Request ->
+// Response for one HTTP request (or HTTP/2 stream), so recording the
+// resolved member per flow at injection time and reading it on the matching
+// response pins attribution to the request's own injected member.
+type flowInjectedMember struct {
+	mu      sync.Mutex
+	entries map[uuid.UUID]flowAttrEntry
+}
+
+type flowAttrEntry struct {
+	member  string
+	expires time.Time
+}
+
+func newFlowInjectedMember() *flowInjectedMember {
+	return &flowInjectedMember{entries: make(map[uuid.UUID]flowAttrEntry)}
+}
+
+// Tag records that the given pool member's credential was injected for the
+// request identified by flowID. Idempotent: pass-1 (injectHeaders) and
+// pass-2 (buildPhantomPairs) both resolve the same member for one flow, so
+// recording twice is harmless. A best-effort opportunistic sweep of expired
+// entries keeps the map bounded without a background goroutine.
+func (m *flowInjectedMember) Tag(flowID uuid.UUID, member string) {
+	if member == "" || flowID == uuid.Nil {
+		return
+	}
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.entries) > 0 {
+		for k, e := range m.entries {
+			if now.After(e.expires) {
+				delete(m.entries, k)
+			}
+		}
+	}
+	m.entries[flowID] = flowAttrEntry{member: member, expires: now.Add(flowAttrTTL)}
+}
+
+// Recover returns the member tagged for the given flow ID and removes the
+// entry (single-use: a flow's response is processed exactly once). Returns
+// ("", false) when no live tag exists — the caller falls back to
+// response-time ResolveActive.
+func (m *flowInjectedMember) Recover(flowID uuid.UUID) (string, bool) {
+	if flowID == uuid.Nil {
+		return "", false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[flowID]
+	if !ok {
+		return "", false
+	}
+	delete(m.entries, flowID)
+	if time.Now().After(e.expires) {
+		return "", false
+	}
+	return e.member, true
+}
 
 // refreshAttrTTL is how long a real-refresh-token -> member tag is retained.
 // An OAuth refresh round-trip (agent POSTs refresh_token, upstream answers

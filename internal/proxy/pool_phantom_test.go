@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,6 +17,80 @@ import (
 )
 
 func timeFuture() time.Time { return time.Now().Add(5 * time.Minute) }
+
+// TestPoolStablePhantomAccessNameInjectionSafe is the Finding 4 regression.
+// The pool name was interpolated directly into the JWT payload JSON string,
+// so a name containing '"', '\', or control characters produced an invalid
+// or claim-injected JWT, breaking the agent-facing phantom. The fix marshals
+// the payload through encoding/json (fixed-field struct, deterministic).
+//
+// Pre-fix this test fails: base64-decoding the payload of the produced
+// phantom yields invalid JSON (the embedded '"' / '\' / control byte breaks
+// the hand-rolled string), so json.Unmarshal errors and the sub claim does
+// not round-trip the exact pool name.
+func TestPoolStablePhantomAccessNameInjectionSafe(t *testing.T) {
+	hostile := []string{
+		`a"b`,                       // double quote — closes the JSON string early
+		`a\b`,                       // backslash — invalid JSON escape
+		"a\x01b",                    // control character — invalid in a JSON string
+		`","admin":true,"x":"`,      // claim-injection attempt
+		`pool"}` + "\n" + `garbage`, // quote + newline + trailing junk
+		"normal_pool",               // sanity: the common case still works
+	}
+
+	for _, name := range hostile {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			tok := poolStablePhantomAccess(name)
+
+			// Determinism / byte-stability for a given pool name.
+			if tok2 := poolStablePhantomAccess(name); tok != tok2 {
+				t.Fatalf("phantom not deterministic for %q: %q != %q", name, tok, tok2)
+			}
+
+			parts := strings.Split(tok, ".")
+			if len(parts) != 3 {
+				t.Fatalf("phantom not a 3-part JWT for %q: %q", name, tok)
+			}
+
+			payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+			if err != nil {
+				t.Fatalf("payload not valid base64url for %q: %v", name, err)
+			}
+
+			var claims struct {
+				Sub string `json:"sub"`
+				Iss string `json:"iss"`
+				Exp int64  `json:"exp"`
+			}
+			if err := json.Unmarshal(payloadBytes, &claims); err != nil {
+				t.Fatalf("payload not valid JSON for pool name %q: %v (raw: %s) — Finding 4",
+					name, err, payloadBytes)
+			}
+
+			// The exact pool name must round-trip — no truncation at the
+			// first quote, no injected claims.
+			if claims.Sub != "sluice-pool:"+name {
+				t.Fatalf("sub claim = %q, want %q (pool name must round-trip exactly) — Finding 4",
+					claims.Sub, "sluice-pool:"+name)
+			}
+			if claims.Iss != "sluice-phantom" || claims.Exp != 4102444800 {
+				t.Fatalf("fixed claims corrupted for %q: iss=%q exp=%d", name, claims.Iss, claims.Exp)
+			}
+
+			// No extra top-level keys (claim injection would add e.g.
+			// "admin"). Decode into a generic map and assert exactly 3.
+			var generic map[string]interface{}
+			if err := json.Unmarshal(payloadBytes, &generic); err != nil {
+				t.Fatalf("payload re-decode failed for %q: %v", name, err)
+			}
+			if len(generic) != 3 {
+				t.Fatalf("payload has %d keys for %q, want exactly 3 (claim injection) — Finding 4: %v",
+					len(generic), name, generic)
+			}
+		})
+	}
+}
 
 // poolMemberCred builds an OAuth credential envelope for a pool member.
 func poolMemberCred(t *testing.T, access, refresh string) string {
