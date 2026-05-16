@@ -2114,7 +2114,18 @@ func waitForPending(t *testing.T, broker *channel.Broker, n int) { //nolint:unpa
 // then fires n-1 more concurrent requests to the same dest:port so they
 // coalesce onto the primary waiter. It returns the primary request ID and a
 // channel that receives all n responses.
-func fireCoalescedBurstTG(t *testing.T, broker *channel.Broker, dest string, port, n int) (string, chan channel.Response) {
+//
+// Before returning it deterministically waits for the primary's msgMap entry
+// to be populated by the async sendApprovalMessage goroutine (RequestApproval
+// spawns it via `go tc.sendApprovalMessage`, and msgMap.Store runs after the
+// prompt Send). Callers immediately drive a resolve/cancel that depends on
+// that entry existing; without this sync the broker's coalesced bookkeeping
+// can be fully settled while the prompt goroutine has not yet reached
+// msgMap.Store, so CancelApproval LoadAndDelete misses and zero cancel edits
+// are recorded. Synchronizing on the broker's CoalescedCount alone is not
+// sufficient — that count is settled by the broker independently of the
+// channel's async msgMap write.
+func fireCoalescedBurstTG(t *testing.T, broker *channel.Broker, tc *TelegramChannel, dest string, port, n int) (string, chan channel.Response) {
 	t.Helper()
 	out := make(chan channel.Response, n)
 
@@ -2141,6 +2152,21 @@ func fireCoalescedBurstTG(t *testing.T, broker *channel.Broker, dest string, por
 			time.Sleep(time.Millisecond)
 		}
 	}
+
+	// Deterministically wait for the async sendApprovalMessage goroutine to
+	// populate the primary's msgMap entry. The mock API returns immediately
+	// so this is typically a single iteration; the bounded loop only guards
+	// against scheduler starvation under CI load.
+	mapDeadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(mapDeadline) {
+		if _, ok := tc.msgMap.Load(reqID); ok {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, ok := tc.msgMap.Load(reqID); !ok {
+		t.Fatalf("msgMap entry for primary %s was not populated by sendApprovalMessage", reqID)
+	}
 	return reqID, out
 }
 
@@ -2157,7 +2183,7 @@ func TestHandleCallbackRendersCoalescedCount(t *testing.T) {
 	tc.SetBroker(broker)
 
 	const n = 5
-	reqID, out := fireCoalescedBurstTG(t, broker, "burst.example.com", 443, n)
+	reqID, out := fireCoalescedBurstTG(t, broker, tc, "burst.example.com", 443, n)
 
 	tc.handleCallback(&tgbotapi.CallbackQuery{
 		ID: "cb_coalesce",
@@ -2259,7 +2285,7 @@ func TestCancelApprovalRendersCoalescedCount(t *testing.T) {
 	tc.SetBroker(broker)
 
 	const n = 4
-	reqID, out := fireCoalescedBurstTG(t, broker, "cancel.example.com", 443, n)
+	reqID, out := fireCoalescedBurstTG(t, broker, tc, "cancel.example.com", 443, n)
 
 	// Resolve via the broker directly (simulating another channel) so the
 	// final count is recorded, then drive the Telegram cleanup edit.
