@@ -1450,6 +1450,16 @@ func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, flo
 	// pass is a no-op).
 	covered := make(map[string]bool, len(boundCreds))
 
+	// poolEmitted tracks pool namespaces whose pool-keyed phantom pairs
+	// (SLUICE_PHANTOM:<pool>.access / .refresh) were already produced — by
+	// EITHER pass. The token-host expansion below must be gated on the POOL
+	// namespace, not on covered[member]: if the active member ALSO has a
+	// plain direct binding on the token host, the CONNECT-host loop emits
+	// only member-scoped phantoms and sets covered[member], which would
+	// otherwise wrongly suppress the pool namespace and leave
+	// SLUICE_PHANTOM:<pool>.refresh unswapped (Finding 1, round-9).
+	poolEmitted := make(map[string]bool)
+
 	var pairs []phantomPair
 	for _, boundName := range boundCreds {
 		// Chokepoint: expand a bound pool name to its active member
@@ -1478,6 +1488,7 @@ func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, flo
 					continue
 				}
 				covered[member] = true
+				poolEmitted[poolName] = true
 				pairs = append(pairs, oauthPairs...)
 				continue
 			}
@@ -1527,15 +1538,21 @@ func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, flo
 				pr = a.poolResolver.Load()
 			}
 			if pr != nil {
-				seenPool := make(map[string]bool)
 				for _, credName := range idx.MatchAll(reqURL) {
 					poolName := pr.PoolForMember(credName)
-					if poolName == "" || seenPool[poolName] {
+					// Gate on the POOL namespace only. covered[member] is
+					// deliberately NOT consulted here: a plain direct
+					// binding for the active member on this same token
+					// host sets covered[member] but does NOT emit the
+					// pool-keyed phantoms the agent actually holds, so
+					// suppressing on it would leak SLUICE_PHANTOM:<pool>.*
+					// upstream unswapped (Finding 1, round-9).
+					if poolName == "" || poolEmitted[poolName] {
 						continue
 					}
-					seenPool[poolName] = true
+					poolEmitted[poolName] = true
 					member, ok := pr.ResolveActive(poolName)
-					if !ok || member == "" || covered[member] {
+					if !ok || member == "" {
 						continue
 					}
 					secret, err := a.provider.Get(member)

@@ -562,28 +562,50 @@ func handleCredRemove(args []string) error {
 	}
 	name := fs.Arg(0)
 
-	// Block removing a credential that is still a live pool member so no
-	// dangling member rows are left behind. The operator must remove it
-	// from the pool first. This check runs before the vault delete so a
-	// blocked removal does not destroy the secret. Only consult the DB if
-	// it already exists (do not create it as a side effect of a removal).
+	// Store-first removal order (Finding 3, round-9). The authoritative
+	// pool-membership gate is the atomic, fail-closed RemoveCredentialMeta
+	// in the store layer: it refuses inside its own transaction if the
+	// credential is still a live pool member, closing the TOCTOU window
+	// where a separate pre-check passes and a concurrent caller then
+	// creates a pool with this credential before the vault secret is
+	// deleted. The vault secret is therefore only deleted AFTER the store
+	// removal has succeeded; if the store removal refuses, the vault
+	// secret is left untouched and no window exists where the secret is
+	// gone but credential_pool_members still references it.
+	//
+	// Only consult/mutate the DB if it already exists (do not create it as
+	// a side effect of a removal).
+	dbExists := false
 	if _, statErr := os.Stat(*dbPath); statErr == nil {
-		guardDB, gerr := store.New(*dbPath)
-		if gerr != nil {
+		dbExists = true
+	} else if !os.IsNotExist(statErr) {
+		return fmt.Errorf("access database %q for credential removal of %q (refusing to remove; a pool member may otherwise be orphaned): %w", *dbPath, name, statErr)
+	}
+
+	var db *store.Store
+	if dbExists {
+		var derr error
+		db, derr = store.New(*dbPath)
+		if derr != nil {
 			// Fail closed: the DB exists but cannot be opened, so the
-			// pool-membership guard cannot run. Proceeding to delete the
+			// pool-membership gate cannot run. Proceeding to delete the
 			// vault secret would orphan any credential_pool_members row
 			// pointing at this now-missing credential -- exactly what the
-			// guard prevents. Refuse the removal instead.
-			return fmt.Errorf("open database %q to check pool membership for %q (refusing to remove; a pool member may otherwise be orphaned): %w", *dbPath, name, gerr)
+			// gate prevents. Refuse the removal instead.
+			return fmt.Errorf("open database %q to check pool membership for %q (refusing to remove; a pool member may otherwise be orphaned): %w", *dbPath, name, derr)
 		}
-		pools, perr := guardDB.PoolsForMember(name)
-		_ = guardDB.Close()
-		if perr != nil {
-			return fmt.Errorf("check pool membership for %q: %w", name, perr)
+		defer func() { _ = db.Close() }()
+
+		// GATE: atomic, fail-closed pool-member guard. This MUST run before
+		// the vault delete. If the credential is still a live pool member,
+		// RemoveCredentialMeta returns an error inside its transaction and
+		// the vault secret below is never touched.
+		metaDeleted, rmMetaErr := db.RemoveCredentialMeta(name)
+		if rmMetaErr != nil {
+			return fmt.Errorf("remove credential metadata for %q (refusing to delete the vault secret so a pool member is not orphaned): %w", name, rmMetaErr)
 		}
-		if len(pools) > 0 {
-			return fmt.Errorf("credential %q is a member of pool(s) %s; remove it from the pool first (sluice pool remove <p>, or recreate the pool without it)", name, strings.Join(pools, ", "))
+		if metaDeleted {
+			fmt.Printf("removed credential metadata for %q\n", name)
 		}
 	}
 
@@ -592,8 +614,10 @@ func handleCredRemove(args []string) error {
 		return err
 	}
 
-	// Remove from vault. If already gone (previous partial cleanup),
-	// continue to DB cleanup so stale rules/bindings can be removed.
+	// Store removal already succeeded (or the DB does not exist). Now it is
+	// safe to delete the vault secret. If already gone (previous partial
+	// cleanup), continue to DB cleanup so stale rules/bindings can be
+	// removed.
 	if err := vs.Remove(name); err != nil {
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("remove: %w", err)
@@ -603,22 +627,12 @@ func handleCredRemove(args []string) error {
 		fmt.Printf("credential %q removed\n", name)
 	}
 
-	// Clean up associated bindings and auto-created rules. Only open the
-	// store if the DB file exists to avoid creating it as a side effect of
-	// a credential removal.
-	if _, statErr := os.Stat(*dbPath); statErr != nil {
-		if !os.IsNotExist(statErr) {
-			log.Printf("warning: cannot access database %q for cleanup: %v (stale rules/bindings may remain)", *dbPath, statErr)
-		}
+	// Clean up associated bindings and auto-created rules. The DB handle
+	// was opened above for the membership gate; if the DB did not exist
+	// there is nothing to clean up.
+	if db == nil {
 		return nil
 	}
-
-	db, err := store.New(*dbPath)
-	if err != nil {
-		log.Printf("warning: could not open database %q for cleanup: %v (stale rules/bindings may remain)", *dbPath, err)
-		return nil
-	}
-	defer func() { _ = db.Close() }()
 
 	// Remove rules tagged either by "sluice cred add --destination"
 	// (cred-add:<name>) or by "sluice binding add" (binding-add:<name>).
@@ -645,14 +659,6 @@ func handleCredRemove(args []string) error {
 		log.Printf("warning: failed to remove bindings for %q: %v", name, rmBindErr)
 	} else if removed > 0 {
 		fmt.Printf("removed %d binding(s) for %q\n", removed, name)
-	}
-
-	// Remove credential metadata (type, token_url).
-	metaDeleted, rmMetaErr := db.RemoveCredentialMeta(name)
-	if rmMetaErr != nil {
-		log.Printf("warning: failed to remove credential meta for %q: %v", name, rmMetaErr)
-	} else if metaDeleted {
-		fmt.Printf("removed credential metadata for %q\n", name)
 	}
 	return nil
 }

@@ -275,6 +275,84 @@ func TestSharedHealthSurvivesResolverRebuild(t *testing.T) {
 	}
 }
 
+// TestFinding2Round9_SharedHealthPrunesNonMembers is the Copilot round-9
+// Finding 2 regression. On the shared-PoolHealth path (the normal server
+// path, prev.health == pr.health) MergeLiveCooldowns early-returned BEFORE
+// pruning cooldowns for credentials no longer a member of ANY pool. A cooled
+// member removed from a pool stayed in the process-wide shared health map
+// and, if re-added before its old TTL expired, was skipped again by
+// ResolveActive even though the store snapshot no longer recorded the
+// cooldown. The fix prunes non-member entries on the shared path too, while
+// never shortening a still-valid cooldown for a current member.
+func TestFinding2Round9_SharedHealthPrunesNonMembers(t *testing.T) {
+	shared := NewPoolHealth()
+
+	// gen1: a single resolver generation holds ALL pools (this is how the
+	// server builds it — one PoolResolver per process, every pool inside
+	// it). "pool" has members "a" and "b"; "other" has "c". "a" (still a
+	// member next gen) and "b" (about to be removed) both get cooled.
+	gen1 := NewPoolResolverShared([]store.Pool{
+		mkPool("pool", "a", "b"),
+		mkPool("other", "c"),
+	}, nil, shared)
+	aUntil := time.Now().Add(300 * time.Second)
+	bUntil := time.Now().Add(300 * time.Second)
+	gen1.MarkCooldown("a", aUntil, "429")
+	gen1.MarkCooldown("b", bUntil, "401")
+
+	// gen2: "b" removed from "pool" (membership change). gen2's memberOf is
+	// the COMPLETE member set across all pools for the new generation, so a
+	// credential absent from it is no longer in ANY pool. Same shared
+	// health instance — this is the normal server path
+	// (prev.health == pr.health).
+	gen2 := NewPoolResolverShared([]store.Pool{
+		mkPool("pool", "a"),
+		mkPool("other", "c"),
+	}, nil, shared)
+
+	// Without the fix MergeLiveCooldowns early-returns on the shared path
+	// and "b"'s stale cooldown lingers in the process-wide shared map.
+	gen2.MergeLiveCooldowns(gen1)
+
+	// "b" is no longer a member of any pool: its stale cooldown MUST be
+	// pruned so a re-add before the old TTL does not inherit it.
+	if until, cooling := gen2.CooldownUntil("b"); cooling {
+		t.Errorf("Finding 2 r9: stale cooldown for removed non-member b must be pruned; got until=%v cooling=%v", until, cooling)
+	}
+
+	// "a" is still a member of "pool": its cooldown must survive the merge
+	// and must NOT be shortened (monotonic-cooldown / CRITICAL-1 durability
+	// for live members).
+	if until, cooling := gen2.CooldownUntil("a"); !cooling {
+		t.Fatalf("Finding 2 r9: still-member a lost its cooldown across the shared-path merge")
+	} else if until.Before(aUntil.Add(-time.Second)) {
+		t.Errorf("Finding 2 r9: still-member a's cooldown was shortened: got %v want ~%v", until, aUntil)
+	}
+
+	// Re-add "b" to a pool (next generation) BEFORE its old TTL would have
+	// expired. Because the stale cooldown was pruned, "b" must now be
+	// healthy and ResolveActive must pick it, not skip it as still-cooling.
+	gen3 := NewPoolResolverShared([]store.Pool{
+		mkPool("pool", "a"),
+		mkPool("other", "c"),
+		mkPool("p2", "b", "d"),
+	}, nil, shared)
+	gen3.MergeLiveCooldowns(gen2)
+	if _, cooling := gen3.CooldownUntil("b"); cooling {
+		t.Errorf("Finding 2 r9: re-added b inherited a stale cooldown that should have been pruned")
+	}
+	if got, ok := gen3.ResolveActive("p2"); !ok || got != "b" {
+		t.Errorf("Finding 2 r9: re-added b should be the active member of p2; got %q,%v want b,true", got, ok)
+	}
+	// "a" is still in gen3's "pool"; its (unshortened) cooldown must still
+	// be intact after the second merge as well.
+	if until, cooling := gen3.CooldownUntil("a"); !cooling {
+		t.Errorf("Finding 2 r9: still-member a lost its cooldown across the second shared-path merge")
+	} else if until.Before(aUntil.Add(-time.Second)) {
+		t.Errorf("Finding 2 r9: still-member a's cooldown was shortened by the second merge: got %v want ~%v", until, aUntil)
+	}
+}
+
 // TestSharedHealthConcurrentMarkCooldownVsRebuild stresses the CRITICAL-1
 // race: MarkCooldown on rotating "old" generations racing continuous
 // resolver rebuilds (the StorePool/reload swap) against one shared health.

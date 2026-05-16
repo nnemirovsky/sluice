@@ -302,7 +302,28 @@ func (pr *PoolResolver) MergeLiveCooldowns(prev *PoolResolver) {
 	}
 	if pr.health == prev.health {
 		// Shared health map: both generations already see the same
-		// cooldowns. Nothing to do — this is the CRITICAL-1 fix.
+		// cooldowns, so there is nothing to carry forward — this is the
+		// CRITICAL-1 fix. But the shared map can still hold stale entries
+		// for credentials this new generation no longer tracks as a pool
+		// member (a member removed from a pool, or removed and recreated
+		// under the same name). Without pruning, a re-add before the old
+		// TTL expires would inherit the stale cooldown and ResolveActive
+		// would skip the member even though the store snapshot no longer
+		// records it (Finding 2, round-9).
+		//
+		// Pruning only NON-members preserves both invariants: a current
+		// member's (possibly synchronously-recorded) cooldown is never
+		// touched, so the monotonic-cooldown invariant and CRITICAL-1
+		// shared-map durability for live members are intact; only entries
+		// for credentials absent from the new resolver's member set are
+		// dropped.
+		pr.health.mu.Lock()
+		for cred := range pr.health.health {
+			if _, stillMember := pr.memberOf[cred]; !stillMember {
+				delete(pr.health.health, cred)
+			}
+		}
+		pr.health.mu.Unlock()
 		return
 	}
 	now := time.Now()

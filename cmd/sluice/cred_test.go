@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/nemirovsky/sluice/internal/store"
@@ -2520,5 +2521,199 @@ func TestHandleCredUpdateNoName(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "usage:") {
 		t.Errorf("expected usage error, got: %v", err)
+	}
+}
+
+// TestFinding3Round9_StoreGatedVaultDeleteOnLivePoolMember is the Copilot
+// round-9 Finding 3 regression. A credential that is a live pool member must
+// NOT have its vault secret deleted by `cred remove`: the store-layer
+// RemoveCredentialMeta fail-closes on a live pool member, and the vault
+// delete must be GATED on that store removal succeeding (store-first order).
+//
+// Before the fix, vs.Remove(name) ran BEFORE the guarded RemoveCredentialMeta,
+// so even though the command ultimately reported the credential could not be
+// removed, the vault secret was already destroyed — leaving the pool pointing
+// at a deleted secret (the TOCTOU window). The fix performs the guarded store
+// removal first and only deletes the vault secret if it succeeds.
+func TestFinding3Round9_StoreGatedVaultDeleteOnLivePoolMember(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+
+	// Create an OAuth credential and make it a live pool member.
+	vs, err := vault.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vs.Add("pool_mem", `{"access_token":"at","refresh_token":"rt"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddCredentialMeta("pool_mem", "oauth", "https://auth.example.com/token"); err != nil {
+		t.Fatalf("AddCredentialMeta: %v", err)
+	}
+	if err := db.CreatePoolWithMembers("codex_pool", "failover", []string{"pool_mem"}); err != nil {
+		t.Fatalf("CreatePoolWithMembers: %v", err)
+	}
+	_ = db.Close()
+
+	// `cred remove` must refuse because pool_mem is a live pool member.
+	err = handleCredCommand([]string{"remove", "pool_mem", "--db", dbPath})
+	if err == nil {
+		t.Fatal("Finding 3 r9: cred remove of a live pool member must fail")
+	}
+	if !strings.Contains(err.Error(), "pool") {
+		t.Errorf("Finding 3 r9: expected a pool-membership error, got: %v", err)
+	}
+
+	// The vault secret MUST still be present: the store gate refused, so the
+	// vault delete must never have run (store-first ordering).
+	names, err := vs.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, n := range names {
+		if n == "pool_mem" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("Finding 3 r9: vault secret was deleted despite the store removal being refused — store-first ordering violated, pool now points at a deleted secret")
+	}
+
+	// The credential must still be loadable (not just listed).
+	sec, gerr := vs.Get("pool_mem")
+	if gerr != nil {
+		t.Fatalf("Finding 3 r9: vault secret unreadable after a refused removal: %v", gerr)
+	}
+	sec.Release()
+
+	// Sanity: removing it from the pool first then `cred remove` succeeds
+	// and deletes BOTH (store-first, then vault).
+	db2, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db2.RemovePool("codex_pool"); err != nil {
+		t.Fatalf("RemovePool: %v", err)
+	}
+	_ = db2.Close()
+
+	if err := handleCredCommand([]string{"remove", "pool_mem", "--db", dbPath}); err != nil {
+		t.Fatalf("Finding 3 r9: cred remove after pool removal should succeed: %v", err)
+	}
+	names, err = vs.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range names {
+		if n == "pool_mem" {
+			t.Fatal("Finding 3 r9: normal removal (not a pool member) should delete the vault secret")
+		}
+	}
+	db3, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db3.Close() }()
+	if meta, gerr := db3.GetCredentialMeta("pool_mem"); gerr == nil && meta != nil {
+		t.Fatal("Finding 3 r9: credential meta should have been removed (store-first) on normal removal")
+	}
+}
+
+// TestFinding3Round9_TOCTOUInterleaveStoreGatesVaultDelete deterministically
+// exercises the round-9 Finding 3 TOCTOU: a pool is created concurrently
+// with `cred remove`. The invariant that MUST always hold is:
+//
+//	if the credential is still referenced by credential_pool_members,
+//	its vault secret MUST still exist.
+//
+// With the OLD vault-first order, an interleave where the pool is created
+// after the (separate) pre-check read but before vs.Remove deletes the vault
+// secret while the membership row survives — the pool is left pointing at a
+// deleted secret. With the store-first fix the atomic, fail-closed
+// RemoveCredentialMeta runs BEFORE vs.Remove, so either it refuses (pool
+// already exists -> vault untouched) or it succeeds (no membership ->
+// consistent). There is never a state where the secret is gone but
+// membership still references it.
+func TestFinding3Round9_TOCTOUInterleaveStoreGatesVaultDelete(t *testing.T) {
+	for iter := 0; iter < 40; iter++ {
+		dir := t.TempDir()
+		dbPath := setupVaultDB(t, dir)
+
+		vs, err := vault.NewStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := vs.Add("racer", `{"access_token":"at","refresh_token":"rt"}`); err != nil {
+			t.Fatal(err)
+		}
+		seed, err := store.New(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := seed.AddCredentialMeta("racer", "oauth", "https://auth.example.com/token"); err != nil {
+			t.Fatalf("AddCredentialMeta: %v", err)
+		}
+		_ = seed.Close()
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		// Racer A: create a pool with "racer" as a member.
+		go func() {
+			defer wg.Done()
+			<-start
+			pdb, e := store.New(dbPath)
+			if e != nil {
+				return
+			}
+			_ = pdb.CreatePoolWithMembers("codex_pool", "failover", []string{"racer"})
+			_ = pdb.Close()
+		}()
+
+		// Racer B: `cred remove racer`.
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = handleCredCommand([]string{"remove", "racer", "--db", dbPath})
+		}()
+
+		close(start)
+		wg.Wait()
+
+		// Invariant check: if membership still references "racer", the vault
+		// secret MUST still be present.
+		chk, err := store.New(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pools, perr := chk.PoolsForMember("racer")
+		_ = chk.Close()
+		if perr != nil {
+			t.Fatalf("PoolsForMember: %v", err)
+		}
+
+		names, lerr := vs.List()
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		vaultHas := false
+		for _, n := range names {
+			if n == "racer" {
+				vaultHas = true
+				break
+			}
+		}
+
+		if len(pools) > 0 && !vaultHas {
+			t.Fatalf("iter %d: TOCTOU violated — credential is a member of pool(s) %v but its vault secret was deleted (store-first ordering must gate the vault delete)", iter, pools)
+		}
 	}
 }

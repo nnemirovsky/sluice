@@ -429,3 +429,121 @@ func TestFinding3_ProtocolScopedPooledBindingFailoverLookup(t *testing.T) {
 		t.Fatalf("no cred_failover audit event found in:\n%s", data)
 	}
 }
+
+// TestFinding1Round9_PoolNamespaceNotSuppressedByMemberPlainBinding is the
+// Copilot round-9 Finding 1 regression. Topology: a pool bound to the API
+// host (api.example.com), AND the active pool member (memA) ALSO has its OWN
+// plain direct binding on the TOKEN host (auth.example.com, == the pool's
+// token URL host). The agent POSTs the pool-keyed refresh grant
+// (SLUICE_PHANTOM:codex_pool.refresh) to the token host.
+//
+// Before the fix, the CONNECT-host binding loop processed memA's plain
+// binding on the token host, emitted only memA-scoped phantoms, and set
+// covered[memA]=true. The token-host expansion pass then saw
+// covered[member]==true (member==memA) and skipped the pool entirely, so
+// SLUICE_PHANTOM:codex_pool.refresh AND .access were NEVER swapped: the
+// pool-keyed phantoms the agent actually holds would travel upstream
+// verbatim and the refresh would fail. The fix gates the token-host pass on
+// the POOL namespace (poolEmitted[poolName]) rather than covered[member], so
+// a plain member binding no longer suppresses the pool expansion. The pool
+// namespace must be emitted exactly once (not double-emitted, not skipped).
+func TestFinding1Round9_PoolNamespaceNotSuppressedByMemberPlainBinding(t *testing.T) {
+	const (
+		poolName = "codex_pool"
+		memA     = "memA"
+		memB     = "memB"
+	)
+
+	provider := &addonWritableProvider{
+		creds: map[string]string{
+			memA: poolMemberCred(t, "A-access-old", "A-refresh-old"),
+			memB: poolMemberCred(t, "B-access-old", "B-refresh-old"),
+		},
+	}
+
+	// Pool bound to the API host. AND memA (the active member) ALSO has a
+	// plain direct binding on the TOKEN host -- this is the configuration
+	// that, pre-fix, set covered[memA] in the CONNECT-host loop and
+	// suppressed the pool expansion on the token host.
+	bindings := []vault.Binding{
+		{Destination: "api.example.com", Ports: []int{443}, Credential: poolName},
+		{Destination: "auth.example.com", Ports: []int{443}, Credential: memA},
+	}
+	resolver, err := vault.NewBindingResolver(bindings)
+	if err != nil {
+		t.Fatalf("NewBindingResolver: %v", err)
+	}
+	var resolverPtr atomic.Pointer[vault.BindingResolver]
+	resolverPtr.Store(resolver)
+
+	addon := NewSluiceAddon(WithResolver(&resolverPtr), WithProvider(provider))
+	addon.persistDone = make(chan struct{}, 10)
+
+	metas := []store.CredentialMeta{
+		{Name: memA, CredType: "oauth", TokenURL: testOAuthTokenURL},
+		{Name: memB, CredType: "oauth", TokenURL: testOAuthTokenURL},
+	}
+	addon.UpdateOAuthIndex(metas)
+
+	pool := store.Pool{Name: poolName, Strategy: store.PoolStrategyFailover}
+	pool.Members = []store.PoolMember{
+		{Credential: memA, Position: 0},
+		{Credential: memB, Position: 1},
+	}
+	var prPtr atomic.Pointer[vault.PoolResolver]
+	prPtr.Store(vault.NewPoolResolver([]store.Pool{pool}, nil))
+	addon.SetPoolResolver(&prPtr)
+
+	if got, _ := prPtr.Load().ResolveActive(poolName); got != memA {
+		t.Fatalf("pre-condition active = %q, want %s", got, memA)
+	}
+
+	// CONNECT target is the token host (where memA ALSO has a plain
+	// binding). The agent body carries the pool-keyed refresh phantom.
+	client := setupAddonConn(addon, "auth.example.com:443")
+	reqFlow := newTestFlow(client, "POST", testOAuthTokenURL)
+	reqFlow.Request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqFlow.Request.Body = refreshGrantBody(poolName)
+
+	addon.Requestheaders(reqFlow)
+	addon.Request(reqFlow)
+
+	body := string(reqFlow.Request.Body)
+
+	// The pool refresh phantom must be swapped to the active member's REAL
+	// refresh token, NOT left verbatim.
+	if strings.Contains(body, "SLUICE_PHANTOM:"+poolName+".refresh") {
+		t.Fatalf("Finding 1 r9: pool refresh phantom NOT swapped (suppressed by member plain binding); body=%q", body)
+	}
+	if !strings.Contains(body, "A-refresh-old") {
+		t.Fatalf("Finding 1 r9: active member memA real refresh token not injected; body=%q", body)
+	}
+	// The pool ACCESS phantom must also be swappable: build the pairs
+	// directly and assert the pool access phantom maps to memA's real
+	// access token exactly once (no double-emit, not suppressed).
+	pairs := addon.buildPhantomPairs("auth.example.com", 443, "https", reqFlow.Id, reqFlow.Request.URL)
+	defer releasePhantomPairs(pairs)
+	accessPhantom := poolStablePhantomAccess(poolName)
+	refreshPhantom := "SLUICE_PHANTOM:" + poolName + ".refresh"
+	var accessCount, refreshCount int
+	for _, p := range pairs {
+		switch string(p.phantom) {
+		case accessPhantom:
+			accessCount++
+			if got := string(p.secret.Bytes()); got != "A-access-old" {
+				t.Fatalf("pool access phantom -> %q, want A-access-old", got)
+			}
+		case refreshPhantom:
+			refreshCount++
+			if got := string(p.secret.Bytes()); got != "A-refresh-old" {
+				t.Fatalf("pool refresh phantom -> %q, want A-refresh-old", got)
+			}
+		}
+	}
+	if accessCount != 1 {
+		t.Fatalf("Finding 1 r9: pool access phantom emitted %d times, want exactly 1 (not suppressed, not double-emitted)", accessCount)
+	}
+	if refreshCount != 1 {
+		t.Fatalf("Finding 1 r9: pool refresh phantom emitted %d times, want exactly 1 (not suppressed, not double-emitted)", refreshCount)
+	}
+}

@@ -639,21 +639,27 @@ func (h *CommandHandler) credRotate(name, value string) string {
 }
 
 func (h *CommandHandler) credRemove(name string) string {
-	// Remove from vault. If already gone (previous partial cleanup),
-	// continue to DB cleanup so stale rules/bindings can be removed.
-	if err := h.vault.Remove(name); err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Sprintf("Failed to remove credential: %v", err)
-		}
-		// Vault entry already gone. Continue to clean up stale DB state.
-	}
-
 	// Clean up associated bindings and auto-created rules.
 	var warnings []string
 	var removedEnvVars []string
 	if h.store != nil {
 		h.reloadMu.Lock()
 		defer h.reloadMu.Unlock()
+
+		// Store-first removal order (Finding 3, round-9).
+		// RemoveCredentialMeta is the authoritative, fail-closed
+		// pool-membership gate: it refuses inside its own transaction if
+		// the credential is still a live pool member. Run it BEFORE the
+		// vault delete (and before bindings/rules cleanup) so the vault
+		// secret is only destroyed once the store has accepted the
+		// removal. If it refuses, the vault secret, bindings, and rules
+		// are all left intact and no window exists where the secret is
+		// gone but credential_pool_members still references it.
+		if _, err := h.store.RemoveCredentialMeta(name); err != nil {
+			log.Printf("[WARN] remove credential meta for %q: %v", name, err)
+			return fmt.Sprintf("Failed to remove credential %q (vault secret left intact so a pool member is not orphaned): %v", name, err)
+		}
+
 		// Read env_var values from bindings before removal so we can clear
 		// them from the agent container after the bindings are deleted.
 		if credBindings, err := h.store.ListBindingsByCredential(name); err == nil {
@@ -663,6 +669,18 @@ func (h *CommandHandler) credRemove(name string) string {
 				}
 			}
 		}
+
+		// Store removal already succeeded (the pool-membership gate
+		// passed). Only now is it safe to delete the vault secret. If
+		// already gone (previous partial cleanup), continue to clean up
+		// stale DB state.
+		if err := h.vault.Remove(name); err != nil {
+			if !os.IsNotExist(err) {
+				return fmt.Sprintf("Failed to remove credential: %v", err)
+			}
+			// Vault entry already gone. Continue to clean up stale DB state.
+		}
+
 		if _, err := h.store.RemoveRulesBySource("cred-add:" + name); err != nil {
 			log.Printf("[WARN] remove rules for credential %q: %v", name, err)
 			warnings = append(warnings, fmt.Sprintf("failed to remove rules: %v", err))
@@ -670,10 +688,6 @@ func (h *CommandHandler) credRemove(name string) string {
 		if _, err := h.store.RemoveBindingsByCredential(name); err != nil {
 			log.Printf("[WARN] remove bindings for credential %q: %v", name, err)
 			warnings = append(warnings, fmt.Sprintf("failed to remove bindings: %v", err))
-		}
-		if _, err := h.store.RemoveCredentialMeta(name); err != nil {
-			log.Printf("[WARN] remove credential meta for %q: %v", name, err)
-			warnings = append(warnings, fmt.Sprintf("failed to remove credential meta: %v", err))
 		}
 		// Recompile engine so removed allow rules take effect immediately.
 		if err := h.recompileAndSwap(); err != nil {
@@ -689,6 +703,14 @@ func (h *CommandHandler) credRemove(name string) string {
 		// the deleted credential's token URL.
 		if h.onOAuthIndexRebuild != nil {
 			h.onOAuthIndexRebuild()
+		}
+	} else {
+		// No store configured, so there is no pool-membership gate to
+		// run; delete the vault secret directly. If already gone
+		// (previous partial cleanup), report success — there is no DB
+		// state to clean up.
+		if err := h.vault.Remove(name); err != nil && !os.IsNotExist(err) {
+			return fmt.Sprintf("Failed to remove credential: %v", err)
 		}
 	}
 

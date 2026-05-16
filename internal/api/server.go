@@ -1263,7 +1263,20 @@ func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Remove associated bindings and auto-created rules first. If vault.Remove
+	// Store-first removal order (Finding 3, round-9). RemoveCredentialMeta
+	// is the authoritative, fail-closed pool-membership gate: it refuses
+	// inside its own transaction if the credential is still a live pool
+	// member. Run it BEFORE the vault delete (and before bindings/rules
+	// cleanup) so the vault secret is only destroyed once the store has
+	// accepted the removal. If it refuses, the vault secret, bindings, and
+	// rules are all left intact and no window exists where the secret is
+	// gone but credential_pool_members still references it.
+	if _, err := s.store.RemoveCredentialMeta(name); err != nil {
+		writeError(w, http.StatusConflict, "failed to remove credential metadata (vault secret left intact so a pool member is not orphaned): "+err.Error(), "")
+		return
+	}
+
+	// Remove associated bindings and auto-created rules next. If vault.Remove
 	// below fails, bindings/rules are already gone. This is a pre-existing
 	// ordering tradeoff: reversing it would orphan bindings when vault succeeds
 	// but SQLite fails. A transactional approach would require the vault to
@@ -1287,16 +1300,12 @@ func (s *Server) DeleteApiCredentialsName(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Remove the credential from the vault first. If this fails, metadata
-	// stays intact so the credential type is not lost.
+	// Store removal already succeeded above (the pool-membership gate
+	// passed and credential_meta is gone). Only now is it safe to delete
+	// the vault secret.
 	if err := s.vault.Remove(name); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to remove credential: "+err.Error(), "")
 		return
-	}
-
-	// Remove credential metadata after vault deletion succeeded.
-	if _, err := s.store.RemoveCredentialMeta(name); err != nil {
-		log.Printf("[WARN] failed to remove credential meta %q: %v", name, err)
 	}
 
 	if err := s.recompileEngine(); err != nil {
