@@ -470,39 +470,47 @@ func main() {
 
 		// Update the proxy's broker reference now that it's created.
 		srv.SetBroker(broker)
+	} else {
+		log.Printf("no approval channels configured (ask rules will auto-deny)")
+	}
 
-		// Wire Phase 2 pool failover side effects: durable health write
-		// + best-effort Telegram notice. The in-memory active-member
-		// switch already happened synchronously on the response path
-		// before this callback fires (Risk I1); this only persists for
-		// restart durability and tells the operator. Everything here runs
-		// in a detached goroutine so the response/injection path is never
-		// blocked by a SQLite write or a Telegram round-trip.
-		failoverBroker := broker
-		srv.SetOnFailover(func(ev proxy.FailoverEvent) {
-			go func() {
-				if db != nil {
-					reason := fmt.Sprintf("failover:%s", ev.Reason)
-					if herr := db.SetCredentialHealth(ev.From, "cooldown", ev.Until, reason); herr != nil {
-						log.Printf("[POOL-FAILOVER] durable health write for %q failed: %v", ev.From, herr)
+	// Wire Phase 2 pool failover side effects: durable health write
+	// + best-effort Telegram notice. The in-memory active-member switch
+	// already happened synchronously on the response path before this
+	// callback fires (Risk I1); this only persists for restart durability
+	// and tells the operator. Registered UNCONDITIONALLY (outside the
+	// channel block): the durable SetCredentialHealth write is the
+	// CRITICAL-1 cooldown-durability guarantee and must run even in
+	// deployments with no Telegram/HTTP approval channel. Only the
+	// operator notice is gated on a broker being present. Everything
+	// here runs in a detached goroutine so the response/injection path
+	// is never blocked by a SQLite write or a Telegram round-trip.
+	failoverBroker := broker
+	srv.SetOnFailover(func(ev proxy.FailoverEvent) {
+		go func() {
+			if db != nil {
+				reason := fmt.Sprintf("failover:%s", ev.Reason)
+				if herr := db.SetCredentialHealth(ev.From, "cooldown", ev.Until, reason); herr != nil {
+					log.Printf("[POOL-FAILOVER] durable health write for %q failed: %v", ev.From, herr)
+				}
+			}
+			if failoverBroker != nil {
+				// Plain text: TelegramChannel.Notify sends with no parse
+				// mode, so markdown backticks would render literally.
+				msg := fmt.Sprintf("pool %s failed over %s -> %s (%s)",
+					ev.Pool, ev.From, ev.To, ev.Reason)
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				for _, ch := range failoverBroker.Channels() {
+					if nerr := ch.Notify(ctx, msg); nerr != nil {
+						log.Printf("[POOL-FAILOVER] notice via %s failed: %v", ch.Type(), nerr)
 					}
 				}
-				if failoverBroker != nil {
-					// Plain text: TelegramChannel.Notify sends with no parse
-					// mode, so markdown backticks would render literally.
-					msg := fmt.Sprintf("pool %s failed over %s -> %s (%s)",
-						ev.Pool, ev.From, ev.To, ev.Reason)
-					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-					defer cancel()
-					for _, ch := range failoverBroker.Channels() {
-						if nerr := ch.Notify(ctx, msg); nerr != nil {
-							log.Printf("[POOL-FAILOVER] notice via %s failed: %v", ch.Type(), nerr)
-						}
-					}
-				}
-			}()
-		})
+			}
+		}()
+	})
 
+	if len(allChannels) > 0 {
 		// Start all channels.
 		if tgChannel != nil {
 			if err := tgChannel.Start(); err != nil {
@@ -517,8 +525,6 @@ func main() {
 			}
 			defer hc.Stop()
 		}
-	} else {
-		log.Printf("no approval channels configured (ask rules will auto-deny)")
 	}
 
 	// MCP gateway: always start (even with zero upstreams) so the

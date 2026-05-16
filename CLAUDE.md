@@ -219,16 +219,16 @@ A **credential pool** lets one phantom identity the agent sees be backed by **N 
 **CLI:**
 
 ```
-sluice pool create <name> --member <cred> [--member <cred> ...]   # ordered members; rejects static; namespace must not collide with a credential name
+sluice pool create <name> --members credA,credB[,credC]   # comma-separated ordered members; rejects static; namespace must not collide with a credential name
 sluice pool list
-sluice pool status <name>     # active member, per-member health (healthy / cooldown + recover-at + reason)
+sluice pool status <name>     # active member, per-member health (healthy / cooldown + cooldown-until + reason)
 sluice pool rotate <name>     # operator override: advance the active member manually
 sluice pool remove <name>
 ```
 
 Auto-failover on 429/401 is the primary mechanism; `pool rotate` is an operator override. Pool and credential namespaces are mutually exclusive at create time.
 
-**Data model (migration `000006_credential_pools`):** three tables — `credential_pools` (pool name, strategy reserved `failover`), `credential_pool_members` (ordered membership, pool→credential FK), `credential_health` (per-member state `healthy|cooldown`, `recover_at`, reason) — with CHECK constraints. Store API lives in `internal/store/pools.go`. `reloadAll` loads pool + health into an atomic-pointer-swapped `PoolResolver` (`internal/vault/pool.go`), rewired into the addon via `srv.StorePool`/`SetPoolResolver` on SIGHUP and the 2s data-version watcher.
+**Data model (migration `000006_credential_pools`):** three tables — `credential_pools` (pool name, strategy reserved `failover`), `credential_pool_members` (ordered membership, pool→credential FK), `credential_health` (per-member state `healthy|cooldown`, `cooldown_until`, `last_failure_reason`) — with CHECK constraints. Store API lives in `internal/store/pools.go`. `reloadAll` loads pool + health into an atomic-pointer-swapped `PoolResolver` (`internal/vault/pool.go`), rewired into the addon via `srv.StorePool`/`SetPoolResolver` on SIGHUP and the 2s data-version watcher.
 
 **Phase 1 — phantom indirection (pool phantom → active member):**
 

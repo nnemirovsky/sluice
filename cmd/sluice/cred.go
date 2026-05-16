@@ -570,16 +570,20 @@ func handleCredRemove(args []string) error {
 	if _, statErr := os.Stat(*dbPath); statErr == nil {
 		guardDB, gerr := store.New(*dbPath)
 		if gerr != nil {
-			log.Printf("warning: could not open database %q to check pool membership: %v", *dbPath, gerr)
-		} else {
-			pools, perr := guardDB.PoolsForMember(name)
-			_ = guardDB.Close()
-			if perr != nil {
-				return fmt.Errorf("check pool membership for %q: %w", name, perr)
-			}
-			if len(pools) > 0 {
-				return fmt.Errorf("credential %q is a member of pool(s) %s; remove it from the pool first (sluice pool remove <p>, or recreate the pool without it)", name, strings.Join(pools, ", "))
-			}
+			// Fail closed: the DB exists but cannot be opened, so the
+			// pool-membership guard cannot run. Proceeding to delete the
+			// vault secret would orphan any credential_pool_members row
+			// pointing at this now-missing credential -- exactly what the
+			// guard prevents. Refuse the removal instead.
+			return fmt.Errorf("open database %q to check pool membership for %q (refusing to remove; a pool member may otherwise be orphaned): %w", *dbPath, name, gerr)
+		}
+		pools, perr := guardDB.PoolsForMember(name)
+		_ = guardDB.Close()
+		if perr != nil {
+			return fmt.Errorf("check pool membership for %q: %w", name, perr)
+		}
+		if len(pools) > 0 {
+			return fmt.Errorf("credential %q is a member of pool(s) %s; remove it from the pool first (sluice pool remove <p>, or recreate the pool without it)", name, strings.Join(pools, ", "))
 		}
 	}
 

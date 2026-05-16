@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -163,4 +164,51 @@ func TestCredRemoveBlockedForLivePoolMember(t *testing.T) {
 		t.Fatalf("credential acct_a was destroyed despite blocked removal: %v", gerr)
 	}
 	sb.Release()
+}
+
+// TestCredRemoveFailsClosedWhenDBUnopenable asserts that when the policy DB
+// path exists but cannot be opened, cred remove refuses (fails closed)
+// instead of logging a warning and deleting the vault secret anyway. A
+// continue-on-error here would orphan a credential_pool_members row pointing
+// at a now-missing credential -- exactly what the membership guard prevents.
+// Regression for Copilot re-review finding 2.
+func TestCredRemoveFailsClosedWhenDBUnopenable(t *testing.T) {
+	dir := t.TempDir()
+
+	// Put a vault secret in place so we can prove it survives the refused
+	// removal. The vault dir is independent of the DB path.
+	vs, verr := vault.NewStore(dir)
+	if verr != nil {
+		t.Fatalf("open vault: %v", verr)
+	}
+	if _, err := vs.Add("acct_a", `{"access_token":"x"}`); err != nil {
+		t.Fatalf("vault add: %v", err)
+	}
+
+	// dbPath exists (os.Stat succeeds, so the membership guard is entered)
+	// but is a directory, so store.New cannot open it as a SQLite file.
+	dbPath := filepath.Join(dir, "broken.db")
+	if err := os.Mkdir(dbPath, 0o755); err != nil {
+		t.Fatalf("mkdir broken db: %v", err)
+	}
+
+	err := handleCredCommand([]string{"remove", "--db", dbPath, "acct_a"})
+	if err == nil {
+		t.Fatalf("cred remove with unopenable DB: err = nil, want fail-closed error")
+	}
+	if !strings.Contains(err.Error(), "refusing to remove") {
+		t.Fatalf("cred remove error = %v, want fail-closed message containing %q", err, "refusing to remove")
+	}
+
+	// The secret must still be present: the removal was refused before the
+	// vault delete.
+	vs2, verr2 := vault.NewStore(dir)
+	if verr2 != nil {
+		t.Fatalf("reopen vault: %v", verr2)
+	}
+	sb2, gerr2 := vs2.Get("acct_a")
+	if gerr2 != nil {
+		t.Fatalf("credential acct_a was destroyed despite refused removal: %v", gerr2)
+	}
+	sb2.Release()
 }
