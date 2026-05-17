@@ -513,8 +513,15 @@ func main() {
 			if failoverBroker != nil {
 				// Plain text: TelegramChannel.Notify sends with no parse
 				// mode, so markdown backticks would render literally.
+				// Exhausted: no distinct member to fail over to (every
+				// member cooling) — report it as pool exhaustion, NOT a
+				// self-referential "X -> X" transition.
 				msg := fmt.Sprintf("pool %s failed over %s -> %s (%s)",
 					ev.Pool, ev.From, ev.To, ev.Reason)
+				if ev.Exhausted {
+					msg = fmt.Sprintf("pool %s exhausted: all members cooling down (%s); no healthy account to fail over to",
+						ev.Pool, ev.Reason)
+				}
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 				for _, ch := range failoverBroker.Channels() {

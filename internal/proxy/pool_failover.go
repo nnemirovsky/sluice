@@ -140,6 +140,13 @@ type FailoverEvent struct {
 	Reason string // short tag: 429 | 403 | 401 | invalid_grant | invalid_token
 	Class  failoverClass
 	Until  time.Time // member cooldown expiry just applied
+	// Exhausted is true when there was NO distinct member to fail over to
+	// (every member is cooling and the soonest-recovering one is the member
+	// that just failed). The cooldown is still applied to From for
+	// durability, but this is a pool-exhaustion signal, not a real
+	// transition: the operator notice and audit action say so, and it is
+	// deduplicated so an agent's retry storm produces one line, not N.
+	Exhausted bool
 	// Epoch is the From member's membership epoch in the resolver
 	// generation that produced this failover. The durable guarded write
 	// commits only if (From, Pool, Epoch) is still a live membership row,
@@ -447,16 +454,49 @@ func (a *SluiceAddon) handlePoolFailover(f *mitmproxy.Flow) {
 		to = next
 	}
 
-	log.Printf("[POOL-FAILOVER] pool %q: %s -> %s (%s); member %q cooling down until %s",
-		pool, from, to, tag, from, until.Format(time.RFC3339))
+	// to == from means ResolveActive degraded back to the member that just
+	// failed: every member is cooling and the soonest-recovering one IS
+	// `from`. There is NO distinct member to fail over to. Emitting a
+	// "<from> -> <from>" cred_failover here (and one Telegram notice per
+	// request) was both meaningless and a notification storm — the agent
+	// retries N times, each retry re-fails on the still-exhausted member
+	// and re-entered this path, producing N identical "failed over A -> A"
+	// notices. Classify it honestly as pool exhaustion instead.
+	exhausted := to == from
 
-	// Audit: emit a cred_failover action with the documented Reason shape
-	// "<pool>:<from>-><to>:<tag>". Safe to call with a nil auditLog. The
-	// blake3 hash chain is appended synchronously by FileLogger.Log; the
+	// Deduplicate identical signals within a short window. Concurrent
+	// in-flight requests (pipelined agents) and retries that race the
+	// synchronous MarkCooldown above would otherwise each emit one audit
+	// row + one operator notice. One per (pool,from,to,tag) per window is
+	// all the operator needs; the cooldown itself was already applied
+	// unconditionally above, so suppressing the notice loses nothing.
+	if !a.shouldEmitPoolNotice(pool, from, to, tag) {
+		return
+	}
+
+	if exhausted {
+		log.Printf("[POOL-FAILOVER] pool %q exhausted: all members cooling (%s); no failover target, serving least-bad %q",
+			pool, tag, from)
+	} else {
+		log.Printf("[POOL-FAILOVER] pool %q: %s -> %s (%s); member %q cooling down until %s",
+			pool, from, to, tag, from, until.Format(time.RFC3339))
+	}
+
+	// Audit: a real failover emits cred_failover with the documented Reason
+	// shape "<pool>:<from>-><to>:<tag>"; pool exhaustion emits the distinct
+	// pool_exhausted action so operators can alert on it separately and are
+	// not misled by a self-referential transition. Safe with a nil auditLog.
+	// The blake3 hash chain is appended synchronously by FileLogger.Log; the
 	// write is local and fast (mirrors logDLPAudit on the same path), so it
 	// does not warrant detaching like the store/Telegram side effects.
 	if a.auditLog != nil {
 		host, port := connectTargetForFlow(a, f)
+		action := "cred_failover"
+		reason := fmt.Sprintf("%s:%s->%s:%s", pool, from, to, tag)
+		if exhausted {
+			action = "pool_exhausted"
+			reason = fmt.Sprintf("%s:exhausted:%s", pool, tag)
+		}
 		evt := audit.Event{
 			Destination: host,
 			Port:        port,
@@ -465,8 +505,8 @@ func (a *SluiceAddon) handlePoolFailover(f *mitmproxy.Flow) {
 			// scoped pooled binding the audit must record the real protocol.
 			Protocol:   proto,
 			Verdict:    "failover",
-			Action:     "cred_failover",
-			Reason:     fmt.Sprintf("%s:%s->%s:%s", pool, from, to, tag),
+			Action:     action,
+			Reason:     reason,
 			Credential: from,
 		}
 		if err := a.auditLog.Log(evt); err != nil {
@@ -477,15 +517,46 @@ func (a *SluiceAddon) handlePoolFailover(f *mitmproxy.Flow) {
 	// (3) Durability + Telegram via the callback. The callback is
 	// responsible for being non-blocking (it runs the store write and the
 	// Telegram send in its own goroutine); we still guard with a nil check.
+	// The durable cooldown is persisted even when exhausted (the member did
+	// fail); only the operator-facing wording differs.
 	if a.onFailover != nil {
 		a.onFailover(FailoverEvent{
-			Pool:   pool,
-			From:   from,
-			To:     to,
-			Reason: tag,
-			Class:  class,
-			Until:  until,
-			Epoch:  idEpoch,
+			Pool:      pool,
+			From:      from,
+			To:        to,
+			Reason:    tag,
+			Class:     class,
+			Until:     until,
+			Exhausted: exhausted,
+			Epoch:     idEpoch,
 		})
 	}
+}
+
+// poolNoticeDedupWindow bounds how often an identical pool failover /
+// exhaustion signal (same pool, from, to, tag) produces an audit row +
+// operator notice. The synchronous in-memory MarkCooldown already switched
+// the active member before this fires, so a burst of agent retries within
+// the window is genuinely the same event, not new information.
+const poolNoticeDedupWindow = 30 * time.Second
+
+// shouldEmitPoolNotice returns true at most once per poolNoticeDedupWindow
+// for a given (pool,from,to,tag). It is mutex-guarded (not a sync.Map
+// LoadOrStore) so a concurrent burst cannot have two goroutines both miss
+// and both emit. The map is keyed by a NUL-joined tuple; key cardinality is
+// bounded by pool x member x member x tag, so it does not grow unbounded in
+// practice.
+func (a *SluiceAddon) shouldEmitPoolNotice(pool, from, to, tag string) bool {
+	key := pool + "\x00" + from + "\x00" + to + "\x00" + tag
+	now := time.Now()
+	a.poolNoticeMu.Lock()
+	defer a.poolNoticeMu.Unlock()
+	if a.poolNoticeAt == nil {
+		a.poolNoticeAt = make(map[string]time.Time)
+	}
+	if last, ok := a.poolNoticeAt[key]; ok && now.Sub(last) < poolNoticeDedupWindow {
+		return false
+	}
+	a.poolNoticeAt[key] = now
+	return true
 }

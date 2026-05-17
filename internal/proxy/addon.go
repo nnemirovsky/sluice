@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	mitmproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 	"github.com/nemirovsky/sluice/internal/audit"
@@ -119,6 +120,17 @@ type SluiceAddon struct {
 	// streamed response chunk. Use sync.Map to avoid per-lookup locking
 	// on the hot StreamResponseModifier path.
 	dlpStreamWarned sync.Map
+
+	// poolNoticeMu/poolNoticeAt deduplicate pool failover / exhaustion
+	// operator notices (audit row + Telegram) within poolNoticeDedupWindow.
+	// A failing pooled destination produces a burst of identical signals
+	// (agent retries + pipelined requests racing the synchronous
+	// MarkCooldown); without this an exhausted pool spammed one notice per
+	// retry. Mutex-guarded (not sync.Map) so a concurrent burst cannot have
+	// two goroutines both miss the dedup and both emit. See
+	// shouldEmitPoolNotice in pool_failover.go.
+	poolNoticeMu sync.Mutex
+	poolNoticeAt map[string]time.Time
 
 	// refreshGroup deduplicates concurrent OAuth token refresh responses
 	// for the same credential. Keyed by credential name so only one
