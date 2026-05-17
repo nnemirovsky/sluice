@@ -18,6 +18,18 @@ const (
 	AuthFailCooldown  = 300 * time.Second
 )
 
+// ManualRotateReason is the cooldown reason stamped by `sluice pool rotate`
+// when it parks the previously-active member. A member parked for this
+// reason is operationally deprioritized BY AN OPERATOR, not unhealthy: it
+// must still be skipped for normal position-order active selection (so the
+// rotated-to member wins), but it REMAINS a valid failover / degrade target.
+// A manual park must never strand the pool with no servable member when the
+// rotated-to member subsequently fails — otherwise a rotate onto an
+// exhausted account self-loops instead of falling back to the parked-but-
+// healthy peer. The literal is shared with cmd/sluice's rotate writer so the
+// two stay in sync.
+const ManualRotateReason = "manual rotate"
+
 // memberHealth is the in-memory health view for one credential. Status is
 // derived: a credential with a zero cooldownUntil is healthy.
 type memberHealth struct {
@@ -301,8 +313,8 @@ func (pr *PoolResolver) ResolveActive(name string) (member string, ok bool) {
 	defer pr.health.mu.RUnlock()
 
 	now := time.Now()
-	var soonest string
-	var soonestUntil time.Time
+	var soonest, soonestParked string
+	var soonestUntil, soonestParkedUntil time.Time
 	for _, m := range members {
 		h, tracked := pr.health.health[m]
 		if !tracked || h.cooldownUntil.IsZero() || !h.cooldownUntil.After(now) {
@@ -312,6 +324,24 @@ func (pr *PoolResolver) ResolveActive(name string) (member string, ok bool) {
 			soonest = m
 			soonestUntil = h.cooldownUntil
 		}
+		// A "manual rotate" park is an operator deprioritization, not a
+		// health failure: the member is still servable. When EVERY member
+		// is cooling, such a member is a strictly better degrade target
+		// than a genuinely failed (rate-limited / auth-failed) one — this
+		// is what lets a `pool rotate` onto an exhausted member still fail
+		// over to the parked-but-healthy peer instead of self-looping on
+		// the exhausted one.
+		if h.reason == ManualRotateReason {
+			if soonestParked == "" || h.cooldownUntil.Before(soonestParkedUntil) {
+				soonestParked = m
+				soonestParkedUntil = h.cooldownUntil
+			}
+		}
+	}
+	if soonestParked != "" {
+		log.Printf("[POOL] all %d members of pool %q are cooling; degrading to operator-parked-but-healthy %q",
+			len(members), name, soonestParked)
+		return soonestParked, true
 	}
 	log.Printf("[POOL] all %d members of pool %q are in cooldown; degrading to %q (recovers %s)",
 		len(members), name, soonest, soonestUntil.Format(time.RFC3339))

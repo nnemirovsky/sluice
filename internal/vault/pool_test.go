@@ -157,6 +157,47 @@ func TestResolveActiveAllDownDegradesToSoonest(t *testing.T) {
 	}
 }
 
+// TestResolveActiveAllDownPrefersManualRotateOverFailure is the
+// pool-stranding regression. `sluice pool rotate` parks the previously
+// active member with reason ManualRotateReason — that member is healthy,
+// just operator-deprioritized. If the rotated-to member then fails (rate
+// limit / auth), EVERY member is cooling. The old degrade picked the member
+// with the soonest cooldownUntil, which is the genuinely-FAILED one (a 429
+// cooldown is 60s; a manual rotate park is 300s), so a rotate onto an
+// exhausted account self-looped on the exhausted account and the agent hard
+// errored. Fail-before: soonest-by-time -> "a" (the failed member).
+// Pass-after: a manual-rotate-parked-but-healthy member is preferred -> "b".
+func TestResolveActiveAllDownPrefersManualRotateOverFailure(t *testing.T) {
+	now := time.Now()
+	health := []store.CredentialHealth{
+		// Genuinely failed, recovers SOON (would win the old soonest rule).
+		{Credential: "a", Status: "cooldown", CooldownUntil: now.Add(30 * time.Second), LastFailureReason: "429"},
+		// Operator-parked by `pool rotate`, recovers LATER, but healthy.
+		{Credential: "b", Status: "cooldown", CooldownUntil: now.Add(300 * time.Second), LastFailureReason: ManualRotateReason},
+	}
+	pr := NewPoolResolver([]store.Pool{mkPool("pool", "a", "b")}, health)
+	got, ok := pr.ResolveActive("pool")
+	if !ok || got != "b" {
+		t.Errorf("ResolveActive (all down) = %q,%v; want b,true (operator-parked-but-healthy preferred over genuinely-failed soonest)", got, ok)
+	}
+}
+
+// TestResolveActiveAllDownNoManualRotateStillSoonest guards that the
+// preference is ONLY for manual-rotate parks: when every member is cooling
+// for a genuine failure, behavior is unchanged (soonest recovery wins).
+func TestResolveActiveAllDownNoManualRotateStillSoonest(t *testing.T) {
+	now := time.Now()
+	health := []store.CredentialHealth{
+		{Credential: "a", Status: "cooldown", CooldownUntil: now.Add(300 * time.Second), LastFailureReason: "401"},
+		{Credential: "b", Status: "cooldown", CooldownUntil: now.Add(30 * time.Second), LastFailureReason: "429"},
+	}
+	pr := NewPoolResolver([]store.Pool{mkPool("pool", "a", "b")}, health)
+	got, ok := pr.ResolveActive("pool")
+	if !ok || got != "b" {
+		t.Errorf("ResolveActive (all down, no manual rotate) = %q,%v; want b,true (soonest unchanged)", got, ok)
+	}
+}
+
 func TestResolveActiveEmptyPool(t *testing.T) {
 	pr := NewPoolResolver([]store.Pool{mkPool("empty")}, nil)
 	if _, ok := pr.ResolveActive("empty"); ok {

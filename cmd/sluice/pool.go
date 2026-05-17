@@ -235,7 +235,7 @@ func handlePoolRotate(args []string) error {
 		return fmt.Errorf("pool %q rotate: resolved active member %q is not in the pool snapshot (membership changed under the rotate); re-check with \"sluice pool list %s\"", name, active, name)
 	}
 	until := time.Now().Add(vault.AuthFailCooldown)
-	wrote, err := db.SetCredentialHealthIfPoolMemberEpoch(active, name, rotateEpoch, "cooldown", until, "manual rotate")
+	wrote, err := db.SetCredentialHealthIfPoolMemberEpoch(active, name, rotateEpoch, "cooldown", until, vault.ManualRotateReason)
 	if err != nil {
 		return err
 	}

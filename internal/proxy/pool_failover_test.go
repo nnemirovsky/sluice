@@ -919,3 +919,163 @@ func TestServerStorePoolStaleGenerationCooldownNotLost(t *testing.T) {
 		t.Fatalf("ResolveActive = %q, want y (z cooled via stale-gen mark)", got)
 	}
 }
+
+// auditActionCount reads a closed FileLogger's file and counts lines whose
+// audit Action equals want.
+func auditActionCount(t *testing.T, logPath, want string) int {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var evt audit.Event
+		if uerr := json.Unmarshal([]byte(line), &evt); uerr != nil {
+			t.Fatalf("unmarshal audit line %q: %v", line, uerr)
+		}
+		if evt.Action == want {
+			n++
+		}
+	}
+	return n
+}
+
+// TestFailoverPoolExhaustedNoSelfFailoverSpam is the self-failover regression.
+// When every member is cooling and the soonest-recovering one IS the member
+// that just failed, ResolveActive degrades back to it: there is NO distinct
+// failover target. The old code emitted a meaningless "memA -> memA"
+// cred_failover AND one Telegram notice + audit row per agent retry (the
+// production symptom was six identical "failed over X -> X (429)" notices).
+//
+// Fail-before: action == cred_failover, From==To, and a second Response emits
+// a second row (no dedup). Pass-after: action == pool_exhausted, Exhausted
+// is true, From==To==memA, and the dedup window collapses the retry storm to
+// exactly one audit row + one onFailover.
+func TestFailoverPoolExhaustedNoSelfFailoverSpam(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	logger, err := audit.NewFileLogger(logPath)
+	if err != nil {
+		t.Fatalf("NewFileLogger: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+
+	addon, _, prPtr := setupPoolAddon(t, "memA", "memB")
+	addon.auditLog = logger
+	client := setupAddonConn(addon, "auth.example.com:443")
+
+	// memB is already genuinely failure-cooled for LONGER than a 429 TTL, so
+	// after memA's own 429 cooldown the soonest-recovering member is memA
+	// itself -> ResolveActive degrades to memA -> no distinct target.
+	prPtr.Load().MarkCooldown("memB", time.Now().Add(10*time.Minute), "401")
+
+	var calls int32
+	var last FailoverEvent
+	done := make(chan struct{}, 4)
+	addon.SetOnFailover(func(ev FailoverEvent) {
+		atomic.AddInt32(&calls, 1)
+		last = ev
+		done <- struct{}{}
+	})
+
+	// Two back-to-back identical 429s (the agent's retry storm).
+	for i := 0; i < 2; i++ {
+		f := newPoolRespFlow(client, 429, []byte(`{"error":"rate_limited"}`))
+		addon.flowInjected.Tag(f.Id, "memA")
+		addon.Response(f)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("onFailover callback not invoked")
+	}
+	// Dedup: the second identical signal within the window is suppressed.
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("onFailover invoked %d times, want exactly 1 (dedup window must collapse the retry storm)", got)
+	}
+	if !last.Exhausted {
+		t.Fatalf("FailoverEvent.Exhausted = false, want true (no distinct failover target)")
+	}
+	if last.From != "memA" || last.To != "memA" {
+		t.Fatalf("FailoverEvent from=%q to=%q, want memA/memA (degraded to self)", last.From, last.To)
+	}
+
+	if err := logger.Close(); err != nil {
+		t.Fatalf("logger close: %v", err)
+	}
+	if n := auditActionCount(t, logPath, "pool_exhausted"); n != 1 {
+		t.Fatalf("pool_exhausted audit rows = %d, want exactly 1 (no per-retry spam)", n)
+	}
+	if n := auditActionCount(t, logPath, "cred_failover"); n != 0 {
+		t.Fatalf("cred_failover audit rows = %d, want 0 (a self-failover is NOT a real failover)", n)
+	}
+}
+
+// TestFailoverToManualRotateParkedPeer is the pool-stranding regression that
+// broke the live agent: `sluice pool rotate` parks the previously-active
+// member (reason ManualRotateReason). That member is healthy, just operator
+// deprioritized. When the rotated-to member then 429s, EVERY member is
+// cooling — the old soonest-by-time degrade picked the just-failed member
+// (60s 429 TTL < 300s rotate park) and self-looped, hard-failing the agent.
+//
+// Fail-before: To == memA (self-loop), Exhausted true. Pass-after: the
+// operator-parked-but-healthy memB is preferred -> a REAL failover memA ->
+// memB, Exhausted false, cred_failover audit.
+func TestFailoverToManualRotateParkedPeer(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	logger, err := audit.NewFileLogger(logPath)
+	if err != nil {
+		t.Fatalf("NewFileLogger: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+
+	addon, _, prPtr := setupPoolAddon(t, "memA", "memB")
+	addon.auditLog = logger
+	client := setupAddonConn(addon, "auth.example.com:443")
+
+	// Operator rotated onto memA: memB is parked (healthy, just
+	// deprioritized) for the long manual-rotate TTL. memA is active.
+	prPtr.Load().MarkCooldown("memB", time.Now().Add(vault.AuthFailCooldown), vault.ManualRotateReason)
+	if got, _ := prPtr.Load().ResolveActive("codex_pool"); got != "memA" {
+		t.Fatalf("pre-failover active = %q, want memA (memB operator-parked)", got)
+	}
+
+	var got FailoverEvent
+	done := make(chan struct{}, 1)
+	addon.SetOnFailover(func(ev FailoverEvent) {
+		got = ev
+		done <- struct{}{}
+	})
+
+	f := newPoolRespFlow(client, 429, []byte(`{"error":"rate_limited"}`))
+	addon.flowInjected.Tag(f.Id, "memA")
+	addon.Response(f)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("onFailover callback not invoked")
+	}
+	if got.Exhausted {
+		t.Fatalf("FailoverEvent.Exhausted = true, want false (memB is a valid parked-but-healthy target)")
+	}
+	if got.From != "memA" || got.To != "memB" {
+		t.Fatalf("FailoverEvent from=%q to=%q, want memA -> memB (failover to operator-parked-but-healthy peer)", got.From, got.To)
+	}
+
+	if err := logger.Close(); err != nil {
+		t.Fatalf("logger close: %v", err)
+	}
+	if n := auditActionCount(t, logPath, "cred_failover"); n != 1 {
+		t.Fatalf("cred_failover audit rows = %d, want exactly 1 (real failover to memB)", n)
+	}
+	if n := auditActionCount(t, logPath, "pool_exhausted"); n != 0 {
+		t.Fatalf("pool_exhausted audit rows = %d, want 0 (a healthy parked peer exists)", n)
+	}
+}
