@@ -189,7 +189,13 @@ func ManualRotateCooldownForTest() time.Duration { return 300 * time.Second }
 // it back to position 0.
 func TestResolveActiveStickyPointerSurvivesRebuildAndSwap(t *testing.T) {
 	shared := NewPoolHealth()
-	gen1 := NewPoolResolverShared([]store.Pool{mkPool("pool", "a", "b")}, nil, shared)
+	// Realistic epoch >= 1 (Finding 2): production membership rows are stamped
+	// with a monotonic epoch >= 1; epoch 0 is documented as "never live", so a
+	// zero-epoch "live" generation is unrealistic and could mask an
+	// epoch-guard regression. All generations here rebuild the SAME pool
+	// (membership unchanged) so they share epoch 1 — the sticky pointer must
+	// survive the swap precisely because the epoch still matches.
+	gen1 := NewPoolResolverShared([]store.Pool{mkPoolEpoch("pool", 1, "a", "b")}, nil, shared)
 	if got, _ := gen1.ResolveActive("pool"); got != "a" {
 		t.Fatalf("gen1 initial = %q, want a", got)
 	}
@@ -201,8 +207,10 @@ func TestResolveActiveStickyPointerSurvivesRebuildAndSwap(t *testing.T) {
 	// "a" recovers (durable write may not have landed).
 	gen1.MarkCooldown("a", time.Time{}, "")
 
-	// Reload: fresh generation, SAME shared health, store has no rows.
-	gen2 := NewPoolResolverShared([]store.Pool{mkPool("pool", "a", "b")}, nil, shared)
+	// Reload: fresh generation, SAME shared health, store has no rows. Same
+	// pool/membership -> same epoch 1, so the sticky entry's epoch still
+	// matches and the pointer must survive (not snap back).
+	gen2 := NewPoolResolverShared([]store.Pool{mkPoolEpoch("pool", 1, "a", "b")}, nil, shared)
 	gen2.MergeLiveCooldowns(gen1)
 	// Sticky pointer survived the swap: gen2 keeps serving "b", not "a".
 	if got, _ := gen2.ResolveActive("pool"); got != "b" {
@@ -220,13 +228,64 @@ func TestResolveActiveStickyPointerSurvivesRebuildAndSwap(t *testing.T) {
 
 	// A pool dropped entirely prunes its sticky pointer (mirrors cooldown
 	// prune) so a re-add does not inherit a stale active member.
-	gen3 := NewPoolResolverShared([]store.Pool{mkPool("other", "x")}, nil, shared)
+	gen3 := NewPoolResolverShared([]store.Pool{mkPoolEpoch("other", 1, "x")}, nil, shared)
 	gen3.MergeLiveCooldowns(gen2)
-	gen4 := NewPoolResolverShared([]store.Pool{mkPool("pool", "a", "b"), mkPool("other", "x")}, nil, shared)
+	gen4 := NewPoolResolverShared([]store.Pool{mkPoolEpoch("pool", 1, "a", "b"), mkPoolEpoch("other", 1, "x")}, nil, shared)
 	gen4.MergeLiveCooldowns(gen3)
 	if got, _ := gen4.ResolveActive("pool"); got != "a" {
 		t.Fatalf("re-added pool active = %q, want a (dropped pool's sticky pointer must be pruned)", got)
 	}
+}
+
+// TestResolveActiveConcurrentDegradeNoDoubleUnlock pins Finding 3: the slow
+// path now Unlocks the write lock EXPLICITLY (no defer) before every
+// return/log.Printf, including the all-cooling degrade exit. A
+// double-unlock or unlock-of-rlock would panic/race; a missed unlock would
+// deadlock. Drive many concurrent ResolveActive calls with EVERY member
+// cooling (forces the degrade exit every time) and assert the result is
+// stable and the run is race-clean (run under -race). Behavior is unchanged:
+// the soonest-recovering member is still returned and the sticky pointer is
+// not moved.
+func TestResolveActiveConcurrentDegradeNoDoubleUnlock(t *testing.T) {
+	now := time.Now()
+	health := []store.CredentialHealth{
+		{Credential: "a", Status: "cooldown", CooldownUntil: now.Add(300 * time.Second), LastFailureReason: "401"},
+		{Credential: "b", Status: "cooldown", CooldownUntil: now.Add(30 * time.Second), LastFailureReason: "429"},
+	}
+	pr := NewPoolResolver([]store.Pool{mkPool("pool", "a", "b")}, health)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 300; j++ {
+				got, ok := pr.ResolveActive("pool")
+				if !ok || got != "b" {
+					t.Errorf("degrade resolve = %q,%v; want b,true (soonest)", got, ok)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	// Concurrent MarkCooldown vs degrade ResolveActive: same mu, must be
+	// race-clean and never deadlock after the explicit-unlock restructure.
+	var wg2 sync.WaitGroup
+	wg2.Add(2)
+	go func() {
+		defer wg2.Done()
+		for j := 0; j < 500; j++ {
+			pr.ResolveActive("pool")
+		}
+	}()
+	go func() {
+		defer wg2.Done()
+		for j := 0; j < 500; j++ {
+			pr.MarkCooldown("a", time.Now().Add(300*time.Second), "401")
+		}
+	}()
+	wg2.Wait()
 }
 
 func TestResolveActivePassthroughForNonPool(t *testing.T) {
