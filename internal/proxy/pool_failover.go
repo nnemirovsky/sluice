@@ -155,6 +155,47 @@ type FailoverEvent struct {
 	Epoch int64
 }
 
+// humanizeFailoverReason maps a short reason tag (the same tag embedded in the
+// audit Reason) to operator-friendly words, keeping the raw tag in parentheses
+// so the technical detail is still visible. Unknown tags degrade gracefully:
+// the raw tag is shown as-is rather than swallowed.
+func humanizeFailoverReason(tag string) string {
+	switch tag {
+	case "429":
+		return "rate limit (429)"
+	case "403":
+		return "quota exhausted (403)"
+	case "401":
+		return "auth failure (401)"
+	case "invalid_grant":
+		return "auth failure (invalid_grant)"
+	case "invalid_token":
+		return "auth failure (invalid_token)"
+	case "":
+		return "unknown reason"
+	default:
+		return "failover (" + tag + ")"
+	}
+}
+
+// FormatFailoverNotice builds the plain-text, single-line operator notice for a
+// completed pool failover. It is the human-facing Telegram/notice string only;
+// it deliberately does NOT touch the audit Reason format. Kept as a pure
+// function (no I/O, no server state) so it is directly unit-testable.
+//
+// Plain text only: the notice path (TelegramChannel.Notify) sends with no
+// parse mode, so markdown/HTML would render literally — keep it sentence-style
+// like sluice's other notices.
+func FormatFailoverNotice(ev FailoverEvent) string {
+	reason := humanizeFailoverReason(ev.Reason)
+	if ev.Exhausted {
+		return fmt.Sprintf("Pool %q exhausted: all members are cooling down, no healthy account to fail over to (%s).",
+			ev.Pool, reason)
+	}
+	return fmt.Sprintf("Pool %q failed over from %q to %q after %s.",
+		ev.Pool, ev.From, ev.To, reason)
+}
+
 // poolForResponse maps a response's CONNECT destination back to a pooled
 // binding and returns the pool name + the member that was active for this
 // request. Returns ok=false when the destination is not bound to a pool.
