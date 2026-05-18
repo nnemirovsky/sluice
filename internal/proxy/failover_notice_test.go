@@ -60,9 +60,19 @@ func TestFormatFailoverNotice(t *testing.T) {
 			want: `Pool "p" failed over from "a" to "b".`,
 		},
 		{
-			name:     "unknown tag degrades gracefully (still shows raw tag)",
-			ev:       FailoverEvent{Pool: "p", From: "a", To: "b", Reason: "teapot"},
-			mustHave: []string{"teapot", `Pool "p"`, `"a"`, `"b"`},
+			// Finding 2: an unknown tag must read naturally after "after"
+			// (no redundant "failed over ... after failover (teapot)").
+			name: "unknown tag reads naturally after the after-clause",
+			ev:   FailoverEvent{Pool: "p", From: "a", To: "b", Reason: "teapot"},
+			want: `Pool "p" failed over from "a" to "b" after unknown reason (teapot).`,
+		},
+		{
+			// Finding 2: an unknown tag in the exhausted message also reads
+			// naturally and still surfaces the raw tag.
+			name:     "unknown tag in exhausted message reads naturally",
+			ev:       FailoverEvent{Pool: "p", From: "a", To: "a", Reason: "teapot", Exhausted: true},
+			want:     `Pool "p" exhausted: all members are cooling down, no healthy account to fail over to (unknown reason (teapot)).`,
+			mustHave: []string{"teapot"},
 		},
 	}
 	for _, tt := range tests {
@@ -93,7 +103,11 @@ func TestFormatFailoverNotice(t *testing.T) {
 }
 
 // TestHumanizeFailoverReason covers every reason tag form produced by
-// failoverReasonTag / classifyFailover so none falls through unlabeled.
+// failoverReasonTag / classifyFailover so none falls through unlabeled. The
+// empty-tag case is intentionally absent: it is handled by
+// FormatFailoverNotice (the sole caller short-circuits an empty reason and
+// drops the clause), asserted by TestFormatFailoverNotice's empty-reason
+// cases, so humanizeFailoverReason has no reachable "" branch.
 func TestHumanizeFailoverReason(t *testing.T) {
 	cases := map[string]string{
 		"429":           "rate limit (429)",
@@ -101,8 +115,7 @@ func TestHumanizeFailoverReason(t *testing.T) {
 		"401":           "auth failure (401)",
 		"invalid_grant": "auth failure (invalid_grant)",
 		"invalid_token": "auth failure (invalid_token)",
-		"":              "unknown reason",
-		"weird":         "failover (weird)",
+		"weird":         "unknown reason (weird)",
 	}
 	for tag, want := range cases {
 		if got := humanizeFailoverReason(tag); got != want {
