@@ -49,6 +49,20 @@ type memberIdentity struct {
 	epoch int64
 }
 
+// activeEntry is the sticky pointer's value: the member ResolveActive last
+// settled on PLUS the (pool, epoch) identity of the generation that wrote it.
+// Finding 3: storing only the member NAME let a remove/re-create of the same
+// pool name with an overlapping member name be accepted by a later
+// generation as a valid sticky hold even though that name belongs to the OLD
+// epoch/order. Carrying the epoch (the same monotonic membership epoch the
+// cooldown gate keys on via memberIdentity) lets ResolveActive reject a
+// stored sticky entry whose epoch no longer matches this generation's
+// identity for the pool and advance fresh instead.
+type activeEntry struct {
+	member string
+	epoch  int64
+}
+
 // PoolHealth is the mutex-guarded credential cooldown map. It is
 // deliberately a SEPARATE object from PoolResolver so it can outlive any
 // single resolver generation.
@@ -107,9 +121,18 @@ type PoolHealth struct {
 	// lock-ordering hazard). It survives swaps because every generation
 	// shares one *PoolHealth; a stale generation cannot clobber it because
 	// ResolveActive only ever writes a member of THIS generation's member
-	// list, and the MergeLiveCooldowns / SetCurrentMembers prune drops the
-	// pointer for any pool no longer present (mirrors the cooldown prune).
-	active map[string]string
+	// list, AND the entry is epoch-scoped (activeEntry.epoch): a write records
+	// the writing generation's membership epoch, and ResolveActive ignores a
+	// stored entry whose epoch no longer matches THIS generation's identity
+	// for the pool (Finding 3 — a same-pool-name re-create with overlapping
+	// member names bumps the epoch, so the stale sticky hold is rejected and
+	// the pointer advances fresh). Both live reload paths that swap the member
+	// set — NewPoolResolverShared -> SetCurrentMembers AND
+	// MergeLiveCooldowns's shared-map branch — prune this map for any pool no
+	// longer present, whose recorded member is no longer in that pool, or
+	// whose recorded epoch no longer matches the new generation (mirrors the
+	// cooldown prune).
+	active map[string]activeEntry
 }
 
 // NewPoolHealth returns an empty shared health map. Call this exactly once
@@ -118,7 +141,7 @@ type PoolHealth struct {
 func NewPoolHealth() *PoolHealth {
 	return &PoolHealth{
 		health: make(map[string]memberHealth),
-		active: make(map[string]string),
+		active: make(map[string]activeEntry),
 	}
 }
 
@@ -131,13 +154,39 @@ func NewPoolHealth() *PoolHealth {
 // observes the OLD member set entirely or the NEW one entirely — it can never
 // observe a half-updated set, and it can never slip a non-member cooldown in
 // between the prune and the member-set swap.
+//
+// It ALSO prunes the sticky-pointer map under the same lock so this live
+// path stays consistent with MergeLiveCooldowns's shared-map prune (Finding
+// 1): on the server reload path NewPoolResolverShared calls this BEFORE
+// StorePool reaches MergeLiveCooldowns, so without pruning here a dropped or
+// epoch-bumped pool would briefly keep a stale sticky entry that
+// ResolveActive could observe. A sticky entry is dropped when the pool's
+// recorded member is no longer present in the new member set, or its epoch
+// no longer matches the new generation (Finding 3); an entry for a pool with
+// no surviving members is also dropped (every member of that pool would be
+// absent from `members`).
 func (ph *PoolHealth) SetCurrentMembers(members map[string]memberIdentity) {
 	if ph == nil {
 		return
 	}
 	ph.mu.Lock()
+	defer ph.mu.Unlock()
 	ph.currentMembers = members
-	ph.mu.Unlock()
+	ph.pruneActiveLocked(members)
+}
+
+// pruneActiveLocked drops sticky-pointer entries that are no longer valid for
+// the generation described by `members` (cred -> pool+epoch). An entry
+// survives only when its recorded member still maps to the SAME pool with the
+// SAME epoch. Caller must hold ph.mu. Shared by SetCurrentMembers and
+// MergeLiveCooldowns so both live reload paths prune identically.
+func (ph *PoolHealth) pruneActiveLocked(members map[string]memberIdentity) {
+	for poolName, ent := range ph.active {
+		id, stillMember := members[ent.member]
+		if !stillMember || id.pool != poolName || id.epoch != ent.epoch {
+			delete(ph.active, poolName)
+		}
+	}
 }
 
 // Seed merges store-persisted cooldown rows into the shared map. It is
@@ -344,33 +393,68 @@ func (pr *PoolResolver) ResolveActive(name string) (member string, ok bool) {
 		return "", false
 	}
 
-	// Take the shared map's WRITE lock: the sticky pointer is mutated here
-	// when the active member is unhealthy/unset, and it must be consistent
-	// with the cooldown view a concurrent failover's MarkCooldown writes
-	// (same mu, no second lock, no lock-ordering hazard).
+	// THIS generation's membership epoch for the pool. Every member of a pool
+	// shares one epoch (the store stamps all rows of a membership generation
+	// with the same monotonic value), so the first member's identity epoch is
+	// the pool's epoch. Used to reject a sticky entry written by an older
+	// generation after a same-pool-name re-create bumped the epoch (Finding
+	// 3). identity is immutable for this resolver, so it is read lock-free.
+	genEpoch := pr.identity[members[0]].epoch
+
+	cooling := func(m string) bool {
+		// Caller holds ph.mu (R or W).
+		h, tracked := pr.health.health[m]
+		return tracked && !h.cooldownUntil.IsZero() && h.cooldownUntil.After(time.Now())
+	}
+
+	// Read-mostly fast path (Finding 2): the common case is a sticky hold —
+	// the recorded active member is still a member of THIS generation, its
+	// epoch matches, and it is not cooling. That requires no mutation, so it
+	// runs under the shared RLock and does not serialize with other resolves.
+	pr.health.mu.RLock()
+	if ent, set := pr.health.active[name]; set && ent.epoch == genEpoch {
+		for _, m := range members {
+			if m != ent.member {
+				continue
+			}
+			if !cooling(ent.member) {
+				pr.health.mu.RUnlock()
+				return ent.member, true
+			}
+			break
+		}
+	}
+	pr.health.mu.RUnlock()
+
+	// Slow path: the sticky pointer must be advanced/initialized (unset,
+	// stale-epoch, no longer a member, or cooling). Go's RWMutex has no
+	// in-place upgrade, so drop the RLock and take the WRITE lock, then
+	// RE-CHECK the sticky-hold condition: another goroutine may have advanced
+	// the pointer between RUnlock and Lock, in which case return it without
+	// re-advancing. The write lock keeps the sticky pointer consistent with
+	// the cooldown view a concurrent failover's MarkCooldown writes (same mu,
+	// no second lock, no lock-ordering hazard).
 	pr.health.mu.Lock()
 	defer pr.health.mu.Unlock()
 
-	now := time.Now()
-
-	cooling := func(m string) bool {
-		h, tracked := pr.health.health[m]
-		return tracked && !h.cooldownUntil.IsZero() && h.cooldownUntil.After(now)
-	}
-
 	// Position of the current sticky member in THIS generation's member
 	// list. startIdx == -1 (no valid current) makes the scan start at
-	// position 0; otherwise it starts AFTER cur and wraps.
+	// position 0; otherwise it starts AFTER cur and wraps. A stored entry
+	// whose epoch does not match this generation is treated as "no current
+	// active" (Finding 3): it belongs to an old epoch/order, so advance
+	// fresh rather than honor a cross-generation name collision.
 	startIdx := -1
-	if cur, set := pr.health.active[name]; set {
+	if ent, set := pr.health.active[name]; set && ent.epoch == genEpoch {
 		for i, m := range members {
-			if m != cur {
+			if m != ent.member {
 				continue
 			}
-			// Sticky hold: the recorded active member is still a member of
-			// this generation and is healthy — keep serving it. Do not move.
-			if !cooling(cur) {
-				return cur, true
+			// Re-check under the write lock: still a member of this
+			// generation and healthy — another resolver may have just
+			// advanced here, or it was a benign RLock->Lock race. Keep
+			// serving it; do not move.
+			if !cooling(ent.member) {
+				return ent.member, true
 			}
 			startIdx = i
 			break
@@ -385,7 +469,7 @@ func (pr *PoolResolver) ResolveActive(name string) (member string, ok bool) {
 		idx := (startIdx + off) % n
 		m := members[idx]
 		if !cooling(m) {
-			pr.health.active[name] = m
+			pr.health.active[name] = activeEntry{member: m, epoch: genEpoch}
 			return m, true
 		}
 	}
@@ -593,26 +677,15 @@ func (pr *PoolResolver) MergeLiveCooldowns(prev *PoolResolver) {
 		pr.health.currentMembers = cm
 		// Sticky-pointer prune (mirrors the cooldown prune above): drop the
 		// recorded active member for any pool this generation no longer has,
-		// or whose recorded member is no longer in that pool. A surviving
-		// pool keeps its sticky member so a benign reload does NOT snap it
-		// back to position 0 (the whole point of CRITICAL-1 for the pointer).
-		for poolName, cur := range pr.health.active {
-			poolMembers, stillPool := pr.pools[poolName]
-			if !stillPool {
-				delete(pr.health.active, poolName)
-				continue
-			}
-			stillMember := false
-			for _, m := range poolMembers {
-				if m == cur {
-					stillMember = true
-					break
-				}
-			}
-			if !stillMember {
-				delete(pr.health.active, poolName)
-			}
-		}
+		// whose recorded member is no longer in that pool, or whose recorded
+		// epoch no longer matches this generation (Finding 3 — a same-pool-
+		// name re-create with overlapping member names bumps the epoch). A
+		// surviving pool with a still-valid same-epoch member keeps its sticky
+		// member so a benign reload does NOT snap it back to position 0 (the
+		// whole point of CRITICAL-1 for the pointer). Same predicate as
+		// SetCurrentMembers via the shared helper so both live reload paths
+		// prune identically (Finding 1).
+		pr.health.pruneActiveLocked(cm)
 		pr.health.mu.Unlock()
 		return
 	}
