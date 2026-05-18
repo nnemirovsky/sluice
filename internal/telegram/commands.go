@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"github.com/nemirovsky/sluice/internal/flagutil"
 	"github.com/nemirovsky/sluice/internal/mcp"
 	"github.com/nemirovsky/sluice/internal/policy"
+	"github.com/nemirovsky/sluice/internal/poolops"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
 )
@@ -248,6 +250,8 @@ func (h *CommandHandler) Handle(cmd *Command) string {
 		return h.handleCred(cmd.Args)
 	case "mcp":
 		return h.handleMCP(cmd.Args)
+	case "pool":
+		return h.handlePool(cmd.Args)
 	case "status":
 		return h.handleStatus()
 	case "audit":
@@ -1182,6 +1186,171 @@ func (h *CommandHandler) handleAudit(args []string) string {
 	return b.String()
 }
 
+// poolUsage is the usage banner for /pool.
+const poolUsage = "Usage: /pool create <name> <a,b[,c]> | /pool list | /pool status <name> | /pool rotate <name> | /pool remove <name>"
+
+// handlePool dispatches /pool subcommands to the channel-agnostic
+// internal/poolops package, the same package the CLI and REST API call, so
+// the three management surfaces cannot drift (channel feature-parity
+// principle).
+//
+// Unlike /mcp add, pool arguments carry only credential NAMES (never secret
+// values), so the chat message is NOT auto-deleted.
+//
+// reloadMu is not held: like MCP upstream changes, pool changes do not
+// recompile the policy engine or the binding resolver.
+func (h *CommandHandler) handlePool(args []string) string {
+	if h.store == nil {
+		return "Pool management is not available (policy store not configured)."
+	}
+	if len(args) == 0 {
+		return poolUsage
+	}
+	switch args[0] {
+	case "create":
+		return h.poolCreate(args[1:])
+	case "list":
+		return h.poolList()
+	case "status":
+		if len(args) < 2 {
+			return "Usage: /pool status <name>"
+		}
+		return h.poolStatus(args[1])
+	case "rotate":
+		if len(args) < 2 {
+			return "Usage: /pool rotate <name>"
+		}
+		return h.poolRotate(args[1])
+	case "remove":
+		if len(args) < 2 {
+			return "Usage: /pool remove <name>"
+		}
+		return h.poolRemove(args[1])
+	default:
+		return fmt.Sprintf("Unknown pool subcommand: %s", args[0])
+	}
+}
+
+func (h *CommandHandler) poolCreate(args []string) string {
+	if len(args) < 2 {
+		return "Usage: /pool create <name> <a,b[,c]>"
+	}
+	name := args[0]
+	members, err := poolops.ParseMembers(args[1])
+	if err != nil {
+		return fmt.Sprintf("Failed to create pool: %v", err)
+	}
+	if err := poolops.Create(h.store, name, "", members); err != nil {
+		return fmt.Sprintf("Failed to create pool: %v", err)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Created pool %s (strategy: %s)\n", htmlCode(name), htmlCode(store.PoolStrategyFailover))
+	for i, m := range members {
+		fmt.Fprintf(&b, "  [%d] %s\n", i, htmlCode(m))
+	}
+	b.WriteString("Bind it with: /policy or sluice binding add " + name + " --destination <host>")
+	return b.String()
+}
+
+func (h *CommandHandler) poolList() string {
+	pools, err := poolops.List(h.store)
+	if err != nil {
+		return fmt.Sprintf("Failed to list pools: %v", err)
+	}
+	if len(pools) == 0 {
+		return "No credential pools configured."
+	}
+	var b strings.Builder
+	b.WriteString("<b>Credential pools</b>\n")
+	for _, p := range pools {
+		names := make([]string, 0, len(p.Members))
+		for _, m := range p.Members {
+			names = append(names, m.Credential)
+		}
+		fmt.Fprintf(&b, "%s (strategy: %s): %s\n",
+			htmlCode(p.Name), htmlCode(p.Strategy), htmlCode(strings.Join(names, ", ")))
+	}
+	return b.String()
+}
+
+func (h *CommandHandler) poolStatus(name string) string {
+	res, err := poolops.Status(h.store, name)
+	if err != nil {
+		var nf *poolops.PoolNotFoundError
+		if errors.As(err, &nf) {
+			return fmt.Sprintf("No pool named %s", htmlCode(name))
+		}
+		return fmt.Sprintf("Failed to get pool status: %v", err)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "<b>Pool %s</b> (strategy: %s)\n", htmlCode(res.Name), htmlCode(res.Strategy))
+	for _, m := range res.Members {
+		marker := "  "
+		if m.Active {
+			marker = "* "
+		}
+		status := "healthy"
+		switch m.State {
+		case "cooldown":
+			status = fmt.Sprintf("cooldown until %s", m.CooldownUntil.Format(time.RFC3339))
+			if m.LastFailureReason != "" {
+				status += " — " + m.LastFailureReason
+			}
+		case "healthy (cooldown expired)":
+			status = "healthy (cooldown expired)"
+			if m.LastFailureReason != "" {
+				status += " — " + m.LastFailureReason
+			}
+		}
+		fmt.Fprintf(&b, "%s[%d] %s  %s\n", marker, m.Position, htmlCode(m.Credential), status)
+	}
+	fmt.Fprintf(&b, "active: %s\n", htmlCode(res.Active))
+	return b.String()
+}
+
+func (h *CommandHandler) poolRotate(name string) string {
+	res, err := poolops.Rotate(h.store, name)
+	if err != nil {
+		var nf *poolops.PoolNotFoundError
+		if errors.As(err, &nf) {
+			return fmt.Sprintf("No pool named %s", htmlCode(name))
+		}
+		var race *poolops.RotateRaceError
+		if errors.As(err, &race) {
+			return fmt.Sprintf("Pool %s rotate raced a concurrent membership change; nothing was persisted. Re-check the pool with /pool status %s and retry.",
+				htmlCode(name), name)
+		}
+		return fmt.Sprintf("Failed to rotate pool: %v", err)
+	}
+	return fmt.Sprintf("Rotated pool %s: %s -> %s (parked %s until %s)",
+		htmlCode(name), htmlCode(res.From), htmlCode(res.To),
+		htmlCode(res.From), res.ParkedUntil.Format(time.RFC3339))
+}
+
+func (h *CommandHandler) poolRemove(name string) string {
+	err := poolops.Remove(h.store, name)
+	if err != nil {
+		var refErr *store.PoolReferencedError
+		if errors.As(err, &refErr) {
+			details := make([]string, len(refErr.Bindings))
+			for i, bnd := range refErr.Bindings {
+				details[i] = fmt.Sprintf("[%d] %s", bnd.ID, bnd.Destination)
+			}
+			return fmt.Sprintf("Pool %s is still referenced by %d binding(s): %s. Remove those bindings first, then retry.",
+				htmlCode(name), len(refErr.Bindings), htmlCode(strings.Join(details, ", ")))
+		}
+		if errors.Is(err, store.ErrCredentialInUseByPool) {
+			return fmt.Sprintf("Failed to remove pool: %v", err)
+		}
+		var nf *poolops.PoolNotFoundError
+		if errors.As(err, &nf) {
+			return fmt.Sprintf("No pool named %s", htmlCode(name))
+		}
+		return fmt.Sprintf("Failed to remove pool: %v", err)
+	}
+	return fmt.Sprintf("Removed pool %s", htmlCode(name))
+}
+
 func (h *CommandHandler) handleStart() string {
 	return "Sluice approval proxy is running.\nType /help for available commands."
 }
@@ -1207,7 +1376,11 @@ Credentials
 
 MCP Upstreams
 /mcp list | /mcp add <name> --command <cmd> [--transport stdio|http|websocket] [--args "a,b"] [--env "K=V,K=V"] [--header "K=V"] [--timeout 120]
-/mcp remove <name>`
+/mcp remove <name>
+
+Credential Pools
+/pool create <name> <a,b[,c]> | /pool list | /pool status <name>
+/pool rotate <name> | /pool remove <name>`
 	}
 
 	help += `
