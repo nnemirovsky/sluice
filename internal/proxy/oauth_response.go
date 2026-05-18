@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	mitmproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 	"github.com/nemirovsky/sluice/internal/vault"
 )
 
@@ -155,6 +156,70 @@ func extractRequestRefreshToken(body []byte, contentType string) string {
 		}
 	}
 	return ""
+}
+
+// maxGrantTypeProbeBody bounds the request body requestGrantType will copy +
+// parse. RFC 6749 §4 token requests (refresh_token / device_code /
+// authorization_code) are tiny — well under 8 KiB even with a long JWT-shaped
+// code. A larger body to the token host is not a token request, so it is
+// passed through unprobed instead of paying an O(body) string()+ParseQuery on
+// the proxy hot path.
+const maxGrantTypeProbeBody = 8 << 10 // 8 KiB
+
+// requestGrantType pulls the `grant_type` value out of an outbound OAuth
+// token-endpoint request body. RFC 6749 §4 mandates
+// application/x-www-form-urlencoded for token requests; some non-conformant
+// clients send JSON, so both are parsed (form first, JSON fallback) using the
+// same shape as extractRequestRefreshToken. Returns "" when the body is empty,
+// larger than maxGrantTypeProbeBody, or has no parseable grant_type (e.g. a
+// malformed body or an opaque device-poll request) — the caller treats
+// absent/unknown the same as a non-refresh grant and passes the request
+// through unmodified. The form parse is restricted to bodies whose
+// Content-Type indicates form-encoding (or is absent/ambiguous, since a
+// well-formed token request omitting Content-Type is still form-encoded);
+// JSON and large/binary bodies (octet-stream, multipart, text/*) are not
+// run through string()+url.ParseQuery, keeping the proxy hot path cheap.
+func requestGrantType(body []byte, contentType string) string {
+	if len(body) == 0 || len(body) > maxGrantTypeProbeBody {
+		return ""
+	}
+	ct := strings.TrimSpace(strings.ToLower(contentType))
+	// Parse as form only when the Content-Type is form-encoded, or absent — a
+	// conformant token request that omitted the header is still form-encoded.
+	// An explicit non-form CT (octet-stream, multipart, text/*, json) is not a
+	// form token request, so the O(body) string()+url.ParseQuery is skipped;
+	// JSON is handled by the dedicated fallback below.
+	if strings.Contains(ct, "application/x-www-form-urlencoded") || ct == "" {
+		if vals, err := url.ParseQuery(string(body)); err == nil {
+			if gt := vals.Get("grant_type"); gt != "" {
+				return gt
+			}
+		}
+	}
+	if strings.Contains(ct, "json") || strings.HasPrefix(strings.TrimSpace(string(body)), "{") {
+		var probe struct {
+			GrantType string `json:"grant_type"`
+		}
+		if err := json.Unmarshal(body, &probe); err == nil && probe.GrantType != "" {
+			return probe.GrantType
+		}
+	}
+	return ""
+}
+
+// requestFlowGrantType extracts the OAuth grant_type from a flow's outbound
+// request (body + Content-Type). Returns "" when the flow / request / body is
+// nil-or-empty or the grant_type is not parseable, which the pool token-host
+// expansion treats the same as a non-refresh grant (pass through unmodified).
+func requestFlowGrantType(f *mitmproxy.Flow) string {
+	if f == nil || f.Request == nil {
+		return ""
+	}
+	ct := ""
+	if f.Request.Header != nil {
+		ct = f.Request.Header.Get("Content-Type")
+	}
+	return requestGrantType(f.Request.Body, ct)
 }
 
 // tokenResponse is the parsed result from an OAuth token endpoint. Fields
