@@ -516,12 +516,7 @@ func main() {
 				// Exhausted: no distinct member to fail over to (every
 				// member cooling) — report it as pool exhaustion, NOT a
 				// self-referential "X -> X" transition.
-				msg := fmt.Sprintf("pool %s failed over %s -> %s (%s)",
-					ev.Pool, ev.From, ev.To, ev.Reason)
-				if ev.Exhausted {
-					msg = fmt.Sprintf("pool %s exhausted: all members cooling down (%s); no healthy account to fail over to",
-						ev.Pool, ev.Reason)
-				}
+				msg := proxy.FormatFailoverNotice(ev)
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 				for _, ch := range failoverBroker.Channels() {

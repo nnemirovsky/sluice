@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/policy"
@@ -2077,5 +2078,257 @@ func TestHandleMCPAddRepeatableHeader(t *testing.T) {
 	}
 	if ups[0].Headers["X-Custom"] != "a,b,c" {
 		t.Errorf("repeatable --header must keep commas intact: %q", ups[0].Headers["X-Custom"])
+	}
+}
+
+// seedPoolOAuthMeta registers oauth credential_meta rows so the store-side
+// pool-member validation (oauth + non-empty token_url) passes, mirroring how
+// the real CLI/REST flows create OAuth credentials before pooling them.
+func seedPoolOAuthMeta(t *testing.T, s *store.Store, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		if err := s.AddCredentialMeta(n, "oauth", "https://auth.example.com/token"); err != nil {
+			t.Fatalf("seed oauth meta %q: %v", n, err)
+		}
+	}
+}
+
+func TestHandlePoolNoStore(t *testing.T) {
+	// Build the engine from a transient store but omit SetStore on the handler.
+	s := newTestStore(t)
+	eng, err := policy.LoadFromStore(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ptr := new(atomic.Pointer[policy.Engine])
+	ptr.Store(eng)
+	h := NewCommandHandler(ptr, new(sync.Mutex), "")
+	// Deliberately do not call SetStore.
+
+	got := h.Handle(&Command{Name: "pool", Args: []string{"list"}})
+	if !strings.Contains(got, "not available") {
+		t.Errorf("pool with no store = %q, want unavailable message", got)
+	}
+}
+
+func TestHandlePoolNoArgs(t *testing.T) {
+	s := newTestStore(t)
+	h := newTestHandlerWithStore(t, s, nil, "")
+	got := h.Handle(&Command{Name: "pool", Args: nil})
+	if !strings.Contains(got, "Usage:") {
+		t.Errorf("pool no args = %q, want usage", got)
+	}
+}
+
+func TestHandlePoolUnknownSubcommand(t *testing.T) {
+	s := newTestStore(t)
+	h := newTestHandlerWithStore(t, s, nil, "")
+	got := h.Handle(&Command{Name: "pool", Args: []string{"frobnicate"}})
+	if !strings.Contains(got, "Unknown pool subcommand") {
+		t.Errorf("pool unknown subcommand = %q", got)
+	}
+}
+
+func TestHandlePoolCreateListStatusRotateRemove(t *testing.T) {
+	s := newTestStore(t)
+	seedPoolOAuthMeta(t, s, "acct_a", "acct_b")
+	h := newTestHandlerWithStore(t, s, nil, "")
+
+	// create
+	got := h.Handle(&Command{Name: "pool", Args: []string{"create", "codex", "acct_a,acct_b"}})
+	if !strings.Contains(got, "Created pool") || !strings.Contains(got, "codex") {
+		t.Fatalf("pool create = %q", got)
+	}
+
+	// list
+	got = h.Handle(&Command{Name: "pool", Args: []string{"list"}})
+	if !strings.Contains(got, "codex") || !strings.Contains(got, "acct_a, acct_b") {
+		t.Fatalf("pool list = %q", got)
+	}
+
+	// status
+	got = h.Handle(&Command{Name: "pool", Args: []string{"status", "codex"}})
+	if !strings.Contains(got, "active:") || !strings.Contains(got, "acct_a") {
+		t.Fatalf("pool status = %q", got)
+	}
+	if !strings.Contains(got, "* ") {
+		t.Errorf("pool status should mark the active member with '* ': %q", got)
+	}
+
+	// rotate
+	got = h.Handle(&Command{Name: "pool", Args: []string{"rotate", "codex"}})
+	if !strings.Contains(got, "Rotated pool") || !strings.Contains(got, "acct_a") || !strings.Contains(got, "acct_b") {
+		t.Fatalf("pool rotate = %q", got)
+	}
+
+	// status after rotate: acct_b active, acct_a cooled down
+	got = h.Handle(&Command{Name: "pool", Args: []string{"status", "codex"}})
+	if !strings.Contains(got, "cooldown until") {
+		t.Errorf("post-rotate status should show acct_a cooldown: %q", got)
+	}
+
+	// remove
+	got = h.Handle(&Command{Name: "pool", Args: []string{"remove", "codex"}})
+	if !strings.Contains(got, "Removed pool") {
+		t.Fatalf("pool remove = %q", got)
+	}
+	// GetPool returns (nil, nil) for a missing pool, so assert the pool row
+	// is actually gone (p == nil) rather than testing the always-true err.
+	if p, err := s.GetPool("codex"); err != nil {
+		t.Fatalf("GetPool after remove errored: %v", err)
+	} else if p != nil {
+		t.Fatalf("pool still present after remove: %+v", p)
+	}
+	// And the operator-visible status command reports it not-found.
+	got = h.Handle(&Command{Name: "pool", Args: []string{"status", "codex"}})
+	if !strings.Contains(got, "No pool named") {
+		t.Fatalf("status after remove = %q, want not-found", got)
+	}
+}
+
+func TestHandlePoolCreateNoMembers(t *testing.T) {
+	s := newTestStore(t)
+	h := newTestHandlerWithStore(t, s, nil, "")
+	got := h.Handle(&Command{Name: "pool", Args: []string{"create", "p"}})
+	if !strings.Contains(got, "Usage:") {
+		t.Errorf("pool create without members = %q, want usage", got)
+	}
+}
+
+func TestHandlePoolCreateStaticMemberRejected(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.AddCredentialMeta("static_one", "static", ""); err != nil {
+		t.Fatalf("add static meta: %v", err)
+	}
+	h := newTestHandlerWithStore(t, s, nil, "")
+	got := h.Handle(&Command{Name: "pool", Args: []string{"create", "p", "static_one"}})
+	if !strings.Contains(got, "Failed to create pool") {
+		t.Errorf("pool create with static member = %q, want failure", got)
+	}
+}
+
+func TestHandlePoolStatusUnknown(t *testing.T) {
+	s := newTestStore(t)
+	h := newTestHandlerWithStore(t, s, nil, "")
+	got := h.Handle(&Command{Name: "pool", Args: []string{"status", "ghost"}})
+	if !strings.Contains(got, "No pool named") {
+		t.Errorf("status unknown pool = %q", got)
+	}
+}
+
+func TestHandlePoolRotateUnknown(t *testing.T) {
+	s := newTestStore(t)
+	h := newTestHandlerWithStore(t, s, nil, "")
+	got := h.Handle(&Command{Name: "pool", Args: []string{"rotate", "ghost"}})
+	if !strings.Contains(got, "No pool named") {
+		t.Errorf("rotate unknown pool = %q", got)
+	}
+}
+
+func TestHandlePoolRemoveUnknown(t *testing.T) {
+	s := newTestStore(t)
+	h := newTestHandlerWithStore(t, s, nil, "")
+	got := h.Handle(&Command{Name: "pool", Args: []string{"remove", "ghost"}})
+	if !strings.Contains(got, "No pool named") {
+		t.Errorf("remove unknown pool = %q", got)
+	}
+}
+
+func TestHandlePoolRemoveReferencedByBinding(t *testing.T) {
+	s := newTestStore(t)
+	seedPoolOAuthMeta(t, s, "acct_a", "acct_b")
+	if err := s.CreatePoolWithMembers("codex", store.PoolStrategyFailover, []string{"acct_a", "acct_b"}); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	// A binding referencing the pool by name keeps it from being removed.
+	if _, err := s.AddBinding("api.example.com", "codex", store.BindingOpts{}); err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+	h := newTestHandlerWithStore(t, s, nil, "")
+	got := h.Handle(&Command{Name: "pool", Args: []string{"remove", "codex"}})
+	if !strings.Contains(got, "still referenced") {
+		t.Errorf("remove referenced pool = %q, want referenced message", got)
+	}
+}
+
+func TestPoolStatusFormatMatchesCLI(t *testing.T) {
+	// The Telegram status rendering must mirror the CLI: active marker,
+	// position index, healthy/cooldown line. This locks the format so it
+	// doesn't drift from cmd/sluice/pool.go.
+	s := newTestStore(t)
+	seedPoolOAuthMeta(t, s, "m0", "m1")
+	if err := s.CreatePoolWithMembers("p", store.PoolStrategyFailover, []string{"m0", "m1"}); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	// Park m0 so it shows a cooldown line with the reason.
+	until := time.Now().Add(time.Hour)
+	if err := s.SetCredentialHealth("m0", "cooldown", until, "rate_limited"); err != nil {
+		t.Fatalf("set health: %v", err)
+	}
+	h := newTestHandlerWithStore(t, s, nil, "")
+	got := h.Handle(&Command{Name: "pool", Args: []string{"status", "p"}})
+	if !strings.Contains(got, "[0] <code>m0</code>") || !strings.Contains(got, "cooldown until") || !strings.Contains(got, "rate_limited") {
+		t.Errorf("status format = %q, want CLI-style cooldown line", got)
+	}
+	if !strings.Contains(got, "* [1] <code>m1</code>") || !strings.Contains(got, "active: <code>m1</code>") {
+		t.Errorf("status should make m1 active (m0 cooled): %q", got)
+	}
+}
+
+func TestPoolStatusEscapesLastFailureReason(t *testing.T) {
+	// LastFailureReason carries upstream error text. The status message is
+	// sent with HTML parse mode (htmlCode emits <code>), so a reason with
+	// < > & must be HTML-escaped or the Bot API rejects/garbles the message.
+	s := newTestStore(t)
+	seedPoolOAuthMeta(t, s, "m0", "m1")
+	if err := s.CreatePoolWithMembers("p", store.PoolStrategyFailover, []string{"m0", "m1"}); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	rawReason := `429 <too many> & "retry"`
+	until := time.Now().Add(time.Hour)
+	if err := s.SetCredentialHealth("m0", "cooldown", until, rawReason); err != nil {
+		t.Fatalf("set health: %v", err)
+	}
+	h := newTestHandlerWithStore(t, s, nil, "")
+	got := h.Handle(&Command{Name: "pool", Args: []string{"status", "p"}})
+	if strings.Contains(got, rawReason) {
+		t.Errorf("status leaked raw unescaped reason: %q", got)
+	}
+	if strings.Contains(got, "<too many>") {
+		t.Errorf("status contains unescaped angle brackets: %q", got)
+	}
+	want := `429 &lt;too many&gt; &amp; "retry"`
+	if !strings.Contains(got, want) {
+		t.Errorf("status = %q, want escaped reason %q", got, want)
+	}
+}
+
+func TestPoolCreateReplyIsHTMLSafe(t *testing.T) {
+	// The create reply embeds a "sluice binding add <name> --destination
+	// <host>" hint. The message is sent with HTML parse mode (htmlCode emits
+	// <code>), and a literal <host> is an invalid HTML tag that makes the Bot
+	// API reject the whole send, so the success message must not contain a
+	// raw angle-bracket placeholder.
+	s := newTestStore(t)
+	seedPoolOAuthMeta(t, s, "m0", "m1")
+	h := newTestHandlerWithStore(t, s, nil, "")
+	got := h.Handle(&Command{Name: "pool", Args: []string{"create", "codex", "m0,m1"}})
+	if !strings.Contains(got, "Created pool") {
+		t.Fatalf("create did not succeed: %q", got)
+	}
+	if strings.Contains(got, "<host>") {
+		t.Errorf("create reply contains raw <host> placeholder (Bot API will reject HTML send): %q", got)
+	}
+	if !strings.Contains(got, "&lt;host&gt;") {
+		t.Errorf("create reply = %q, want escaped &lt;host&gt; placeholder", got)
+	}
+}
+
+func TestHandleHelpListsPool(t *testing.T) {
+	s := newTestStore(t)
+	h := newTestHandlerWithStore(t, s, nil, "")
+	got := h.handleHelp()
+	if !strings.Contains(got, "Credential Pools") || !strings.Contains(got, "/pool create") {
+		t.Errorf("help should list /pool: %q", got)
 	}
 }

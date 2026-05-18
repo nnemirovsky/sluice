@@ -329,6 +329,11 @@ Manage sluice from your phone. Approve connections and tool calls, add credentia
 | `/mcp list` | List registered MCP upstreams |
 | `/mcp add <name> --command <cmd> [flags]` | Register a new MCP upstream (stdio/http/websocket, see `/help`; chat message auto-deleted because `--env` may carry secrets) |
 | `/mcp remove <name>` | Remove an MCP upstream |
+| `/pool create <name> <a,b[,c]>` | Create a credential pool (ordered OAuth members, failover order) |
+| `/pool list` | List credential pools |
+| `/pool status <name>` | Active member and per-member health |
+| `/pool rotate <name>` | Operator override: advance the active member |
+| `/pool remove <name>` | Remove a credential pool |
 | `/status` | Proxy stats and pending approvals |
 | `/audit recent [N]` | Last N audit entries |
 
@@ -337,6 +342,11 @@ Manage sluice from your phone. Approve connections and tool calls, add credentia
 ### HTTP Webhooks
 
 REST API on port 3000 for programmatic approval integration. `GET /api/approvals` lists pending requests, `POST /api/approvals/{id}/resolve` resolves them. Use this to build custom approval UIs or integrate with existing workflows.
+
+All `/api/*` endpoints below are protected by bearer auth. Every request must
+send `Authorization: Bearer $SLUICE_API_TOKEN` (the token sluice prints at
+startup). The curl examples omit the header for brevity, but it is required
+for the credential, pool, and rule calls shown here.
 
 Credential management endpoints support both static and OAuth types:
 
@@ -348,6 +358,26 @@ curl -X POST http://localhost:3000/api/credentials \
 # Add OAuth credential with env var injection
 curl -X POST http://localhost:3000/api/credentials \
   -d '{"name":"openai_oauth","type":"oauth","token_url":"https://auth.example.com/token","access_token":"at-xxx","refresh_token":"rt-xxx","destination":"api.openai.com","env_var":"OPENAI_API_KEY"}'
+```
+
+Credential pools are managed over the same REST surface as the CLI `sluice pool` and Telegram `/pool` commands:
+
+```bash
+# List pools
+curl http://localhost:3000/api/pools
+
+# Create a pool (members are ordered OAuth credential names; strategy defaults to "failover")
+curl -X POST http://localhost:3000/api/pools \
+  -d '{"name":"openai","members":["codex_a","codex_b"]}'
+
+# Pool status (active member + per-member health)
+curl http://localhost:3000/api/pools/openai
+
+# Operator override: advance the active member
+curl -X POST http://localhost:3000/api/pools/openai/rotate
+
+# Remove a pool
+curl -X DELETE http://localhost:3000/api/pools/openai
 ```
 
 ## Data Loss Prevention

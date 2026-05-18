@@ -12,6 +12,47 @@ import (
 // the column constrained to this value.
 const PoolStrategyFailover = "failover"
 
+// ErrPoolNameConflict is returned (wrapped) by CreatePoolWithMembers when the
+// requested pool name cannot be used because it already exists as a pool or
+// collides with an existing credential (pool and credential names share one
+// namespace). It is a typed sentinel so the REST layer maps this
+// client-facing conflict to 409 Conflict and distinguishes it from genuine
+// input-validation errors (no members, static member, unknown member) which
+// stay 400.
+var ErrPoolNameConflict = errors.New("pool name conflicts with an existing pool or credential")
+
+// ErrCredentialAlreadyPooled is returned (wrapped) by CreatePoolWithMembers
+// when one of the requested members is already a member of another pool. A
+// credential may belong to at most one pool (proxy attribution maps a member
+// back to a single pool). Typed so the REST layer maps it to 409 Conflict
+// rather than 400.
+var ErrCredentialAlreadyPooled = errors.New("credential is already a member of another pool")
+
+// The following sentinels classify genuine client-input validation failures
+// from CreatePoolWithMembers so every management channel (REST, CLI,
+// Telegram) can tell a 400-class bad request apart from a 500-class
+// internal/DB error without string matching. They are wrapped (%w) at their
+// origin so the existing human-readable message is preserved verbatim while
+// staying errors.Is-able. A failure NOT matching one of these or the two
+// conflict sentinels above is an internal error (tx/DB/INSERT) and must
+// surface as 500, never be misclassified as a client 400.
+var (
+	// ErrPoolNoMembers: the pool was requested with no members (or an
+	// empty pool name). Distinct from poolops.ErrNoMembers (the
+	// channel-agnostic pre-store guard) but classified the same (400).
+	ErrPoolNoMembers = errors.New("pool requires at least one member")
+	// ErrPoolStrategyInvalid: an unsupported strategy was requested.
+	ErrPoolStrategyInvalid = errors.New("unsupported pool strategy")
+	// ErrPoolMemberDuplicate: the submitted member list has a duplicate
+	// (or an empty member name).
+	ErrPoolMemberDuplicate = errors.New("pool member listed more than once")
+	// ErrPoolMemberNotFound: a requested member credential does not exist.
+	ErrPoolMemberNotFound = errors.New("pool member credential does not exist")
+	// ErrPoolMemberNotOAuth: a requested member is not an oauth credential
+	// with a token endpoint (pools are OAuth-specific).
+	ErrPoolMemberNotOAuth = errors.New("pool member must be an oauth credential")
+)
+
 // Pool is a named group of OAuth credentials backing a single phantom
 // identity. Members are returned ordered by position (failover order).
 type Pool struct {
@@ -108,16 +149,16 @@ func validatePoolMemberTx(tx *sql.Tx, credential string) error {
 		"SELECT cred_type, token_url FROM credential_meta WHERE name = ?", credential,
 	).Scan(&credType, &tokenURL)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("credential %q does not exist (add it with --type oauth first)", credential)
+		return fmt.Errorf("%w: credential %q does not exist (add it with --type oauth first)", ErrPoolMemberNotFound, credential)
 	}
 	if err != nil {
 		return fmt.Errorf("look up credential %q: %w", credential, err)
 	}
 	if credType != "oauth" {
-		return fmt.Errorf("credential %q is %s, pools require oauth credentials", credential, credType)
+		return fmt.Errorf("%w: credential %q is %s, pools require oauth credentials", ErrPoolMemberNotOAuth, credential, credType)
 	}
 	if tokenURL.String == "" {
-		return fmt.Errorf("credential %q has no token_url; pools require oauth credentials with a token endpoint", credential)
+		return fmt.Errorf("%w: credential %q has no token_url; pools require oauth credentials with a token endpoint", ErrPoolMemberNotOAuth, credential)
 	}
 	return nil
 }
@@ -141,7 +182,7 @@ func assertCredentialNotInAnotherPoolTx(tx *sql.Tx, credential, newPool string) 
 	if err != nil {
 		return fmt.Errorf("check existing pool membership for %q: %w", credential, err)
 	}
-	return fmt.Errorf("credential %q is already a member of pool %q; a credential may belong to at most one pool", credential, existing)
+	return fmt.Errorf("%w: credential %q is already a member of pool %q; a credential may belong to at most one pool", ErrCredentialAlreadyPooled, credential, existing)
 }
 
 // CreatePoolWithMembers creates a pool and its ordered members atomically.
@@ -153,24 +194,24 @@ func assertCredentialNotInAnotherPoolTx(tx *sql.Tx, credential, newPool string) 
 // permitted (it degrades to a plain indirection with no failover target).
 func (s *Store) CreatePoolWithMembers(name, strategy string, members []string) error {
 	if name == "" {
-		return fmt.Errorf("pool name is required")
+		return fmt.Errorf("%w: pool name is required", ErrPoolNoMembers)
 	}
 	if strategy == "" {
 		strategy = PoolStrategyFailover
 	}
 	if strategy != PoolStrategyFailover {
-		return fmt.Errorf("invalid pool strategy %q: only %q is supported", strategy, PoolStrategyFailover)
+		return fmt.Errorf("%w %q: only %q is supported", ErrPoolStrategyInvalid, strategy, PoolStrategyFailover)
 	}
 	if len(members) == 0 {
-		return fmt.Errorf("pool %q requires at least one member", name)
+		return fmt.Errorf("%w: pool %q requires at least one member", ErrPoolNoMembers, name)
 	}
 	seen := make(map[string]bool, len(members))
 	for _, m := range members {
 		if m == "" {
-			return fmt.Errorf("pool %q has an empty member name", name)
+			return fmt.Errorf("%w: pool %q has an empty member name", ErrPoolMemberDuplicate, name)
 		}
 		if seen[m] {
-			return fmt.Errorf("pool %q lists credential %q more than once", name, m)
+			return fmt.Errorf("%w: pool %q lists credential %q more than once", ErrPoolMemberDuplicate, name, m)
 		}
 		seen[m] = true
 	}
@@ -186,11 +227,25 @@ func (s *Store) CreatePoolWithMembers(name, strategy string, members []string) e
 	collErr := tx.QueryRow("SELECT name FROM credential_meta WHERE name = ?", name).Scan(&credName)
 	switch {
 	case collErr == nil:
-		return fmt.Errorf("name %q is already a credential; pool and credential names share one namespace", name)
+		return fmt.Errorf("%w: name %q is already a credential; pool and credential names share one namespace", ErrPoolNameConflict, name)
 	case errors.Is(collErr, sql.ErrNoRows):
 		// ok
 	default:
 		return fmt.Errorf("check name collision for %q: %w", name, collErr)
+	}
+
+	// A pool with this name must not already exist. Detect it explicitly so
+	// the conflict is a typed ErrPoolNameConflict rather than a raw UNIQUE
+	// constraint string from the INSERT below.
+	var existingPool string
+	dupErr := tx.QueryRow("SELECT name FROM credential_pools WHERE name = ?", name).Scan(&existingPool)
+	switch {
+	case dupErr == nil:
+		return fmt.Errorf("%w: pool %q already exists", ErrPoolNameConflict, name)
+	case errors.Is(dupErr, sql.ErrNoRows):
+		// ok
+	default:
+		return fmt.Errorf("check existing pool %q: %w", name, dupErr)
 	}
 
 	if _, err := tx.Exec(

@@ -754,7 +754,7 @@ func (a *SluiceAddon) Request(f *mitmproxy.Flow) {
 	proto := a.detectRequestProtocol(f, port)
 	protoStr := proto.String()
 
-	pairs := a.buildPhantomPairs(host, port, protoStr, f.Request.URL)
+	pairs := a.buildPhantomPairs(host, port, protoStr, f.Request.URL, requestFlowGrantType(f, a.oauthIndex.Load()))
 	if len(pairs) == 0 && !a.hasPhantomPrefix(f) {
 		return
 	}
@@ -834,7 +834,26 @@ func (a *SluiceAddon) StreamRequestModifier(f *mitmproxy.Flow, in io.Reader) io.
 	proto := a.detectRequestProtocol(f, port)
 	protoStr := proto.String()
 
-	pairs := a.buildPhantomPairs(host, port, protoStr, f.Request.URL)
+	// DELIBERATE LIMITATION (Finding 11): the pool token-host refresh-phantom
+	// expansion in buildPhantomPairs is gated on grant_type=="refresh_token",
+	// and grant_type can only be parsed from a buffered body. Streamed bodies
+	// are NOT buffered into f.Request.Body, so requestFlowGrantType returns ""
+	// here and the pool token-host expansion is therefore unreachable on the
+	// streamed path. This is SAFE, not a latent bug, because an OAuth token
+	// request (refresh_token / device_code / authorization_code grant) is, by
+	// RFC 6749 §4, a tiny application/x-www-form-urlencoded POST (a few
+	// hundred bytes). go-mitmproxy only switches a request to the streamed
+	// path when its body exceeds the buffering threshold, so a token request
+	// is ALWAYS buffered through Request (where the expansion runs) and never
+	// reaches StreamRequestModifier. An empty grantType here therefore only
+	// suppresses the pool token-host expansion for genuinely large streamed
+	// bodies, which by construction are not token requests. The CONNECT-host
+	// binding loop (plain + pooled API-host bindings) does not depend on
+	// grant_type and is unaffected on the streamed path. If a future change
+	// ever streams token POSTs, this assumption breaks and the expansion would
+	// silently stop — that change must re-buffer token-host POSTs or move the
+	// grant_type probe into the stream reader.
+	pairs := a.buildPhantomPairs(host, port, protoStr, f.Request.URL, requestFlowGrantType(f, a.oauthIndex.Load()))
 	if len(pairs) == 0 {
 		return in
 	}
@@ -1545,7 +1564,17 @@ func (a *SluiceAddon) persistAddonOAuthTokens(credName string, realAccess, realR
 // post-swap by tagPooledFlowAfterSwap, which inspects the built pairs'
 // pooledMember field and tags only the members whose pool phantom was
 // actually present in this request.
-func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, reqURL *url.URL) []phantomPair {
+// grantType is the OAuth grant_type parsed from the outbound request body
+// (requestGrantType; "" when there is no body or it is unparseable / not a
+// token request). It scopes the pool token-host expansion: that expansion
+// rewrites every request to a pool's shared OAuth token host (e.g.
+// auth.openai.com), so a non-refresh grant on the same host — most importantly
+// a fresh in-container `codex login --device-auth` (a device_code grant) —
+// would be corrupted into a 400 token_exchange_user_error. The expansion is
+// therefore gated to grant_type == "refresh_token"; device_code,
+// authorization_code, and absent/unparseable grants pass through with the
+// request body + headers byte-identical to what the agent sent.
+func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, reqURL *url.URL, grantType string) []phantomPair {
 	res := a.resolver.Load()
 	if res == nil {
 		return nil
@@ -1651,7 +1680,18 @@ func (a *SluiceAddon) buildPhantomPairs(host string, port int, proto string, req
 	// and token-endpoint failover work). MatchAll (not Match) is used so a
 	// plain OAuth credential that sorts before the pool members and shares
 	// the token URL cannot mask them.
-	if reqURL != nil {
+	// Grant scope (Task 4): this expansion is for the REFRESH round-trip
+	// only. A pool's token host (e.g. auth.openai.com) also serves the OTHER
+	// OAuth grants — device_code (a fresh in-container `codex login
+	// --device-auth`) and authorization_code. Rewriting those bodies/headers
+	// with the pool refresh phantom corrupts them (Codex returns
+	// 400 token_exchange_user_error and the in-container login fails). Only
+	// expand when the parsed grant_type is exactly "refresh_token";
+	// device_code / authorization_code / absent / unparseable grants fall
+	// through with the request byte-identical to what the agent sent. The
+	// grant_type parse (requestGrantType) mirrors classifyFailover's
+	// token-endpoint form parse.
+	if reqURL != nil && grantType == "refresh_token" {
 		if idx := a.oauthIndex.Load(); idx != nil {
 			pr := (*vault.PoolResolver)(nil)
 			if a.poolResolver != nil {

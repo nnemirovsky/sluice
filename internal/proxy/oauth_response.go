@@ -6,10 +6,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
+	mitmproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 	"github.com/nemirovsky/sluice/internal/vault"
 )
 
@@ -139,11 +142,23 @@ func extractRequestRefreshToken(body []byte, contentType string) string {
 		return ""
 	}
 	ct := strings.ToLower(contentType)
-	if strings.Contains(ct, "application/x-www-form-urlencoded") || !strings.Contains(ct, "json") {
+	isFormCT := strings.Contains(ct, "application/x-www-form-urlencoded")
+	if isFormCT || !strings.Contains(ct, "json") {
 		if vals, err := url.ParseQuery(string(body)); err == nil {
 			if rt := vals.Get("refresh_token"); rt != "" {
 				return rt
 			}
+		}
+		// An explicit form Content-Type is authoritative: the body was
+		// already parsed as form, so do not also stringify+JSON-parse it
+		// when it merely starts with '{' (Finding 3, the double string(body)
+		// alloc). Behavior is identical for normal cases (form body -> form,
+		// form-CT-with-json-body -> no refresh_token -> ""). The JSON
+		// fallback below stays reachable only for absent/ambiguous CT, where
+		// a conformant-but-headerless JSON token request must still be
+		// recoverable.
+		if isFormCT {
+			return ""
 		}
 	}
 	if strings.Contains(ct, "json") || strings.HasPrefix(strings.TrimSpace(string(body)), "{") {
@@ -155,6 +170,136 @@ func extractRequestRefreshToken(body []byte, contentType string) string {
 		}
 	}
 	return ""
+}
+
+// maxGrantTypeProbeBody bounds the request body requestGrantType will copy +
+// parse. RFC 6749 §4 token requests are small, but an RFC 7523
+// client_assertion (a signed JWT, optionally with a long refresh token and a
+// large key-bound assertion) can run to tens of KiB. The original 8 KiB cap
+// was unsafe: a legitimately large refresh-grant payload at a pool's token
+// host would probe as "" -> the pool token-host gate would treat it as a
+// non-refresh grant and silently NOT expand the refresh phantom, the inverted
+// form of the very failure the gate prevents (Finding 9). 64 KiB is well above
+// any realistic OAuth token-request body (a 4 KiB RSA-signed JWT base64s to
+// ~6 KiB; even several stacked assertions plus a JWT refresh token stay under
+// 64 KiB) while still bounding the worst-case string()+ParseQuery so an
+// unbounded body to the token host cannot become an O(body) hot-path cost
+// (the original perf bug). Combined with requestFlowGrantType's POST +
+// token-host pre-gate (Finding 2) the parse only runs for token-host requests
+// at all, so the larger cap is effectively free.
+const maxGrantTypeProbeBody = 64 << 10 // 64 KiB
+
+// grantTypeProbeTruncated counts requests whose body exceeded
+// maxGrantTypeProbeBody and were therefore NOT probed for grant_type. A
+// truncated probe at a pool token host silently degrades into "no refresh
+// expansion", so it must be observable. Rate-limited like the DLP no-match
+// log so a pathological client cannot spam production logs.
+var grantTypeProbeTruncated uint64
+
+// grantTypeProbeTruncLogEvery sets the rate-limit cadence for the
+// cap-truncation warning (one line per N truncations).
+const grantTypeProbeTruncLogEvery = 100
+
+// requestGrantType pulls the `grant_type` value out of an outbound OAuth
+// token-endpoint request body. RFC 6749 §4 mandates
+// application/x-www-form-urlencoded for token requests; some non-conformant
+// clients send JSON, so both are parsed (form first, JSON fallback) using the
+// same shape as extractRequestRefreshToken. Returns "" when the body is empty,
+// larger than maxGrantTypeProbeBody, or has no parseable grant_type (e.g. a
+// malformed body or an opaque device-poll request) — the caller treats
+// absent/unknown the same as a non-refresh grant and passes the request
+// through unmodified. The form parse is restricted to bodies whose
+// Content-Type indicates form-encoding (or is absent/ambiguous, since a
+// well-formed token request omitting Content-Type is still form-encoded);
+// JSON and large/binary bodies (octet-stream, multipart, text/*) are not
+// run through string()+url.ParseQuery, keeping the proxy hot path cheap.
+func requestGrantType(body []byte, contentType string) string {
+	if len(body) == 0 {
+		return ""
+	}
+	if len(body) > maxGrantTypeProbeBody {
+		// Cap hit: the grant_type is not probed, so a real refresh-grant
+		// payload this large would NOT get the pool refresh phantom expanded
+		// (Finding 9). Rate-limited WARNING so the silent degrade is
+		// observable in a log aggregator without spamming under a
+		// pathological client.
+		if n := atomic.AddUint64(&grantTypeProbeTruncated, 1); n%grantTypeProbeTruncLogEvery == 1 {
+			log.Printf("[ADDON-INJECT] WARNING: request body %d bytes exceeds grant_type probe cap %d; "+
+				"grant_type not parsed, pool refresh-phantom expansion skipped for this request "+
+				"(occurrence #%d)", len(body), maxGrantTypeProbeBody, n)
+		}
+		return ""
+	}
+	ct := strings.TrimSpace(strings.ToLower(contentType))
+	// Parse as form only when the Content-Type is form-encoded, or absent — a
+	// conformant token request that omitted the header is still form-encoded.
+	// An explicit non-form CT (octet-stream, multipart, text/*, json) is not a
+	// form token request, so the O(body) string()+url.ParseQuery is skipped;
+	// JSON is handled by the dedicated fallback below.
+	isFormCT := strings.Contains(ct, "application/x-www-form-urlencoded")
+	if isFormCT || ct == "" {
+		if vals, err := url.ParseQuery(string(body)); err == nil {
+			if gt := vals.Get("grant_type"); gt != "" {
+				return gt
+			}
+		}
+		// An explicit form Content-Type is authoritative: skip the
+		// stringify+JSON-parse fallback for a body that merely starts with
+		// '{' (Finding 3, the double string(body) alloc). Behavior is
+		// identical for normal cases (form body -> form,
+		// form-CT-with-json-body -> no grant_type -> ""). The JSON fallback
+		// stays reachable only for absent CT (ct == ""), preserving
+		// recovery of a headerless JSON token request.
+		if isFormCT {
+			return ""
+		}
+	}
+	if strings.Contains(ct, "json") || strings.HasPrefix(strings.TrimSpace(string(body)), "{") {
+		var probe struct {
+			GrantType string `json:"grant_type"`
+		}
+		if err := json.Unmarshal(body, &probe); err == nil && probe.GrantType != "" {
+			return probe.GrantType
+		}
+	}
+	return ""
+}
+
+// requestFlowGrantType extracts the OAuth grant_type from a flow's outbound
+// request (body + Content-Type). Returns "" when the flow / request / body is
+// nil-or-empty or the grant_type is not parseable, which the pool token-host
+// expansion treats the same as a non-refresh grant (pass through unmodified).
+//
+// Cheap pre-gate (Finding 2): requestFlowGrantType runs on EVERY proxied
+// request, but the only consumer (the pool token-host expansion in
+// buildPhantomPairs) acts solely on grant_type=="refresh_token" requests to a
+// pool's OAuth token host. A token request is, per RFC 6749 §3.2, an
+// HTTP POST to the token endpoint. So unless the request is a POST whose
+// scheme+host matches a known OAuth token endpoint (idx.MatchesHost — host
+// only, no path normalization, no body copy), the request cannot be a token
+// round-trip and we return "" without ever calling string(body)+ParseQuery.
+// This skips the O(body) grant_type probe for the vast majority of
+// non-OAuth-token traffic. classifyFailover keeps its own independent
+// response-side parse (gated on the OAuthIndex path match), so the two paths
+// stay consistent without sharing this request-side gate.
+func requestFlowGrantType(f *mitmproxy.Flow, idx *OAuthIndex) string {
+	if f == nil || f.Request == nil {
+		return ""
+	}
+	// Pre-gate: only an HTTP POST to a known OAuth token host can be a token
+	// request. url.ParseQuery / json.Unmarshal of the body are skipped
+	// entirely otherwise.
+	if !strings.EqualFold(f.Request.Method, "POST") {
+		return ""
+	}
+	if !idx.MatchesHost(f.Request.URL) {
+		return ""
+	}
+	ct := ""
+	if f.Request.Header != nil {
+		ct = f.Request.Header.Get("Content-Type")
+	}
+	return requestGrantType(f.Request.Body, ct)
 }
 
 // tokenResponse is the parsed result from an OAuth token endpoint. Fields
