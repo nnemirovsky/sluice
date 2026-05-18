@@ -96,13 +96,30 @@ type PoolHealth struct {
 	// same-named successor) so the stale write must NOT apply. Mutated only
 	// under mu, the same lock the cooldown map uses.
 	currentMembers map[string]memberIdentity
+	// active maps a pool name -> the credential ResolveActive last settled
+	// on (the sticky pointer). It lives here, NOT on PoolResolver, for the
+	// exact same CRITICAL-1 reason cooldowns do: a membership change / SIGHUP
+	// / 2s data_version watcher rebuilds a fresh PoolResolver that the server
+	// atomically pointer-swaps, and ResolveActive on the new generation must
+	// keep serving the member it switched to instead of snapping back to
+	// position 0 (the flap that spams cred_failover + Telegram). Reads and
+	// writes are under the SAME mu as the cooldown map (no second lock, no
+	// lock-ordering hazard). It survives swaps because every generation
+	// shares one *PoolHealth; a stale generation cannot clobber it because
+	// ResolveActive only ever writes a member of THIS generation's member
+	// list, and the MergeLiveCooldowns / SetCurrentMembers prune drops the
+	// pointer for any pool no longer present (mirrors the cooldown prune).
+	active map[string]string
 }
 
 // NewPoolHealth returns an empty shared health map. Call this exactly once
 // per process and thread the result through every NewPoolResolver so all
 // resolver generations share one cooldown view.
 func NewPoolHealth() *PoolHealth {
-	return &PoolHealth{health: make(map[string]memberHealth)}
+	return &PoolHealth{
+		health: make(map[string]memberHealth),
+		active: make(map[string]string),
+	}
 }
 
 // SetCurrentMembers atomically replaces the authoritative member set for the
@@ -287,11 +304,32 @@ func (pr *PoolResolver) Members(pool string) []string {
 
 // ResolveActive expands a name to the credential that should actually be
 // used. For a plain credential (not a pool) the name is returned unchanged.
-// For a pool, the first member that is healthy or whose cooldown has expired
-// (in position order) is returned. If every member is still cooling down,
-// the member with the soonest recovery is returned and a WARNING is logged
-// (degraded: sluice keeps serving with the least-bad account rather than
-// failing the request outright).
+//
+// For a pool the selection is STICKY (there is no "main" / position-0
+// account):
+//
+//   - If a current-active member is recorded for this pool, is still a
+//     member of THIS generation, and is healthy (no active cooldown), it is
+//     returned unchanged — a sticky hold. A lower-position member recovering
+//     from cooldown does NOT cause a switch back to it (this is the flap fix:
+//     re-probing an exhausted-upstream member every 60s and snapping back to
+//     it was wrong and spammed cred_failover + Telegram).
+//   - Otherwise the next eligible member is chosen by position order
+//     STARTING AFTER the current-active member's position and WRAPPING
+//     (advance forward, never snap back to position 0). Members in active
+//     cooldown are skipped. The chosen member becomes the new sticky
+//     current-active for the pool.
+//   - If EVERY member is cooling, sluice keeps serving with the least-bad
+//     account (degraded): an operator-parked-but-healthy member
+//     (ManualRotateReason) is preferred over a genuinely failed one, else
+//     the soonest-recovering member; a WARNING is logged. The sticky pointer
+//     is NOT moved in this case, so when a member recovers the next call
+//     advances forward to it rather than snapping to absolute position 0.
+//
+// The current-active pointer lives on the shared *PoolHealth and is read/
+// written under the same mu as the cooldown map, so it survives resolver
+// pointer swaps (CRITICAL-1) and a stale generation cannot clobber it: a
+// write only ever stores a member of THIS generation's member list.
 func (pr *PoolResolver) ResolveActive(name string) (member string, ok bool) {
 	if pr == nil {
 		return name, true
@@ -306,20 +344,58 @@ func (pr *PoolResolver) ResolveActive(name string) (member string, ok bool) {
 		return "", false
 	}
 
-	// Read the shared health map under its RLock. A concurrent failover's
-	// MarkCooldown takes the same map's write lock, so this observes a
-	// consistent cooldown view regardless of resolver generation.
-	pr.health.mu.RLock()
-	defer pr.health.mu.RUnlock()
+	// Take the shared map's WRITE lock: the sticky pointer is mutated here
+	// when the active member is unhealthy/unset, and it must be consistent
+	// with the cooldown view a concurrent failover's MarkCooldown writes
+	// (same mu, no second lock, no lock-ordering hazard).
+	pr.health.mu.Lock()
+	defer pr.health.mu.Unlock()
 
 	now := time.Now()
+
+	cooling := func(m string) bool {
+		h, tracked := pr.health.health[m]
+		return tracked && !h.cooldownUntil.IsZero() && h.cooldownUntil.After(now)
+	}
+
+	// Position of the current sticky member in THIS generation's member
+	// list. startIdx == -1 (no valid current) makes the scan start at
+	// position 0; otherwise it starts AFTER cur and wraps.
+	startIdx := -1
+	if cur, set := pr.health.active[name]; set {
+		for i, m := range members {
+			if m != cur {
+				continue
+			}
+			// Sticky hold: the recorded active member is still a member of
+			// this generation and is healthy — keep serving it. Do not move.
+			if !cooling(cur) {
+				return cur, true
+			}
+			startIdx = i
+			break
+		}
+	}
+
+	// Advance forward from AFTER the current member (or position 0 when
+	// there is no valid current), wrapping, picking the first non-cooling
+	// member. Never snap back to position 0 on a flap.
+	n := len(members)
+	for off := 1; off <= n; off++ {
+		idx := (startIdx + off) % n
+		m := members[idx]
+		if !cooling(m) {
+			pr.health.active[name] = m
+			return m, true
+		}
+	}
+
+	// Every member is cooling: degrade (do NOT move the sticky pointer, so a
+	// recovery advances forward rather than snapping to position 0).
 	var soonest, soonestParked string
 	var soonestUntil, soonestParkedUntil time.Time
 	for _, m := range members {
-		h, tracked := pr.health.health[m]
-		if !tracked || h.cooldownUntil.IsZero() || !h.cooldownUntil.After(now) {
-			return m, true
-		}
+		h := pr.health.health[m]
 		if soonest == "" || h.cooldownUntil.Before(soonestUntil) {
 			soonest = m
 			soonestUntil = h.cooldownUntil
@@ -515,6 +591,28 @@ func (pr *PoolResolver) MergeLiveCooldowns(prev *PoolResolver) {
 			cm[cred] = id
 		}
 		pr.health.currentMembers = cm
+		// Sticky-pointer prune (mirrors the cooldown prune above): drop the
+		// recorded active member for any pool this generation no longer has,
+		// or whose recorded member is no longer in that pool. A surviving
+		// pool keeps its sticky member so a benign reload does NOT snap it
+		// back to position 0 (the whole point of CRITICAL-1 for the pointer).
+		for poolName, cur := range pr.health.active {
+			poolMembers, stillPool := pr.pools[poolName]
+			if !stillPool {
+				delete(pr.health.active, poolName)
+				continue
+			}
+			stillMember := false
+			for _, m := range poolMembers {
+				if m == cur {
+					stillMember = true
+					break
+				}
+			}
+			if !stillMember {
+				delete(pr.health.active, poolName)
+			}
+		}
 		pr.health.mu.Unlock()
 		return
 	}
