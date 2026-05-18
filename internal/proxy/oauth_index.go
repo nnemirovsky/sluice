@@ -120,6 +120,29 @@ func (idx *OAuthIndex) MatchAll(requestURL *url.URL) []string {
 	return creds
 }
 
+// MatchesHost reports whether the request URL's scheme+host matches any
+// configured token endpoint, ignoring the path. This is a cheap pre-gate
+// (no path normalization, no body copy) used to decide whether a request
+// could plausibly be an OAuth token round-trip before paying the
+// string(body)+ParseQuery grant_type probe on the proxy hot path. A host
+// match without a path match is harmless: the grant_type parse that follows
+// still returns "" for a non-token request to the same host, so this only
+// trades a rare false-positive parse (same host, different path) for
+// skipping the parse entirely on the vast majority of non-token traffic.
+func (idx *OAuthIndex) MatchesHost(requestURL *url.URL) bool {
+	if idx == nil || requestURL == nil {
+		return false
+	}
+	reqHost := normalizeHost(requestURL.Host, requestURL.Scheme)
+	for _, e := range idx.entries {
+		if e.tokenURL.Scheme == requestURL.Scheme &&
+			normalizeHost(e.tokenURL.Host, e.tokenURL.Scheme) == reqHost {
+			return true
+		}
+	}
+	return false
+}
+
 // Len returns the number of entries in the index.
 func (idx *OAuthIndex) Len() int {
 	if idx == nil {

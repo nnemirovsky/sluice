@@ -527,7 +527,7 @@ func TestFinding1Round9_PoolNamespaceNotSuppressedByMemberPlainBinding(t *testin
 	// The pool ACCESS phantom must also be swappable: build the pairs
 	// directly and assert the pool access phantom maps to memA's real
 	// access token exactly once (no double-emit, not suppressed).
-	pairs := addon.buildPhantomPairs("auth.example.com", 443, "https", reqFlow.Request.URL, requestFlowGrantType(reqFlow))
+	pairs := addon.buildPhantomPairs("auth.example.com", 443, "https", reqFlow.Request.URL, requestFlowGrantType(reqFlow, addon.oauthIndex.Load()))
 	defer releasePhantomPairs(pairs)
 	accessPhantom := poolStablePhantomAccess(poolName)
 	refreshPhantom := "SLUICE_PHANTOM:" + poolName + ".refresh"

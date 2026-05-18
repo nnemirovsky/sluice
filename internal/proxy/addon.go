@@ -754,7 +754,7 @@ func (a *SluiceAddon) Request(f *mitmproxy.Flow) {
 	proto := a.detectRequestProtocol(f, port)
 	protoStr := proto.String()
 
-	pairs := a.buildPhantomPairs(host, port, protoStr, f.Request.URL, requestFlowGrantType(f))
+	pairs := a.buildPhantomPairs(host, port, protoStr, f.Request.URL, requestFlowGrantType(f, a.oauthIndex.Load()))
 	if len(pairs) == 0 && !a.hasPhantomPrefix(f) {
 		return
 	}
@@ -834,14 +834,26 @@ func (a *SluiceAddon) StreamRequestModifier(f *mitmproxy.Flow, in io.Reader) io.
 	proto := a.detectRequestProtocol(f, port)
 	protoStr := proto.String()
 
-	// Streamed bodies are not buffered into f.Request.Body, so the
-	// grant_type cannot be parsed here. OAuth token requests (refresh /
-	// device_code / authorization_code) are tiny form posts that are always
-	// buffered through Request, never streamed, so an empty grantType here
-	// only suppresses the pool token-host expansion for genuinely large
-	// streamed bodies (not token requests) — the CONNECT-host binding loop
-	// is unaffected.
-	pairs := a.buildPhantomPairs(host, port, protoStr, f.Request.URL, requestFlowGrantType(f))
+	// DELIBERATE LIMITATION (Finding 11): the pool token-host refresh-phantom
+	// expansion in buildPhantomPairs is gated on grant_type=="refresh_token",
+	// and grant_type can only be parsed from a buffered body. Streamed bodies
+	// are NOT buffered into f.Request.Body, so requestFlowGrantType returns ""
+	// here and the pool token-host expansion is therefore unreachable on the
+	// streamed path. This is SAFE, not a latent bug, because an OAuth token
+	// request (refresh_token / device_code / authorization_code grant) is, by
+	// RFC 6749 §4, a tiny application/x-www-form-urlencoded POST (a few
+	// hundred bytes). go-mitmproxy only switches a request to the streamed
+	// path when its body exceeds the buffering threshold, so a token request
+	// is ALWAYS buffered through Request (where the expansion runs) and never
+	// reaches StreamRequestModifier. An empty grantType here therefore only
+	// suppresses the pool token-host expansion for genuinely large streamed
+	// bodies, which by construction are not token requests. The CONNECT-host
+	// binding loop (plain + pooled API-host bindings) does not depend on
+	// grant_type and is unaffected on the streamed path. If a future change
+	// ever streams token POSTs, this assumption breaks and the expansion would
+	// silently stop — that change must re-buffer token-host POSTs or move the
+	// grant_type probe into the stream reader.
+	pairs := a.buildPhantomPairs(host, port, protoStr, f.Request.URL, requestFlowGrantType(f, a.oauthIndex.Load()))
 	if len(pairs) == 0 {
 		return in
 	}
