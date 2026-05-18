@@ -769,3 +769,115 @@ func TestFinding3Round15_ConcurrentStaleMarkVsPruneUnderRace(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveActiveStickyEpochClobberRegression is the Finding 3 regression.
+// A pool name is removed and re-created with an OVERLAPPING member name but a
+// strictly greater membership epoch (the store stamps every membership
+// generation with a monotonic epoch). Before the fix the sticky pointer
+// stored only the member NAME, so the new generation accepted the old
+// generation's stored name as a valid sticky hold even though it belongs to
+// the OLD epoch/order. Fail-before: gen2 honors the stale name and skips
+// fresh position-0 selection. Pass-after: the epoch mismatch makes gen2
+// treat it as "no current active" and select by fresh position order.
+func TestResolveActiveStickyEpochClobberRegression(t *testing.T) {
+	shared := NewPoolHealth()
+	const e1 = int64(1)
+	const e2 = int64(2)
+
+	// gen1: pool P = [a, b] at epoch e1. Fail a over so the sticky pointer
+	// settles on "b".
+	gen1 := NewPoolResolverShared([]store.Pool{mkPoolEpoch("P", e1, "a", "b")}, nil, shared)
+	if got, _ := gen1.ResolveActive("P"); got != "a" {
+		t.Fatalf("gen1 initial = %q, want a", got)
+	}
+	gen1.MarkCooldownScoped("a", "P", e1, time.Now().Add(300*time.Second), "failover:429")
+	if got, _ := gen1.ResolveActive("P"); got != "b" {
+		t.Fatalf("gen1 after cooling a = %q, want b", got)
+	}
+
+	// P is removed and RE-CREATED with the SAME name but a DIFFERENT member
+	// order [b, a] at a strictly greater epoch e2. "b" still exists by name
+	// but at epoch e2 / position 0; the stored sticky entry (member "b",
+	// epoch e1) must NOT be honored — the new generation must pick by fresh
+	// position order, which is "b" at position 0. To make the test prove the
+	// epoch check (not just coincide), the new order is [c, b]: position 0 is
+	// "c". A name-only sticky pointer would wrongly return "b"; the
+	// epoch-scoped pointer rejects the stale entry and returns fresh
+	// position-0 "c".
+	gen2 := NewPoolResolverShared([]store.Pool{mkPoolEpoch("P", e2, "c", "b")}, nil, shared)
+	gen2.MergeLiveCooldowns(gen1)
+	if got, ok := gen2.ResolveActive("P"); !ok || got != "c" {
+		t.Fatalf("Finding 3: stale-epoch sticky entry honored; got %q,%v want c,true "+
+			"(epoch-bumped re-create must NOT inherit the old generation's sticky member)", got, ok)
+	}
+}
+
+// TestResolveActiveFastPathAndAdvancePath exercises both Finding 2 lock
+// paths for correctness: the RLock sticky-hold fast path (no mutation) and
+// the write-lock advance path. It is a correctness test, not a benchmark.
+func TestResolveActiveFastPathAndAdvancePath(t *testing.T) {
+	shared := NewPoolHealth()
+	pr := NewPoolResolverShared([]store.Pool{mkPool("pool", "a", "b")}, nil, shared)
+
+	// First call: no sticky entry -> advance/init path (write lock), settles a.
+	if got, _ := pr.ResolveActive("pool"); got != "a" {
+		t.Fatalf("init = %q, want a", got)
+	}
+	// Subsequent calls: sticky hold -> RLock fast path, must keep returning a.
+	for i := 0; i < 100; i++ {
+		if got, _ := pr.ResolveActive("pool"); got != "a" {
+			t.Fatalf("fast-path call %d = %q, want a (sticky hold)", i, got)
+		}
+	}
+	// Cool a -> next call takes the advance (write-lock) path and moves to b.
+	pr.MarkCooldown("a", time.Now().Add(120*time.Second), "429")
+	if got, _ := pr.ResolveActive("pool"); got != "b" {
+		t.Fatalf("after cooling a = %q, want b (advance path)", got)
+	}
+	// Now b is the sticky hold: fast path again.
+	for i := 0; i < 100; i++ {
+		if got, _ := pr.ResolveActive("pool"); got != "b" {
+			t.Fatalf("fast-path call %d after advance = %q, want b", i, got)
+		}
+	}
+	// Concurrent resolves under the read-mostly pattern must all agree and be
+	// race-clean (run under -race).
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				if got, _ := pr.ResolveActive("pool"); got != "b" {
+					t.Errorf("concurrent resolve = %q, want b", got)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// TestSetCurrentMembersPrunesStaleActive pins Finding 1: SetCurrentMembers is
+// a live reload path (NewPoolResolverShared calls it before StorePool reaches
+// MergeLiveCooldowns), so it must itself prune a stale sticky entry. This
+// drives SetCurrentMembers directly with a member set that drops the pool's
+// recorded member and asserts the sticky pointer is gone.
+func TestSetCurrentMembersPrunesStaleActive(t *testing.T) {
+	shared := NewPoolHealth()
+	pr := NewPoolResolverShared([]store.Pool{mkPoolEpoch("pool", 1, "a", "b")}, nil, shared)
+	if got, _ := pr.ResolveActive("pool"); got != "a" {
+		t.Fatalf("init = %q, want a", got)
+	}
+	// New generation: pool no longer contains "a" (membership changed). Drive
+	// SetCurrentMembers directly with the new member set (b only, epoch 2).
+	shared.SetCurrentMembers(map[string]memberIdentity{
+		"b": {pool: "pool", epoch: 2},
+	})
+	shared.mu.RLock()
+	_, stillActive := shared.active["pool"]
+	shared.mu.RUnlock()
+	if stillActive {
+		t.Fatal("Finding 1: SetCurrentMembers did not prune the stale sticky pointer for a dropped/epoch-bumped member")
+	}
+}
