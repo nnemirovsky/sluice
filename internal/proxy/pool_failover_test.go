@@ -193,11 +193,23 @@ func TestFailoverCooldownTTLAndLazyRecovery(t *testing.T) {
 		t.Fatalf("auth-fail cooldown TTL = %v, want ~%v", gotTTL, vault.AuthFailCooldown)
 	}
 
-	// Lazy recovery: force the cooldown to the past; ResolveActive must
-	// treat memA as eligible again with no background scheduler involved.
+	// Lazy recovery: force the cooldown to the past. memA becomes ELIGIBLE
+	// again with no background scheduler involved (CooldownUntil reports it
+	// is no longer cooling). Selection is STICKY, so memB - which we failed
+	// over to and which is healthy - remains active: a recovered lower-
+	// position member must NOT snap back (the flap fix). memA's eligibility
+	// only matters as a future advance target if memB later exhausts.
 	pr.MarkCooldown("memA", time.Now().Add(-time.Second), "expired")
+	if _, cooling := pr.CooldownUntil("memA"); cooling {
+		t.Fatal("after expiry memA must no longer be cooling (lazy recovery, no scheduler)")
+	}
+	if active, _ := pr.ResolveActive("codex_pool"); active != "memB" {
+		t.Fatalf("after expiry active = %q, want memB (sticky: recovered memA must NOT snap back)", active)
+	}
+	// Confirm memA IS the advance target once memB exhausts (wrap forward).
+	pr.MarkCooldown("memB", time.Now().Add(vault.RateLimitCooldown), "429")
 	if active, _ := pr.ResolveActive("codex_pool"); active != "memA" {
-		t.Fatalf("after expiry active = %q, want memA (lazy recovery)", active)
+		t.Fatalf("after memB exhausts active = %q, want memA (advance forward to recovered member)", active)
 	}
 }
 
@@ -343,6 +355,95 @@ func TestFailoverAuditEvent(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no cred_failover audit event found in:\n%s", data)
+	}
+}
+
+// TestStickyFailoverNoSpamOnNonActiveCooldownLapse is the notification-spam
+// regression for the live knuth flap. memA (position 0) is upstream-
+// exhausted. Sequence:
+//
+//  1. memA 429 -> exactly ONE cred_failover (memA->memB) + one notice.
+//  2. memA's short cooldown lapses. Under the OLD position-priority
+//     ResolveActive, the next request's injection would re-select memA
+//     (lower position, no longer cooling), hit the still-exhausted upstream,
+//     429 again, and emit ANOTHER identical failover + Telegram notice -
+//     repeating every cooldown window (the 20+ message spam).
+//  3. With sticky selection memB stays active after memA recovers, so the
+//     subsequent request resolves to memB, succeeds (200), and produces NO
+//     additional failover event or notice.
+//
+// Fail-before: step 3 would record a 2nd cred_failover (the flap).
+// Pass-after: exactly one cred_failover total, one notice total.
+func TestStickyFailoverNoSpamOnNonActiveCooldownLapse(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	logger, err := audit.NewFileLogger(logPath)
+	if err != nil {
+		t.Fatalf("NewFileLogger: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+
+	addon, _, prPtr := setupPoolAddon(t, "memA", "memB")
+	addon.auditLog = logger
+	client := setupAddonConn(addon, "auth.example.com:443")
+	pr := prPtr.Load()
+
+	var notices int
+	addon.SetOnFailover(func(FailoverEvent) { notices++ })
+
+	if got, _ := pr.ResolveActive("codex_pool"); got != "memA" {
+		t.Fatalf("pre = %q, want memA", got)
+	}
+
+	// 1. memA exhausts -> one real failover to memB.
+	f1 := newPoolRespFlow(client, 429, []byte(`{"error":"rate_limited"}`))
+	addon.flowInjected.Tag(f1.Id, "memA")
+	addon.Response(f1)
+	if got, _ := pr.ResolveActive("codex_pool"); got != "memB" {
+		t.Fatalf("after 429 active = %q, want memB", got)
+	}
+
+	// 2. memA's short cooldown lapses (still upstream-exhausted in reality).
+	pr.MarkCooldown("memA", time.Now().Add(-time.Second), "expired")
+
+	// The next request's injection resolves the pool. STICKY: it must stay
+	// on memB, NOT snap back to the recovered-but-still-exhausted memA. This
+	// is the single source of truth that kills the flap.
+	if got, _ := pr.ResolveActive("codex_pool"); got != "memB" {
+		t.Fatalf("FLAP: after memA cooldown lapse, injection resolves %q, want memB", got)
+	}
+
+	// 3. The subsequent legitimate request therefore hits memB and succeeds;
+	// a 200 is a documented no-op (no failover, no notice).
+	f2 := newPoolRespFlow(client, 200, []byte(`{"ok":true}`))
+	addon.flowInjected.Tag(f2.Id, "memB")
+	addon.Response(f2)
+
+	if err := logger.Close(); err != nil {
+		t.Fatalf("logger close: %v", err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	failovers := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var evt audit.Event
+		if uerr := json.Unmarshal([]byte(line), &evt); uerr != nil {
+			t.Fatalf("unmarshal %q: %v", line, uerr)
+		}
+		if evt.Action == "cred_failover" || evt.Action == "pool_exhausted" {
+			failovers++
+		}
+	}
+	if failovers != 1 {
+		t.Fatalf("got %d failover audit events, want exactly 1 (sticky must not flap on non-active cooldown lapse)\n%s", failovers, data)
+	}
+	if notices != 1 {
+		t.Fatalf("got %d failover notices, want exactly 1 (no Telegram spam on cooldown lapse)", notices)
 	}
 }
 
