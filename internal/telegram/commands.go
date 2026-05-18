@@ -1339,9 +1339,13 @@ func (h *CommandHandler) poolRemove(name string) string {
 			return fmt.Sprintf("Pool %s is still referenced by %d binding(s): %s. Remove those bindings first, then retry.",
 				htmlCode(name), len(refErr.Bindings), htmlCode(strings.Join(details, ", ")))
 		}
-		if errors.Is(err, store.ErrCredentialInUseByPool) {
-			return fmt.Sprintf("Failed to remove pool: %v", err)
-		}
+		// store.ErrCredentialInUseByPool is deliberately NOT checked here: it is
+		// raised only by the credential-removal path (RemoveCredentialStoreState
+		// in store.go, when deleting a credential that is still a live pool
+		// member) and is handled by its own errors.Is check in the credential
+		// handler. No poolops.Remove store path can return it, so checking it
+		// here would be dead code returning the same string as the fallthrough
+		// below (kept consistent with poolStatusError in internal/api/server.go).
 		var nf *poolops.PoolNotFoundError
 		if errors.As(err, &nf) {
 			return fmt.Sprintf("No pool named %s", htmlCode(name))
