@@ -12,6 +12,22 @@ import (
 // the column constrained to this value.
 const PoolStrategyFailover = "failover"
 
+// ErrPoolNameConflict is returned (wrapped) by CreatePoolWithMembers when the
+// requested pool name cannot be used because it already exists as a pool or
+// collides with an existing credential (pool and credential names share one
+// namespace). It is a typed sentinel so the REST layer maps this
+// client-facing conflict to 409 Conflict and distinguishes it from genuine
+// input-validation errors (no members, static member, unknown member) which
+// stay 400.
+var ErrPoolNameConflict = errors.New("pool name conflicts with an existing pool or credential")
+
+// ErrCredentialAlreadyPooled is returned (wrapped) by CreatePoolWithMembers
+// when one of the requested members is already a member of another pool. A
+// credential may belong to at most one pool (proxy attribution maps a member
+// back to a single pool). Typed so the REST layer maps it to 409 Conflict
+// rather than 400.
+var ErrCredentialAlreadyPooled = errors.New("credential is already a member of another pool")
+
 // Pool is a named group of OAuth credentials backing a single phantom
 // identity. Members are returned ordered by position (failover order).
 type Pool struct {
@@ -141,7 +157,7 @@ func assertCredentialNotInAnotherPoolTx(tx *sql.Tx, credential, newPool string) 
 	if err != nil {
 		return fmt.Errorf("check existing pool membership for %q: %w", credential, err)
 	}
-	return fmt.Errorf("credential %q is already a member of pool %q; a credential may belong to at most one pool", credential, existing)
+	return fmt.Errorf("%w: credential %q is already a member of pool %q; a credential may belong to at most one pool", ErrCredentialAlreadyPooled, credential, existing)
 }
 
 // CreatePoolWithMembers creates a pool and its ordered members atomically.
@@ -186,11 +202,25 @@ func (s *Store) CreatePoolWithMembers(name, strategy string, members []string) e
 	collErr := tx.QueryRow("SELECT name FROM credential_meta WHERE name = ?", name).Scan(&credName)
 	switch {
 	case collErr == nil:
-		return fmt.Errorf("name %q is already a credential; pool and credential names share one namespace", name)
+		return fmt.Errorf("%w: name %q is already a credential; pool and credential names share one namespace", ErrPoolNameConflict, name)
 	case errors.Is(collErr, sql.ErrNoRows):
 		// ok
 	default:
 		return fmt.Errorf("check name collision for %q: %w", name, collErr)
+	}
+
+	// A pool with this name must not already exist. Detect it explicitly so
+	// the conflict is a typed ErrPoolNameConflict rather than a raw UNIQUE
+	// constraint string from the INSERT below.
+	var existingPool string
+	dupErr := tx.QueryRow("SELECT name FROM credential_pools WHERE name = ?", name).Scan(&existingPool)
+	switch {
+	case dupErr == nil:
+		return fmt.Errorf("%w: pool %q already exists", ErrPoolNameConflict, name)
+	case errors.Is(dupErr, sql.ErrNoRows):
+		// ok
+	default:
+		return fmt.Errorf("check existing pool %q: %w", name, dupErr)
 	}
 
 	if _, err := tx.Exec(
