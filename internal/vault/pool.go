@@ -401,10 +401,20 @@ func (pr *PoolResolver) ResolveActive(name string) (member string, ok bool) {
 	// 3). identity is immutable for this resolver, so it is read lock-free.
 	genEpoch := pr.identity[members[0]].epoch
 
+	// Finding 1: one time snapshot for the whole resolve. cooling() runs once
+	// per member in the scan loops; calling time.Now() per invocation made the
+	// cooldown gate observe a drifting clock within a single resolve (and was
+	// needless syscall churn). Capture now ONCE here so the RLock fast path and
+	// the write-lock advance/degrade slow path evaluate every member against
+	// one coherent instant. Semantics are unchanged: a member is cooling iff
+	// cooldownUntil.After(now).
+	now := time.Now()
+
 	cooling := func(m string) bool {
-		// Caller holds ph.mu (R or W).
+		// Caller holds ph.mu (R or W). Compared against the resolve-wide `now`
+		// snapshot (Finding 1), not a fresh time.Now() per call.
 		h, tracked := pr.health.health[m]
-		return tracked && !h.cooldownUntil.IsZero() && h.cooldownUntil.After(time.Now())
+		return tracked && !h.cooldownUntil.IsZero() && h.cooldownUntil.After(now)
 	}
 
 	// Read-mostly fast path (Finding 2): the common case is a sticky hold —
@@ -435,7 +445,14 @@ func (pr *PoolResolver) ResolveActive(name string) (member string, ok bool) {
 	// the cooldown view a concurrent failover's MarkCooldown writes (same mu,
 	// no second lock, no lock-ordering hazard).
 	pr.health.mu.Lock()
-	defer pr.health.mu.Unlock()
+	// Finding 3: the write lock is held ONLY for the sticky-pointer
+	// re-check, the advance mutation, and the degrade-target selection.
+	// Each slow-path exit Unlocks EXPLICITLY before its return/log.Printf
+	// (no `defer`), so the lock never spans logging or the value return and
+	// concurrent ResolveActive / MarkCooldown are not serialized behind log
+	// I/O. Every path below unlocks exactly once before returning; there is
+	// no path that returns while still holding the lock and none unlocks
+	// twice.
 
 	// Position of the current sticky member in THIS generation's member
 	// list. startIdx == -1 (no valid current) makes the scan start at
@@ -454,6 +471,7 @@ func (pr *PoolResolver) ResolveActive(name string) (member string, ok bool) {
 			// advanced here, or it was a benign RLock->Lock race. Keep
 			// serving it; do not move.
 			if !cooling(ent.member) {
+				pr.health.mu.Unlock()
 				return ent.member, true
 			}
 			startIdx = i
@@ -470,6 +488,7 @@ func (pr *PoolResolver) ResolveActive(name string) (member string, ok bool) {
 		m := members[idx]
 		if !cooling(m) {
 			pr.health.active[name] = activeEntry{member: m, epoch: genEpoch}
+			pr.health.mu.Unlock()
 			return m, true
 		}
 	}
@@ -498,13 +517,22 @@ func (pr *PoolResolver) ResolveActive(name string) (member string, ok bool) {
 			}
 		}
 	}
+	// Finding 3: the degrade TARGET (and the values the WARNING needs) are
+	// fully computed above under the write lock; the sticky pointer is
+	// deliberately NOT moved in the degrade case. Release the lock here,
+	// BEFORE the log.Printf and return, so logging never serializes
+	// concurrent ResolveActive / MarkCooldown. memberCount/name/soonest*
+	// are locals captured under the lock; the post-Unlock log/return only
+	// reads them, never the shared map.
+	memberCount := len(members)
+	pr.health.mu.Unlock()
 	if soonestParked != "" {
 		log.Printf("[POOL] all %d members of pool %q are cooling; degrading to operator-parked-but-healthy %q",
-			len(members), name, soonestParked)
+			memberCount, name, soonestParked)
 		return soonestParked, true
 	}
 	log.Printf("[POOL] all %d members of pool %q are in cooldown; degrading to %q (recovers %s)",
-		len(members), name, soonest, soonestUntil.Format(time.RFC3339))
+		memberCount, name, soonest, soonestUntil.Format(time.RFC3339))
 	return soonest, true
 }
 
