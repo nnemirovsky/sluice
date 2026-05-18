@@ -97,6 +97,14 @@ make lint-api
 
 Do not edit `internal/api/api.gen.go` manually. It is regenerated from the spec.
 
+## Channel Feature Parity
+
+Sluice manages its state from several channels: the **CLI**, the **REST API**, the **Telegram bot**, and future channels. **A store-backed management feature must land on all channels in the same PR**, not just the one that motivated it. This applies to anything that reads or writes the SQLite store: policy rules, credentials, bindings, MCP upstreams, credential pools, config/default-verdict, etc.
+
+To keep the channels from drifting, put the operation in a **channel-agnostic** place (a `store` method or a small `*ops` package) and make each channel a thin adapter. Do **not** write the logic inline in `cmd/sluice/*` (or only in a REST handler) — that is exactly how credential pools ended up CLI-only.
+
+A feature may be scoped to a single channel **only** with an explicit, documented rationale that makes it meaningless elsewhere (e.g. local operator tools like `sluice cert generate` / `sluice audit verify`; CLI-stdin-only OAuth token entry, which deliberately keeps secrets out of the REST/Telegram surfaces and shell history). State the rationale in the code comment and the relevant doc. Absent that rationale, **reviewers should treat a single-channel feature as incomplete and request parity before merge**, and the PR description should note which channels the change touches.
+
 ## Architecture
 
 - `internal/store/` -- SQLite-backed policy store for all runtime state
