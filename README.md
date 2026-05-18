@@ -343,6 +343,11 @@ Manage sluice from your phone. Approve connections and tool calls, add credentia
 
 REST API on port 3000 for programmatic approval integration. `GET /api/approvals` lists pending requests, `POST /api/approvals/{id}/resolve` resolves them. Use this to build custom approval UIs or integrate with existing workflows.
 
+All `/api/*` endpoints below are protected by bearer auth. Every request must
+send `Authorization: Bearer $SLUICE_API_TOKEN` (the token sluice prints at
+startup). The curl examples omit the header for brevity, but it is required
+for the credential, pool, and rule calls shown here.
+
 Credential management endpoints support both static and OAuth types:
 
 ```bash
