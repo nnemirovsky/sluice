@@ -98,6 +98,137 @@ func TestMarkCooldownLegacyUnscopedStillGated(t *testing.T) {
 	}
 }
 
+// TestResolveActiveStickyHold: once a member is selected it keeps being
+// returned across many ResolveActive calls while it is healthy, even though a
+// lower-position member is also healthy. (Fail-before: old position-priority
+// always returned position-0 "a".)
+func TestResolveActiveStickyHold(t *testing.T) {
+	pr := NewPoolResolver([]store.Pool{mkPool("pool", "a", "b")}, nil)
+	// First resolution settles on "a" (position 0, both healthy).
+	if got, _ := pr.ResolveActive("pool"); got != "a" {
+		t.Fatalf("initial = %q, want a", got)
+	}
+	// "a" cools -> switch to "b".
+	pr.MarkCooldown("a", time.Now().Add(60*time.Second), "429")
+	if got, _ := pr.ResolveActive("pool"); got != "b" {
+		t.Fatalf("after cooling a = %q, want b", got)
+	}
+	// "a" recovers, but "b" is healthy: sticky hold across many calls.
+	pr.MarkCooldown("a", time.Time{}, "")
+	for i := 0; i < 25; i++ {
+		if got, _ := pr.ResolveActive("pool"); got != "b" {
+			t.Fatalf("call %d: sticky hold broke, got %q want b (lower-position a recovered must NOT snap back)", i, got)
+		}
+	}
+}
+
+// TestResolveActiveFlapRegression is the core flap fix. Sequence mirrors the
+// live knuth bug: A (position 0) is upstream-exhausted. Fail A (cooldown) ->
+// ResolveActive returns B. A's cooldown EXPIRES -> ResolveActive STILL returns
+// B (no snap-back, so A is not re-probed every 60s and no spurious failover).
+// Then B itself cools -> advance to the next member WITH WRAP (back to A,
+// which has recovered). Fail-before (position-priority): step 3 would return
+// A, the flap.
+func TestResolveActiveFlapRegression(t *testing.T) {
+	pr := NewPoolResolver([]store.Pool{mkPool("pool", "A", "B", "C")}, nil)
+	if got, _ := pr.ResolveActive("pool"); got != "A" {
+		t.Fatalf("initial = %q, want A", got)
+	}
+	// 1. A exhausts -> failover to B.
+	pr.MarkCooldown("A", time.Now().Add(60*time.Second), "429")
+	if got, _ := pr.ResolveActive("pool"); got != "B" {
+		t.Fatalf("after cooling A = %q, want B", got)
+	}
+	// 2. A's short cooldown lapses (still upstream-exhausted in reality).
+	pr.MarkCooldown("A", time.Time{}, "")
+	if got, _ := pr.ResolveActive("pool"); got != "B" {
+		t.Fatalf("FLAP: after A cooldown lapse = %q, want B (must NOT snap back to A)", got)
+	}
+	// 3. B itself now exhausts -> advance forward with wrap. C is next.
+	pr.MarkCooldown("B", time.Now().Add(60*time.Second), "429")
+	if got, _ := pr.ResolveActive("pool"); got != "C" {
+		t.Fatalf("after cooling B = %q, want C (advance forward from B)", got)
+	}
+	// 4. C exhausts too -> wrap forward past end -> A (recovered at step 2).
+	pr.MarkCooldown("C", time.Now().Add(60*time.Second), "429")
+	if got, _ := pr.ResolveActive("pool"); got != "A" {
+		t.Fatalf("after cooling C = %q, want A (wrap forward, A is healthy again)", got)
+	}
+}
+
+// TestResolveActiveStickyRotateAdvancesAndStays: `sluice pool rotate` parks
+// the active member with ManualRotateReason; the next ResolveActive must
+// advance to the next member and STAY there (no snap-back) even after the
+// parked member's park lapses.
+func TestResolveActiveStickyRotateAdvancesAndStays(t *testing.T) {
+	pr := NewPoolResolver([]store.Pool{mkPool("pool", "a", "b")}, nil)
+	if got, _ := pr.ResolveActive("pool"); got != "a" {
+		t.Fatalf("initial = %q, want a", got)
+	}
+	// Operator rotate: park the active "a".
+	pr.MarkCooldown("a", time.Now().Add(ManualRotateCooldownForTest()), ManualRotateReason)
+	if got, _ := pr.ResolveActive("pool"); got != "b" {
+		t.Fatalf("after rotate = %q, want b (advance)", got)
+	}
+	// "a"'s park lapses: must NOT snap back, "b" stays active.
+	pr.MarkCooldown("a", time.Time{}, "")
+	for i := 0; i < 10; i++ {
+		if got, _ := pr.ResolveActive("pool"); got != "b" {
+			t.Fatalf("call %d after park lapse = %q, want b (rotate advances AND stays)", i, got)
+		}
+	}
+}
+
+// ManualRotateCooldownForTest is a small helper duration for the rotate test.
+func ManualRotateCooldownForTest() time.Duration { return 300 * time.Second }
+
+// TestResolveActiveStickyPointerSurvivesRebuildAndSwap extends the CRITICAL-1
+// shared-health regression to the sticky pointer: a member switched-to on an
+// OLD generation must remain the active member on a NEW generation built
+// against the SAME shared PoolHealth, and a stale generation must not clobber
+// it back to position 0.
+func TestResolveActiveStickyPointerSurvivesRebuildAndSwap(t *testing.T) {
+	shared := NewPoolHealth()
+	gen1 := NewPoolResolverShared([]store.Pool{mkPool("pool", "a", "b")}, nil, shared)
+	if got, _ := gen1.ResolveActive("pool"); got != "a" {
+		t.Fatalf("gen1 initial = %q, want a", got)
+	}
+	// Failover on gen1 switches the sticky pointer to "b".
+	gen1.MarkCooldown("a", time.Now().Add(120*time.Second), "429")
+	if got, _ := gen1.ResolveActive("pool"); got != "b" {
+		t.Fatalf("gen1 after cooling a = %q, want b", got)
+	}
+	// "a" recovers (durable write may not have landed).
+	gen1.MarkCooldown("a", time.Time{}, "")
+
+	// Reload: fresh generation, SAME shared health, store has no rows.
+	gen2 := NewPoolResolverShared([]store.Pool{mkPool("pool", "a", "b")}, nil, shared)
+	gen2.MergeLiveCooldowns(gen1)
+	// Sticky pointer survived the swap: gen2 keeps serving "b", not "a".
+	if got, _ := gen2.ResolveActive("pool"); got != "b" {
+		t.Fatalf("gen2 active = %q, want b (sticky pointer must survive resolver swap, no snap-back)", got)
+	}
+
+	// A stale OLD generation's ResolveActive must not clobber the pointer to
+	// a member of the wrong/old member list. gen1 still has {a,b}; calling
+	// it again only ever writes a member of THIS gen's list. Even so, the
+	// authoritative current generation (gen2) must keep "b".
+	gen1.ResolveActive("pool")
+	if got, _ := gen2.ResolveActive("pool"); got != "b" {
+		t.Fatalf("after stale gen1 ResolveActive, gen2 = %q, want b (stale generation must not clobber sticky pointer)", got)
+	}
+
+	// A pool dropped entirely prunes its sticky pointer (mirrors cooldown
+	// prune) so a re-add does not inherit a stale active member.
+	gen3 := NewPoolResolverShared([]store.Pool{mkPool("other", "x")}, nil, shared)
+	gen3.MergeLiveCooldowns(gen2)
+	gen4 := NewPoolResolverShared([]store.Pool{mkPool("pool", "a", "b"), mkPool("other", "x")}, nil, shared)
+	gen4.MergeLiveCooldowns(gen3)
+	if got, _ := gen4.ResolveActive("pool"); got != "a" {
+		t.Fatalf("re-added pool active = %q, want a (dropped pool's sticky pointer must be pruned)", got)
+	}
+}
+
 func TestResolveActivePassthroughForNonPool(t *testing.T) {
 	pr := NewPoolResolver(nil, nil)
 	got, ok := pr.ResolveActive("plain_cred")
@@ -219,10 +350,12 @@ func TestMarkCooldownSynchronousFlip(t *testing.T) {
 	if _, cooling := pr.CooldownUntil("a"); !cooling {
 		t.Error("CooldownUntil(a) cooling=false, want true")
 	}
-	// Clearing (zero/past) recovers the member.
+	// Clearing (zero/past) recovers the member, but selection is STICKY:
+	// "a" recovering does NOT snap the active member back to it. "b" was
+	// switched to and is healthy, so it keeps being served (flap fix).
 	pr.MarkCooldown("a", time.Time{}, "")
-	if got, _ := pr.ResolveActive("pool"); got != "a" {
-		t.Errorf("after clear active = %q, want a", got)
+	if got, _ := pr.ResolveActive("pool"); got != "b" {
+		t.Errorf("after clear active = %q, want b (sticky: recovered a must NOT snap back)", got)
 	}
 }
 
