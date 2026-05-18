@@ -2172,13 +2172,17 @@ func TestHandlePoolCreateListStatusRotateRemove(t *testing.T) {
 	if !strings.Contains(got, "Removed pool") {
 		t.Fatalf("pool remove = %q", got)
 	}
-	if _, err := s.GetPool("codex"); err == nil {
-		// GetPool returns (nil, nil) for a missing pool; the status command
-		// is the operator-visible "gone" check.
-		got = h.Handle(&Command{Name: "pool", Args: []string{"status", "codex"}})
-		if !strings.Contains(got, "No pool named") {
-			t.Fatalf("status after remove = %q, want not-found", got)
-		}
+	// GetPool returns (nil, nil) for a missing pool, so assert the pool row
+	// is actually gone (p == nil) rather than testing the always-true err.
+	if p, err := s.GetPool("codex"); err != nil {
+		t.Fatalf("GetPool after remove errored: %v", err)
+	} else if p != nil {
+		t.Fatalf("pool still present after remove: %+v", p)
+	}
+	// And the operator-visible status command reports it not-found.
+	got = h.Handle(&Command{Name: "pool", Args: []string{"status", "codex"}})
+	if !strings.Contains(got, "No pool named") {
+		t.Fatalf("status after remove = %q, want not-found", got)
 	}
 }
 

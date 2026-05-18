@@ -1318,7 +1318,7 @@ func (h *CommandHandler) poolRotate(name string) string {
 		var race *poolops.RotateRaceError
 		if errors.As(err, &race) {
 			return fmt.Sprintf("Pool %s rotate raced a concurrent membership change; nothing was persisted. Re-check the pool with /pool status %s and retry.",
-				htmlCode(name), name)
+				htmlCode(name), htmlCode(name))
 		}
 		return fmt.Sprintf("Failed to rotate pool: %v", err)
 	}
