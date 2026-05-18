@@ -46,6 +46,20 @@ func TestFormatFailoverNotice(t *testing.T) {
 			want: `Pool "openai_pool" exhausted: all members are cooling down, no healthy account to fail over to (rate limit (429)).`,
 		},
 		{
+			// Finding 5: an empty reason tag must NOT render the awkward
+			// "(unknown reason)" parenthetical; the clause is dropped.
+			name: "exhausted empty reason drops parenthetical",
+			ev:   FailoverEvent{Pool: "openai_pool", From: "a", To: "a", Reason: "", Exhausted: true},
+			want: `Pool "openai_pool" exhausted: all members are cooling down, no healthy account to fail over to.`,
+		},
+		{
+			// Finding 5: normal failover with an empty reason tag drops the
+			// "after unknown reason" clause entirely.
+			name: "normal failover empty reason drops clause",
+			ev:   FailoverEvent{Pool: "p", From: "a", To: "b", Reason: ""},
+			want: `Pool "p" failed over from "a" to "b".`,
+		},
+		{
 			name:     "unknown tag degrades gracefully (still shows raw tag)",
 			ev:       FailoverEvent{Pool: "p", From: "a", To: "b", Reason: "teapot"},
 			mustHave: []string{"teapot", `Pool "p"`, `"a"`, `"b"`},

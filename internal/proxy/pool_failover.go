@@ -187,6 +187,19 @@ func humanizeFailoverReason(tag string) string {
 // parse mode, so markdown/HTML would render literally — keep it sentence-style
 // like sluice's other notices.
 func FormatFailoverNotice(ev FailoverEvent) string {
+	// An empty reason tag yields humanizeFailoverReason("") == "unknown
+	// reason", which reads awkwardly inline ("... to fail over to (unknown
+	// reason)." / "... after unknown reason."). When the tag is empty, drop
+	// the reason clause entirely instead (Finding 5). The audit Reason format
+	// is untouched - this only shapes the human-facing notice.
+	if ev.Reason == "" {
+		if ev.Exhausted {
+			return fmt.Sprintf("Pool %q exhausted: all members are cooling down, no healthy account to fail over to.",
+				ev.Pool)
+		}
+		return fmt.Sprintf("Pool %q failed over from %q to %q.",
+			ev.Pool, ev.From, ev.To)
+	}
 	reason := humanizeFailoverReason(ev.Reason)
 	if ev.Exhausted {
 		return fmt.Sprintf("Pool %q exhausted: all members are cooling down, no healthy account to fail over to (%s).",
