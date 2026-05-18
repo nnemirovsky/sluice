@@ -2275,6 +2275,34 @@ func TestPoolStatusFormatMatchesCLI(t *testing.T) {
 	}
 }
 
+func TestPoolStatusEscapesLastFailureReason(t *testing.T) {
+	// LastFailureReason carries upstream error text. The status message is
+	// sent with HTML parse mode (htmlCode emits <code>), so a reason with
+	// < > & must be HTML-escaped or the Bot API rejects/garbles the message.
+	s := newTestStore(t)
+	seedPoolOAuthMeta(t, s, "m0", "m1")
+	if err := s.CreatePoolWithMembers("p", store.PoolStrategyFailover, []string{"m0", "m1"}); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	rawReason := `429 <too many> & "retry"`
+	until := time.Now().Add(time.Hour)
+	if err := s.SetCredentialHealth("m0", "cooldown", until, rawReason); err != nil {
+		t.Fatalf("set health: %v", err)
+	}
+	h := newTestHandlerWithStore(t, s, nil, "")
+	got := h.Handle(&Command{Name: "pool", Args: []string{"status", "p"}})
+	if strings.Contains(got, rawReason) {
+		t.Errorf("status leaked raw unescaped reason: %q", got)
+	}
+	if strings.Contains(got, "<too many>") {
+		t.Errorf("status contains unescaped angle brackets: %q", got)
+	}
+	want := `429 &lt;too many&gt; &amp; "retry"`
+	if !strings.Contains(got, want) {
+		t.Errorf("status = %q, want escaped reason %q", got, want)
+	}
+}
+
 func TestHandleHelpListsPool(t *testing.T) {
 	s := newTestStore(t)
 	h := newTestHandlerWithStore(t, s, nil, "")

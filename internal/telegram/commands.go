@@ -1294,12 +1294,16 @@ func (h *CommandHandler) poolStatus(name string) string {
 		case "cooldown":
 			status = fmt.Sprintf("cooldown until %s", m.CooldownUntil.Format(time.RFC3339))
 			if m.LastFailureReason != "" {
-				status += " — " + m.LastFailureReason
+				// LastFailureReason is upstream error text (may contain
+				// < > &); this message is sent with HTML parse mode, so
+				// escape it like every other user-facing value here
+				// (htmlEscape, not htmlCode — it is prose, not an identifier).
+				status += " — " + htmlEscape(m.LastFailureReason)
 			}
 		case "healthy (cooldown expired)":
 			status = "healthy (cooldown expired)"
 			if m.LastFailureReason != "" {
-				status += " — " + m.LastFailureReason
+				status += " — " + htmlEscape(m.LastFailureReason)
 			}
 		}
 		fmt.Fprintf(&b, "%s[%d] %s  %s\n", marker, m.Position, htmlCode(m.Credential), status)
