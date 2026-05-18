@@ -181,6 +181,8 @@ sluice pool rotate <name>     # operator override: advance active member
 sluice pool remove <name>
 ```
 
+Pools are reachable from all channels — CLI `sluice pool`, REST `/api/pools` (`GET`/`POST`, `GET`/`DELETE /api/pools/{name}`, `POST /api/pools/{name}/rotate`), and Telegram `/pool` — all via the channel-agnostic `internal/poolops`.
+
 Auto-failover on 429/401 is primary; `pool rotate` is an override.
 
 **Data model (migration `000006_credential_pools`):** `credential_pools` (name, strategy reserved `failover`), `credential_pool_members` (ordered, pool->credential FK), `credential_health` (`healthy|cooldown`, `cooldown_until`, `last_failure_reason`), all CHECK-constrained. Store API in `internal/store/pools.go`. `reloadAll` loads pool+health into an atomic-pointer-swapped `PoolResolver` (`internal/vault/pool.go`), rewired via `srv.StorePool`/`SetPoolResolver` on SIGHUP and the 2s data-version watcher.

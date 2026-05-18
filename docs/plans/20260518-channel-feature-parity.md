@@ -7,6 +7,8 @@ Two follow-ups surfaced while operating the credential-pool feature live:
 1. **Pools are CLI-only.** `sluice pool create|list|status|rotate|remove` exists, but there are **no HTTP API endpoints** and **no Telegram `/pool` commands**. Every other store-backed management surface (policy, credentials, bindings, MCP upstreams) is reachable from CLI **and** REST **and** Telegram. Pools must reach parity.
 2. **Token-host phantom expansion is grant-blind.** sluice rewrites *every* request to a pool's shared OAuth token host (e.g. `auth.openai.com`), including non-refresh grants. A fresh in-container `codex login --device-auth` (a `device_code` grant) is therefore corrupted into `400 token_exchange_user_error`. The expansion must act only on `grant_type=refresh_token`.
 
+A third, smaller follow-up: the **pool failover Telegram notice is operator-unfriendly** — it emits the raw `pool <name> failed over <a> -> <b> (<code>)` with a bare HTTP/grant code, unlike sluice's other plain-text Telegram messages. Reword it into a concise, human-readable notice (raw code kept in parentheses for operators) without touching the `cred_failover` audit `Reason` format.
+
 This plan also codifies a general **channel feature-parity principle** (CLI / HTTP API / Telegram / future channels expose the same management features unless there is a documented single-channel rationale) in `CLAUDE.md` and `CONTRIBUTING.md` so future store-backed features do not regress into a single channel again.
 
 ## Context
@@ -52,11 +54,11 @@ This plan also codifies a general **channel feature-parity principle** (CLI / HT
 - Add: `internal/poolops/poolops_test.go`
 - Modify: `cmd/sluice/pool.go` (call the shared package instead of inline logic)
 
-- [ ] Define `Create(store, name, strategy, members)`, `List(store)`, `Status(store, name)`, `Rotate(store, name)`, `Remove(store, name)` with typed results and sentinel errors (reuse `store.ErrCredentialInUseByPool`, `store.PoolReferencedError`)
-- [ ] Move the epoch-guarded rotate write (`SetCredentialHealthIfPoolMemberEpoch` + `vault.ManualRotateReason`) and the `vault.NewPoolResolver(...).ResolveActive` status derivation into `Status`/`Rotate`
-- [ ] Rewrite `cmd/sluice/pool.go` handlers to thin wrappers over `internal/poolops` (no behavior change; existing CLI tests must still pass)
-- [ ] Tests: every op, success + each sentinel error; rotate epoch-race no-op
-- [ ] Run tests
+- [x] Define `Create(store, name, strategy, members)`, `List(store)`, `Status(store, name)`, `Rotate(store, name)`, `Remove(store, name)` with typed results and sentinel errors (reuse `store.ErrCredentialInUseByPool`, `store.PoolReferencedError`)
+- [x] Move the epoch-guarded rotate write (`SetCredentialHealthIfPoolMemberEpoch` + `vault.ManualRotateReason`) and the `vault.NewPoolResolver(...).ResolveActive` status derivation into `Status`/`Rotate`
+- [x] Rewrite `cmd/sluice/pool.go` handlers to thin wrappers over `internal/poolops` (no behavior change; existing CLI tests must still pass)
+- [x] Tests: every op, success + each sentinel error; rotate epoch-race no-op
+- [x] Run tests
 
 ### Task 2: REST endpoints for pools (spec-first)
 
@@ -66,11 +68,11 @@ This plan also codifies a general **channel feature-parity principle** (CLI / HT
 - Modify: `internal/api/server.go`
 - Modify: `internal/api/server_test.go`
 
-- [ ] Add to `api/openapi.yaml`: `/api/pools` (GET, POST), `/api/pools/{name}` (GET, DELETE), `/api/pools/{name}/rotate` (POST), with schemas mirroring the credentials/bindings style
-- [ ] `make generate`; implement the new `ServerInterface` methods in `server.go` calling `internal/poolops`
-- [ ] Map errors: validation → 400, unknown pool → 404, `ErrCredentialInUseByPool` / `PoolReferencedError` → 409, else 500 (mirror the existing cred-removal mapping at `server.go:~1287`)
-- [ ] Tests: list/create/status/rotate/remove happy paths + 400/404/409
-- [ ] `make lint-api`; run `go test ./internal/api/`
+- [x] Add to `api/openapi.yaml`: `/api/pools` (GET, POST), `/api/pools/{name}` (GET, DELETE), `/api/pools/{name}/rotate` (POST), with schemas mirroring the credentials/bindings style
+- [x] `make generate`; implement the new `ServerInterface` methods in `server.go` calling `internal/poolops`
+- [x] Map errors: validation → 400, unknown pool → 404, `ErrCredentialInUseByPool` / `PoolReferencedError` → 409, else 500 (mirror the existing cred-removal mapping at `server.go:~1287`)
+- [x] Tests: list/create/status/rotate/remove happy paths + 400/404/409
+- [x] `make lint-api`; run `go test ./internal/api/`
 
 ### Task 3: Telegram `/pool` commands
 
@@ -79,11 +81,11 @@ This plan also codifies a general **channel feature-parity principle** (CLI / HT
 - Modify: `internal/telegram/commands_test.go`
 - Modify: command help/menu registration (wherever `/policy`,`/cred`,`/mcp` are listed)
 
-- [ ] Add `case "pool":` to the dispatch switch; subcommands `create|list|status|rotate|remove` calling `internal/poolops`
-- [ ] Render `status` like the CLI (`* [i] member  healthy|cooldown … reason`); render errors as plain text
-- [ ] No message auto-delete (pool args carry no secrets — unlike `/mcp add`); add `/pool` to the grouped help/command menu
-- [ ] Tests: each subcommand success + error
-- [ ] Run tests
+- [x] Add `case "pool":` to the dispatch switch; subcommands `create|list|status|rotate|remove` calling `internal/poolops`
+- [x] Render `status` like the CLI (`* [i] member  healthy|cooldown … reason`); render errors as plain text
+- [x] No message auto-delete (pool args carry no secrets — unlike `/mcp add`); add `/pool` to the grouped help/command menu
+- [x] Tests: each subcommand success + error
+- [x] Run tests
 
 ### Task 4: Scope pool token-host phantom expansion to refresh grants
 
@@ -91,18 +93,31 @@ This plan also codifies a general **channel feature-parity principle** (CLI / HT
 - Modify: `internal/proxy/addon.go`
 - Modify: `internal/proxy/addon_test.go` (or `pool_phantom_test.go`)
 
-- [ ] At the pool token-host expansion site, parse the request body form and only expand when `grant_type == "refresh_token"`; pass `device_code`/`authorization_code`/absent-grant requests through unmodified (reuse the form-parse already used by `classifyFailover`)
-- [ ] Tests (fail-before/pass-after): `refresh_token` grant still expanded (regression guard); `device_code` grant body + headers reach upstream byte-unchanged so a fresh in-container `codex login --device-auth` is not corrupted
-- [ ] Run tests; `go vet ./...` and `go vet -tags=e2e ./e2e/`
+- [x] At the pool token-host expansion site, parse the request body form and only expand when `grant_type == "refresh_token"`; pass `device_code`/`authorization_code`/absent-grant requests through unmodified (reuse the form-parse already used by `classifyFailover`)
+- [x] Tests (fail-before/pass-after): `refresh_token` grant still expanded (regression guard); `device_code` grant body + headers reach upstream byte-unchanged so a fresh in-container `codex login --device-auth` is not corrupted
+- [x] Run tests; `go vet ./...` and `go vet -tags=e2e ./e2e/`
+
+### Task 4b: Friendlier pool failover Telegram notification text
+
+**Files:**
+- Modify: `cmd/sluice/main.go` (the `onFailover` goroutine, lines ~519–524 — `msg := fmt.Sprintf("pool %s failed over %s -> %s (%s)", ...)` and the `ev.Exhausted` branch `"pool %s exhausted: all members cooling down (%s); ..."`)
+- Modify: the unit test(s) asserting the failover notice / `FailoverEvent` wording (search `internal/proxy/pool_failover_test.go`, `pool_failover_apihost_test.go`, `pool_splithost_test.go`; if the human-facing string is only built in `cmd/sluice/main.go` with no direct test, add a focused test for the message builder — extract a small pure helper if needed so it is testable, without changing the `onFailover` callback shape)
+
+Context (verified): the notice is sent via `channel.Notify` (plain text, no parse mode — `internal/telegram/approval.go:215` `TelegramChannel.Notify` uses `tgbotapi.NewMessage` with no `ParseMode`, so markdown/HTML renders literally). sluice's other Telegram messages are plain sentence-style, no emoji, no markdown (e.g. `internal/telegram/commands.go`: `"Added allow rule"`, `"Removed rule ID: %d"`, `"No rule found for: %s"`; `internal/telegram/approval.go:198`: `" — applied to %d requests"`). Reason-code mapping for human words: `429`/`403`/quota tags → rate limit / quota exhausted; `401`/`invalid_grant`/`invalid_token` → auth failure.
+
+- [x] Replace the bare `pool <name> failed over <a> -> <b> (<code>)` Telegram notice (and the `ev.Exhausted` variant) with a friendlier, concise message consistent with sluice's other plain-text Telegram notifications (sentence-style, no emoji/markdown, matching the `commands.go`/`approval.go` examples above). Keep it compact (one short line, not verbose). Translate the raw reason/HTTP code into human words (rate limit / quota exhausted for 429/403; auth failure for 401/invalid_grant/invalid_token) while still including the technical code in parentheses for operators. Show the pool name and the from->to members clearly (and, for the exhausted case, that no healthy member remains).
+- [x] Keep it plain-text safe (this notice path is best-effort plain text — `TelegramChannel.Notify` sets no parse mode per CLAUDE.md and the code comment at `cmd/sluice/main.go:514`). Do not introduce Telegram markdown/HTML the notice path does not render.
+- [x] Update/extend the existing unit test(s) that assert the failover notice / `FailoverEvent` wording (fail-before/pass-after on the new wording). Do NOT change the `cred_failover` audit `Reason` format (`<pool>:<from>-><to>:<code>`) nor the `pool_exhausted` `Reason` (`<pool>:exhausted:<code>`) asserted in `internal/proxy/pool_failover_test.go` — only the human-facing Telegram text.
+- [x] Run tests (`go test ./internal/proxy/ ./internal/telegram/ -timeout 60s`, plus `go test ./cmd/sluice/ -timeout 60s` if a builder test lands there) and `gofumpt -w` changed files
 
 ### Task 5: Final validation
 
 **Files:** none (validation only)
 
-- [ ] `gofumpt -l` clean; `golangci-lint run ./...` 0 issues
-- [ ] Full `go test ./...` + `-race` on `internal/proxy`,`internal/api`,`internal/telegram`,`internal/poolops`,`internal/store`
-- [ ] `go build ./...`; `go vet ./...`; `go vet -tags=e2e ./e2e/`
-- [ ] Independently verify the committed HEAD (no conflict markers; `git diff --stat HEAD` empty) before pushing
+- [x] `gofumpt -l` clean; `golangci-lint run ./...` 0 issues
+- [x] Full `go test ./...` + `-race` on `internal/proxy`,`internal/api`,`internal/telegram`,`internal/poolops`,`internal/store`
+- [x] `go build ./...`; `go vet ./...`; `go vet -tags=e2e ./e2e/`
+- [x] Independently verify the committed HEAD (no conflict markers; `git diff --stat HEAD` empty) before pushing
 
 ## Out of Scope
 
