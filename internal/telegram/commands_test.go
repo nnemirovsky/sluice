@@ -2303,6 +2303,27 @@ func TestPoolStatusEscapesLastFailureReason(t *testing.T) {
 	}
 }
 
+func TestPoolCreateReplyIsHTMLSafe(t *testing.T) {
+	// The create reply embeds a "sluice binding add <name> --destination
+	// <host>" hint. The message is sent with HTML parse mode (htmlCode emits
+	// <code>), and a literal <host> is an invalid HTML tag that makes the Bot
+	// API reject the whole send, so the success message must not contain a
+	// raw angle-bracket placeholder.
+	s := newTestStore(t)
+	seedPoolOAuthMeta(t, s, "m0", "m1")
+	h := newTestHandlerWithStore(t, s, nil, "")
+	got := h.Handle(&Command{Name: "pool", Args: []string{"create", "codex", "m0,m1"}})
+	if !strings.Contains(got, "Created pool") {
+		t.Fatalf("create did not succeed: %q", got)
+	}
+	if strings.Contains(got, "<host>") {
+		t.Errorf("create reply contains raw <host> placeholder (Bot API will reject HTML send): %q", got)
+	}
+	if !strings.Contains(got, "&lt;host&gt;") {
+		t.Errorf("create reply = %q, want escaped &lt;host&gt; placeholder", got)
+	}
+}
+
 func TestHandleHelpListsPool(t *testing.T) {
 	s := newTestStore(t)
 	h := newTestHandlerWithStore(t, s, nil, "")

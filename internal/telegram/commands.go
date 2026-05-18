@@ -1248,7 +1248,7 @@ func (h *CommandHandler) poolCreate(args []string) string {
 	for i, m := range members {
 		fmt.Fprintf(&b, "  [%d] %s\n", i, htmlCode(m))
 	}
-	b.WriteString("Bind it with: /policy or sluice binding add " + name + " --destination <host>")
+	b.WriteString("Bind it with /policy or " + htmlCode("sluice binding add "+name+" --destination <host>"))
 	return b.String()
 }
 
