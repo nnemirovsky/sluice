@@ -1783,14 +1783,28 @@ func (s *Server) GetApiPools(w http.ResponseWriter, _ *http.Request) { //nolint:
 // poolCreateError maps a poolops.Create / store error to an HTTP status.
 // Per the OpenAPI contract for POST /api/pools: a name collision (pool name
 // already taken or shadowing a credential) or an already-pooled member is a
-// 409 Conflict; genuine input validation (no members, static member, unknown
-// member, duplicate in the submitted list) is 400. Mirrors the cred-removal
-// errors.Is mapping pattern used elsewhere in this file.
+// 409 Conflict; genuine input validation (no members, invalid strategy,
+// static/non-oauth member, unknown member, duplicate in the submitted list)
+// is 400; ANYTHING ELSE (tx/DB/INSERT failure inside
+// store.CreatePoolWithMembers — wrapped fmt.Errorf strings, not sentinels)
+// is an internal error and must surface as 500, never be downgraded to a
+// misleading 400. Defaults to 500 like poolStatusError so a wrapped internal
+// error fails closed correctly (Finding 1).
 func poolCreateError(err error) int {
-	if errors.Is(err, store.ErrPoolNameConflict) || errors.Is(err, store.ErrCredentialAlreadyPooled) {
+	switch {
+	case errors.Is(err, store.ErrPoolNameConflict),
+		errors.Is(err, store.ErrCredentialAlreadyPooled):
 		return http.StatusConflict
+	case errors.Is(err, poolops.ErrNoMembers),
+		errors.Is(err, store.ErrPoolNoMembers),
+		errors.Is(err, store.ErrPoolStrategyInvalid),
+		errors.Is(err, store.ErrPoolMemberDuplicate),
+		errors.Is(err, store.ErrPoolMemberNotFound),
+		errors.Is(err, store.ErrPoolMemberNotOAuth):
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
 	}
-	return http.StatusBadRequest
 }
 
 // PostApiPools creates a credential pool. Members are ordered (failover

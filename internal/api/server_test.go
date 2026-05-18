@@ -2873,6 +2873,84 @@ func TestPostApiPools_MemberAlreadyPooled(t *testing.T) {
 	}
 }
 
+// TestPostApiPools_UnknownMember asserts a member credential that does not
+// exist is a 400 client error (store.ErrPoolMemberNotFound), not 500.
+func TestPostApiPools_UnknownMember(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"name": "p1", "members": ["nope_does_not_exist"]}`
+	req := httptest.NewRequest("POST", "/api/pools", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown member, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPostApiPools_DuplicateMember asserts a member listed twice in the
+// submitted list is a 400 client error (store.ErrPoolMemberDuplicate).
+func TestPostApiPools_DuplicateMember(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	seedOAuthCred(t, st, "credA")
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"name": "p1", "members": ["credA", "credA"]}`
+	req := httptest.NewRequest("POST", "/api/pools", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for duplicate member in list, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPostApiPools_InternalErrorIs500 asserts a genuine internal failure
+// (the DB is closed, so CreatePoolWithMembers' tx Begin fails with a
+// sentinel-free wrapped "begin tx: %w" error) surfaces as 500, NOT a
+// misleading 400. This is the Finding 1 regression guard at the HTTP layer.
+func TestPostApiPools_InternalErrorIs500(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	seedOAuthCred(t, st, "credA", "credB")
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	// Close the underlying DB so the create transaction fails with a
+	// non-sentinel internal error inside store.CreatePoolWithMembers. The
+	// request body is otherwise fully valid, so a 400 here would mean an
+	// internal failure was wrongly downgraded to a client error.
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	body := `{"name": "ok_pool", "members": ["credA", "credB"]}`
+	req := httptest.NewRequest("POST", "/api/pools", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for internal DB error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGetApiPoolsName_Status(t *testing.T) {
 	st := newTestStore(t)
 	enableHTTPChannel(t, st)

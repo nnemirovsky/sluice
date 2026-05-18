@@ -1,10 +1,50 @@
 package api
 
 import (
+	"errors"
+	"fmt"
+	"net/http"
 	"testing"
 
+	"github.com/nemirovsky/sluice/internal/poolops"
 	"github.com/nemirovsky/sluice/internal/store"
 )
+
+// TestPoolCreateError_StatusMapping is the Finding 1 seam: poolCreateError
+// must map the two conflict sentinels to 409, every genuine client-input
+// validation sentinel to 400, and ANYTHING ELSE (a sentinel-free wrapped
+// internal/DB error) to 500 — never downgrade an internal failure to a
+// misleading 400.
+func TestPoolCreateError_StatusMapping(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		// 409 conflicts (wrapped at origin like CreatePoolWithMembers does).
+		{"name conflict", fmt.Errorf("%w: pool %q already exists", store.ErrPoolNameConflict, "p"), http.StatusConflict},
+		{"already pooled", fmt.Errorf("%w: credential %q is already a member", store.ErrCredentialAlreadyPooled, "c"), http.StatusConflict},
+		// 400 client-input validation sentinels.
+		{"poolops no members", poolops.ErrNoMembers, http.StatusBadRequest},
+		{"store no members", fmt.Errorf("%w: pool %q requires at least one member", store.ErrPoolNoMembers, "p"), http.StatusBadRequest},
+		{"invalid strategy", fmt.Errorf("%w %q: only %q is supported", store.ErrPoolStrategyInvalid, "rr", "failover"), http.StatusBadRequest},
+		{"duplicate member", fmt.Errorf("%w: pool %q lists credential %q more than once", store.ErrPoolMemberDuplicate, "p", "c"), http.StatusBadRequest},
+		{"unknown member", fmt.Errorf("%w: credential %q does not exist", store.ErrPoolMemberNotFound, "c"), http.StatusBadRequest},
+		{"static member", fmt.Errorf("%w: credential %q is static", store.ErrPoolMemberNotOAuth, "c"), http.StatusBadRequest},
+		// 500 default: a genuine internal/DB error carries NO sentinel and
+		// must NOT be misclassified as a 400.
+		{"wrapped internal tx error", fmt.Errorf("begin tx: %w", errors.New("database is closed")), http.StatusInternalServerError},
+		{"wrapped internal collision-check error", fmt.Errorf("check name collision for %q: %w", "p", errors.New("disk I/O error")), http.StatusInternalServerError},
+		{"bare error", errors.New("something unexpected"), http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := poolCreateError(tc.err); got != tc.want {
+				t.Fatalf("poolCreateError(%v) = %d, want %d", tc.err, got, tc.want)
+			}
+		})
+	}
+}
 
 // TestMembersToStorePoolMembers is the Finding 7 seam: PostApiPools builds the
 // 201 body from the request members (not a store read-back) so a read-back
