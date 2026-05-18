@@ -613,7 +613,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
+                $ref: "#/components/schemas/PoolReferencedErrorResponse"
 
   /api/pools/{name}/rotate:
     post:
@@ -745,12 +745,23 @@ components:
           type: string
         code:
           type: string
+
+    PoolReferencedErrorResponse:
+      description: >-
+        409 body for DELETE /api/pools/{name} when the pool is still
+        referenced by one or more bindings. Carries the generic error/code
+        plus the structured list of blocking bindings (id + destination); the
+        CLI and Telegram surfaces render the same list (channel parity). This
+        is a dedicated schema so the generic ErrorResponse envelope is not
+        coupled to one endpoint.
+      type: object
+      required: [error, bindings]
+      properties:
+        error:
+          type: string
+        code:
+          type: string
         bindings:
-          description: >-
-            Bindings that block the operation, populated on the pool-delete
-            409 (a pool cannot be removed while bindings still reference it).
-            CLI and Telegram render the same list; included here for channel
-            parity.
           type: array
           items:
             $ref: "#/components/schemas/PoolReferencingBinding"

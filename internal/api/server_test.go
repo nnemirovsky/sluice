@@ -3053,18 +3053,20 @@ func TestDeleteApiPoolsName_ReferencedByBinding(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected 409 (pool still referenced by a binding), got %d: %s", rec.Code, rec.Body.String())
 	}
-	var er api.ErrorResponse
+	// Finding 8: the 409 body is the dedicated PoolReferencedErrorResponse,
+	// not the generic ErrorResponse (which no longer carries bindings).
+	var er api.PoolReferencedErrorResponse
 	if err := json.NewDecoder(rec.Body).Decode(&er); err != nil {
 		t.Fatalf("decode error response: %v", err)
 	}
-	if er.Bindings == nil || len(*er.Bindings) != 1 {
+	if len(er.Bindings) != 1 {
 		t.Fatalf("expected 1 structured referencing binding, got %+v", er.Bindings)
 	}
-	if (*er.Bindings)[0].Destination != "api.example.com" {
-		t.Errorf("expected binding destination api.example.com, got %q", (*er.Bindings)[0].Destination)
+	if er.Bindings[0].Destination != "api.example.com" {
+		t.Errorf("expected binding destination api.example.com, got %q", er.Bindings[0].Destination)
 	}
-	if (*er.Bindings)[0].Id == 0 {
-		t.Errorf("expected non-zero binding id, got %d", (*er.Bindings)[0].Id)
+	if er.Bindings[0].Id == 0 {
+		t.Errorf("expected non-zero binding id, got %d", er.Bindings[0].Id)
 	}
 }
 

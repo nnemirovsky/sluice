@@ -1740,18 +1740,26 @@ func (s *Server) DeleteApiMcpUpstreamsName(w http.ResponseWriter, r *http.Reques
 // package so the REST surface cannot drift from the CLI / Telegram surfaces
 // (channel feature-parity principle). Error mapping mirrors the credential
 // handlers: validation/bad input -> 400, unknown pool -> 404,
-// ErrCredentialInUseByPool / *PoolReferencedError -> 409, else 500.
+// *PoolReferencedError -> 409, else 500.
 
-// poolStatusError maps a poolops/store error to an HTTP status. Unknown pool
-// is 404; the fail-closed pool-membership / still-referenced conflicts are
-// 409; everything else (store faults, etc.) is 500.
+// poolStatusError maps a poolops/store error to an HTTP status for the pool
+// Status / Rotate / Remove handlers. Unknown pool is 404; a pool still
+// referenced by a binding (Remove) is 409; everything else (store faults,
+// etc.) is 500.
+//
+// store.ErrCredentialInUseByPool is deliberately NOT mapped here: it is
+// raised only by the credential-removal path (RemoveCredentialStoreState in
+// store.go, when deleting a credential that is still a live pool member) and
+// is handled by its own errors.Is check in the credential-delete handler. No
+// poolops.Status/Rotate/Remove store path can return it, so checking it here
+// would be dead, misleading code.
 func poolStatusError(err error) int {
 	var notFound *poolops.PoolNotFoundError
 	if errors.As(err, &notFound) {
 		return http.StatusNotFound
 	}
 	var referenced *store.PoolReferencedError
-	if errors.As(err, &referenced) || errors.Is(err, store.ErrCredentialInUseByPool) {
+	if errors.As(err, &referenced) {
 		return http.StatusConflict
 	}
 	return http.StatusInternalServerError
@@ -1812,14 +1820,42 @@ func (s *Server) PostApiPools(w http.ResponseWriter, r *http.Request) { //nolint
 		return
 	}
 
-	p, err := s.store.GetPool(req.Name)
-	if err != nil || p == nil {
-		writeError(w, http.StatusInternalServerError, "pool created but read-back failed", "")
-		return
+	// The create succeeded. Build the 201 body from the data we already have
+	// (request name + ordered members + the strategy poolops.Create applied)
+	// rather than gating the response on an independent GetPool read-back: a
+	// read-back error would otherwise tell the client the create FAILED when
+	// it actually succeeded, and a client retry would then 409 on the
+	// now-existing pool (Finding 7). poolops.Create defaults an empty
+	// strategy to store.PoolStrategyFailover, so mirror that here. The
+	// read-back is kept only as a best-effort enrichment for CreatedAt (an
+	// optional field); its failure no longer changes the status code.
+	effectiveStrategy := strategy
+	if effectiveStrategy == "" {
+		effectiveStrategy = store.PoolStrategyFailover
+	}
+	out := storePoolToAPI(store.Pool{
+		Name:     req.Name,
+		Strategy: effectiveStrategy,
+		Members:  membersToStorePoolMembers(req.Members),
+	})
+	if p, err := s.store.GetPool(req.Name); err == nil && p != nil {
+		out = storePoolToAPI(*p)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(storePoolToAPI(*p))
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// membersToStorePoolMembers maps an ordered credential-name slice (the create
+// request order == failover order) to store.PoolMember rows with 0-based
+// positions, so PostApiPools can render the 201 body without a store
+// read-back (Finding 7).
+func membersToStorePoolMembers(names []string) []store.PoolMember {
+	out := make([]store.PoolMember, len(names))
+	for i, n := range names {
+		out[i] = store.PoolMember{Credential: n, Position: i}
+	}
+	return out
 }
 
 // GetApiPoolsName returns the pool status (active member + per-member health),
@@ -1873,9 +1909,12 @@ func (s *Server) DeleteApiPoolsName(w http.ResponseWriter, _ *http.Request, name
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
-			_ = json.NewEncoder(w).Encode(ErrorResponse{
+			// Dedicated 409 schema (Finding 8): the blocking-binding list
+			// lives on PoolReferencedErrorResponse, not the generic
+			// ErrorResponse envelope.
+			_ = json.NewEncoder(w).Encode(PoolReferencedErrorResponse{
 				Error:    err.Error(),
-				Bindings: &bindings,
+				Bindings: bindings,
 			})
 			return
 		}
