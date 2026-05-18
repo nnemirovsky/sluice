@@ -86,18 +86,18 @@ one place.
 ## Steps
 
 ### Task 1: Sticky selection in vault.PoolResolver
-- [ ] Add swap-surviving per-pool current-active to shared `PoolHealth` (same mutex)
-- [ ] Rewrite `ResolveActive` to the sticky algorithm above; preserve degrade + parked semantics
-- [ ] Preserve CRITICAL-1 invariants (no loss/clobber across swap; stale generation safe)
-- [ ] Unit tests: sticky hold, flap regression (no snap-back), advance+wrap, degrade unchanged, swap-survival
-- [ ] `go test ./internal/vault/ -race`, gofumpt, vet
+- [x] Add swap-surviving per-pool current-active to shared `PoolHealth` (same mutex)
+- [x] Rewrite `ResolveActive` to the sticky algorithm above; preserve degrade + parked semantics
+- [x] Preserve CRITICAL-1 invariants (no loss/clobber across swap; stale generation safe)
+- [x] Unit tests: sticky hold, flap regression (no snap-back), advance+wrap, degrade unchanged, swap-survival
+- [x] `go test ./internal/vault/ -race`, gofumpt, vet
 
 ### Task 2: Failover path + notification spam regression
-- [ ] Confirm `pool_failover.go` from->to now changes only on real exhaustion (sticky source of truth); adjust only if it bypasses `ResolveActive`
-- [ ] Test: one `cred_failover`+notice per real transition; zero events when a non-active member's cooldown lapses (fail-before/pass-after)
-- [ ] `go test ./internal/proxy/ -race`, gofumpt, vet
+- [x] Confirm `pool_failover.go` from->to now changes only on real exhaustion (sticky source of truth); adjust only if it bypasses `ResolveActive`
+- [x] Test: one `cred_failover`+notice per real transition; zero events when a non-active member's cooldown lapses (fail-before/pass-after)
+- [x] `go test ./internal/proxy/ -race`, gofumpt, vet
 
 ### Task 3: Docs + final validation
-- [ ] Update CLAUDE.md credential-pools section to describe sticky selection (replace the position-priority wording) and note the mode-toggle follow-up
-- [ ] `gofumpt -l` clean; `golangci-lint run ./...` 0 issues; full `go test ./...`; `go vet ./...`; `go vet -tags=e2e ./e2e/`
-- [ ] Independently verify committed HEAD builds and tests pass (do not trust subagent green)
+- [x] Update CLAUDE.md credential-pools section to describe sticky selection (replace the position-priority wording) and note the mode-toggle follow-up
+- [x] `gofumpt -l` clean; `golangci-lint run ./...` 0 issues; full `go test ./...`; `go vet ./...`; `go vet -tags=e2e ./e2e/`
+- [x] Independently verify committed HEAD builds and tests pass (do not trust subagent green)
