@@ -118,6 +118,14 @@ Two credential types: `static` (default) for API keys and `oauth` for OAuth acce
 
 Runtime flags: `--mcp-base-url` sets the external URL the agent uses to reach sluice's MCP gateway (e.g. `http://sluice:3000`). This is added to `SelfBypass` so sluice does not policy-check its own MCP traffic. Defaults to deriving from `--health-addr`. `--agent <profile>` selects an agent profile (`openclaw`, `hermes`); the profile controls the env file path inside the container, the secrets-reload mechanism, and the MCP wiring command. The default is `openclaw`. May also be set via `SLUICE_AGENT_PROFILE`.
 
+## Channel Feature Parity
+
+Sluice exposes management surfaces over multiple channels: the **CLI**, the **HTTP/REST API** (`api/openapi.yaml`), the **Telegram bot**, and any future channel. **Every store-backed management feature must be reachable from all channels.** When you add or change a feature that reads or writes the SQLite store (policy rules, credentials, bindings, MCP upstreams, credential pools, config/default-verdict, …), implement it on **CLI and REST and Telegram**, not just one.
+
+The mechanism for keeping them honest: put the operation logic in a **channel-agnostic package** (e.g. the `store` methods, or a small `*ops` package like `internal/poolops`) and have each channel be a thin adapter over it. Logic written inline in one channel (the historical cause of the pools-are-CLI-only gap — rotate/status lived in `cmd/sluice/pool.go`) is the anti-pattern; lift it so the channels cannot drift.
+
+The **only** acceptable single-channel features are those with a documented rationale that makes them meaningless elsewhere — e.g. `sluice cert generate` / `sluice audit verify` are local-filesystem/operator tools with no remote-management semantics; OAuth token entry is stdin-only on the CLI specifically to keep secrets out of shell history and out of the REST/Telegram surfaces. State the rationale in the code and docs when you deliberately scope a feature to one channel; absent that rationale, parity is required and a reviewer should block the PR.
+
 ## Agent Profiles
 
 Profiles abstract per-agent runtime conventions so sluice's container managers stay agent-agnostic. Each profile carries `EnvFileRelPath` (where to write phantom-token env vars), `ReloadCmd` (argv to exec for in-place secret reload, or nil), and `WireMCPCmd` (argv to register sluice as an MCP server in the agent's config).
