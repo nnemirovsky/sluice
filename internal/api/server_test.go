@@ -2680,6 +2680,394 @@ func TestDeleteApiMcpUpstreams_NotFound(t *testing.T) {
 	}
 }
 
+// --- Pool handler tests ---
+
+// seedOAuthCred registers oauth credential_meta rows so the store-side pool
+// member validation (oauth + non-empty token_url) passes. Mirrors how the
+// real REST flow creates an OAuth credential before pooling it.
+func seedOAuthCred(t *testing.T, st *store.Store, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		if err := st.AddCredentialMeta(n, "oauth", "https://auth.example.com/token"); err != nil {
+			t.Fatalf("seed oauth credential meta %q: %v", n, err)
+		}
+	}
+}
+
+func TestGetApiPools_Empty(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("GET", "/api/pools", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var pools []api.Pool
+	if err := json.NewDecoder(rec.Body).Decode(&pools); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(pools) != 0 {
+		t.Errorf("expected 0 pools, got %d", len(pools))
+	}
+}
+
+func TestPostApiPools_Success(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	seedOAuthCred(t, st, "credA", "credB")
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"name": "openai_pool", "members": ["credA", "credB"]}`
+	req := httptest.NewRequest("POST", "/api/pools", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var p api.Pool
+	if err := json.NewDecoder(rec.Body).Decode(&p); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if p.Name != "openai_pool" {
+		t.Errorf("expected name openai_pool, got %q", p.Name)
+	}
+	if p.Strategy != store.PoolStrategyFailover {
+		t.Errorf("expected strategy %q, got %q", store.PoolStrategyFailover, p.Strategy)
+	}
+	if len(p.Members) != 2 || p.Members[0].Credential != "credA" || p.Members[1].Credential != "credB" {
+		t.Errorf("unexpected members: %+v", p.Members)
+	}
+}
+
+func TestPostApiPools_MissingMembers(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"name": "p1", "members": []}`
+	req := httptest.NewRequest("POST", "/api/pools", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPostApiPools_StaticMemberRejected(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	seedCred(t, st, "static_one") // static cred_type
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"name": "p1", "members": ["static_one"]}`
+	req := httptest.NewRequest("POST", "/api/pools", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for static member, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPostApiPools_DuplicateName asserts that creating a pool whose name is
+// already taken returns 409 Conflict per the OpenAPI contract (POST
+// /api/pools: "Pool name collides or a member is already pooled"), not 400.
+func TestPostApiPools_DuplicateName(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	seedOAuthCred(t, st, "credA", "credB")
+	if err := st.CreatePoolWithMembers("dup_pool", store.PoolStrategyFailover, []string{"credA"}); err != nil {
+		t.Fatalf("seed pool: %v", err)
+	}
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"name": "dup_pool", "members": ["credB"]}`
+	req := httptest.NewRequest("POST", "/api/pools", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for duplicate pool name, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPostApiPools_NameCollidesWithCredential asserts the pool/credential
+// shared-namespace collision is a 409 Conflict, not 400.
+func TestPostApiPools_NameCollidesWithCredential(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	seedOAuthCred(t, st, "credA", "credB")
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	// "credA" already exists as a credential; a pool may not shadow it.
+	body := `{"name": "credA", "members": ["credB"]}`
+	req := httptest.NewRequest("POST", "/api/pools", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for name colliding with a credential, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPostApiPools_MemberAlreadyPooled asserts that re-pooling a credential
+// that already belongs to another pool returns 409 Conflict per the spec.
+func TestPostApiPools_MemberAlreadyPooled(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	seedOAuthCred(t, st, "credA", "credB")
+	if err := st.CreatePoolWithMembers("pool_one", store.PoolStrategyFailover, []string{"credA"}); err != nil {
+		t.Fatalf("seed pool: %v", err)
+	}
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	// credA is already a member of pool_one; a credential may belong to at
+	// most one pool.
+	body := `{"name": "pool_two", "members": ["credA", "credB"]}`
+	req := httptest.NewRequest("POST", "/api/pools", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for already-pooled member, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetApiPoolsName_Status(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	seedOAuthCred(t, st, "credA", "credB")
+	if err := st.CreatePoolWithMembers("pool1", store.PoolStrategyFailover, []string{"credA", "credB"}); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("GET", "/api/pools/pool1", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var ps api.PoolStatus
+	if err := json.NewDecoder(rec.Body).Decode(&ps); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if ps.Name != "pool1" {
+		t.Errorf("expected name pool1, got %q", ps.Name)
+	}
+	if ps.Active != "credA" {
+		t.Errorf("expected active credA (first member, all healthy), got %q", ps.Active)
+	}
+	if len(ps.Members) != 2 {
+		t.Fatalf("expected 2 member statuses, got %d", len(ps.Members))
+	}
+	if !ps.Members[0].Active || ps.Members[0].State != "healthy" {
+		t.Errorf("member[0] unexpected: %+v", ps.Members[0])
+	}
+}
+
+func TestGetApiPoolsName_NotFound(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("GET", "/api/pools/nope", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPostApiPoolsNameRotate_Success(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	seedOAuthCred(t, st, "credA", "credB")
+	if err := st.CreatePoolWithMembers("pool1", store.PoolStrategyFailover, []string{"credA", "credB"}); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("POST", "/api/pools/pool1/rotate", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var rr api.PoolRotateResult
+	if err := json.NewDecoder(rec.Body).Decode(&rr); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if rr.Pool != "pool1" {
+		t.Errorf("expected pool pool1, got %q", rr.Pool)
+	}
+	if rr.From != "credA" {
+		t.Errorf("expected from credA, got %q", rr.From)
+	}
+	if rr.To != "credB" {
+		t.Errorf("expected to credB after rotate, got %q", rr.To)
+	}
+}
+
+func TestPostApiPoolsNameRotate_NotFound(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("POST", "/api/pools/nope/rotate", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteApiPoolsName_Success(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	seedOAuthCred(t, st, "credA", "credB")
+	if err := st.CreatePoolWithMembers("pool1", store.PoolStrategyFailover, []string{"credA", "credB"}); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("DELETE", "/api/pools/pool1", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	pools, err := st.ListPools()
+	if err != nil {
+		t.Fatalf("list pools: %v", err)
+	}
+	if len(pools) != 0 {
+		t.Errorf("expected 0 pools after delete, got %d", len(pools))
+	}
+}
+
+func TestDeleteApiPoolsName_NotFound(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("DELETE", "/api/pools/nope", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteApiPoolsName_ReferencedByBinding(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	seedOAuthCred(t, st, "credA", "credB")
+	if err := st.CreatePoolWithMembers("pool1", store.PoolStrategyFailover, []string{"credA", "credB"}); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	// A binding referencing the pool by name keeps it from being removed.
+	if _, err := st.AddBinding("api.example.com", "pool1", store.BindingOpts{}); err != nil {
+		t.Fatalf("add binding: %v", err)
+	}
+	srv := api.NewServer(st, nil, nil, "")
+
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	req := httptest.NewRequest("DELETE", "/api/pools/pool1", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 (pool still referenced by a binding), got %d: %s", rec.Code, rec.Body.String())
+	}
+	var er api.ErrorResponse
+	if err := json.NewDecoder(rec.Body).Decode(&er); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if er.Bindings == nil || len(*er.Bindings) != 1 {
+		t.Fatalf("expected 1 structured referencing binding, got %+v", er.Bindings)
+	}
+	if (*er.Bindings)[0].Destination != "api.example.com" {
+		t.Errorf("expected binding destination api.example.com, got %q", (*er.Bindings)[0].Destination)
+	}
+	if (*er.Bindings)[0].Id == 0 {
+		t.Errorf("expected non-zero binding id, got %d", (*er.Bindings)[0].Id)
+	}
+}
+
 // --- Audit handler tests ---
 
 func TestGetApiAuditRecent_NoPath(t *testing.T) {

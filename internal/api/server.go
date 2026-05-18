@@ -23,6 +23,7 @@ import (
 	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/container"
 	"github.com/nemirovsky/sluice/internal/policy"
+	"github.com/nemirovsky/sluice/internal/poolops"
 	"github.com/nemirovsky/sluice/internal/proxy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
@@ -1733,6 +1734,157 @@ func (s *Server) DeleteApiMcpUpstreamsName(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// --- Pool handlers ---
+//
+// All pool operations route through the channel-agnostic internal/poolops
+// package so the REST surface cannot drift from the CLI / Telegram surfaces
+// (channel feature-parity principle). Error mapping mirrors the credential
+// handlers: validation/bad input -> 400, unknown pool -> 404,
+// ErrCredentialInUseByPool / *PoolReferencedError -> 409, else 500.
+
+// poolStatusError maps a poolops/store error to an HTTP status. Unknown pool
+// is 404; the fail-closed pool-membership / still-referenced conflicts are
+// 409; everything else (store faults, etc.) is 500.
+func poolStatusError(err error) int {
+	var notFound *poolops.PoolNotFoundError
+	if errors.As(err, &notFound) {
+		return http.StatusNotFound
+	}
+	var referenced *store.PoolReferencedError
+	if errors.As(err, &referenced) || errors.Is(err, store.ErrCredentialInUseByPool) {
+		return http.StatusConflict
+	}
+	return http.StatusInternalServerError
+}
+
+// GetApiPools lists all credential pools.
+func (s *Server) GetApiPools(w http.ResponseWriter, _ *http.Request) { //nolint:revive // generated interface name
+	pools, err := poolops.List(s.store)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list pools: "+err.Error(), "")
+		return
+	}
+	out := make([]Pool, len(pools))
+	for i, p := range pools {
+		out[i] = storePoolToAPI(p)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// poolCreateError maps a poolops.Create / store error to an HTTP status.
+// Per the OpenAPI contract for POST /api/pools: a name collision (pool name
+// already taken or shadowing a credential) or an already-pooled member is a
+// 409 Conflict; genuine input validation (no members, static member, unknown
+// member, duplicate in the submitted list) is 400. Mirrors the cred-removal
+// errors.Is mapping pattern used elsewhere in this file.
+func poolCreateError(err error) int {
+	if errors.Is(err, store.ErrPoolNameConflict) || errors.Is(err, store.ErrCredentialAlreadyPooled) {
+		return http.StatusConflict
+	}
+	return http.StatusBadRequest
+}
+
+// PostApiPools creates a credential pool. Members are ordered (failover
+// order). A namespace/pool-name collision or an already-pooled member is a
+// 409 Conflict (the OpenAPI contract); genuine input validation (no members,
+// static member, unknown member) is 400. The store does the static/oauth +
+// duplicate gating in one transaction.
+func (s *Server) PostApiPools(w http.ResponseWriter, r *http.Request) { //nolint:revive // generated interface name
+	var req CreatePoolRequest
+	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", "")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required", "")
+		return
+	}
+	// Empty-members validation is owned by poolops.Create (returns
+	// ErrNoMembers, mapped to 400 by poolCreateError) so the rule has a
+	// single channel-agnostic source of truth.
+	strategy := ""
+	if req.Strategy != nil {
+		strategy = *req.Strategy
+	}
+	if err := poolops.Create(s.store, req.Name, strategy, req.Members); err != nil {
+		writeError(w, poolCreateError(err), err.Error(), "")
+		return
+	}
+
+	p, err := s.store.GetPool(req.Name)
+	if err != nil || p == nil {
+		writeError(w, http.StatusInternalServerError, "pool created but read-back failed", "")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(storePoolToAPI(*p))
+}
+
+// GetApiPoolsName returns the pool status (active member + per-member health),
+// derived with the exact selection logic the proxy uses at injection time.
+func (s *Server) GetApiPoolsName(w http.ResponseWriter, _ *http.Request, name string) { //nolint:revive // generated interface name
+	res, err := poolops.Status(s.store, name)
+	if err != nil {
+		writeError(w, poolStatusError(err), err.Error(), "")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(poolStatusToAPI(res))
+}
+
+// PostApiPoolsNameRotate is the operator override: park the active member so
+// the next member in position order becomes active. A concurrent membership
+// change that invalidates the snapshot is a 409 (RotateRaceError); the
+// operator should re-check the pool and retry.
+func (s *Server) PostApiPoolsNameRotate(w http.ResponseWriter, _ *http.Request, name string) { //nolint:revive // generated interface name
+	res, err := poolops.Rotate(s.store, name)
+	if err != nil {
+		status := poolStatusError(err)
+		var race *poolops.RotateRaceError
+		if errors.As(err, &race) {
+			status = http.StatusConflict
+		}
+		writeError(w, status, err.Error(), "")
+		return
+	}
+	out := PoolRotateResult{Pool: res.Pool, From: res.From, To: res.To}
+	if !res.ParkedUntil.IsZero() {
+		t := res.ParkedUntil
+		out.ParkedUntil = &t
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// DeleteApiPoolsName removes a pool. It refuses (409) while any binding still
+// references it by name; an unknown pool is 404. On the 409 the structured
+// list of referencing bindings (id + destination) is included in the response
+// body, matching what the CLI and Telegram surfaces render from
+// store.PoolReferencedError.Bindings (channel parity).
+func (s *Server) DeleteApiPoolsName(w http.ResponseWriter, _ *http.Request, name string) { //nolint:revive // generated interface name
+	if err := poolops.Remove(s.store, name); err != nil {
+		var referenced *store.PoolReferencedError
+		if errors.As(err, &referenced) {
+			bindings := make([]PoolReferencingBinding, len(referenced.Bindings))
+			for i, b := range referenced.Bindings {
+				bindings[i] = PoolReferencingBinding{Id: b.ID, Destination: b.Destination}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(ErrorResponse{
+				Error:    err.Error(),
+				Bindings: &bindings,
+			})
+			return
+		}
+		writeError(w, poolStatusError(err), err.Error(), "")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // --- Audit handlers ---
 
 // GetApiAuditRecent returns the last N audit log entries.
@@ -2014,6 +2166,52 @@ func storeMCPUpstreamToAPI(u store.MCPUpstreamRow) MCPUpstream {
 		}
 	}
 	return upstream
+}
+
+// storePoolToAPI converts a store.Pool to the API Pool type.
+func storePoolToAPI(p store.Pool) Pool {
+	pool := Pool{
+		Name:     p.Name,
+		Strategy: p.Strategy,
+		Members:  make([]PoolMember, len(p.Members)),
+	}
+	for i, m := range p.Members {
+		pool.Members[i] = PoolMember{Credential: m.Credential, Position: m.Position}
+	}
+	if p.CreatedAt != "" {
+		if t, err := time.Parse("2006-01-02 15:04:05", p.CreatedAt); err == nil {
+			pool.CreatedAt = &t
+		}
+	}
+	return pool
+}
+
+// poolStatusToAPI converts a *poolops.StatusResult to the API PoolStatus type.
+func poolStatusToAPI(res *poolops.StatusResult) PoolStatus {
+	out := PoolStatus{
+		Name:     res.Name,
+		Strategy: res.Strategy,
+		Active:   res.Active,
+		Members:  make([]PoolMemberStatus, len(res.Members)),
+	}
+	for i, m := range res.Members {
+		ms := PoolMemberStatus{
+			Credential: m.Credential,
+			Position:   m.Position,
+			Active:     m.Active,
+			State:      m.State,
+		}
+		if !m.CooldownUntil.IsZero() {
+			t := m.CooldownUntil
+			ms.CooldownUntil = &t
+		}
+		if m.LastFailureReason != "" {
+			r := m.LastFailureReason
+			ms.LastFailureReason = &r
+		}
+		out.Members[i] = ms
+	}
+	return out
 }
 
 // storeChannelToAPI converts a store.Channel to the API Channel type.
