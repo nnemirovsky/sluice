@@ -92,6 +92,44 @@ type Server struct {
 	serving      atomic.Bool
 	activeConns  sync.WaitGroup
 
+	// Per-pool exhaustion notification state for the A2 edge-triggered
+	// notices + recovery monitor. This deliberately lives on the long-lived
+	// Server, NOT on PoolHealth, for two reasons:
+	//
+	//  1. It is per-PROCESS notification bookkeeping (have we already told the
+	//     operator this pool is exhausted?), not per-resolver-generation health.
+	//     PoolHealth is rebuilt/merged on every resolver pointer swap (SIGHUP,
+	//     the 2s data-version watcher); the exhaustion edge must survive those
+	//     swaps so a swap mid-exhaustion does not re-fire the "exhausted" notice.
+	//  2. PoolHealth entries are pruned on a membership change (MergeLiveCooldowns
+	//     drops cooldowns for credentials no longer in any pool). Exhaustion state
+	//     keyed by POOL must NOT be pruned that way — it is the recovery monitor,
+	//     not membership churn, that clears it (and only when the pool genuinely
+	//     recovers or is removed). Putting it on PoolHealth would wrongly prune it.
+	//
+	// poolExhausted[pool] is true between the healthy->exhausted edge (set in the
+	// addon's handlePoolFailover via onPoolExhausted) and the recovery monitor
+	// observing HasHealthyMember again. recoveryWake (buffered cap-1) is a
+	// non-blocking edge signal that wakes the monitor. monitorStop is closed once
+	// (monitorStopOnce) from BOTH Close and GracefulShutdown to stop the monitor
+	// goroutine idempotently. onPoolRecovered is the optional recovery-edge
+	// callback (auto-reset wiring, Task 8) set via SetOnPoolRecovered.
+	// onPoolRecoveredNotice is the operator-notice callback, fired on every
+	// recovery edge independent of any auth-reset target (wired to the broker
+	// channels in main.go) — kept separate so the notice always fires while the
+	// reset is opt-in (Task 8).
+	poolExhaustMu         sync.Mutex
+	poolExhausted         map[string]bool
+	recoveryWake          chan struct{}
+	monitorStop           chan struct{}
+	monitorStopOnce       sync.Once
+	onPoolRecovered       func(pool string)
+	onPoolRecoveredNotice func(pool string)
+	// recoveryMinReschedule is the floor for the monitor's per-pool sleep so a
+	// just-expired-but-still-unhealthy state can't spin the loop. Defaults to
+	// minRecoveryReschedule; tests may shorten it for determinism.
+	recoveryMinReschedule time.Duration
+
 	// oauthMetasCache holds the latest credential_meta slice the
 	// server saw via UpdateOAuthIndex. Cached so a later
 	// quicProxy initialization (or re-init) can re-apply it.
@@ -615,7 +653,13 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("listen: %w", err)
 	}
 
-	srv := &Server{listener: ln}
+	srv := &Server{
+		listener:              ln,
+		poolExhausted:         make(map[string]bool),
+		recoveryWake:          make(chan struct{}, 1),
+		monitorStop:           make(chan struct{}),
+		recoveryMinReschedule: minRecoveryReschedule,
+	}
 
 	// Initialize credential injection handlers when a vault provider is
 	// configured. The resolver may be nil at startup (no bindings yet) and
@@ -668,6 +712,12 @@ func New(cfg Config) (*Server, error) {
 		socks5.WithAssociateHandle(srv.handleAssociate),
 	)
 
+	// Launch the pool recovery monitor exactly once for the lifetime of this
+	// Server. It is started here (not in ListenAndServe) so it is running for
+	// any constructed Server; both Close and GracefulShutdown stop it
+	// idempotently via monitorStopOnce.
+	go srv.runRecoveryMonitor()
+
 	return srv, nil
 }
 
@@ -718,6 +768,13 @@ func (s *Server) setupInjection(cfg Config, _ net.Listener) error {
 		addonOpts = append(addonOpts, WithAuditLogger(cfg.Audit))
 	}
 	s.addon = NewSluiceAddon(addonOpts...)
+	// Wire the addon's exhaustion-edge hook back into the Server's per-pool
+	// notification state. The addon owns the failover classification but the
+	// edge bookkeeping (and the recovery monitor it wakes) live on the
+	// long-lived Server (see the poolExhausted field doc). markPoolExhausted
+	// returns true only on the healthy->exhausted edge, so the addon emits the
+	// "exhausted" notice exactly once per edge.
+	s.addon.SetOnPoolExhausted(s.markPoolExhausted)
 
 	// Load credential metadata once and stash it; we cannot mirror it
 	// into the QUIC proxy yet because that proxy is initialized later
@@ -2833,6 +2890,220 @@ func (s *Server) SetOnFailover(fn func(FailoverEvent)) {
 	}
 }
 
+// SetOnPoolRecovered configures the callback the recovery monitor invokes once,
+// on the exhausted->recovered edge, after it has emitted the "pool recovered"
+// notice. Task 8 wires this in main.go to look up the recovered pool's
+// auth_reset_target and, when set, run the agent's auth-reset command in a
+// detached goroutine. Safe to leave unset (recovery is then notice-only).
+func (s *Server) SetOnPoolRecovered(fn func(pool string)) {
+	s.poolExhaustMu.Lock()
+	s.onPoolRecovered = fn
+	s.poolExhaustMu.Unlock()
+}
+
+// SetOnPoolRecoveredNotice configures the operator-notice callback the recovery
+// monitor fires on every exhausted->recovered edge, independent of whether the
+// pool has an auth-reset target. main.go wires this to fan the
+// FormatPoolRecoveredNotice text out across the broker channels (mirroring the
+// onFailover notice path). Kept separate from onPoolRecovered so the notice
+// always fires while the auth-reset stays opt-in.
+func (s *Server) SetOnPoolRecoveredNotice(fn func(pool string)) {
+	s.poolExhaustMu.Lock()
+	s.onPoolRecoveredNotice = fn
+	s.poolExhaustMu.Unlock()
+}
+
+// minRecoveryReschedule floors the recovery monitor's per-pool wake interval so
+// a member whose cooldown has just expired but whose upstream is still
+// unhealthy (no HasHealthyMember yet) cannot spin the monitor in a tight loop.
+const minRecoveryReschedule = 1 * time.Second
+
+// markPoolExhausted records the healthy->exhausted edge for a pool and returns
+// true ONLY on that edge (false->true). It is the addon's onPoolExhausted hook:
+// the addon calls it on every exhausted classification, but the "exhausted"
+// operator notice is emitted only when this returns true, so a retry storm
+// against an already-exhausted pool produces exactly one notice. On the edge it
+// also wakes the recovery monitor with a non-blocking buffered send.
+//
+// This edge — not the addon's 30s window — is authoritative for the exhausted
+// notice (A2). The window dedup remains only for real from->to transitions.
+func (s *Server) markPoolExhausted(pool string) bool {
+	s.poolExhaustMu.Lock()
+	if s.poolExhausted == nil {
+		s.poolExhausted = make(map[string]bool)
+	}
+	already := s.poolExhausted[pool]
+	if already {
+		s.poolExhaustMu.Unlock()
+		return false
+	}
+	s.poolExhausted[pool] = true
+	s.poolExhaustMu.Unlock()
+
+	// Wake the monitor. Non-blocking: the channel is cap-1, so a wake already
+	// pending coalesces with this one (the monitor re-Loads the resolver and
+	// scans every exhausted pool on each wake regardless of which pool woke it).
+	select {
+	case s.recoveryWake <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+// stopMonitors stops the recovery monitor goroutine idempotently. Closing
+// monitorStop is guarded by monitorStopOnce so calling it from BOTH Close and
+// GracefulShutdown (or twice) cannot panic on a double close.
+func (s *Server) stopMonitors() {
+	s.monitorStopOnce.Do(func() {
+		close(s.monitorStop)
+	})
+}
+
+// runRecoveryMonitor is the A2 recovery monitor. It is server-driven
+// (time-based) because a latched agent will not emit a recovering 2xx on its
+// own — nothing on the traffic path signals recovery, so sluice must poll the
+// in-memory cooldowns itself.
+//
+// On every wake (an exhaustion edge from markPoolExhausted, or its own
+// reschedule timer) it Load()s the CURRENT pool resolver — never caching it
+// across wakes, so a resolver pointer swap (SIGHUP / data-version watcher) is
+// observed immediately. For each pool currently marked exhausted it:
+//
+//   - drops the state entry if the pool no longer exists in the resolver (a
+//     removed pool fires no recovered notice);
+//   - on HasHealthyMember becoming true, flips true->false, emits the "pool
+//     recovered" notice, and invokes onPoolRecovered(pool) once;
+//   - otherwise computes the next wake as max(SoonestCooldown-now,
+//     recoveryMinReschedule) and keeps the soonest such wake across all still-
+//     exhausted pools.
+//
+// A single timer is reused across iterations; the loop selects on the
+// reschedule timer, the wake channel, and monitorStop.
+func (s *Server) runRecoveryMonitor() {
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	timerArmed := false
+
+	for {
+		next, anyExhausted := s.scanRecovery()
+		if !timer.Stop() && timerArmed {
+			// Drain a fired-but-unread timer so the reset below is clean.
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timerArmed = false
+		if anyExhausted {
+			if next < s.recoveryMinReschedule {
+				next = s.recoveryMinReschedule
+			}
+			timer.Reset(next)
+			timerArmed = true
+		}
+
+		select {
+		case <-s.monitorStop:
+			if timerArmed {
+				timer.Stop()
+			}
+			return
+		case <-s.recoveryWake:
+			// New exhaustion edge (or coalesced edges): re-scan immediately.
+		case <-timer.C:
+			timerArmed = false
+			// Reschedule fired: re-scan to check for recovery.
+		}
+	}
+}
+
+// scanRecovery performs one pass over the pools currently marked exhausted. It
+// returns the soonest reschedule interval among the pools still exhausted and
+// whether any pool remains exhausted (so the caller knows whether to arm the
+// timer). It Load()s the current resolver fresh.
+func (s *Server) scanRecovery() (next time.Duration, anyExhausted bool) {
+	pr := s.poolResolver.Load()
+
+	// Snapshot the exhausted pool names under the lock, then evaluate health
+	// outside it (HasHealthyMember/SoonestCooldown take their own RLock on the
+	// shared PoolHealth and must not be called while holding poolExhaustMu).
+	s.poolExhaustMu.Lock()
+	pools := make([]string, 0, len(s.poolExhausted))
+	for p, ex := range s.poolExhausted {
+		if ex {
+			pools = append(pools, p)
+		}
+	}
+	s.poolExhaustMu.Unlock()
+
+	now := time.Now()
+	for _, pool := range pools {
+		// A removed pool: drop the state, fire no recovered notice.
+		if pr == nil || !pr.IsPool(pool) {
+			s.clearPoolExhausted(pool)
+			continue
+		}
+		if pr.HasHealthyMember(pool) {
+			s.recoverPool(pool)
+			continue
+		}
+		// Still exhausted: schedule the next wake at the soonest cooldown.
+		if until, ok := pr.SoonestCooldown(pool); ok {
+			d := until.Sub(now)
+			if !anyExhausted || d < next {
+				next = d
+			}
+			anyExhausted = true
+		} else {
+			// No member is currently cooling yet HasHealthyMember is false
+			// (e.g. an empty/raced pool). Reschedule at the floor so we
+			// re-evaluate rather than block forever on the wake channel.
+			if !anyExhausted || s.recoveryMinReschedule < next {
+				next = s.recoveryMinReschedule
+			}
+			anyExhausted = true
+		}
+	}
+	return next, anyExhausted
+}
+
+// clearPoolExhausted drops a pool's exhaustion state without firing a recovered
+// notice (used when the pool was removed while exhausted).
+func (s *Server) clearPoolExhausted(pool string) {
+	s.poolExhaustMu.Lock()
+	delete(s.poolExhausted, pool)
+	s.poolExhaustMu.Unlock()
+}
+
+// recoverPool fires the exhausted->recovered edge for a pool: it flips the
+// state false (returning early if a concurrent pass already did so), emits the
+// "pool recovered" notice, and invokes onPoolRecovered once. The state flip and
+// callback snapshot happen under poolExhaustMu so two concurrent passes cannot
+// both recover the same pool.
+func (s *Server) recoverPool(pool string) {
+	s.poolExhaustMu.Lock()
+	if !s.poolExhausted[pool] {
+		s.poolExhaustMu.Unlock()
+		return
+	}
+	delete(s.poolExhausted, pool)
+	cb := s.onPoolRecovered
+	noticeCb := s.onPoolRecoveredNotice
+	s.poolExhaustMu.Unlock()
+
+	log.Printf("[POOL-FAILOVER] %s", FormatPoolRecoveredNotice(pool))
+	// Notice always fires on the recovery edge (independent of auth-reset).
+	if noticeCb != nil {
+		noticeCb(pool)
+	}
+	// Auth-reset (opt-in, only when a target is configured) is wired here.
+	if cb != nil {
+		cb(pool)
+	}
+}
+
 // EnginePtr returns the shared atomic engine pointer. The Telegram command
 // handler uses this to read and mutate the same engine as the proxy, avoiding
 // split-brain windows during SIGHUP reloads.
@@ -2875,6 +3146,7 @@ func (s *Server) IsListening() bool {
 // Close stops the server by closing the listener and any internal resources.
 func (s *Server) Close() error {
 	s.closed.Store(true)
+	s.stopMonitors()
 	if s.mitmProxy != nil {
 		_ = s.mitmProxy.Close()
 	}
@@ -2890,6 +3162,7 @@ func (s *Server) Close() error {
 // the timeout, or an error if the timeout was exceeded.
 func (s *Server) GracefulShutdown(timeout time.Duration) error {
 	s.closed.Store(true)
+	s.stopMonitors()
 	// Stop accepting new connections.
 	_ = s.listener.Close()
 	if s.mitmProxy != nil {

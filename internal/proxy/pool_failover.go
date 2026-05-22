@@ -349,6 +349,15 @@ func FormatFailoverNotice(ev FailoverEvent) string {
 		ev.Pool, ev.From, ev.To, reason)
 }
 
+// FormatPoolRecoveredNotice builds the plain-text, single-line operator notice
+// emitted on the exhausted->recovered edge by the recovery monitor. Kept next
+// to FormatFailoverNotice as a pure, directly-testable function. Plain text /
+// sentence style for the same reason (the notice path sends with no parse
+// mode, so markdown/HTML would render literally).
+func FormatPoolRecoveredNotice(pool string) string {
+	return fmt.Sprintf("Pool %q recovered: a healthy account is available again.", pool)
+}
+
 // poolForResponse maps a response's CONNECT destination back to a pooled
 // binding and returns the pool name + the member that was active for this
 // request. Returns ok=false when the destination is not bound to a pool.
@@ -667,15 +676,24 @@ func (a *SluiceAddon) handlePoolFailover(f *mitmproxy.Flow) {
 	// synchronous MarkCooldown above would otherwise each emit one audit
 	// row + one operator notice.
 	//
-	// A1: for the exhausted path collapse the dedup key to
-	// (pool, "*", "*", "exhausted") so the flap direction (which degrade
-	// target ResolveActive happened to pick) cannot mint two distinct keys and
-	// let the retry storm through twice. A real from->to transition keeps its
-	// (pool, from, to, tag) key. The cooldown itself was already applied
+	// A2: the "exhausted" notice is gated on the healthy->exhausted EDGE, not
+	// the 30s window. onPoolExhausted (set by the Server) flips the per-pool
+	// exhaustion state on the long-lived Server and returns true only on the
+	// false->true edge, so a retry storm against an already-exhausted pool
+	// emits exactly one notice and the edge also wakes the recovery monitor.
+	// When the hook is unset (addon-only unit tests) fall back to the A1
+	// collapsed 30s-window key so those tests keep their existing behavior.
+	//
+	// A real from->to transition is unchanged: it keeps its (pool, from, to,
+	// tag) 30s-window key. The cooldown itself was already applied
 	// unconditionally above, so suppressing the notice loses nothing.
 	emit := false
 	if exhausted {
-		emit = a.shouldEmitPoolNotice(pool, "*", "*", "exhausted")
+		if a.onPoolExhausted != nil {
+			emit = a.onPoolExhausted(pool)
+		} else {
+			emit = a.shouldEmitPoolNotice(pool, "*", "*", "exhausted")
+		}
 	} else {
 		emit = a.shouldEmitPoolNotice(pool, from, to, tag)
 	}

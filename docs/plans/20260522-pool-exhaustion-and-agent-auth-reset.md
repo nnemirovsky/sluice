@@ -249,28 +249,34 @@ precedent) and emits an `agent_auth_reset` audit event.
 - Modify: `internal/proxy/pool_failover.go` (entry-edge gating; recovered notice formatter)
 - Modify: `internal/proxy/server_test.go` (+ focused new test file as needed)
 
-- [ ] add `poolExhaustMu`/`poolExhausted`/`recoveryWake`(cap-1)/`monitorStop`+`monitorStopOnce`/
+- [x] add `poolExhaustMu`/`poolExhausted`/`recoveryWake`(cap-1)/`monitorStop`+`monitorStopOnce`/
   `onPoolRecovered` to `Server`; `SetOnPoolRecovered`; document WHY state is on `Server` not
-  `PoolHealth` (survives swaps, must not be pruned on membership change)
-- [ ] launch the monitor once (in `New`/`StartMonitors`); stop it idempotently from BOTH
-  `Close` and `GracefulShutdown` (via `monitorStopOnce`)
-- [ ] gate the "exhausted" notice on the `false→true` edge (one notice on entry; this edge —
+  `PoolHealth` (survives swaps, must not be pruned on membership change). Also added a separate
+  `onPoolRecoveredNotice` callback (notice always fires; auth-reset stays opt-in per Task 8) and
+  a test-shortenable `recoveryMinReschedule` field.
+- [x] launch the monitor once (in `New`); stop it idempotently from BOTH
+  `Close` and `GracefulShutdown` (via `monitorStopOnce`/`stopMonitors`)
+- [x] gate the "exhausted" notice on the `false→true` edge (one notice on entry; this edge —
   not the 30s window — is authoritative for the exhausted notice); record state; wake the
-  monitor with a non-blocking `select { case recoveryWake <- struct{}{}: default: }`
-- [ ] implement the monitor: each wake `Load()` the current resolver (never cache); compute
+  monitor with a non-blocking `select { case recoveryWake <- struct{}{}: default: }`. Wired via
+  addon `onPoolExhausted` hook (`SetOnPoolExhausted`, mirroring `SetOnFailover`); addon-only
+  tests with no Server fall back to the A1 30s-window collapse.
+- [x] implement the monitor: each wake `Load()` the current resolver (never cache); compute
   `sleep = max(SoonestCooldown(pool).Sub(time.Now()), minReschedule)`; on wake, for each
   exhausted pool flip `true→false` when `HasHealthyMember` is true, emit "pool recovered",
   call `onPoolRecovered(pool)`; reschedule while still exhausted; drop state for pools no
   longer present
-- [ ] add a recovered-notice formatter (plain text, sentence style) alongside
-  `FormatFailoverNotice`
-- [ ] update the Task-2 exhausted-notice test to assert EDGE behavior (one notice per
-  healthy→exhausted edge across many failing responses), not 30s-window behavior
-- [ ] write tests: entry edge emits exactly one exhausted notice; recovery edge emits exactly
-  one recovered notice + one `onPoolRecovered` call; **unequal cooldowns** (memA 60s, memB 6h)
-  → monitor wakes ~60s, recovers once though memB still cools; monitor stops on shutdown; a
-  pool removed while exhausted fires no recovered notice
-- [ ] run `go test ./internal/proxy/ -race`; gofumpt; vet — pass before Task 4
+- [x] add a recovered-notice formatter (plain text, sentence style) alongside
+  `FormatFailoverNotice` (`FormatPoolRecoveredNotice`)
+- [x] update the Task-2 exhausted-notice test to assert EDGE behavior (one notice per
+  healthy→exhausted edge across many failing responses), not 30s-window behavior. Added
+  `TestExhaustedNoticeEdgeAcrossManyResponses` (Server-wired edge path); the existing addon-only
+  Task-2 tests retain the 30s-window assertion for the no-Server fallback path.
+- [x] write tests: entry edge emits exactly one exhausted notice; recovery edge emits exactly
+  one recovered notice + one `onPoolRecovered` call; **unequal cooldowns** (memA short, memB 6h)
+  → monitor wakes ~soonest, recovers once though memB still cools; monitor stops on shutdown
+  (double-stop no panic); a pool removed while exhausted fires no recovered notice
+- [x] run `go test ./internal/proxy/ -race`; gofumpt; vet — pass before Task 4
 
 ### Task 4: Schema + store for per-pool `auth_reset_target`
 
