@@ -105,14 +105,16 @@ The only acceptable single-channel features have a documented rationale making t
 
 ## Agent Profiles
 
-Profiles abstract per-agent runtime conventions so container managers stay agent-agnostic. Each carries `EnvFileRelPath` (phantom env-var path), `ReloadCmd` (argv for in-place secret reload, or nil), `WireMCPCmd` (argv to register sluice as an MCP server).
+Profiles abstract per-agent runtime conventions so container managers stay agent-agnostic. Each carries `EnvFileRelPath` (phantom env-var path), `ReloadCmd` (argv for in-place secret reload, or nil), `WireMCPCmd` (argv to register sluice as an MCP server), `ResetAuthCmd(target)` (argv to un-latch the agent's local auth state on pool recovery, or nil), and `ExecUser()` (UID:GID for file-writing execs, "" = image USER).
 
-| Profile | Env file | Reload | MCP wiring |
-|---------|----------|--------|------------|
-| `openclaw` (default) | `~/.openclaw/.env` | `node -e <gateway_rpc.js> secrets.reload` over the agent's WebSocket gateway | `node -e <gateway_rpc.js> wire-mcp <name> <url>` patches `mcp.servers.<name>` |
-| `hermes` | `~/.hermes/.env` | None (see caveats) | sh wrapper patches `mcp_servers.<name>.url` in `~/.hermes/config.yaml` (see caveats) |
+| Profile | Env file | Reload | MCP wiring | Auth reset | Exec user |
+|---------|----------|--------|------------|------------|-----------|
+| `openclaw` (default) | `~/.openclaw/.env` | `node -e <gateway_rpc.js> secrets.reload` over the agent's WebSocket gateway | `node -e <gateway_rpc.js> wire-mcp <name> <url>` patches `mcp.servers.<name>` | none (nil; openclaw latch unverified) | "" (root) |
+| `hermes` | `~/.hermes/.env` | None (see caveats) | sh wrapper patches `mcp_servers.<name>.url` in `~/.hermes/config.yaml` (see caveats) | `hermes auth reset <target>` (pure argv `/opt/hermes/.venv/bin/hermes auth reset <target>`) | `10000:10000` |
 
-Adding a profile is a single edit to `internal/container/agent_profile.go` (register a struct in `builtinProfiles`); all three backends consume it via `BuildEnvInjectionScriptForProfile`, `profile.ReloadCmd()`, `profile.WireMCPCmd()`.
+`ExecUser` exists because hermes runs its gateway as the non-root runtime UID 10000; a default-root `docker exec` that writes a hermes-owned file (`auth.json`) root-chowns it and bricks the gateway, so `ResetAuth` execs as `profile.ExecUser()`. The target is validated (non-empty, no NUL, charset `[A-Za-z0-9_.:-]+`) before exec; `ResetAuthCmd` is pure argv (no `sh -c`) so there is no shell-metachar threat.
+
+Adding a profile is a single edit to `internal/container/agent_profile.go` (register a struct in `builtinProfiles`); all three backends consume it via `BuildEnvInjectionScriptForProfile`, `profile.ReloadCmd()`, `profile.WireMCPCmd()`, `profile.ResetAuthCmd()`, `profile.ExecUser()`.
 
 Hermes caveats:
 - `ReloadCmd` nil; `ReloadSecrets` logs a notice, returns nil. New phantom tokens take effect on next Hermes message or `/reload-mcp`.
@@ -174,18 +176,19 @@ A **pool** backs one phantom identity with **N real OAuth credentials**. The age
 **CLI:**
 
 ```
-sluice pool create <name> --members credA,credB[,credC]   # ordered; rejects static; namespace must not collide with a credential name
+sluice pool create <name> --members credA,credB[,credC] [--auth-reset-target <target>]   # ordered; rejects static; namespace must not collide with a credential name
 sluice pool list
-sluice pool status <name>     # active member, per-member health (healthy / cooldown + until + reason)
+sluice pool status <name>     # active member, per-member health (healthy / cooldown + until + reason), auth-reset target
 sluice pool rotate <name>     # operator override: advance active member
+sluice pool set-auth-reset <name> <target|->   # set/clear the recovery auth-reset target (a single - clears)
 sluice pool remove <name>
 ```
 
-Pools are reachable from all channels — CLI `sluice pool`, REST `/api/pools` (`GET`/`POST`, `GET`/`DELETE /api/pools/{name}`, `POST /api/pools/{name}/rotate`), and Telegram `/pool` — all via the channel-agnostic `internal/poolops`.
+Pools are reachable from all channels — CLI `sluice pool`, REST `/api/pools` (`GET`/`POST`, `GET`/`DELETE /api/pools/{name}`, `POST /api/pools/{name}/rotate`, `POST /api/pools/{name}/auth-reset-target`), and Telegram `/pool` (incl. `/pool set-auth-reset <name> <target|->` and an optional 3rd `/pool create` arg) — all via the channel-agnostic `internal/poolops`.
 
 Auto-failover on 429/401 is primary; `pool rotate` is an override.
 
-**Data model (migration `000006_credential_pools`):** `credential_pools` (name, strategy reserved `failover`), `credential_pool_members` (ordered, pool->credential FK), `credential_health` (`healthy|cooldown`, `cooldown_until`, `last_failure_reason`), all CHECK-constrained. Store API in `internal/store/pools.go`. `reloadAll` loads pool+health into an atomic-pointer-swapped `PoolResolver` (`internal/vault/pool.go`), rewired via `srv.StorePool`/`SetPoolResolver` on SIGHUP and the 2s data-version watcher.
+**Data model (migration `000006_credential_pools`):** `credential_pools` (name, strategy reserved `failover`, `auth_reset_target` added by migration `000008_pool_auth_reset` — empty default = opt-out), `credential_pool_members` (ordered, pool->credential FK), `credential_health` (`healthy|cooldown`, `cooldown_until`, `last_failure_reason`), all CHECK-constrained. Store API in `internal/store/pools.go` (`SetPoolAuthResetTarget`). `reloadAll` loads pool+health into an atomic-pointer-swapped `PoolResolver` (`internal/vault/pool.go`), rewired via `srv.StorePool`/`SetPoolResolver` on SIGHUP and the 2s data-version watcher.
 
 **Phase 1 — phantom indirection (pool phantom -> active member):**
 
@@ -199,13 +202,15 @@ Auto-failover on 429/401 is primary; `pool rotate` is an override.
 
 - **Classification** (`classifyFailover`, `internal/proxy/pool_failover.go`, from `SluiceAddon.Response` for pooled destinations): `429`/`403 + insufficient_quota` -> rate-limited; `401`/token-body `invalid_grant`/`invalid_token` -> auth-failure; `5xx`/other -> no-op. Token-endpoint body trusted only when the request URL matched the OAuth index.
 - **Pool attribution** (`poolForResponse`): a response is pool-attributed either (a) the flow's CONNECT host has a pooled binding (API-host 429/403), or (b) the request URL matches the OAuth token-URL index for a member (token-endpoint 401/`invalid_grant`). (b) is essential — an OAuth refresh hits `auth.openai.com` (no pool binding; only `api.openai.com` has one), so without it the token-endpoint classification is dead code for Codex. Member recovery + fail-closed are the R1 mechanism above (`OAuthIndex.MatchAll` + the refresh-token join key, never `OAuthIndex.Match`).
-- **Synchronous in-memory failover (I1):** health is updated in-process before the response returns (`MarkCooldown` write lock, `ResolveActive` read lock) so the switch never waits on the 2s watcher (which only reconciles); a detached `onFailover` also writes `SetCredentialHealth(member,'cooldown',now+ttl,reason)` for durability. TTLs: `vault.RateLimitCooldown`=60s, `vault.AuthFailCooldown`=300s. **Cooldown extension is monotonic on both layers:** a member parked 300s for auth that then trips a 60s rate-limit keeps the LATER expiry — `MarkCooldown` and `SetCredentialHealth`'s `cooldown` upsert (CASE-compared against the stored future `cooldown_until`) both keep `max(existing-future, new)`. Only extend is monotonic: an explicit clear (zero/past `until`) and any transition to `healthy` still shorten/clear, and lazy expiry still wins over an expired stored cooldown. No in-flight retry — next request uses the new member.
+- **Synchronous in-memory failover (I1):** health is updated in-process before the response returns (`MarkCooldown` write lock, `ResolveActive` read lock) so the switch never waits on the 2s watcher (which only reconciles); a detached `onFailover` also writes `SetCredentialHealth(member,'cooldown',now+ttl,reason)` for durability. **Cooldown window (B1):** `cooldownFromResponse(class, f.Response.Header)` (`internal/proxy/pool_failover.go`) derives the TTL from the upstream recovery hints — `Retry-After` (delta-seconds or HTTP-date), then `x-ratelimit-reset` / `x-ratelimit-reset-requests` / `x-ratelimit-reset-tokens` (delta or epoch) — clamped to `[floor(class), vault.MaxCooldown=6h]`; no hint falls back to the class default (`vault.RateLimitCooldown`=60s / `vault.AuthFailCooldown`=300s). Floors: rate-limit `vault.MinRateLimitFloor`=10s (a short parsed window is honored, not floored up to 60s), auth-failure `AuthFailCooldown` (a revoked/expired token is never re-probed in seconds). This honors the real multi-hour quota window so a usage-limited member is not re-probed every 60s (the degrade-flap root cause). No body parsing yet. **Cooldown extension is monotonic on both layers:** a member parked 300s for auth that then trips a 60s rate-limit keeps the LATER expiry — `MarkCooldown` and `SetCredentialHealth`'s `cooldown` upsert (CASE-compared against the stored future `cooldown_until`) both keep `max(existing-future, new)`. Only extend is monotonic: an explicit clear (zero/past `until`) and any transition to `healthy` still shorten/clear, and lazy expiry still wins over an expired stored cooldown. No in-flight retry — next request uses the new member.
 - **Reload doesn't resurrect a cooled member:** the durable write is detached/best-effort, so any reload (SIGHUP or the 2s watcher on any unrelated DB write) rebuilds the resolver from store rows via `NewPoolResolver`; `Server.StorePool` calls `PoolResolver.MergeLiveCooldowns(prev)` to carry forward still-active in-memory cooldowns before the atomic swap (monotonic; drops cooldowns for credentials no longer in any pool).
-- **Audit:** `cred_failover` (Verdict `failover`, Credential = cooled member), `Reason = "<pool>:<from>-><to>:<429|403|401|invalid_grant>"`, emitted synchronously in `handlePoolFailover`.
-- **Telegram:** best-effort non-blocking notice "pool <name> failed over <a> -> <b> (<reason>)" (plain text); store write + every channel `Notify` detached into their own goroutine so the response path never blocks.
+- **Exhaustion + edge-triggered notices (A1/A2):** a pool is exhausted iff `PoolResolver.HasHealthyMember(pool)` (RLock, single `now`, mirrors `cooling()` lazy-expiry) is false — NOT `to == from`. Per-pool exhaustion state lives on the long-lived `Server` (`poolExhausted` map, NOT `PoolHealth`, so it survives resolver swaps and is not pruned on membership change). `handlePoolFailover` emits one "pool exhausted" notice on the `false->true` edge and wakes a dedicated recovery monitor goroutine (cap-1 `recoveryWake`). The monitor (`internal/proxy/server.go`, started in `New`, stopped idempotently from both `Close` and `GracefulShutdown`) sleeps until `SoonestCooldown(pool)` (clamped to a ~1s floor), `Load()`s the current resolver each wake, and on `HasHealthyMember -> true` flips `true->false`, emits one "pool recovered" notice (`FormatPoolRecoveredNotice`), and invokes `onPoolRecovered`. This replaces the old per-cooldown-window flap that respammed `cred_failover` + a Telegram notice every ~30/60s.
+- **Recovery auto-reset (opt-in, per pool):** if the recovered pool has a non-empty `auth_reset_target`, `onPoolRecovered` (wired in `cmd/sluice/main.go` via `wirePoolRecovery`) calls `containerMgr.ResetAuth(ctx, target)` in a detached goroutine with a fresh bounded context and emits an `agent_auth_reset` audit event (`Verdict "recover"`, `Credential` = pool, `Reason` = target). Empty target = no reset (opt-out default); a `ResetAuth` error is logged, not fatal. This un-latches an agent (hermes) that latched "usage limit reached" so it resumes without a manual `auth reset`.
+- **Audit:** `cred_failover` (Verdict `failover`, Credential = cooled member), `Reason = "<pool>:<from>-><to>:<429|403|401|invalid_grant>"`, emitted synchronously in `handlePoolFailover`; `agent_auth_reset` (Verdict `recover`) on a successful recovery auto-reset.
+- **Telegram:** best-effort non-blocking notice "pool <name> failed over <a> -> <b> (<reason>)" on a real transition, plus the edge-triggered exhausted/recovered notices (`SetOnPoolRecoveredNotice` fans the recovered notice across `failoverBroker.Channels()` independent of the auth-reset); store write + every channel `Notify` detached into their own goroutine so the response path never blocks.
 - **Known limitation:** streaming responses bypass failover (`handlePoolFailover` runs only from the buffered `Response` addon; SSE / `StreamLargeBodies`-exceeding bodies set `f.Stream=true` and skip it). Impact low (quota/auth bodies are tiny JSON); the next non-streamed request fails over normally.
 
-**Key files:** `internal/store/migrations/000006_credential_pools.{up,down}.sql`, `internal/store/pools.go`, `internal/vault/pool.go`, `internal/proxy/pool_failover.go`, `cmd/sluice/pool.go`, plus pool routing in `internal/proxy/addon.go` / `oauth_response.go`.
+**Key files:** `internal/store/migrations/000006_credential_pools.{up,down}.sql`, `000008_pool_auth_reset.{up,down}.sql`, `internal/store/pools.go`, `internal/vault/pool.go`, `internal/proxy/pool_failover.go`, `internal/proxy/server.go` (recovery monitor), `cmd/sluice/pool.go` / `main.go` (`wirePoolRecovery`), `internal/container/agent_profile.go` (`ResetAuthCmd`/`ExecUser`), plus pool routing in `internal/proxy/addon.go` / `oauth_response.go`.
 
 ### Protocol-specific handling
 
@@ -272,7 +277,7 @@ Two-phase: port-based guess first (standard ports 443/22/25/… route on it), by
 
 ### Audit logger
 
-Optional. JSON lines, blake3 hash chain (`prev_hash`, genesis = blake3("")); recovers across restarts by reading the last line. `sluice audit verify` walks the log and reports broken links. Common action names: `tool_call` (MCP verdict), `inspect_block` (ContentInspector arg block), `exec_block` (ExecInspector block), `response_dlp_redact` (HTTPS response/header redacted), `inject` (phantom injected outbound), `deny` (connection denied at SOCKS5/SNI).
+Optional. JSON lines, blake3 hash chain (`prev_hash`, genesis = blake3("")); recovers across restarts by reading the last line. `sluice audit verify` walks the log and reports broken links. Common action names: `tool_call` (MCP verdict), `inspect_block` (ContentInspector arg block), `exec_block` (ExecInspector block), `response_dlp_redact` (HTTPS response/header redacted), `inject` (phantom injected outbound), `deny` (connection denied at SOCKS5/SNI), `cred_failover` (pool member cooled, Verdict `failover`), `agent_auth_reset` (recovery auto-reset run, Verdict `recover`).
 
 ### MCP gateway
 

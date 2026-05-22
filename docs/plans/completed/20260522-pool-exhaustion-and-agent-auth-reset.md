@@ -415,12 +415,12 @@ precedent) and emits an `agent_auth_reset` audit event.
   (verified post-commit: clean `git status`, build + full suite re-run green at HEAD)
 
 ### Task 10: [Final] Documentation
-- [ ] update `CLAUDE.md` credential-pools section: B1 cooldown-from-hints, A1/A2
+- [x] update `CLAUDE.md` credential-pools section: B1 cooldown-from-hints, A1/A2
   exhaustion+edge notices (replacing the per-window dedup wording), per-pool
   `auth_reset_target` + recovery auto-reset, the `agent_auth_reset` audit action, and the
   `ResetAuthCmd`/`ExecUser` profile hooks in the Agent Profiles table
-- [ ] cross-check the CLI subcommand list + the auto-generated `api/openapi.yaml` in CLAUDE.md
-- [ ] move this plan to `docs/plans/completed/`
+- [x] cross-check the CLI subcommand list + the auto-generated `api/openapi.yaml` in CLAUDE.md
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 *Items requiring manual intervention or external systems — informational only*
