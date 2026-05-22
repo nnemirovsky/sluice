@@ -2573,7 +2573,7 @@ func TestFinding3Round9_StoreGatedVaultDeleteOnLivePoolMember(t *testing.T) {
 	if err := db.AddCredentialMeta("pool_mem", "oauth", "https://auth.example.com/token"); err != nil {
 		t.Fatalf("AddCredentialMeta: %v", err)
 	}
-	if err := db.CreatePoolWithMembers("codex_pool", "failover", []string{"pool_mem"}); err != nil {
+	if err := db.CreatePoolWithMembers("codex_pool", "failover", []string{"pool_mem"}, ""); err != nil {
 		t.Fatalf("CreatePoolWithMembers: %v", err)
 	}
 	_ = db.Close()
@@ -2692,7 +2692,7 @@ func TestFinding3Round9_TOCTOUInterleaveStoreGatesVaultDelete(t *testing.T) {
 			if e != nil {
 				return
 			}
-			_ = pdb.CreatePoolWithMembers("codex_pool", "failover", []string{"racer"})
+			_ = pdb.CreatePoolWithMembers("codex_pool", "failover", []string{"racer"}, "")
 			_ = pdb.Close()
 		}()
 

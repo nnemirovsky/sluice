@@ -24,7 +24,7 @@ import (
 // interface lets each channel pass its own already-open store and lets the
 // tests substitute a fake.
 type Store interface {
-	CreatePoolWithMembers(name, strategy string, members []string) error
+	CreatePoolWithMembers(name, strategy string, members []string, authResetTarget string) error
 	GetPool(name string) (*store.Pool, error)
 	ListPools() ([]store.Pool, error)
 	RemovePoolIfUnreferenced(name string) (bool, error)
@@ -144,10 +144,13 @@ func Create(s Store, name, strategy string, members []string) error {
 }
 
 // CreateWithAuthResetTarget is Create plus an optional per-pool
-// auth_reset_target (empty = no reset). The target is set in a follow-up
-// SetPoolAuthResetTarget call after the pool exists; channels that don't
-// accept a target call Create. Used by every channel's create adapter so the
-// create-with-target path has a single source of truth.
+// auth_reset_target (empty = no reset). The target is bound in the same store
+// transaction that creates the pool and its members, so create-with-target is
+// atomic: a partial state where the pool exists without its target can never
+// be observed, and there is no second write whose failure would leave a
+// created pool plus an error (which a retry would then 409 on). Channels that
+// don't accept a target call Create, which threads "". Used by every channel's
+// create adapter so the create-with-target path has a single source of truth.
 func CreateWithAuthResetTarget(s Store, name, strategy string, members []string, authResetTarget string) error {
 	if strategy == "" {
 		strategy = store.PoolStrategyFailover
@@ -158,15 +161,7 @@ func CreateWithAuthResetTarget(s Store, name, strategy string, members []string,
 	if err := validateAuthResetTarget(authResetTarget); err != nil {
 		return err
 	}
-	if err := s.CreatePoolWithMembers(name, strategy, members); err != nil {
-		return err
-	}
-	if authResetTarget != "" {
-		if err := s.SetPoolAuthResetTarget(name, authResetTarget); err != nil {
-			return err
-		}
-	}
-	return nil
+	return s.CreatePoolWithMembers(name, strategy, members, authResetTarget)
 }
 
 // SetAuthResetTarget sets (target != "") or clears (target == "") the

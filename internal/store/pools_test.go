@@ -27,7 +27,7 @@ func TestCreatePoolWithMembersAndGet(t *testing.T) {
 	seedOAuthCred(t, s, "acct_a")
 	seedOAuthCred(t, s, "acct_b")
 
-	if err := s.CreatePoolWithMembers("codex", "", []string{"acct_a", "acct_b"}); err != nil {
+	if err := s.CreatePoolWithMembers("codex", "", []string{"acct_a", "acct_b"}, ""); err != nil {
 		t.Fatalf("CreatePoolWithMembers: %v", err)
 	}
 
@@ -66,7 +66,7 @@ func TestCreatePoolRejectsStaticMember(t *testing.T) {
 	if err := s.AddCredentialMeta("static_key", "static", ""); err != nil {
 		t.Fatalf("AddCredentialMeta: %v", err)
 	}
-	err := s.CreatePoolWithMembers("p", "failover", []string{"static_key"})
+	err := s.CreatePoolWithMembers("p", "failover", []string{"static_key"}, "")
 	if err == nil {
 		t.Fatal("expected error creating pool with static member")
 	}
@@ -78,7 +78,7 @@ func TestCreatePoolRejectsStaticMember(t *testing.T) {
 
 func TestCreatePoolRejectsMissingMember(t *testing.T) {
 	s := newTestStore(t)
-	if err := s.CreatePoolWithMembers("p", "failover", []string{"nope"}); err == nil {
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"nope"}, ""); err == nil {
 		t.Fatal("expected error for non-existent member credential")
 	}
 }
@@ -86,13 +86,13 @@ func TestCreatePoolRejectsMissingMember(t *testing.T) {
 func TestCreatePoolRejectsBadStrategyAndDupes(t *testing.T) {
 	s := newTestStore(t)
 	seedOAuthCred(t, s, "a")
-	if err := s.CreatePoolWithMembers("p", "roundrobin", []string{"a"}); err == nil {
+	if err := s.CreatePoolWithMembers("p", "roundrobin", []string{"a"}, ""); err == nil {
 		t.Error("expected error for unsupported strategy")
 	}
-	if err := s.CreatePoolWithMembers("p", "failover", []string{"a", "a"}); err == nil {
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"a", "a"}, ""); err == nil {
 		t.Error("expected error for duplicate member")
 	}
-	if err := s.CreatePoolWithMembers("p", "failover", nil); err == nil {
+	if err := s.CreatePoolWithMembers("p", "failover", nil, ""); err == nil {
 		t.Error("expected error for empty member list")
 	}
 }
@@ -101,7 +101,7 @@ func TestPoolCredentialNamespaceMutualExclusion(t *testing.T) {
 	s := newTestStore(t)
 	seedOAuthCred(t, s, "acct_a")
 	// "acct_a" is a credential; a pool may not shadow it.
-	if err := s.CreatePoolWithMembers("acct_a", "failover", []string{"acct_a"}); err == nil {
+	if err := s.CreatePoolWithMembers("acct_a", "failover", []string{"acct_a"}, ""); err == nil {
 		t.Fatal("expected namespace collision error (pool name == credential name)")
 	}
 }
@@ -118,12 +118,12 @@ func TestCreatePoolRejectsMemberAlreadyInAnotherPool(t *testing.T) {
 	seedOAuthCred(t, s, "shared")
 	seedOAuthCred(t, s, "solo")
 
-	if err := s.CreatePoolWithMembers("pool_one", "failover", []string{"shared"}); err != nil {
+	if err := s.CreatePoolWithMembers("pool_one", "failover", []string{"shared"}, ""); err != nil {
 		t.Fatalf("CreatePoolWithMembers(pool_one): %v", err)
 	}
 
 	// "shared" already belongs to pool_one; adding it to pool_two must fail.
-	err := s.CreatePoolWithMembers("pool_two", "failover", []string{"solo", "shared"})
+	err := s.CreatePoolWithMembers("pool_two", "failover", []string{"solo", "shared"}, "")
 	if err == nil {
 		t.Fatal("expected error: credential already a member of another pool (Finding 5)")
 	}
@@ -149,7 +149,7 @@ func TestCreatePoolRejectsMemberAlreadyInAnotherPool(t *testing.T) {
 	if _, err := s.RemovePool("pool_one"); err != nil {
 		t.Fatalf("RemovePool: %v", err)
 	}
-	if err := s.CreatePoolWithMembers("pool_three", "failover", []string{"shared"}); err != nil {
+	if err := s.CreatePoolWithMembers("pool_three", "failover", []string{"shared"}, ""); err != nil {
 		t.Fatalf("after removing pool_one, re-adding shared to a new pool must succeed: %v", err)
 	}
 }
@@ -159,10 +159,10 @@ func TestListPoolsOrdersMembers(t *testing.T) {
 	for _, n := range []string{"a", "b", "c"} {
 		seedOAuthCred(t, s, n)
 	}
-	if err := s.CreatePoolWithMembers("p1", "failover", []string{"c", "a"}); err != nil {
+	if err := s.CreatePoolWithMembers("p1", "failover", []string{"c", "a"}, ""); err != nil {
 		t.Fatalf("create p1: %v", err)
 	}
-	if err := s.CreatePoolWithMembers("p2", "failover", []string{"b"}); err != nil {
+	if err := s.CreatePoolWithMembers("p2", "failover", []string{"b"}, ""); err != nil {
 		t.Fatalf("create p2: %v", err)
 	}
 	pools, err := s.ListPools()
@@ -185,7 +185,7 @@ func TestListPoolsOrdersMembers(t *testing.T) {
 func TestRemovePoolCascadesMembers(t *testing.T) {
 	s := newTestStore(t)
 	seedOAuthCred(t, s, "a")
-	if err := s.CreatePoolWithMembers("p", "failover", []string{"a"}); err != nil {
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"a"}, ""); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	removed, err := s.RemovePool("p")
@@ -205,7 +205,7 @@ func TestRemovePoolCascadesMembers(t *testing.T) {
 func TestRemovePoolIfUnreferenced_Unreferenced(t *testing.T) {
 	s := newTestStore(t)
 	seedOAuthCred(t, s, "a")
-	if err := s.CreatePoolWithMembers("p", "failover", []string{"a"}); err != nil {
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"a"}, ""); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if err := s.SetCredentialHealth("a", "cooldown", time.Now().Add(time.Hour), "429"); err != nil {
@@ -241,7 +241,7 @@ func TestRemovePoolIfUnreferenced_Unreferenced(t *testing.T) {
 func TestRemovePoolIfUnreferenced_RefusedWhenBound(t *testing.T) {
 	s := newTestStore(t)
 	seedOAuthCred(t, s, "a")
-	if err := s.CreatePoolWithMembers("p", "failover", []string{"a"}); err != nil {
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"a"}, ""); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	// A binding NAMES THE POOL (pool shares the credential namespace).
@@ -288,7 +288,7 @@ func TestRemovePoolIfUnreferenced_RefusedWhenBound(t *testing.T) {
 func TestRemovePoolIfUnreferenced_BindingBeforeRemovalRefuses(t *testing.T) {
 	s := newTestStore(t)
 	seedOAuthCred(t, s, "a")
-	if err := s.CreatePoolWithMembers("p", "failover", []string{"a"}); err != nil {
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"a"}, ""); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
@@ -327,7 +327,7 @@ func TestRemovePoolIfUnreferenced_BindingBeforeRemovalRefuses(t *testing.T) {
 func TestAddBinding_AfterPoolRemovedRefuses(t *testing.T) {
 	s := newTestStore(t)
 	seedOAuthCred(t, s, "a")
-	if err := s.CreatePoolWithMembers("p", "failover", []string{"a"}); err != nil {
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"a"}, ""); err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 
@@ -418,7 +418,7 @@ func TestRemovePoolIfUnreferenced_ConcurrentIsInternallyConsistent(t *testing.T)
 			t.Fatalf("iter %d: new store: %v", iter, err)
 		}
 		seedOAuthCred(t, s, "a")
-		if err := s.CreatePoolWithMembers("p", "failover", []string{"a"}); err != nil {
+		if err := s.CreatePoolWithMembers("p", "failover", []string{"a"}, ""); err != nil {
 			t.Fatalf("iter %d: create: %v", iter, err)
 		}
 
@@ -502,12 +502,12 @@ func TestPoolsForMember(t *testing.T) {
 	s := newTestStore(t)
 	seedOAuthCred(t, s, "shared")
 	seedOAuthCred(t, s, "x")
-	if err := s.CreatePoolWithMembers("p1", "failover", []string{"shared", "x"}); err != nil {
+	if err := s.CreatePoolWithMembers("p1", "failover", []string{"shared", "x"}, ""); err != nil {
 		t.Fatalf("create p1: %v", err)
 	}
 	// A credential belongs to at most one pool (Finding 5): adding "shared"
 	// to a second pool must be rejected.
-	if err := s.CreatePoolWithMembers("p2", "failover", []string{"shared"}); err == nil {
+	if err := s.CreatePoolWithMembers("p2", "failover", []string{"shared"}, ""); err == nil {
 		t.Fatal("expected p2 creation to fail: shared already belongs to p1")
 	}
 
@@ -770,7 +770,7 @@ func TestRemoveCredentialMetaBlocksLivePoolMember(t *testing.T) {
 	s := newTestStore(t)
 	seedOAuthCred(t, s, "member")
 	seedOAuthCred(t, s, "other")
-	if err := s.CreatePoolWithMembers("p", "failover", []string{"member", "other"}); err != nil {
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"member", "other"}, ""); err != nil {
 		t.Fatalf("CreatePoolWithMembers: %v", err)
 	}
 
@@ -831,7 +831,7 @@ func TestRemoveCredentialMetaCleansHealthRow(t *testing.T) {
 	// NOT inherit the old cooldown — GetCredentialHealth is nil (= healthy).
 	seedOAuthCred(t, s, "x")
 	seedOAuthCred(t, s, "y")
-	if err := s.CreatePoolWithMembers("fresh", "failover", []string{"x", "y"}); err != nil {
+	if err := s.CreatePoolWithMembers("fresh", "failover", []string{"x", "y"}, ""); err != nil {
 		t.Fatalf("CreatePoolWithMembers(fresh): %v", err)
 	}
 	if h, herr := s.GetCredentialHealth("x"); herr != nil || h != nil {
@@ -847,7 +847,7 @@ func TestAddCredentialMetaRejectsPoolNameCollision(t *testing.T) {
 	s := newTestStore(t)
 	seedOAuthCred(t, s, "acct_a")
 	seedOAuthCred(t, s, "acct_b")
-	if err := s.CreatePoolWithMembers("codex", "failover", []string{"acct_a", "acct_b"}); err != nil {
+	if err := s.CreatePoolWithMembers("codex", "failover", []string{"acct_a", "acct_b"}, ""); err != nil {
 		t.Fatalf("CreatePoolWithMembers: %v", err)
 	}
 
@@ -867,7 +867,7 @@ func TestAddCredentialMetaRejectsPoolNameCollision(t *testing.T) {
 
 	// The reverse direction still holds: CreatePoolWithMembers rejects a
 	// name that already exists as a credential.
-	if err := s.CreatePoolWithMembers("not_a_pool", "failover", []string{"acct_a"}); err == nil {
+	if err := s.CreatePoolWithMembers("not_a_pool", "failover", []string{"acct_a"}, ""); err == nil {
 		t.Fatal("expected CreatePoolWithMembers to reject a name that is already a credential")
 	}
 }
@@ -890,7 +890,7 @@ func TestRemoveCredentialMetaCASGuardsLivePoolMember(t *testing.T) {
 	seedOAuthCred(t, s, "sibling")
 
 	// Concurrent pool-create claims "c" between the insert and the rollback.
-	if err := s.CreatePoolWithMembers("p", "failover", []string{"c", "sibling"}); err != nil {
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"c", "sibling"}, ""); err != nil {
 		t.Fatalf("CreatePoolWithMembers: %v", err)
 	}
 
@@ -967,7 +967,7 @@ func TestRemoveCredentialMetaCASGuardsLivePoolMember(t *testing.T) {
 func TestRemovePoolDeletesMemberHealth(t *testing.T) {
 	s := newTestStore(t)
 	seedOAuthCred(t, s, "m")
-	if err := s.CreatePoolWithMembers("p", "failover", []string{"m"}); err != nil {
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"m"}, ""); err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 	until := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
@@ -1001,7 +1001,7 @@ func TestRemovePoolDeletesMemberHealth(t *testing.T) {
 func TestRemovePoolSparesStillPooledMemberHealth(t *testing.T) {
 	s := newTestStore(t)
 	seedOAuthCred(t, s, "m")
-	if err := s.CreatePoolWithMembers("p", "failover", []string{"m"}); err != nil {
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"m"}, ""); err != nil {
 		t.Fatalf("create pool p: %v", err)
 	}
 	// "m" also belongs to pool q (legacy/pre-invariant row injected directly).
@@ -1044,7 +1044,7 @@ func TestRemovePoolSparesStillPooledMemberHealth(t *testing.T) {
 func TestAddCredentialMetaRejectsLivePoolMemberDowngrade(t *testing.T) {
 	s := newTestStore(t)
 	seedOAuthCred(t, s, "poolcred")
-	if err := s.CreatePoolWithMembers("p", "failover", []string{"poolcred"}); err != nil {
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"poolcred"}, ""); err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 
@@ -1101,7 +1101,7 @@ func TestAddCredentialMetaRejectsLivePoolMemberDowngrade(t *testing.T) {
 func TestSetCredentialHealthIfPoolMemberLiveMemberPersists(t *testing.T) {
 	s := newTestStore(t)
 	seedOAuthCred(t, s, "live")
-	if err := s.CreatePoolWithMembers("p", "failover", []string{"live"}); err != nil {
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"live"}, ""); err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 	until := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
@@ -1139,7 +1139,7 @@ func TestSetCredentialHealthIfPoolMemberLiveMemberPersists(t *testing.T) {
 func TestSetCredentialHealthIfPoolMemberSkipsRemoved(t *testing.T) {
 	s := newTestStore(t)
 	seedOAuthCred(t, s, "gone")
-	if err := s.CreatePoolWithMembers("p", "failover", []string{"gone"}); err != nil {
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"gone"}, ""); err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 
@@ -1167,7 +1167,7 @@ func TestSetCredentialHealthIfPoolMemberSkipsRemoved(t *testing.T) {
 	// cooldown: ListCredentialHealth (what loadPoolResolver seeds from) must
 	// carry no row for "gone".
 	seedOAuthCred(t, s, "gone")
-	if err := s.CreatePoolWithMembers("p2", "failover", []string{"gone"}); err != nil {
+	if err := s.CreatePoolWithMembers("p2", "failover", []string{"gone"}, ""); err != nil {
 		t.Fatalf("recreate pool: %v", err)
 	}
 	rows, err := s.ListCredentialHealth()
@@ -1197,7 +1197,7 @@ func TestSetCredentialHealthIfPoolMemberSkipsRemoved(t *testing.T) {
 func TestSetCredentialHealthIfPoolMemberEpochRejectsReAddedSuccessor(t *testing.T) {
 	s := newTestStore(t)
 	seedOAuthCred(t, s, "c")
-	if err := s.CreatePoolWithMembers("P", "failover", []string{"c"}); err != nil {
+	if err := s.CreatePoolWithMembers("P", "failover", []string{"c"}, ""); err != nil {
 		t.Fatalf("create pool P: %v", err)
 	}
 	pP, err := s.GetPool("P")
@@ -1216,7 +1216,7 @@ func TestSetCredentialHealthIfPoolMemberEpochRejectsReAddedSuccessor(t *testing.
 		t.Fatalf("RemovePool(P) = %v, %v", removed, rerr)
 	}
 	seedOAuthCred(t, s, "c")
-	if err := s.CreatePoolWithMembers("Q", "failover", []string{"c"}); err != nil {
+	if err := s.CreatePoolWithMembers("Q", "failover", []string{"c"}, ""); err != nil {
 		t.Fatalf("recreate c into Q: %v", err)
 	}
 	pQ, err := s.GetPool("Q")
@@ -1264,7 +1264,7 @@ func TestSetCredentialHealthIfPoolMemberEpochRejectsReAddedSuccessor(t *testing.
 func TestSetCredentialHealthIfPoolMemberEpochLiveMemberSamePool(t *testing.T) {
 	s := newTestStore(t)
 	seedOAuthCred(t, s, "m")
-	if err := s.CreatePoolWithMembers("pool", "failover", []string{"m"}); err != nil {
+	if err := s.CreatePoolWithMembers("pool", "failover", []string{"m"}, ""); err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 	p, _ := s.GetPool("pool")
@@ -1410,7 +1410,7 @@ func TestRemoveCredentialFullyRefusesLivePoolMember(t *testing.T) {
 	s := newTestStore(t)
 	seedOAuthCred(t, s, "m")
 	seedOAuthCred(t, s, "n")
-	if err := s.CreatePoolWithMembers("p", "failover", []string{"m", "n"}); err != nil {
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"m", "n"}, ""); err != nil {
 		t.Fatalf("CreatePoolWithMembers: %v", err)
 	}
 
@@ -1517,7 +1517,7 @@ func TestRemoveCredentialFullyCleansHealthOnPartialCleanupFinish(t *testing.T) {
 	// carries no row for "x".
 	seedOAuthCred(t, s, "x")
 	seedOAuthCred(t, s, "y")
-	if err := s.CreatePoolWithMembers("p", "failover", []string{"x", "y"}); err != nil {
+	if err := s.CreatePoolWithMembers("p", "failover", []string{"x", "y"}, ""); err != nil {
 		t.Fatalf("CreatePoolWithMembers: %v", err)
 	}
 	hrows, err := s.ListCredentialHealth()
@@ -1586,7 +1586,7 @@ func TestMigration000008DownUpPopulated(t *testing.T) {
 	// credential_health row for one member.
 	seedOAuthCred(t, s, "acct_a")
 	seedOAuthCred(t, s, "acct_b")
-	if err := s.CreatePoolWithMembers("codex", "failover", []string{"acct_a", "acct_b"}); err != nil {
+	if err := s.CreatePoolWithMembers("codex", "failover", []string{"acct_a", "acct_b"}, ""); err != nil {
 		t.Fatalf("CreatePoolWithMembers: %v", err)
 	}
 	if err := s.SetPoolAuthResetTarget("codex", "openai-codex"); err != nil {
@@ -1692,7 +1692,7 @@ func TestPoolAuthResetTargetCRUD(t *testing.T) {
 	seedOAuthCred(t, s, "acct_a")
 	seedOAuthCred(t, s, "acct_b")
 
-	if err := s.CreatePoolWithMembers("codex", "", []string{"acct_a", "acct_b"}); err != nil {
+	if err := s.CreatePoolWithMembers("codex", "", []string{"acct_a", "acct_b"}, ""); err != nil {
 		t.Fatalf("CreatePoolWithMembers: %v", err)
 	}
 

@@ -502,7 +502,7 @@ func TestPoolRotateGuardedAgainstConcurrentRemoval(t *testing.T) {
 		_ = db.Close()
 		t.Fatalf("RemovePool: %v", rerr)
 	}
-	if cerr := db.CreatePoolWithMembers("codex", "failover", []string{"acct_a"}); cerr != nil {
+	if cerr := db.CreatePoolWithMembers("codex", "failover", []string{"acct_a"}, ""); cerr != nil {
 		_ = db.Close()
 		t.Fatalf("recreate pool: %v", cerr)
 	}
@@ -534,7 +534,7 @@ func TestPoolRotateGuardedAgainstConcurrentRemoval(t *testing.T) {
 	if _, rerr := db.RemovePool("codex"); rerr != nil {
 		t.Fatalf("final RemovePool: %v", rerr)
 	}
-	if cerr := db.CreatePoolWithMembers("codex", "failover", []string{"acct_a", "acct_b"}); cerr != nil {
+	if cerr := db.CreatePoolWithMembers("codex", "failover", []string{"acct_a", "acct_b"}, ""); cerr != nil {
 		t.Fatalf("final recreate pool: %v", cerr)
 	}
 	rows, lerr := db.ListCredentialHealth()
@@ -607,7 +607,7 @@ func TestPoolRotateEpochScopedRejectsCrossPoolReAdd(t *testing.T) {
 		_ = db.Close()
 		t.Fatalf("RemovePool(P): %v", rerr)
 	}
-	if cerr := db.CreatePoolWithMembers("Q", "failover", []string{"c", "d"}); cerr != nil {
+	if cerr := db.CreatePoolWithMembers("Q", "failover", []string{"c", "d"}, ""); cerr != nil {
 		_ = db.Close()
 		t.Fatalf("recreate c,d into Q: %v", cerr)
 	}

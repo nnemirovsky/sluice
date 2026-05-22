@@ -109,6 +109,11 @@ func TestCreateListStatusRotateRemove(t *testing.T) {
 	}
 }
 
+// TestCreateWithAuthResetTarget asserts create-with-target persists the target
+// in the single CreatePoolWithMembers call (the target is bound in the same
+// store transaction that creates the pool, not a separate follow-up
+// SetPoolAuthResetTarget write — Copilot #5). Both the GetPool read-back and
+// the derived Status reflect the configured target.
 func TestCreateWithAuthResetTarget(t *testing.T) {
 	db := newTestStore(t, "acct_a", "acct_b")
 

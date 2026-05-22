@@ -2308,7 +2308,7 @@ func TestHandlePoolRemoveUnknown(t *testing.T) {
 func TestHandlePoolRemoveReferencedByBinding(t *testing.T) {
 	s := newTestStore(t)
 	seedPoolOAuthMeta(t, s, "acct_a", "acct_b")
-	if err := s.CreatePoolWithMembers("codex", store.PoolStrategyFailover, []string{"acct_a", "acct_b"}); err != nil {
+	if err := s.CreatePoolWithMembers("codex", store.PoolStrategyFailover, []string{"acct_a", "acct_b"}, ""); err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 	// A binding referencing the pool by name keeps it from being removed.
@@ -2328,7 +2328,7 @@ func TestPoolStatusFormatMatchesCLI(t *testing.T) {
 	// doesn't drift from cmd/sluice/pool.go.
 	s := newTestStore(t)
 	seedPoolOAuthMeta(t, s, "m0", "m1")
-	if err := s.CreatePoolWithMembers("p", store.PoolStrategyFailover, []string{"m0", "m1"}); err != nil {
+	if err := s.CreatePoolWithMembers("p", store.PoolStrategyFailover, []string{"m0", "m1"}, ""); err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 	// Park m0 so it shows a cooldown line with the reason.
@@ -2352,7 +2352,7 @@ func TestPoolStatusEscapesLastFailureReason(t *testing.T) {
 	// < > & must be HTML-escaped or the Bot API rejects/garbles the message.
 	s := newTestStore(t)
 	seedPoolOAuthMeta(t, s, "m0", "m1")
-	if err := s.CreatePoolWithMembers("p", store.PoolStrategyFailover, []string{"m0", "m1"}); err != nil {
+	if err := s.CreatePoolWithMembers("p", store.PoolStrategyFailover, []string{"m0", "m1"}, ""); err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 	rawReason := `429 <too many> & "retry"`

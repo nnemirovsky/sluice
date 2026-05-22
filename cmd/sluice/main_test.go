@@ -1778,7 +1778,7 @@ func seedRecoveryPool(t *testing.T, db *store.Store, members []string) {
 			t.Fatalf("add credential meta %q: %v", m, err)
 		}
 	}
-	if err := db.CreatePoolWithMembers(pool, "", members); err != nil {
+	if err := db.CreatePoolWithMembers(pool, "", members, ""); err != nil {
 		t.Fatalf("create pool %q: %v", pool, err)
 	}
 }

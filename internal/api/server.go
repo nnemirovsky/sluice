@@ -1856,9 +1856,10 @@ func (s *Server) PostApiPools(w http.ResponseWriter, r *http.Request) { //nolint
 		effectiveStrategy = store.PoolStrategyFailover
 	}
 	out := storePoolToAPI(store.Pool{
-		Name:     req.Name,
-		Strategy: effectiveStrategy,
-		Members:  membersToStorePoolMembers(req.Members),
+		Name:            req.Name,
+		Strategy:        effectiveStrategy,
+		Members:         membersToStorePoolMembers(req.Members),
+		AuthResetTarget: authResetTarget,
 	})
 	if p, err := s.store.GetPool(req.Name); err == nil && p != nil {
 		out = storePoolToAPI(*p)
@@ -1922,7 +1923,11 @@ func (s *Server) PostApiPoolsNameRotate(w http.ResponseWriter, _ *http.Request, 
 // routing through poolops.SetAuthResetTarget so the three surfaces cannot
 // drift (channel feature-parity principle). A NUL/newline in the target is a
 // 400 (poolops.ErrInvalidAuthResetTarget); an unknown pool is 404. On success
-// the updated pool is returned so the caller sees the persisted value.
+// the updated pool is returned (200). If the post-write read-back fails the
+// set still succeeded, so 204 No Content is returned rather than a partial
+// Pool object: the OpenAPI Pool schema requires name+strategy+members, and the
+// request body alone cannot reconstruct strategy/members, so echoing it would
+// emit a schema-invalid response.
 func (s *Server) PostApiPoolsNameAuthResetTarget(w http.ResponseWriter, r *http.Request, name string) { //nolint:revive // generated interface name
 	var req SetPoolAuthResetTargetRequest
 	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
@@ -1937,14 +1942,15 @@ func (s *Server) PostApiPoolsNameAuthResetTarget(w http.ResponseWriter, r *http.
 		writeError(w, status, err.Error(), "")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 	if p, err := s.store.GetPool(name); err == nil && p != nil {
+		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(storePoolToAPI(*p))
 		return
 	}
-	// The set succeeded; a read-back failure must not report failure. Echo
-	// the persisted value from the request instead.
-	_ = json.NewEncoder(w).Encode(Pool{Name: name, AuthResetTarget: &req.AuthResetTarget})
+	// The set succeeded; only the post-write read-back failed. Returning a
+	// partial Pool (name + target, missing the required strategy/members)
+	// would violate the OpenAPI schema, so report success with no body.
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // DeleteApiPoolsName removes a pool. It refuses (409) while any binding still

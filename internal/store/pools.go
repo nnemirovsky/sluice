@@ -196,7 +196,10 @@ func assertCredentialNotInAnotherPoolTx(tx *sql.Tx, credential, newPool string) 
 // existing oauth credential with a token_url. At least two members are
 // required for failover to be meaningful, but a single-member pool is
 // permitted (it degrades to a plain indirection with no failover target).
-func (s *Store) CreatePoolWithMembers(name, strategy string, members []string) error {
+// authResetTarget is stored verbatim in the same transaction (empty = none),
+// so create-with-target is atomic: there is no window where the pool exists
+// without its configured target.
+func (s *Store) CreatePoolWithMembers(name, strategy string, members []string, authResetTarget string) error {
 	if name == "" {
 		return fmt.Errorf("%w: pool name is required", ErrPoolNoMembers)
 	}
@@ -253,7 +256,7 @@ func (s *Store) CreatePoolWithMembers(name, strategy string, members []string) e
 	}
 
 	if _, err := tx.Exec(
-		"INSERT INTO credential_pools (name, strategy, auth_reset_target) VALUES (?, ?, '')", name, strategy,
+		"INSERT INTO credential_pools (name, strategy, auth_reset_target) VALUES (?, ?, ?)", name, strategy, authResetTarget,
 	); err != nil {
 		return fmt.Errorf("insert pool %q: %w", name, err)
 	}
