@@ -120,7 +120,7 @@ func TestHandlePoolAuthResetTarget(t *testing.T) {
 	}
 
 	// Value reached the store.
-	assertStoredAuthResetTarget(t, dbPath, "codex", "openai-codex")
+	assertStoredAuthResetTarget(t, dbPath, "openai-codex")
 
 	// Surfaced in list and status.
 	out = captureStdout(t, func() {
@@ -145,7 +145,7 @@ func TestHandlePoolAuthResetTarget(t *testing.T) {
 	if !strings.Contains(out, "set to \"other-target\"") {
 		t.Errorf("set-auth-reset output = %q", out)
 	}
-	assertStoredAuthResetTarget(t, dbPath, "codex", "other-target")
+	assertStoredAuthResetTarget(t, dbPath, "other-target")
 
 	// Clear with the "-" sentinel.
 	out = captureStdout(t, func() {
@@ -156,7 +156,7 @@ func TestHandlePoolAuthResetTarget(t *testing.T) {
 	if !strings.Contains(out, "cleared") {
 		t.Errorf("clear output = %q", out)
 	}
-	assertStoredAuthResetTarget(t, dbPath, "codex", "")
+	assertStoredAuthResetTarget(t, dbPath, "")
 
 	// Unknown pool and bad usage.
 	if err := handlePoolCommand([]string{"set-auth-reset", "--db", dbPath, "missing", "x"}); err == nil {
@@ -172,17 +172,18 @@ func TestHandlePoolAuthResetTarget(t *testing.T) {
 		if err := handlePoolCommand([]string{"set-auth-reset", "--db", dbPath, "codex", target}); err == nil {
 			t.Errorf("%s target: expected rejection, got nil error", name)
 		}
-		assertStoredAuthResetTarget(t, dbPath, "codex", "")
+		assertStoredAuthResetTarget(t, dbPath, "")
 	}
 }
 
-func assertStoredAuthResetTarget(t *testing.T, dbPath, pool, want string) {
+func assertStoredAuthResetTarget(t *testing.T, dbPath, want string) {
 	t.Helper()
 	db, err := store.New(dbPath)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
 	defer func() { _ = db.Close() }()
+	const pool = "codex"
 	p, err := db.GetPool(pool)
 	if err != nil {
 		t.Fatalf("GetPool: %v", err)
