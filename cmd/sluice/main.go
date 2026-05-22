@@ -528,6 +528,17 @@ func main() {
 		}()
 	})
 
+	// Wire pool recovery side effects (Task 8): the always-fires operator
+	// notice (fanned across broker channels, independent of any reset target)
+	// and the opt-in, per-pool agent auth auto-reset. Registered
+	// UNCONDITIONALLY, mirroring SetOnFailover: the notice is internally gated
+	// on a broker being present, and the reset is internally gated on the
+	// recovered pool having a non-empty auth_reset_target AND a container
+	// manager. Both side effects run in detached goroutines so the recovery
+	// monitor is never blocked by a SQLite read, a Telegram round-trip, or a
+	// container exec.
+	wirePoolRecovery(srv, db, containerMgr, failoverBroker, logger)
+
 	if len(allChannels) > 0 {
 		// Start all channels.
 		if tgChannel != nil {
@@ -953,6 +964,99 @@ func injectEnvVarsFromStore(db *store.Store, mgr container.ContainerManager) err
 	}
 	log.Printf("injected %d env vars into agent container", len(envMap))
 	return nil
+}
+
+// auditLogger is the minimal audit-write surface wirePoolRecovery needs.
+// *audit.FileLogger satisfies it; tests can supply a fake.
+type auditLogger interface {
+	Log(evt audit.Event) error
+}
+
+// wirePoolRecovery registers the two pool-recovery side effects on the proxy
+// server (Task 8), mirroring the SetOnFailover wiring:
+//
+//   - SetOnPoolRecoveredNotice: ALWAYS fires on a recovery edge, independent of
+//     any reset target. Builds the "pool recovered" notice via
+//     proxy.FormatPoolRecoveredNotice and fans it across the broker's channels.
+//     Internally gated only on a broker being present.
+//   - SetOnPoolRecovered: the opt-in, per-pool agent auth auto-reset. Looks up
+//     the recovered pool's auth_reset_target in the store; when non-empty AND a
+//     container manager exists, calls mgr.ResetAuth in a detached goroutine with
+//     a fresh bounded context (never a wake-scoped ctx) and emits an
+//     agent_auth_reset audit event on success. An empty target is the opt-out
+//     default (no reset). A ResetAuth error is logged, not fatal.
+//
+// Both callbacks run their work in detached goroutines so the recovery monitor
+// is never blocked by a SQLite read, a Telegram round-trip, or a container exec.
+// The two hooks are independent: the notice fires even when no reset target is
+// configured, and the reset never suppresses the notice.
+func wirePoolRecovery(srv *proxy.Server, db *store.Store, mgr container.ContainerManager, broker *channel.Broker, logger auditLogger) {
+	srv.SetOnPoolRecoveredNotice(poolRecoveredNoticeFunc(broker))
+	srv.SetOnPoolRecovered(poolAuthResetFunc(db, mgr, logger))
+}
+
+// poolRecoveredNoticeFunc builds the always-fires recovery-notice callback. It
+// fans proxy.FormatPoolRecoveredNotice across the broker's channels in a
+// detached goroutine; a nil broker yields a callback that does nothing (the
+// notice is internally gated on a broker being present, like SetOnFailover).
+func poolRecoveredNoticeFunc(broker *channel.Broker) func(pool string) {
+	return func(pool string) {
+		if broker == nil {
+			return
+		}
+		go func() {
+			msg := proxy.FormatPoolRecoveredNotice(pool)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			for _, ch := range broker.Channels() {
+				if nerr := ch.Notify(ctx, msg); nerr != nil {
+					log.Printf("[POOL-RECOVERY] notice via %s failed: %v", ch.Type(), nerr)
+				}
+			}
+		}()
+	}
+}
+
+// poolAuthResetFunc builds the opt-in, per-pool agent auth auto-reset callback.
+// It looks up the recovered pool's auth_reset_target; when non-empty AND a
+// container manager exists, it calls mgr.ResetAuth in a detached goroutine with
+// a fresh bounded context and emits an agent_auth_reset audit event on success.
+// An empty target is the opt-out default. A ResetAuth error is logged, not fatal.
+func poolAuthResetFunc(db *store.Store, mgr container.ContainerManager, logger auditLogger) func(pool string) {
+	return func(pool string) {
+		if db == nil || mgr == nil {
+			return
+		}
+		go func() {
+			p, err := db.GetPool(pool)
+			if err != nil {
+				log.Printf("[POOL-RECOVERY] auth-reset lookup for pool %q failed: %v", pool, err)
+				return
+			}
+			if p == nil || p.AuthResetTarget == "" {
+				// Opt-out default: no reset target configured for this pool.
+				return
+			}
+			target := p.AuthResetTarget
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			if rerr := mgr.ResetAuth(ctx, target); rerr != nil {
+				log.Printf("[POOL-RECOVERY] auth reset for pool %q (target %q) failed: %v", pool, target, rerr)
+				return
+			}
+			log.Printf("[POOL-RECOVERY] agent auth reset for pool %q (target %q)", pool, target)
+			if logger != nil {
+				if lerr := logger.Log(audit.Event{
+					Action:     "agent_auth_reset",
+					Verdict:    "recover",
+					Credential: pool,
+					Reason:     target,
+				}); lerr != nil {
+					log.Printf("[POOL-RECOVERY] audit log for agent_auth_reset (pool %q) failed: %v", pool, lerr)
+				}
+			}
+		}()
+	}
 }
 
 // envDefault returns the environment variable value if set, otherwise the fallback.

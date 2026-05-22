@@ -369,16 +369,20 @@ precedent) and emits an `agent_auth_reset` audit event.
 - Modify: `internal/proxy/pool_failover.go` / audit usage (`agent_auth_reset` action)
 - Modify: relevant `_test.go`
 
-- [ ] in main.go register `SetOnPoolRecovered`: look up the recovered pool's
+- [x] in main.go register `SetOnPoolRecovered`: look up the recovered pool's
   `auth_reset_target`; if non-empty and `containerMgr != nil`, call
   `containerMgr.ResetAuth(ctx, target)` in a detached goroutine using a fresh
   `context.WithTimeout(context.Background(), …)` (never block; never reuse a wake-scoped ctx);
-  log + emit `agent_auth_reset`; empty target → no reset (opt-out default)
-- [ ] keep the recovered Telegram notice (Task 3) and the reset independent (notice always;
-  reset only when target set); a `ResetAuth` error is logged, not fatal
-- [ ] write tests: target set → recovery triggers `ResetAuth(target)` once; no target → no
-  reset, notice still emitted; `ResetAuth` error logged not fatal
-- [ ] run `go test ./... -race` for touched packages; gofumpt; vet — pass before Task 9
+  log + emit `agent_auth_reset`; empty target → no reset (opt-out default). Implemented via
+  `wirePoolRecovery` (registered unconditionally near `SetOnFailover`), with
+  `poolAuthResetFunc`/`poolRecoveredNoticeFunc` factored out for direct testing.
+- [x] keep the recovered Telegram notice (Task 3) and the reset independent (notice always
+  via `SetOnPoolRecoveredNotice` fanned across `failoverBroker.Channels()`; reset only when
+  target set via `SetOnPoolRecovered`); a `ResetAuth` error is logged, not fatal
+- [x] write tests: target set → recovery triggers `ResetAuth(target)` once + one
+  `agent_auth_reset` audit event; no target → no reset; notice fires across broker channels
+  regardless of target; `ResetAuth` error logged not fatal; nil manager/nil broker no-op
+- [x] run `go test ./... -race` for touched packages; gofumpt; vet — pass before Task 9
 
 ### Task 9: Verify acceptance criteria
 - [ ] both members exhausted → exactly one "pool exhausted" notice (no flap stream)
