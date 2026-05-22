@@ -333,14 +333,14 @@ precedent) and emits an `agent_auth_reset` audit event.
 - Modify: `internal/container/docker_test.go` (`mockClient`) + any other `ExecInContainer` callers
 - Modify: `internal/container/agent_profile.go` (`AgentProfile.ExecUser() string`)
 
-- [ ] add `User string` to `execCreateRequest`; thread an optional user arg through
+- [x] add `User string` to `execCreateRequest`; thread an optional user arg through
   `ExecInContainer` on `ContainerClient` + `SocketClient` (empty "" = current root behavior)
-- [ ] update `mockClient` and every existing `ExecInContainer` caller (no-op default, no
+- [x] update `mockClient` and every existing `ExecInContainer` caller (no-op default, no
   behavior change)
-- [ ] add `ExecUser() string` to `AgentProfile` (hermes `"10000:10000"`, openclaw "")
-- [ ] write tests: socket exec body carries `User` when set and omits/empties it otherwise;
+- [x] add `ExecUser() string` to `AgentProfile` (hermes `"10000:10000"`, openclaw "")
+- [x] write tests: socket exec body carries `User` when set and omits/empties it otherwise;
   profile `ExecUser` values; existing callers unaffected
-- [ ] run `go test ./internal/container/ -race`; gofumpt; vet — pass before Task 7
+- [x] run `go test ./internal/container/ -race`; gofumpt; vet — pass before Task 7
 
 ### Task 7: Profile `ResetAuthCmd` + `ContainerManager.ResetAuth`
 

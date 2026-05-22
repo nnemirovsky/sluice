@@ -25,6 +25,8 @@ type mockClient struct {
 	execCalled  bool
 	execCmd     []string
 	execCalls   [][]string // all exec calls recorded
+	execUser    string     // user from the most recent exec call
+	execUsers   []string   // user from every exec call, in order
 	// Track container names passed to each method.
 	inspectedName string
 	stoppedName   string
@@ -61,11 +63,13 @@ func (m *mockClient) StartContainer(_ context.Context, id string) error {
 	return m.startErr
 }
 
-func (m *mockClient) ExecInContainer(_ context.Context, name string, cmd []string) error {
+func (m *mockClient) ExecInContainer(_ context.Context, name, user string, cmd []string) error {
 	m.execCalled = true
 	m.execName = name
 	m.execCmd = cmd
+	m.execUser = user
 	m.execCalls = append(m.execCalls, cmd)
+	m.execUsers = append(m.execUsers, user)
 
 	// Use per-call error if available.
 	if len(m.execErrs) > 0 {
@@ -468,6 +472,48 @@ func TestInjectEnvVarsHermesProfile(t *testing.T) {
 	}
 	if strings.Contains(script, ".openclaw") {
 		t.Errorf("script should not mention .openclaw under hermes profile: %s", script)
+	}
+}
+
+// TestExistingExecCallersUseDefaultUser pins the no-behavior-change
+// guarantee for Task 6: the existing DockerManager exec call sites
+// (InjectEnvVars, ReloadSecrets, WireMCPGateway) keep running as the
+// image's USER (empty user string), regardless of the profile's
+// ExecUser. Only the future auth-reset path (Task 7) opts into a user.
+func TestExistingExecCallersUseDefaultUser(t *testing.T) {
+	// Hermes profile (ExecUser "10000:10000") exercises both the env
+	// write and the MCP wire exec; neither should adopt the profile user.
+	mc := &mockClient{}
+	mgr := NewDockerManagerForProfile(mc, "hermes", HermesProfile)
+
+	if err := mgr.InjectEnvVars(context.Background(),
+		map[string]string{"OPENAI_API_KEY": "sk-phantom"}, false); err != nil {
+		t.Fatalf("InjectEnvVars: %v", err)
+	}
+	if err := mgr.WireMCPGateway(context.Background(), "sluice", "http://sluice:3000/mcp"); err != nil {
+		t.Fatalf("WireMCPGateway: %v", err)
+	}
+
+	if len(mc.execUsers) == 0 {
+		t.Fatal("expected at least one exec call recorded")
+	}
+	for i, u := range mc.execUsers {
+		if u != "" {
+			t.Errorf("exec call %d ran as user %q, want empty (no behavior change)", i, u)
+		}
+	}
+
+	// Openclaw profile runs the env write + reload exec; both default too.
+	mcO := &mockClient{}
+	mgrO := NewDockerManagerForProfile(mcO, "openclaw", OpenclawProfile)
+	if err := mgrO.InjectEnvVars(context.Background(),
+		map[string]string{"OPENAI_API_KEY": "sk-phantom"}, false); err != nil {
+		t.Fatalf("InjectEnvVars (openclaw): %v", err)
+	}
+	for i, u := range mcO.execUsers {
+		if u != "" {
+			t.Errorf("openclaw exec call %d ran as user %q, want empty", i, u)
+		}
 	}
 }
 

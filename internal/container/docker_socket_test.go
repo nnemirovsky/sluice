@@ -316,6 +316,7 @@ func TestSocketClientExecInContainer(t *testing.T) {
 	defer cleanup()
 
 	var execCreateBody execCreateRequest
+	var rawCreateBody map[string]any
 	mux.HandleFunc("/v1.25/containers/mycontainer/exec", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			http.Error(w, "want POST", http.StatusMethodNotAllowed)
@@ -323,6 +324,7 @@ func TestSocketClientExecInContainer(t *testing.T) {
 		}
 		data, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(data, &execCreateBody)
+		_ = json.Unmarshal(data, &rawCreateBody)
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "exec123"})
 	})
@@ -339,13 +341,56 @@ func TestSocketClientExecInContainer(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"ExitCode": 0})
 	})
 
-	err := client.ExecInContainer(context.Background(), "mycontainer", []string{"openclaw", "secrets", "reload"})
+	err := client.ExecInContainer(context.Background(), "mycontainer", "", []string{"openclaw", "secrets", "reload"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	if len(execCreateBody.Cmd) != 3 || execCreateBody.Cmd[0] != "openclaw" {
 		t.Errorf("exec Cmd = %v, want [openclaw secrets reload]", execCreateBody.Cmd)
+	}
+	if execCreateBody.User != "" {
+		t.Errorf("exec User = %q, want empty for default-root exec", execCreateBody.User)
+	}
+	if _, ok := rawCreateBody["User"]; ok {
+		t.Error("exec-create body should omit the User field when no user is set (omitempty)")
+	}
+}
+
+// TestSocketClientExecInContainerWithUser verifies that a non-empty user is
+// carried into the exec-create request body (Docker runs the exec as that
+// UID:GID), and that the omitempty tag keeps it absent when empty.
+func TestSocketClientExecInContainerWithUser(t *testing.T) {
+	client, mux, cleanup := newTestServer(t)
+	defer cleanup()
+
+	var rawCreateBody map[string]any
+	var execCreateBody execCreateRequest
+	mux.HandleFunc("/v1.25/containers/mycontainer/exec", func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(data, &execCreateBody)
+		_ = json.Unmarshal(data, &rawCreateBody)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "exec123"})
+	})
+	mux.HandleFunc("/v1.25/exec/exec123/start", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/v1.25/exec/exec123/json", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"ExitCode": 0})
+	})
+
+	err := client.ExecInContainer(context.Background(), "mycontainer", "10000:10000",
+		[]string{"hermes", "auth", "reset", "openai-codex"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if execCreateBody.User != "10000:10000" {
+		t.Errorf("exec User = %q, want 10000:10000", execCreateBody.User)
+	}
+	if _, ok := rawCreateBody["User"]; !ok {
+		t.Error("exec-create body should contain a User field when a user is set")
 	}
 }
 
@@ -366,7 +411,7 @@ func TestSocketClientExecNonZeroExit(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"ExitCode": 127})
 	})
 
-	err := client.ExecInContainer(context.Background(), "mycontainer", []string{"openclaw", "secrets", "reload"})
+	err := client.ExecInContainer(context.Background(), "mycontainer", "", []string{"openclaw", "secrets", "reload"})
 	if err == nil {
 		t.Fatal("expected error for non-zero exit code")
 	}

@@ -241,11 +241,15 @@ func (c *SocketClient) StartContainer(ctx context.Context, id string) error {
 	return nil
 }
 
-// ExecInContainer runs a command inside a running container.
-func (c *SocketClient) ExecInContainer(ctx context.Context, name string, cmd []string) error {
+// ExecInContainer runs a command inside a running container. user is the
+// optional UID:GID (or user name) the exec runs as; an empty string omits
+// the User field from the exec-create request, preserving Docker's default
+// of running as the image's USER (typically root for agent containers).
+func (c *SocketClient) ExecInContainer(ctx context.Context, name, user string, cmd []string) error {
 	// Step 1: Create exec instance.
 	createBody := execCreateRequest{
 		Cmd:          cmd,
+		User:         user,
 		AttachStdout: true,
 		AttachStderr: true,
 	}
@@ -395,6 +399,7 @@ type createResponseBody struct {
 
 type execCreateRequest struct {
 	Cmd          []string `json:"Cmd"`
+	User         string   `json:"User,omitempty"`
 	AttachStdout bool     `json:"AttachStdout"`
 	AttachStderr bool     `json:"AttachStderr"`
 }

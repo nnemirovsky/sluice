@@ -348,3 +348,17 @@ func TestResolveProfile_NilDefaultsToOpenclaw(t *testing.T) {
 		t.Error("non-nil profile should be returned as-is")
 	}
 }
+
+func TestProfileExecUser(t *testing.T) {
+	if got := HermesProfile.ExecUser(); got != "10000:10000" {
+		t.Errorf("HermesProfile.ExecUser() = %q, want 10000:10000", got)
+	}
+	if got := OpenclawProfile.ExecUser(); got != "" {
+		t.Errorf("OpenclawProfile.ExecUser() = %q, want empty", got)
+	}
+	// Nil-safe accessor.
+	var p *AgentProfile
+	if got := p.ExecUser(); got != "" {
+		t.Errorf("(*AgentProfile)(nil).ExecUser() = %q, want empty", got)
+	}
+}

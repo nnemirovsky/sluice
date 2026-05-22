@@ -34,6 +34,26 @@ type AgentProfile struct {
 	// config in place and the operator must wire the MCP gateway
 	// manually before starting the agent.
 	WireMCPCmd func(name, url string) []string
+
+	// execUser is the UID:GID (or user name) that file-writing execs
+	// should run as inside the agent container. Empty means run as the
+	// image's USER (typically root). Hermes runs its gateway as a
+	// non-root runtime user (UID 10000), so an exec that writes a
+	// hermes-owned file (e.g. `hermes auth reset`) must run as that
+	// user or it root-chowns the file and bricks the gateway. Read it
+	// via the ExecUser accessor, which is nil-safe.
+	execUser string
+}
+
+// ExecUser returns the UID:GID (or user name) that file-writing execs
+// should run as for this profile, or "" to run as the image's USER. The
+// receiver is nil-safe so callers holding a possibly-nil profile can call
+// it directly.
+func (p *AgentProfile) ExecUser() string {
+	if p == nil {
+		return ""
+	}
+	return p.execUser
 }
 
 // OpenclawProfile is the default profile. Openclaw stores secrets at
@@ -100,6 +120,9 @@ var HermesProfile = &AgentProfile{
 	Name:           "hermes",
 	EnvFileRelPath: ".hermes/.env",
 	ReloadCmd:      nil,
+	// Hermes' gateway runs as UID 10000; file-writing execs must match
+	// so they don't root-chown hermes-owned files and brick the gateway.
+	execUser: "10000:10000",
 	WireMCPCmd: func(name, url string) []string {
 		return []string{
 			"sh",
