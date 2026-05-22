@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1178,5 +1179,161 @@ func TestFailoverToManualRotateParkedPeer(t *testing.T) {
 	}
 	if n := auditActionCount(t, logPath, "pool_exhausted"); n != 0 {
 		t.Fatalf("pool_exhausted audit rows = %d, want 0 (a healthy parked peer exists)", n)
+	}
+}
+
+// TestCooldownFromResponse exercises B1's header-derived cooldown parsing and
+// clamping. These assertions are intentionally GENERIC about the parsing/clamp
+// mechanics and do NOT bake in which header OpenAI's usage-limit 429 actually
+// sends — that header winner is resolved by the Post-Completion live capture.
+func TestCooldownFromResponse(t *testing.T) {
+	now := time.Now()
+	resp := func(class failoverClass, set func(h http.Header)) (failoverClass, http.Header) {
+		h := make(http.Header)
+		if set != nil {
+			set(h)
+		}
+		return class, h
+	}
+
+	tests := []struct {
+		name  string
+		class failoverClass
+		setup func(h http.Header)
+		want  time.Duration
+		// approx: when true, want is treated as a target and the result must
+		// be within tolerance (HTTP-date / absolute-epoch cases lose sub-second
+		// precision against a freshly-sampled now inside cooldownFromResponse).
+		approx bool
+	}{
+		{
+			name:  "no headers falls back to rate-limit class default",
+			class: failoverRateLimited,
+			want:  vault.RateLimitCooldown,
+		},
+		{
+			name:  "no headers falls back to auth-failure class default",
+			class: failoverAuthFailure,
+			want:  vault.AuthFailCooldown,
+		},
+		{
+			name:  "Retry-After delta seconds honored",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "120") },
+			want:  120 * time.Second,
+		},
+		{
+			name:   "Retry-After HTTP-date honored",
+			class:  failoverRateLimited,
+			setup:  func(h http.Header) { h.Set("Retry-After", now.Add(90*time.Second).UTC().Format(http.TimeFormat)) },
+			want:   90 * time.Second,
+			approx: true,
+		},
+		{
+			name:  "x-ratelimit-reset unix epoch honored",
+			class: failoverRateLimited,
+			setup: func(h http.Header) {
+				h.Set("x-ratelimit-reset", strconv.FormatInt(now.Add(300*time.Second).Unix(), 10))
+			},
+			want:   300 * time.Second,
+			approx: true,
+		},
+		{
+			name:  "x-ratelimit-reset-requests delta seconds honored",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("x-ratelimit-reset-requests", "45") },
+			want:  45 * time.Second,
+		},
+		{
+			name:  "x-ratelimit-reset-tokens unit-suffixed duration honored",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("x-ratelimit-reset-tokens", "1500ms") },
+			want:  1500 * time.Millisecond,
+			// 1.5s is below MinRateLimitFloor so it clamps up; assert clamp below.
+		},
+		{
+			name:  "absurd value capped at MaxCooldown",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "999999999") },
+			want:  vault.MaxCooldown,
+		},
+		{
+			name:  "tiny rate-limit value floored at MinRateLimitFloor",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "2") },
+			want:  vault.MinRateLimitFloor,
+		},
+		{
+			name:  "auth-failure hint floored at AuthFailCooldown",
+			class: failoverAuthFailure,
+			setup: func(h http.Header) { h.Set("Retry-After", "5") },
+			want:  vault.AuthFailCooldown,
+		},
+		{
+			name:  "auth-failure long hint honored above its floor",
+			class: failoverAuthFailure,
+			setup: func(h http.Header) { h.Set("Retry-After", "1200") },
+			want:  1200 * time.Second,
+		},
+		{
+			name:  "Retry-After precedence over reset family",
+			class: failoverRateLimited,
+			setup: func(h http.Header) {
+				h.Set("Retry-After", "120")
+				h.Set("x-ratelimit-reset", "30")
+			},
+			want: 120 * time.Second,
+		},
+		{
+			name:  "unparseable header ignored falls back to default",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "soon-ish") },
+			want:  vault.RateLimitCooldown,
+		},
+		{
+			name:  "negative delta ignored falls back to default",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "-5") },
+			want:  vault.RateLimitCooldown,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			class, h := resp(tt.class, tt.setup)
+			got := cooldownFromResponse(class, h)
+			if tt.approx {
+				const tol = 2 * time.Second
+				diff := got - tt.want
+				if diff < 0 {
+					diff = -diff
+				}
+				if diff > tol {
+					t.Fatalf("cooldownFromResponse = %v, want ~%v (tol %v)", got, tt.want, tol)
+				}
+				return
+			}
+			// The unit-suffixed 1.5s case clamps up to MinRateLimitFloor.
+			if tt.name == "x-ratelimit-reset-tokens unit-suffixed duration honored" {
+				if got != vault.MinRateLimitFloor {
+					t.Fatalf("cooldownFromResponse = %v, want clamp to %v", got, vault.MinRateLimitFloor)
+				}
+				return
+			}
+			if got != tt.want {
+				t.Fatalf("cooldownFromResponse = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCooldownFromResponseNilSafe verifies the nil-header guard returns the
+// class default rather than panicking.
+func TestCooldownFromResponseNilSafe(t *testing.T) {
+	if got := cooldownFromResponse(failoverRateLimited, nil); got != vault.RateLimitCooldown {
+		t.Fatalf("nil header: got %v, want %v", got, vault.RateLimitCooldown)
+	}
+	if got := cooldownFromResponse(failoverAuthFailure, nil); got != vault.AuthFailCooldown {
+		t.Fatalf("nil header (auth): got %v, want %v", got, vault.AuthFailCooldown)
 	}
 }

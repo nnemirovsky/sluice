@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -128,6 +130,139 @@ func bodyContainsAny(body []byte, subs ...string) bool {
 		}
 	}
 	return false
+}
+
+// minFloorForClass returns the lower clamp bound for a derived cooldown. A
+// rate-limited member may be honored down to MinRateLimitFloor (a short real
+// recovery window must be respected — the whole point of B1). An auth failure
+// must never be retried in seconds: a revoked/expired token will not self-heal
+// quickly, so the floor stays at AuthFailCooldown regardless of any hint.
+func minFloorForClass(class failoverClass) time.Duration {
+	if class == failoverAuthFailure {
+		return vault.AuthFailCooldown
+	}
+	return vault.MinRateLimitFloor
+}
+
+// classDefaultCooldown is the flat fallback applied when the upstream sends no
+// usable recovery hint header.
+func classDefaultCooldown(class failoverClass) time.Duration {
+	if class == failoverAuthFailure {
+		return vault.AuthFailCooldown
+	}
+	return vault.RateLimitCooldown
+}
+
+// recoveryHintHeaders are the response headers, in precedence order, from
+// which cooldownFromResponse derives the real recovery window. Retry-After is
+// the standard signal; the x-ratelimit-reset* family is provider-specific
+// (OpenAI emits per-resource reset hints). Each value is parsed as either a
+// delta-seconds count, an HTTP-date (Retry-After only), or — for the reset
+// family — a unix epoch.
+var recoveryHintHeaders = []string{
+	"Retry-After",
+	"x-ratelimit-reset",
+	"x-ratelimit-reset-requests",
+	"x-ratelimit-reset-tokens",
+}
+
+// cooldownFromResponse derives the cooldown duration for a failed pool member
+// from the upstream's recovery hint headers, clamped to the class bounds.
+//
+// Precedence: Retry-After (delta-seconds or HTTP-date), then the
+// x-ratelimit-reset* family (delta-seconds or unix epoch). The first header
+// that yields a positive duration wins. With NO usable hint the flat class
+// default is returned (RateLimitCooldown / AuthFailCooldown), so behavior is
+// unchanged from before B1 on responses that carry no hint.
+//
+// The parsed window is clamped to [minFloorForClass(class), MaxCooldown]: a
+// rate-limit hint may shrink the cooldown down to MinRateLimitFloor (honoring
+// a short real window), an auth failure stays floored at AuthFailCooldown, and
+// any absurd/hostile value is capped at MaxCooldown so a member is never
+// parked indefinitely.
+//
+// No body parsing in v1 (deferred until a real Codex 429 is captured — see the
+// plan's Post-Completion note); only headers are consulted.
+//
+// Takes the response header directly (not *http.Response) so it works
+// uniformly against the go-mitmproxy Flow's Response.Header at the call site
+// and a plain http.Header in tests.
+func cooldownFromResponse(class failoverClass, header http.Header) time.Duration {
+	if header == nil {
+		return classDefaultCooldown(class)
+	}
+	now := time.Now()
+	for _, h := range recoveryHintHeaders {
+		raw := strings.TrimSpace(header.Get(h))
+		if raw == "" {
+			continue
+		}
+		d, ok := parseRecoveryHint(h, raw, now)
+		if !ok || d <= 0 {
+			continue
+		}
+		return clampCooldown(class, d)
+	}
+	return classDefaultCooldown(class)
+}
+
+// parseRecoveryHint parses a single recovery-hint header value into a positive
+// duration relative to now. It tries, in order:
+//
+//   - delta-seconds: a bare integer/decimal count of seconds from now (all
+//     headers).
+//   - HTTP-date: an absolute time (Retry-After only, per RFC 9110); the
+//     duration is its distance from now.
+//   - unix epoch: a large integer treated as seconds-since-epoch (the
+//     x-ratelimit-reset* family commonly emits an absolute epoch).
+//
+// Returns ok=false when the value parses to nothing usable (negative,
+// zero-after-now, unparseable). A delta value carrying a unit suffix (OpenAI's
+// "1.5s" / "60ms" form) is handled via time.ParseDuration as a fallback.
+func parseRecoveryHint(header, raw string, now time.Time) (time.Duration, bool) {
+	// Bare numeric: delta-seconds for Retry-After; for the reset family it may
+	// be either delta-seconds OR a unix epoch. Disambiguate by magnitude — a
+	// value large enough to be a plausible epoch (>= ~ year 2001) is treated
+	// as absolute, otherwise as a delta.
+	if secs, err := strconv.ParseFloat(raw, 64); err == nil {
+		if secs < 0 {
+			return 0, false
+		}
+		const epochThreshold = 1_000_000_000 // ~2001-09; below this, treat as delta-seconds
+		if header != "Retry-After" && secs >= epochThreshold {
+			until := time.Unix(int64(secs), 0)
+			if d := until.Sub(now); d > 0 {
+				return d, true
+			}
+			return 0, false
+		}
+		return time.Duration(secs * float64(time.Second)), true
+	}
+	// HTTP-date (Retry-After absolute form).
+	if t, err := http.ParseTime(raw); err == nil {
+		if d := t.Sub(now); d > 0 {
+			return d, true
+		}
+		return 0, false
+	}
+	// Unit-suffixed duration (e.g. OpenAI "1.5s", "60ms").
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d, true
+	}
+	return 0, false
+}
+
+// clampCooldown bounds a derived cooldown to [minFloorForClass(class),
+// MaxCooldown].
+func clampCooldown(class failoverClass, d time.Duration) time.Duration {
+	floor := minFloorForClass(class)
+	if d < floor {
+		return floor
+	}
+	if d > vault.MaxCooldown {
+		return vault.MaxCooldown
+	}
+	return d
 }
 
 // FailoverEvent describes a completed pool failover. It is handed to the
@@ -476,10 +611,13 @@ func (a *SluiceAddon) handlePoolFailover(f *mitmproxy.Flow) {
 		return
 	}
 
-	ttl := vault.RateLimitCooldown
-	if class == failoverAuthFailure {
-		ttl = vault.AuthFailCooldown
-	}
+	// B1: derive the cooldown window from the upstream's recovery hints
+	// (Retry-After / x-ratelimit-reset*) instead of the flat class TTL, so a
+	// quota-exhausted member is parked for the REAL window rather than being
+	// re-probed every RateLimitCooldown (60s). cooldownFromResponse clamps to
+	// the class bounds and falls back to the flat default when no hint header
+	// is present.
+	ttl := cooldownFromResponse(class, f.Response.Header)
 	until := time.Now().Add(ttl)
 	tag := failoverReasonTag(class, f.Response.StatusCode, bodyTag)
 

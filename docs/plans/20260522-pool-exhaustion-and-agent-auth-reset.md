@@ -205,18 +205,21 @@ precedent) and emits an `agent_auth_reset` audit event.
 - Modify: `internal/proxy/pool_failover.go`
 - Modify: `internal/proxy/pool_failover_test.go`
 
-- [ ] add `maxCooldown = 6*time.Hour` and `minRateLimitFloor = 10*time.Second` near the TTLs
-- [ ] add `cooldownFromResponse(class failoverClass, resp *http.Response) time.Duration`:
+- [x] add `maxCooldown = 6*time.Hour` and `minRateLimitFloor = 10*time.Second` near the TTLs
+  (exported as `MaxCooldown`/`MinRateLimitFloor` so the proxy package can clamp against them,
+  mirroring `RateLimitCooldown`/`AuthFailCooldown`)
+- [x] add `cooldownFromResponse(class failoverClass, header http.Header) time.Duration`
+  (takes `http.Header` directly so it works against the go-mitmproxy Flow's `Response.Header`):
   parse `Retry-After` (delta-seconds + HTTP-date), then `x-ratelimit-reset` /
   `x-ratelimit-reset-requests` / `x-ratelimit-reset-tokens` (delta or epoch); clamp to
-  `[minFloor(class), maxCooldown]` (rate-limit floor `minRateLimitFloor`, auth-failure floor
+  `[minFloor(class), MaxCooldown]` (rate-limit floor `MinRateLimitFloor`, auth-failure floor
   `AuthFailCooldown`); **no hint → class default**. No body parsing in v1.
-- [ ] in `handlePoolFailover` replace the flat `ttl` with `cooldownFromResponse(class, f.Response)`
-- [ ] write tests (generic parsing/clamp, NOT a Codex-specific header winner): Retry-After
+- [x] in `handlePoolFailover` replace the flat `ttl` with `cooldownFromResponse(class, f.Response.Header)`
+- [x] write tests (generic parsing/clamp, NOT a Codex-specific header winner): Retry-After
   seconds; Retry-After HTTP-date; epoch reset header; delta reset header; no headers → class
-  default; absurd value → `maxCooldown`; tiny rate-limit value honored down to
-  `minRateLimitFloor`; auth-failure floored at `AuthFailCooldown`
-- [ ] run `go test ./internal/proxy/ ./internal/vault/ -race`; gofumpt; vet — pass before Task 2
+  default; absurd value → `MaxCooldown`; tiny rate-limit value honored down to
+  `MinRateLimitFloor`; auth-failure floored at `AuthFailCooldown`
+- [x] run `go test ./internal/proxy/ ./internal/vault/ -race`; gofumpt; vet — pass before Task 2
 
 ### Task 2: A1 — exhaustion = no healthy member, collapse dedup key
 

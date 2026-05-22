@@ -18,6 +18,21 @@ const (
 	AuthFailCooldown  = 300 * time.Second
 )
 
+// Cooldown bounds applied when the cooldown window is derived from an
+// upstream recovery hint (Retry-After / rate-limit-reset headers) instead of
+// the flat class default. MaxCooldown caps an absurd or malicious hint so a
+// member can never be parked indefinitely; MinRateLimitFloor is the lower
+// bound for a rate-limited member — deliberately well below RateLimitCooldown
+// so a SHORT real recovery window from the upstream is honored (the point of
+// B1 is that the flat 60s is too LONG-floored, re-probing an exhausted account
+// every minute, not too short). Exported so the proxy package's
+// cooldownFromResponse can clamp against them (mirrors RateLimitCooldown /
+// AuthFailCooldown, which are likewise consumed from proxy).
+const (
+	MaxCooldown       = 6 * time.Hour
+	MinRateLimitFloor = 10 * time.Second
+)
+
 // ManualRotateReason is the cooldown reason stamped by `sluice pool rotate`
 // when it parks the previously-active member. A member parked for this
 // reason is operationally deprioritized BY AN OPERATOR, not unhealthy: it
