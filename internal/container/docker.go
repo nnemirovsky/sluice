@@ -127,6 +127,23 @@ func (m *DockerManager) ReloadSecrets(ctx context.Context) error {
 	return m.client.ExecInContainer(ctx, m.containerName, "", m.profile.ReloadCmd())
 }
 
+// ResetAuth clears the agent's local auth state for target so it retries
+// after a credential-pool quota window passes. The mechanism is
+// profile-specific (hermes runs `hermes auth reset <target>`); a nil
+// ResetAuthCmd is a logged no-op (mirrors ReloadSecrets). The exec runs
+// as the profile's ExecUser (UID 10000:10000 for hermes) so it does not
+// root-chown the agent's auth files and brick the gateway.
+func (m *DockerManager) ResetAuth(ctx context.Context, target string) error {
+	if m.profile.ResetAuthCmd == nil {
+		log.Printf("agent profile %q has no auth-reset command; agent must recover on its own", m.profile.Name)
+		return nil
+	}
+	if err := validateResetAuthTarget(target); err != nil {
+		return err
+	}
+	return m.client.ExecInContainer(ctx, m.containerName, m.profile.ExecUser(), m.profile.ResetAuthCmd(target))
+}
+
 // WireMCPGateway registers sluice's MCP gateway URL inside the agent's
 // config so that its embedded runtime discovers sluice as an MCP server.
 // The exact storage format depends on the profile (openclaw patches its

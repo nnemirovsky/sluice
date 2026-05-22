@@ -766,3 +766,80 @@ func TestDockerManagerInjectCACertNoop(t *testing.T) {
 		t.Error("Docker InjectCACert should not exec anything")
 	}
 }
+
+func TestResetAuthHermesRunsAsRuntimeUID(t *testing.T) {
+	mc := &mockClient{}
+	mgr := NewDockerManagerForProfile(mc, "hermes", HermesProfile)
+
+	if err := mgr.ResetAuth(context.Background(), "openai-codex"); err != nil {
+		t.Fatalf("ResetAuth: %v", err)
+	}
+	if len(mc.execCalls) != 1 {
+		t.Fatalf("expected 1 exec call, got %d", len(mc.execCalls))
+	}
+	// The hermes reset exec must run as the runtime UID so it does not
+	// root-chown hermes-owned auth files and brick the gateway.
+	if mc.execUsers[0] != "10000:10000" {
+		t.Errorf("ResetAuth exec user = %q, want 10000:10000", mc.execUsers[0])
+	}
+	want := []string{"/opt/hermes/.venv/bin/hermes", "auth", "reset", "openai-codex"}
+	cmd := mc.execCalls[0]
+	if len(cmd) != len(want) {
+		t.Fatalf("ResetAuth argv = %v, want %v", cmd, want)
+	}
+	for i := range want {
+		if cmd[i] != want[i] {
+			t.Errorf("ResetAuth argv[%d] = %q, want %q", i, cmd[i], want[i])
+		}
+	}
+}
+
+func TestResetAuthNilCmdNoOps(t *testing.T) {
+	// Openclaw has a nil ResetAuthCmd: ResetAuth logs a notice and
+	// returns nil without exec'ing anything (mirrors ReloadSecrets).
+	mc := &mockClient{}
+	mgr := NewDockerManagerForProfile(mc, "openclaw", OpenclawProfile)
+
+	if err := mgr.ResetAuth(context.Background(), "openai-codex"); err != nil {
+		t.Fatalf("ResetAuth with nil cmd should return nil, got: %v", err)
+	}
+	if mc.execCalled {
+		t.Error("ResetAuth with nil ResetAuthCmd should not exec anything")
+	}
+}
+
+func TestResetAuthRejectsInvalidTarget(t *testing.T) {
+	cases := []struct {
+		name   string
+		target string
+	}{
+		{"empty", ""},
+		{"nul byte", "openai\x00codex"},
+		{"shell metachar", "openai;rm -rf /"},
+		{"space", "openai codex"},
+		{"slash", "openai/codex"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := &mockClient{}
+			mgr := NewDockerManagerForProfile(mc, "hermes", HermesProfile)
+			if err := mgr.ResetAuth(context.Background(), tc.target); err == nil {
+				t.Errorf("ResetAuth(%q) should reject invalid target, got nil error", tc.target)
+			}
+			if mc.execCalled {
+				t.Errorf("ResetAuth(%q) should not exec on invalid target", tc.target)
+			}
+		})
+	}
+}
+
+func TestResetAuthValidTargetWithColonAndDot(t *testing.T) {
+	mc := &mockClient{}
+	mgr := NewDockerManagerForProfile(mc, "hermes", HermesProfile)
+	if err := mgr.ResetAuth(context.Background(), "provider:account.v2"); err != nil {
+		t.Fatalf("ResetAuth with allowlisted target should pass: %v", err)
+	}
+	if !mc.execCalled {
+		t.Error("ResetAuth with valid target should exec")
+	}
+}

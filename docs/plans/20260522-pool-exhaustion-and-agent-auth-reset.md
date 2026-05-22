@@ -350,16 +350,17 @@ precedent) and emits an `agent_auth_reset` audit event.
 - Modify: `internal/container/docker.go`, `apple.go`, `tart.go`, standalone (`none`)
 - Modify: `internal/container/agent_profile_test.go`, `docker_test.go`
 
-- [ ] add `ResetAuthCmd func(target string) []string` to `AgentProfile`; `HermesProfile` →
+- [x] add `ResetAuthCmd func(target string) []string` to `AgentProfile`; `HermesProfile` →
   pure-argv `["/opt/hermes/.venv/bin/hermes","auth","reset",target]`;
   `OpenclawProfile.ResetAuthCmd` nil (documented; Post-Completion verification)
-- [ ] add `ResetAuth(ctx, target string) error` to `ContainerManager`; implement per backend;
-  nil `ResetAuthCmd` → log notice, return nil (mirror `ReloadSecrets`); docker exec passes
-  `profile.ExecUser()` (Task 6) so hermes runs as 10000:10000
-- [ ] validate `target` (non-empty, no NUL, allowlisted charset) before exec
-- [ ] write tests: argv per profile; nil-cmd no-ops with notice; empty/invalid target
+- [x] add `ResetAuth(ctx, target string) error` to `ContainerManager`; implement per backend
+  (docker/apple/tart; `none`/standalone has no manager struct — `containerMgr` is nil and
+  handled by the caller); nil `ResetAuthCmd` → log notice, return nil (mirror `ReloadSecrets`);
+  docker exec passes `profile.ExecUser()` (Task 6) so hermes runs as 10000:10000
+- [x] validate `target` (non-empty, no NUL, allowlisted charset `[A-Za-z0-9_.:-]+`) before exec
+- [x] write tests: argv per profile; nil-cmd no-ops with notice; empty/invalid target
   rejected; **docker exec uses the runtime UID from `ExecUser` (now passable, Task 6)**
-- [ ] run `go test ./internal/container/ -race`; gofumpt; vet — pass before Task 8
+- [x] run `go test ./internal/container/ -race`; gofumpt; vet — pass before Task 8
 
 ### Task 8: Wire auto-reset on the recovery edge (opt-in, per pool)
 

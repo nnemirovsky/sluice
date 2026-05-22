@@ -35,6 +35,17 @@ type AgentProfile struct {
 	// manually before starting the agent.
 	WireMCPCmd func(name, url string) []string
 
+	// ResetAuthCmd returns the argv to exec inside the agent container in
+	// order to clear ("un-latch") the agent's local auth state for the
+	// given target so it retries after a pool quota window passes. It is
+	// pure argv (no `sh -c` wrapper), so there is no shell-metacharacter
+	// threat from the interpolated target; the target is still validated
+	// (validateResetAuthTarget) before exec as defense in depth.
+	// Returning nil means the profile has no auth-reset mechanism; the
+	// caller should log a notice and rely on the agent recovering on its
+	// own (mirrors a nil ReloadCmd).
+	ResetAuthCmd func(target string) []string
+
 	// execUser is the UID:GID (or user name) that file-writing execs
 	// should run as inside the agent container. Empty means run as the
 	// image's USER (typically root). Hermes runs its gateway as a
@@ -69,6 +80,12 @@ var OpenclawProfile = &AgentProfile{
 	WireMCPCmd: func(name, url string) []string {
 		return GatewayRPCNodeCommand("wire-mcp", name, url)
 	},
+	// ResetAuthCmd is nil pending verification of whether openclaw
+	// latches its auth state on a usage-limit exhaustion the way hermes
+	// does. If it turns out openclaw needs an explicit un-latch, this is
+	// the place to add the gateway-RPC command (see Post-Completion in
+	// docs/plans/20260522-pool-exhaustion-and-agent-auth-reset.md).
+	ResetAuthCmd: nil,
 }
 
 // hermesMCPWireScript is a small Python script that registers an MCP
@@ -132,6 +149,15 @@ var HermesProfile = &AgentProfile{
 			name,
 			url,
 		}
+	},
+	// ResetAuthCmd un-latches hermes' local auth state for the given
+	// target via `hermes auth reset <target>`. It is pure argv (no
+	// `sh -c`), so the target cannot smuggle shell metacharacters — but
+	// the caller still validates it (validateResetAuthTarget) before
+	// exec. The exec must run as the runtime UID (see execUser above) or
+	// it root-chowns hermes-owned auth files and bricks the gateway.
+	ResetAuthCmd: func(target string) []string {
+		return []string{"/opt/hermes/.venv/bin/hermes", "auth", "reset", target}
 	},
 }
 
