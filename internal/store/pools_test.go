@@ -682,6 +682,15 @@ func TestMigration000006DownUp(t *testing.T) {
 		t.Fatalf("migrator: %v", err)
 	}
 
+	// Migrations newer than 000007 (e.g. 000008_pool_auth_reset) may sit on top
+	// of the schema after New(). This test exercises the 000006/000007 down/up
+	// boundary with relative Steps, so pin the starting version to 000007
+	// first; otherwise a relative Steps(-1) would only undo the newest
+	// migration instead of 000007.
+	if err := m.Migrate(7); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("pin to 000007: %v", err)
+	}
+
 	columnExists := func(table, col string) bool {
 		rows, qerr := s.db.Query("PRAGMA table_info(" + table + ")")
 		if qerr != nil {
@@ -1555,5 +1564,189 @@ func TestRemoveCredentialMetaCASNoOpLeavesHealthIntact(t *testing.T) {
 	}
 	if h, _ := s.GetCredentialHealth("c"); h == nil {
 		t.Error("credential_health wrongly deleted by a CAS no-op (round-11 invariant regressed)")
+	}
+}
+
+// TestMigration000008DownUpPopulated exercises the auth_reset_target column
+// migration (000008) up -> down -> up against a POPULATED schema: a pool with
+// two members and a credential_health row must survive the down (which
+// rebuilds credential_pools while preserving the credential_pool_members FK)
+// and the re-up round-trip. The down migration disables foreign_keys for the
+// 12-step rebuild, so the FK-referencing member rows must NOT be cascade-wiped.
+func TestMigration000008DownUpPopulated(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "m.db")
+	s, err := New(dbPath)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	// Populate: oauth members, a pool with a non-empty auth_reset_target, and a
+	// credential_health row for one member.
+	seedOAuthCred(t, s, "acct_a")
+	seedOAuthCred(t, s, "acct_b")
+	if err := s.CreatePoolWithMembers("codex", "failover", []string{"acct_a", "acct_b"}); err != nil {
+		t.Fatalf("CreatePoolWithMembers: %v", err)
+	}
+	if err := s.SetPoolAuthResetTarget("codex", "openai-codex"); err != nil {
+		t.Fatalf("SetPoolAuthResetTarget: %v", err)
+	}
+	if err := s.SetCredentialHealth("acct_a", "cooldown", time.Now().Add(time.Hour), "429"); err != nil {
+		t.Fatalf("SetCredentialHealth: %v", err)
+	}
+
+	columnExists := func(table, col string) bool {
+		rows, qerr := s.db.Query("PRAGMA table_info(" + table + ")")
+		if qerr != nil {
+			return false
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var cid int
+			var name, ctype string
+			var notnull, pk int
+			var dflt interface{}
+			if scanErr := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); scanErr != nil {
+				return false
+			}
+			if name == col {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !columnExists("credential_pools", "auth_reset_target") {
+		t.Fatal("credential_pools.auth_reset_target missing after up migration (000008)")
+	}
+
+	src, err := iofs.New(migrationsFS, "migrations")
+	if err != nil {
+		t.Fatalf("iofs: %v", err)
+	}
+	drv, err := migsqlite.WithInstance(s.db, &migsqlite.Config{})
+	if err != nil {
+		t.Fatalf("driver: %v", err)
+	}
+	m, err := migrate.NewWithInstance("iofs", src, "sqlite", drv)
+	if err != nil {
+		t.Fatalf("migrator: %v", err)
+	}
+
+	// Down one step (000008 -> 000007): the column goes; the rebuilt
+	// credential_pools keeps its row; the FK-referencing member rows and the
+	// health row survive (foreign_keys=OFF during the rebuild prevents a
+	// cascade wipe).
+	if err := m.Steps(-1); err != nil {
+		t.Fatalf("down 1 (000008): %v", err)
+	}
+	if columnExists("credential_pools", "auth_reset_target") {
+		t.Error("credential_pools.auth_reset_target still present after 000008 down")
+	}
+	var poolCount, memberCount, healthCount int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM credential_pools").Scan(&poolCount); err != nil {
+		t.Fatalf("count pools: %v", err)
+	}
+	if poolCount != 1 {
+		t.Errorf("pool row lost in 000008 down rebuild: got %d, want 1", poolCount)
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM credential_pool_members WHERE pool = 'codex'").Scan(&memberCount); err != nil {
+		t.Fatalf("count members: %v", err)
+	}
+	if memberCount != 2 {
+		t.Errorf("member rows cascade-wiped by 000008 down rebuild: got %d, want 2", memberCount)
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM credential_health WHERE credential = 'acct_a'").Scan(&healthCount); err != nil {
+		t.Fatalf("count health: %v", err)
+	}
+	if healthCount != 1 {
+		t.Errorf("health row lost in 000008 down rebuild: got %d, want 1", healthCount)
+	}
+
+	// Re-up (000007 -> 000008): the column returns, defaulting to '' for the
+	// existing row (the target value is not preserved across a down, which is
+	// expected — the column was dropped). All populated rows still present.
+	if err := m.Steps(1); err != nil {
+		t.Fatalf("up 1 (re-000008): %v", err)
+	}
+	if !columnExists("credential_pools", "auth_reset_target") {
+		t.Fatal("credential_pools.auth_reset_target missing after re-up migration (000008)")
+	}
+	p, err := s.GetPool("codex")
+	if err != nil || p == nil {
+		t.Fatalf("GetPool after re-up: %+v, %v", p, err)
+	}
+	if p.AuthResetTarget != "" {
+		t.Errorf("auth_reset_target = %q after re-up; want '' (column dropped on down)", p.AuthResetTarget)
+	}
+	if len(p.Members) != 2 {
+		t.Errorf("members not preserved across down/up: got %d, want 2", len(p.Members))
+	}
+}
+
+// TestPoolAuthResetTargetCRUD covers the store accessor: default empty on
+// create, create-then-set, clear, and that list/get reflect the value.
+func TestPoolAuthResetTargetCRUD(t *testing.T) {
+	s := newTestStore(t)
+	seedOAuthCred(t, s, "acct_a")
+	seedOAuthCred(t, s, "acct_b")
+
+	if err := s.CreatePoolWithMembers("codex", "", []string{"acct_a", "acct_b"}); err != nil {
+		t.Fatalf("CreatePoolWithMembers: %v", err)
+	}
+
+	// Default empty on create.
+	p, err := s.GetPool("codex")
+	if err != nil || p == nil {
+		t.Fatalf("GetPool: %+v, %v", p, err)
+	}
+	if p.AuthResetTarget != "" {
+		t.Errorf("auth_reset_target = %q on fresh pool; want empty", p.AuthResetTarget)
+	}
+
+	// Set a target.
+	if err := s.SetPoolAuthResetTarget("codex", "openai-codex"); err != nil {
+		t.Fatalf("SetPoolAuthResetTarget set: %v", err)
+	}
+	p, _ = s.GetPool("codex")
+	if p.AuthResetTarget != "openai-codex" {
+		t.Errorf("auth_reset_target = %q after set; want openai-codex", p.AuthResetTarget)
+	}
+
+	// List reflects the value.
+	pools, err := s.ListPools()
+	if err != nil {
+		t.Fatalf("ListPools: %v", err)
+	}
+	var found bool
+	for _, lp := range pools {
+		if lp.Name == "codex" {
+			found = true
+			if lp.AuthResetTarget != "openai-codex" {
+				t.Errorf("ListPools auth_reset_target = %q; want openai-codex", lp.AuthResetTarget)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("pool codex not found in ListPools")
+	}
+
+	// Clear it.
+	if err := s.SetPoolAuthResetTarget("codex", ""); err != nil {
+		t.Fatalf("SetPoolAuthResetTarget clear: %v", err)
+	}
+	p, _ = s.GetPool("codex")
+	if p.AuthResetTarget != "" {
+		t.Errorf("auth_reset_target = %q after clear; want empty", p.AuthResetTarget)
+	}
+
+	// Unknown pool errors.
+	if err := s.SetPoolAuthResetTarget("nope", "x"); err == nil {
+		t.Error("SetPoolAuthResetTarget on a missing pool should error")
+	}
+	// Empty pool name errors.
+	if err := s.SetPoolAuthResetTarget("", "x"); err == nil {
+		t.Error("SetPoolAuthResetTarget with empty name should error")
 	}
 }

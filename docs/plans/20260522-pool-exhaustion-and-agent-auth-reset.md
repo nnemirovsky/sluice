@@ -286,14 +286,17 @@ precedent) and emits an `agent_auth_reset` audit event.
 - Modify: `internal/store/pools.go`
 - Modify: `internal/store/pools_test.go`
 
-- [ ] up: `ALTER TABLE credential_pools ADD COLUMN auth_reset_target TEXT NOT NULL DEFAULT ''`
-- [ ] down: SQLite 12-step rebuild of `credential_pools` only, wrapped
-  `PRAGMA foreign_keys=OFF;` … `=ON;` so the `credential_pool_members` FK isn't orphaned
-- [ ] add `AuthResetTarget` to `Pool`; include in create/list reads; add
+- [x] up: `ALTER TABLE credential_pools ADD COLUMN auth_reset_target TEXT NOT NULL DEFAULT ''`
+  (migration `000008_pool_auth_reset` — `000007` was already taken by `pool_membership_epoch`)
+- [x] down: SQLite 12-step rebuild of `credential_pools` only; because golang-migrate runs each
+  script inside a transaction and SQLite ignores `PRAGMA foreign_keys=OFF` while a transaction is
+  open, the FK-referencing `credential_pool_members` rows are snapshotted to a temp table and
+  restored after the rebuild instead (cascade-safe, FK preserved)
+- [x] add `AuthResetTarget` to `Pool`; include in create/list reads; add
   `SetPoolAuthResetTarget(name, target) error`
-- [ ] write tests: migrate up→down→up against a **populated** table (pool + members + health
+- [x] write tests: migrate up→down→up against a **populated** table (pool + members + health
   rows survive/round-trip); default empty; create with target; set/clear target; list reflects it
-- [ ] run `go test ./internal/store/ -race`; gofumpt; vet — pass before Task 5
+- [x] run `go test ./internal/store/ -race`; gofumpt; vet — pass before Task 5
 
 ### Task 5: Channel parity — `auth_reset_target` on CLI + REST + Telegram
 
