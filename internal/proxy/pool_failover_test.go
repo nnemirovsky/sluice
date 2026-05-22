@@ -1408,3 +1408,40 @@ func TestCooldownFromResponseNilSafe(t *testing.T) {
 		t.Fatalf("nil header (auth): got %v, want %v", got, vault.AuthFailCooldown)
 	}
 }
+
+// TestParseRecoveryHintHTTPDateGatedToRetryAfter verifies the HTTP-date branch
+// is reachable only for Retry-After (RFC 9110). A reset-family header carrying
+// an HTTP-date string must NOT be coerced through http.ParseTime — those
+// headers are numeric (delta-seconds / epoch / unit-suffixed duration), so a
+// date value is simply not a usable hint and parseRecoveryHint reports ok=false.
+func TestParseRecoveryHintHTTPDateGatedToRetryAfter(t *testing.T) {
+	now := time.Now()
+	httpDate := now.Add(90 * time.Second).UTC().Format(http.TimeFormat)
+
+	// Retry-After with an HTTP-date still yields a positive duration.
+	d, ok := parseRecoveryHint("Retry-After", httpDate, now)
+	if !ok || d <= 0 {
+		t.Fatalf("Retry-After HTTP-date: got (%v, %v), want a positive duration", d, ok)
+	}
+
+	// The reset family must not parse an HTTP-date as a date: no usable hint.
+	for _, h := range []string{"x-ratelimit-reset", "x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"} {
+		if d, ok := parseRecoveryHint(h, httpDate, now); ok || d != 0 {
+			t.Fatalf("%s HTTP-date: got (%v, %v), want (0, false) — date form must be Retry-After only", h, d, ok)
+		}
+	}
+
+	// And end-to-end through cooldownFromResponse: a reset-family HTTP-date is
+	// ignored and the class default applies, while the same date on Retry-After
+	// is honored.
+	resetHdr := make(http.Header)
+	resetHdr.Set("x-ratelimit-reset-requests", httpDate)
+	if got := cooldownFromResponse(failoverRateLimited, resetHdr); got != vault.RateLimitCooldown {
+		t.Fatalf("reset-family HTTP-date: got %v, want fallback %v", got, vault.RateLimitCooldown)
+	}
+	retryHdr := make(http.Header)
+	retryHdr.Set("Retry-After", httpDate)
+	if got := cooldownFromResponse(failoverRateLimited, retryHdr); got <= 0 || got > vault.MaxCooldown {
+		t.Fatalf("Retry-After HTTP-date: got %v, want a clamped positive duration", got)
+	}
+}

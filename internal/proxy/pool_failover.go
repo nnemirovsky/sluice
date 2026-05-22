@@ -238,12 +238,17 @@ func parseRecoveryHint(header, raw string, now time.Time) (time.Duration, bool) 
 		}
 		return time.Duration(secs * float64(time.Second)), true
 	}
-	// HTTP-date (Retry-After absolute form).
-	if t, err := http.ParseTime(raw); err == nil {
-		if d := t.Sub(now); d > 0 {
-			return d, true
+	// HTTP-date (Retry-After absolute form, per RFC 9110). Only Retry-After is
+	// permitted to carry an absolute HTTP-date; the x-ratelimit-reset* family is
+	// numeric (delta-seconds / unix epoch / unit-suffixed duration) and must not
+	// be coerced through HTTP-date parsing.
+	if header == "Retry-After" {
+		if t, err := http.ParseTime(raw); err == nil {
+			if d := t.Sub(now); d > 0 {
+				return d, true
+			}
+			return 0, false
 		}
-		return 0, false
 	}
 	// Unit-suffixed duration (e.g. OpenAI "1.5s", "60ms").
 	if d, err := time.ParseDuration(raw); err == nil && d > 0 {

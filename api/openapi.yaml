@@ -678,6 +678,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Pool"
+        "204":
+          description: >-
+            Target updated; pool representation unavailable because the
+            post-update read-back failed
         "400":
           description: Invalid target
           content:

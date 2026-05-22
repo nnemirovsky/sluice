@@ -1928,13 +1928,29 @@ func (s *Server) PostApiPoolsNameRotate(w http.ResponseWriter, _ *http.Request, 
 // Pool object: the OpenAPI Pool schema requires name+strategy+members, and the
 // request body alone cannot reconstruct strategy/members, so echoing it would
 // emit a schema-invalid response.
+//
+// auth_reset_target is REQUIRED per the OpenAPI schema: omitting it is a 400
+// (the generated request type's plain-string field can't tell an absent field
+// from an explicit "", which would silently clear the target). An explicit
+// empty string ("") is accepted and clears the target — that is the documented
+// clear path.
 func (s *Server) PostApiPoolsNameAuthResetTarget(w http.ResponseWriter, r *http.Request, name string) { //nolint:revive // generated interface name
-	var req SetPoolAuthResetTargetRequest
+	// Decode into a presence-detecting type: the generated
+	// SetPoolAuthResetTargetRequest carries a plain (non-pointer) string, so a
+	// "{}" body would decode to "" and silently CLEAR the target. A pointer
+	// distinguishes absent (nil -> 400) from an explicit "" (clear).
+	var req struct {
+		AuthResetTarget *string `json:"auth_reset_target"`
+	}
 	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body", "")
 		return
 	}
-	if err := poolops.SetAuthResetTarget(s.store, name, req.AuthResetTarget); err != nil {
+	if req.AuthResetTarget == nil {
+		writeError(w, http.StatusBadRequest, "auth_reset_target is required", "")
+		return
+	}
+	if err := poolops.SetAuthResetTarget(s.store, name, *req.AuthResetTarget); err != nil {
 		status := poolStatusError(err)
 		if errors.Is(err, poolops.ErrInvalidAuthResetTarget) {
 			status = http.StatusBadRequest

@@ -3142,6 +3142,55 @@ func TestPostApiPoolsNameAuthResetTarget(t *testing.T) {
 	}
 }
 
+// TestPostApiPoolsNameAuthResetTarget_RequiredField asserts auth_reset_target is
+// a REQUIRED field on the set route (Copilot re-review): an empty "{}" body that
+// OMITS the field is a 400 and must NOT silently clear the stored target, while
+// an EXPLICIT empty string ("") is still accepted and clears it (the documented
+// clear path).
+func TestPostApiPoolsNameAuthResetTarget_RequiredField(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	seedOAuthCred(t, st, "credA", "credB")
+	if err := st.CreatePoolWithMembers("pool1", store.PoolStrategyFailover, []string{"credA", "credB"}, "openai-codex"); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	srv := api.NewServer(st, nil, nil, "")
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	post := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/pools/pool1/auth-reset-target", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer tok")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Omitting the field -> 400, and the pre-existing target is untouched.
+	rec := post(`{}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("omitted field: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, err := st.GetPool("pool1")
+	if err != nil {
+		t.Fatalf("GetPool: %v", err)
+	}
+	if got.AuthResetTarget != "openai-codex" {
+		t.Fatalf("omitted field cleared the target to %q; expected it untouched (openai-codex)", got.AuthResetTarget)
+	}
+
+	// Explicit empty string -> still accepted and clears the target.
+	rec = post(`{"auth_reset_target": ""}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("explicit clear: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, _ = st.GetPool("pool1")
+	if got.AuthResetTarget != "" {
+		t.Fatalf("explicit clear: stored AuthResetTarget = %q, want empty", got.AuthResetTarget)
+	}
+}
+
 // TestPostApiPools_WithAuthResetTarget asserts the create body accepts
 // auth_reset_target and persists it via poolops.
 func TestPostApiPools_WithAuthResetTarget(t *testing.T) {
