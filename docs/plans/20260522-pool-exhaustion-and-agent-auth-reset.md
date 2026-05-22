@@ -228,18 +228,18 @@ precedent) and emits an `agent_auth_reset` audit event.
 - Modify: `internal/proxy/pool_failover.go`
 - Modify: `internal/vault/pool_test.go`, `internal/proxy/pool_failover_test.go`
 
-- [ ] add `HasHealthyMember(pool) bool` (RLock, single `now`, `!cooling()` for some member —
+- [x] add `HasHealthyMember(pool) bool` (RLock, single `now`, `!cooling()` for some member —
   mirror `cooling()`/lazy-expiry, not a status field) and `SoonestCooldown(pool)
   (time.Time, bool)` (strictly-future min vs a fresh `now`)
-- [ ] in `handlePoolFailover` set `exhausted = !pr.HasHealthyMember(pool)` (drop `to == from`);
+- [x] in `handlePoolFailover` set `exhausted = !pr.HasHealthyMember(pool)` (drop `to == from`);
   keep computing `to` for the real-transition notice/audit
-- [ ] when `exhausted`, key the dedup as `shouldEmitPoolNotice(pool, "*", "*", "exhausted")`
+- [x] when `exhausted`, key the dedup as `shouldEmitPoolNotice(pool, "*", "*", "exhausted")`
   so flap direction can't create two keys (real transitions unchanged)
-- [ ] write tests: 2-member pool both cooling → exhausted true; one healthy (incl. a
+- [x] write tests: 2-member pool both cooling → exhausted true; one healthy (incl. a
   lazily-expired cooldown still in the map) → false; `SoonestCooldown` skips already-passed
   entries; exhausted dedup collapses both flap directions to one notice within the window
   (fail-before/pass-after). NOTE: Task 3 re-gates this to an edge — update this assertion there.
-- [ ] run `go test ./internal/vault/ ./internal/proxy/ -race`; gofumpt; vet — pass before Task 3
+- [x] run `go test ./internal/vault/ ./internal/proxy/ -race`; gofumpt; vet — pass before Task 3
 
 ### Task 3: A2 — per-pool exhaustion state machine, edge notices, recovery monitor
 

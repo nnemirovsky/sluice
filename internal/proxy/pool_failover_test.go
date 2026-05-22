@@ -1118,6 +1118,77 @@ func TestFailoverPoolExhaustedNoSelfFailoverSpam(t *testing.T) {
 	}
 }
 
+// TestFailoverExhaustedDedupCollapsesFlapDirection is the A1 dedup-collapse
+// regression. When both members are exhausted, the degrade target ResolveActive
+// picks can differ depending on which member a given failing response is
+// attributed to (the "flap direction"). The OLD per-(pool,from,to,tag) dedup
+// key minted a DISTINCT key per direction, so a retry storm hitting both
+// members produced two notices even though the pool is in one exhausted state.
+//
+// A1 collapses the exhausted path to the single key (pool,"*","*","exhausted")
+// so the direction can't create two keys.
+//
+// Fail-before (per-tuple key): two responses attributed to memA and memB emit
+// two pool_exhausted rows / two onFailover calls. Pass-after (collapsed key):
+// exactly one of each within the dedup window.
+func TestFailoverExhaustedDedupCollapsesFlapDirection(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	logger, err := audit.NewFileLogger(logPath)
+	if err != nil {
+		t.Fatalf("NewFileLogger: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+
+	addon, _, prPtr := setupPoolAddon(t, "memA", "memB")
+	addon.auditLog = logger
+	client := setupAddonConn(addon, "auth.example.com:443")
+
+	// Both members already genuinely failure-cooled (the pool is exhausted).
+	// Unequal future expiries so the degrade target differs by which member
+	// each request is attributed to (the flap direction the old key split on).
+	prPtr.Load().MarkCooldown("memA", time.Now().Add(5*time.Minute), "429")
+	prPtr.Load().MarkCooldown("memB", time.Now().Add(10*time.Minute), "401")
+
+	var calls int32
+	done := make(chan struct{}, 4)
+	addon.SetOnFailover(func(ev FailoverEvent) {
+		if !ev.Exhausted {
+			t.Errorf("FailoverEvent.Exhausted = false, want true (pool exhausted)")
+		}
+		atomic.AddInt32(&calls, 1)
+		done <- struct{}{}
+	})
+
+	// Two failing responses, attributed to DIFFERENT members (flap directions).
+	for _, member := range []string{"memA", "memB"} {
+		f := newPoolRespFlow(client, 429, []byte(`{"error":"rate_limited"}`))
+		addon.flowInjected.Tag(f.Id, member)
+		addon.Response(f)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("onFailover callback not invoked")
+	}
+	// Give any erroneous second call a moment to surface before asserting.
+	time.Sleep(50 * time.Millisecond)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("onFailover invoked %d times, want exactly 1 (collapsed exhausted dedup key must absorb both flap directions)", got)
+	}
+
+	if err := logger.Close(); err != nil {
+		t.Fatalf("logger close: %v", err)
+	}
+	if n := auditActionCount(t, logPath, "pool_exhausted"); n != 1 {
+		t.Fatalf("pool_exhausted audit rows = %d, want exactly 1 (one collapsed key across both flap directions)", n)
+	}
+	if n := auditActionCount(t, logPath, "cred_failover"); n != 0 {
+		t.Fatalf("cred_failover audit rows = %d, want 0 (exhausted is not a real failover)", n)
+	}
+}
+
 // TestFailoverToManualRotateParkedPeer is the pool-stranding regression that
 // broke the live agent: `sluice pool rotate` parks the previously-active
 // member (reason ManualRotateReason). That member is healthy, just operator

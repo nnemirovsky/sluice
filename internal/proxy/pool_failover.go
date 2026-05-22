@@ -651,23 +651,35 @@ func (a *SluiceAddon) handlePoolFailover(f *mitmproxy.Flow) {
 		to = next
 	}
 
-	// to == from means ResolveActive degraded back to the member that just
-	// failed: every member is cooling and the soonest-recovering one IS
-	// `from`. There is NO distinct member to fail over to. Emitting a
-	// "<from> -> <from>" cred_failover here (and one Telegram notice per
-	// request) was both meaningless and a notification storm — the agent
-	// retries N times, each retry re-fails on the still-exhausted member
-	// and re-entered this path, producing N identical "failed over A -> A"
-	// notices. Classify it honestly as pool exhaustion instead.
-	exhausted := to == from
+	// A1: the pool is exhausted when NO member is healthy, not merely when
+	// ResolveActive degraded back to `from` (to == from). The old `to == from`
+	// test missed the flap case where the soonest-recovering degrade target is
+	// a DIFFERENT still-cooling member: that produced a meaningless
+	// "<from> -> <other>" cred_failover plus one Telegram notice per agent
+	// retry even though there was no healthy account to serve. HasHealthyMember
+	// mirrors ResolveActive's cooling()/lazy-expiry exactly, so it agrees with
+	// the degrade decision made just above. `to` is still computed for the
+	// real-transition notice/audit (the not-exhausted branch).
+	exhausted := !pr.HasHealthyMember(pool)
 
 	// Deduplicate identical signals within a short window. Concurrent
 	// in-flight requests (pipelined agents) and retries that race the
 	// synchronous MarkCooldown above would otherwise each emit one audit
-	// row + one operator notice. One per (pool,from,to,tag) per window is
-	// all the operator needs; the cooldown itself was already applied
+	// row + one operator notice.
+	//
+	// A1: for the exhausted path collapse the dedup key to
+	// (pool, "*", "*", "exhausted") so the flap direction (which degrade
+	// target ResolveActive happened to pick) cannot mint two distinct keys and
+	// let the retry storm through twice. A real from->to transition keeps its
+	// (pool, from, to, tag) key. The cooldown itself was already applied
 	// unconditionally above, so suppressing the notice loses nothing.
-	if !a.shouldEmitPoolNotice(pool, from, to, tag) {
+	emit := false
+	if exhausted {
+		emit = a.shouldEmitPoolNotice(pool, "*", "*", "exhausted")
+	} else {
+		emit = a.shouldEmitPoolNotice(pool, from, to, tag)
+	}
+	if !emit {
 		return
 	}
 
