@@ -29,6 +29,7 @@ type Store interface {
 	RemovePoolIfUnreferenced(name string) (bool, error)
 	ListCredentialHealth() ([]store.CredentialHealth, error)
 	SetCredentialHealthIfPoolMemberEpoch(credential, pool string, epoch int64, status string, cooldownUntil time.Time, reason string) (bool, error)
+	SetPoolAuthResetTarget(name, target string) error
 }
 
 // ErrNoMembers is returned by Create when the member list is empty.
@@ -78,7 +79,9 @@ type StatusResult struct {
 	Name     string
 	Strategy string
 	Active   string
-	Members  []MemberStatus
+	// AuthResetTarget is the per-pool agent auth-reset target (empty = none).
+	AuthResetTarget string
+	Members         []MemberStatus
 }
 
 // RotateResult is the outcome of a successful Rotate.
@@ -107,18 +110,87 @@ func ParseMembers(membersStr string) ([]string, error) {
 	return members, nil
 }
 
+// ErrInvalidAuthResetTarget is returned when a non-empty auth-reset target
+// contains a NUL byte or newline. The target is consumed as argv (never
+// shell-interpolated), so this is a minimal structural guard, not a
+// shell-metachar check; channels that exec the target apply any stricter
+// allowlist at exec time.
+var ErrInvalidAuthResetTarget = errors.New("invalid auth_reset_target: must not contain NUL or newline characters")
+
+// validateAuthResetTarget rejects a non-empty target containing a NUL byte or
+// a newline. An empty target ("") is always valid and means "clear / no
+// reset", so callers normalize the clear sentinel before validating.
+func validateAuthResetTarget(target string) error {
+	if target == "" {
+		return nil
+	}
+	if strings.ContainsAny(target, "\x00\n\r") {
+		return ErrInvalidAuthResetTarget
+	}
+	return nil
+}
+
 // Create creates a pool with the given ordered members. An empty strategy
 // defaults to the only supported strategy (failover). Sentinel errors from
 // the store (namespace collision, static member, unknown member) propagate
 // unchanged so channels can map them.
 func Create(s Store, name, strategy string, members []string) error {
+	return CreateWithAuthResetTarget(s, name, strategy, members, "")
+}
+
+// CreateWithAuthResetTarget is Create plus an optional per-pool
+// auth_reset_target (empty = no reset). The target is set in a follow-up
+// SetPoolAuthResetTarget call after the pool exists; channels that don't
+// accept a target call Create. Used by every channel's create adapter so the
+// create-with-target path has a single source of truth.
+func CreateWithAuthResetTarget(s Store, name, strategy string, members []string, authResetTarget string) error {
 	if strategy == "" {
 		strategy = store.PoolStrategyFailover
 	}
 	if len(members) == 0 {
 		return ErrNoMembers
 	}
-	return s.CreatePoolWithMembers(name, strategy, members)
+	if err := validateAuthResetTarget(authResetTarget); err != nil {
+		return err
+	}
+	if err := s.CreatePoolWithMembers(name, strategy, members); err != nil {
+		return err
+	}
+	if authResetTarget != "" {
+		if err := s.SetPoolAuthResetTarget(name, authResetTarget); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetAuthResetTarget sets (target != "") or clears (target == "") the
+// per-pool auth_reset_target. Channels normalize their clear sentinel (CLI /
+// Telegram use a single "-") to "" before calling. A missing pool surfaces as
+// the store's "does not exist" error; channels may also wrap it as a
+// *PoolNotFoundError by checking existence first.
+func SetAuthResetTarget(s Store, name, target string) error {
+	if err := validateAuthResetTarget(target); err != nil {
+		return err
+	}
+	if _, err := mustExist(s, name); err != nil {
+		return err
+	}
+	return s.SetPoolAuthResetTarget(name, target)
+}
+
+// mustExist returns the pool or a *PoolNotFoundError, so channels get the same
+// typed not-found error from SetAuthResetTarget that Status/Rotate/Remove
+// already return.
+func mustExist(s Store, name string) (*store.Pool, error) {
+	p, err := s.GetPool(name)
+	if err != nil {
+		return nil, err
+	}
+	if p == nil {
+		return nil, &PoolNotFoundError{Name: name}
+	}
+	return p, nil
 }
 
 // List returns every configured pool, ordered as the store returns them.
@@ -151,7 +223,7 @@ func Status(s Store, name string) (*StatusResult, error) {
 	}
 
 	now := time.Now()
-	res := &StatusResult{Name: p.Name, Strategy: p.Strategy, Active: active}
+	res := &StatusResult{Name: p.Name, Strategy: p.Strategy, Active: active, AuthResetTarget: p.AuthResetTarget}
 	for _, m := range p.Members {
 		ms := MemberStatus{
 			Credential: m.Credential,

@@ -109,6 +109,108 @@ func TestCreateListStatusRotateRemove(t *testing.T) {
 	}
 }
 
+func TestCreateWithAuthResetTarget(t *testing.T) {
+	db := newTestStore(t, "acct_a", "acct_b")
+
+	if err := poolops.CreateWithAuthResetTarget(db, "codex", "", []string{"acct_a", "acct_b"}, "openai-codex"); err != nil {
+		t.Fatalf("CreateWithAuthResetTarget: %v", err)
+	}
+
+	p, err := db.GetPool("codex")
+	if err != nil {
+		t.Fatalf("GetPool: %v", err)
+	}
+	if p.AuthResetTarget != "openai-codex" {
+		t.Fatalf("AuthResetTarget = %q, want openai-codex", p.AuthResetTarget)
+	}
+
+	st, err := poolops.Status(db, "codex")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.AuthResetTarget != "openai-codex" {
+		t.Fatalf("Status.AuthResetTarget = %q, want openai-codex", st.AuthResetTarget)
+	}
+}
+
+func TestCreateWithEmptyAuthResetTargetDefaultsEmpty(t *testing.T) {
+	db := newTestStore(t, "acct_a")
+	if err := poolops.CreateWithAuthResetTarget(db, "p", "", []string{"acct_a"}, ""); err != nil {
+		t.Fatalf("CreateWithAuthResetTarget: %v", err)
+	}
+	p, err := db.GetPool("p")
+	if err != nil {
+		t.Fatalf("GetPool: %v", err)
+	}
+	if p.AuthResetTarget != "" {
+		t.Fatalf("AuthResetTarget = %q, want empty", p.AuthResetTarget)
+	}
+}
+
+func TestCreateWithInvalidAuthResetTarget(t *testing.T) {
+	db := newTestStore(t, "acct_a")
+	err := poolops.CreateWithAuthResetTarget(db, "p", "", []string{"acct_a"}, "bad\ntarget")
+	if !errors.Is(err, poolops.ErrInvalidAuthResetTarget) {
+		t.Fatalf("err = %v, want ErrInvalidAuthResetTarget", err)
+	}
+	// The pool must not have been created when the target is invalid.
+	p, err := db.GetPool("p")
+	if err != nil {
+		t.Fatalf("GetPool: %v", err)
+	}
+	if p != nil {
+		t.Fatalf("pool created despite invalid target: %+v", p)
+	}
+}
+
+func TestSetAuthResetTargetSetAndClear(t *testing.T) {
+	db := newTestStore(t, "acct_a", "acct_b")
+	if err := poolops.Create(db, "codex", "", []string{"acct_a", "acct_b"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := poolops.SetAuthResetTarget(db, "codex", "openai-codex"); err != nil {
+		t.Fatalf("SetAuthResetTarget set: %v", err)
+	}
+	st, err := poolops.Status(db, "codex")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.AuthResetTarget != "openai-codex" {
+		t.Fatalf("after set AuthResetTarget = %q, want openai-codex", st.AuthResetTarget)
+	}
+
+	if err := poolops.SetAuthResetTarget(db, "codex", ""); err != nil {
+		t.Fatalf("SetAuthResetTarget clear: %v", err)
+	}
+	st, err = poolops.Status(db, "codex")
+	if err != nil {
+		t.Fatalf("Status post-clear: %v", err)
+	}
+	if st.AuthResetTarget != "" {
+		t.Fatalf("after clear AuthResetTarget = %q, want empty", st.AuthResetTarget)
+	}
+}
+
+func TestSetAuthResetTargetUnknownPool(t *testing.T) {
+	db := newTestStore(t)
+	err := poolops.SetAuthResetTarget(db, "missing", "x")
+	var nf *poolops.PoolNotFoundError
+	if !errors.As(err, &nf) {
+		t.Fatalf("SetAuthResetTarget unknown pool err = %v, want PoolNotFoundError", err)
+	}
+}
+
+func TestSetAuthResetTargetInvalid(t *testing.T) {
+	db := newTestStore(t, "acct_a")
+	if err := poolops.Create(db, "p", "", []string{"acct_a"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := poolops.SetAuthResetTarget(db, "p", "bad\x00target"); !errors.Is(err, poolops.ErrInvalidAuthResetTarget) {
+		t.Fatalf("err = %v, want ErrInvalidAuthResetTarget", err)
+	}
+}
+
 func TestCreateErrors(t *testing.T) {
 	db := newTestStore(t, "acct_a")
 

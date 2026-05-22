@@ -3042,6 +3042,108 @@ func TestPostApiPoolsNameRotate_Success(t *testing.T) {
 	}
 }
 
+// TestPostApiPoolsNameAuthResetTarget exercises the REST adapter for the
+// per-pool auth_reset_target action route. It asserts the value reaches the
+// store (the REST handler is a thin poolops adapter), that clearing with an
+// empty string works, and that an invalid target is a 400 and an unknown
+// pool a 404.
+func TestPostApiPoolsNameAuthResetTarget(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	seedOAuthCred(t, st, "credA", "credB")
+	if err := st.CreatePoolWithMembers("pool1", store.PoolStrategyFailover, []string{"credA", "credB"}); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	srv := api.NewServer(st, nil, nil, "")
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	post := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/pools/pool1/auth-reset-target", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer tok")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Set a target.
+	rec := post(`{"auth_reset_target": "openai-codex"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var p api.Pool
+	if err := json.NewDecoder(rec.Body).Decode(&p); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if p.AuthResetTarget == nil || *p.AuthResetTarget != "openai-codex" {
+		t.Fatalf("response AuthResetTarget = %v, want openai-codex", p.AuthResetTarget)
+	}
+	// Reached the store (no inline logic; routed through poolops).
+	got, err := st.GetPool("pool1")
+	if err != nil {
+		t.Fatalf("GetPool: %v", err)
+	}
+	if got.AuthResetTarget != "openai-codex" {
+		t.Fatalf("stored AuthResetTarget = %q, want openai-codex", got.AuthResetTarget)
+	}
+
+	// Clear with an empty string.
+	rec = post(`{"auth_reset_target": ""}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, _ = st.GetPool("pool1")
+	if got.AuthResetTarget != "" {
+		t.Fatalf("after clear stored AuthResetTarget = %q, want empty", got.AuthResetTarget)
+	}
+
+	// Invalid target (newline) -> 400.
+	rec = post(`{"auth_reset_target": "bad\ntarget"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid target: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Unknown pool -> 404.
+	req := httptest.NewRequest("POST", "/api/pools/nope/auth-reset-target", strings.NewReader(`{"auth_reset_target": "x"}`))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown pool: expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPostApiPools_WithAuthResetTarget asserts the create body accepts
+// auth_reset_target and persists it via poolops.
+func TestPostApiPools_WithAuthResetTarget(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	seedOAuthCred(t, st, "credA", "credB")
+	srv := api.NewServer(st, nil, nil, "")
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"name": "codex", "members": ["credA", "credB"], "auth_reset_target": "openai-codex"}`
+	req := httptest.NewRequest("POST", "/api/pools", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, err := st.GetPool("codex")
+	if err != nil {
+		t.Fatalf("GetPool: %v", err)
+	}
+	if got.AuthResetTarget != "openai-codex" {
+		t.Fatalf("stored AuthResetTarget = %q, want openai-codex", got.AuthResetTarget)
+	}
+}
+
 func TestPostApiPoolsNameRotate_NotFound(t *testing.T) {
 	st := newTestStore(t)
 	enableHTTPChannel(t, st)

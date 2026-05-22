@@ -1829,8 +1829,16 @@ func (s *Server) PostApiPools(w http.ResponseWriter, r *http.Request) { //nolint
 	if req.Strategy != nil {
 		strategy = *req.Strategy
 	}
-	if err := poolops.Create(s.store, req.Name, strategy, req.Members); err != nil {
-		writeError(w, poolCreateError(err), err.Error(), "")
+	authResetTarget := ""
+	if req.AuthResetTarget != nil {
+		authResetTarget = *req.AuthResetTarget
+	}
+	if err := poolops.CreateWithAuthResetTarget(s.store, req.Name, strategy, req.Members, authResetTarget); err != nil {
+		status := poolCreateError(err)
+		if errors.Is(err, poolops.ErrInvalidAuthResetTarget) {
+			status = http.StatusBadRequest
+		}
+		writeError(w, status, err.Error(), "")
 		return
 	}
 
@@ -1906,6 +1914,37 @@ func (s *Server) PostApiPoolsNameRotate(w http.ResponseWriter, _ *http.Request, 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// PostApiPoolsNameAuthResetTarget sets (or clears, with an empty string) the
+// per-pool agent auth-reset target. This is the action-route REST counterpart
+// of the CLI `pool set-auth-reset` and Telegram `/pool set-auth-reset`, all
+// routing through poolops.SetAuthResetTarget so the three surfaces cannot
+// drift (channel feature-parity principle). A NUL/newline in the target is a
+// 400 (poolops.ErrInvalidAuthResetTarget); an unknown pool is 404. On success
+// the updated pool is returned so the caller sees the persisted value.
+func (s *Server) PostApiPoolsNameAuthResetTarget(w http.ResponseWriter, r *http.Request, name string) { //nolint:revive // generated interface name
+	var req SetPoolAuthResetTargetRequest
+	if err := json.NewDecoder(limitedBody(w, r)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body", "")
+		return
+	}
+	if err := poolops.SetAuthResetTarget(s.store, name, req.AuthResetTarget); err != nil {
+		status := poolStatusError(err)
+		if errors.Is(err, poolops.ErrInvalidAuthResetTarget) {
+			status = http.StatusBadRequest
+		}
+		writeError(w, status, err.Error(), "")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if p, err := s.store.GetPool(name); err == nil && p != nil {
+		_ = json.NewEncoder(w).Encode(storePoolToAPI(*p))
+		return
+	}
+	// The set succeeded; a read-back failure must not report failure. Echo
+	// the persisted value from the request instead.
+	_ = json.NewEncoder(w).Encode(Pool{Name: name, AuthResetTarget: &req.AuthResetTarget})
 }
 
 // DeleteApiPoolsName removes a pool. It refuses (409) while any binding still
@@ -2228,6 +2267,10 @@ func storePoolToAPI(p store.Pool) Pool {
 		Strategy: p.Strategy,
 		Members:  make([]PoolMember, len(p.Members)),
 	}
+	if p.AuthResetTarget != "" {
+		t := p.AuthResetTarget
+		pool.AuthResetTarget = &t
+	}
 	for i, m := range p.Members {
 		pool.Members[i] = PoolMember{Credential: m.Credential, Position: m.Position}
 	}
@@ -2246,6 +2289,10 @@ func poolStatusToAPI(res *poolops.StatusResult) PoolStatus {
 		Strategy: res.Strategy,
 		Active:   res.Active,
 		Members:  make([]PoolMemberStatus, len(res.Members)),
+	}
+	if res.AuthResetTarget != "" {
+		t := res.AuthResetTarget
+		out.AuthResetTarget = &t
 	}
 	for i, m := range res.Members {
 		ms := PoolMemberStatus{

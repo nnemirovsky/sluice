@@ -13,7 +13,7 @@ import (
 
 func handlePoolCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: sluice pool [create|list|status|rotate|remove]")
+		return fmt.Errorf("usage: sluice pool [create|list|status|rotate|set-auth-reset|remove]")
 	}
 
 	switch args[0] {
@@ -25,10 +25,12 @@ func handlePoolCommand(args []string) error {
 		return handlePoolStatus(args[1:])
 	case "rotate":
 		return handlePoolRotate(args[1:])
+	case "set-auth-reset":
+		return handlePoolSetAuthReset(args[1:])
 	case "remove":
 		return handlePoolRemove(args[1:])
 	default:
-		return fmt.Errorf("unknown pool command: %s (usage: sluice pool [create|list|status|rotate|remove] ...)", args[0])
+		return fmt.Errorf("unknown pool command: %s (usage: sluice pool [create|list|status|rotate|set-auth-reset|remove] ...)", args[0])
 	}
 }
 
@@ -37,12 +39,13 @@ func handlePoolCreate(args []string) error {
 	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
 	membersStr := fs.String("members", "", "comma-separated ordered list of oauth credential names (failover order)")
 	strategy := fs.String("strategy", store.PoolStrategyFailover, "pool strategy (only 'failover' is supported)")
+	authResetTarget := fs.String("auth-reset-target", "", "agent auth-reset target run on the exhausted->recovered edge (e.g. openai-codex); empty = no reset")
 	if err := fs.Parse(reorderFlagsBeforePositional(args, fs)); err != nil {
 		return err
 	}
 
 	if fs.NArg() == 0 {
-		return fmt.Errorf("usage: sluice pool create <name> --members a,b[,c] [--strategy failover]")
+		return fmt.Errorf("usage: sluice pool create <name> --members a,b[,c] [--strategy failover] [--auth-reset-target <target>]")
 	}
 	name := fs.Arg(0)
 
@@ -60,13 +63,16 @@ func handlePoolCreate(args []string) error {
 	}
 	defer func() { _ = db.Close() }()
 
-	if err := poolops.Create(db, name, *strategy, members); err != nil {
+	if err := poolops.CreateWithAuthResetTarget(db, name, *strategy, members, *authResetTarget); err != nil {
 		return err
 	}
 
 	fmt.Printf("pool %q created (strategy: %s)\n", name, *strategy)
 	for i, m := range members {
 		fmt.Printf("  [%d] %s\n", i, m)
+	}
+	if *authResetTarget != "" {
+		fmt.Printf("auth-reset target: %s\n", *authResetTarget)
 	}
 	fmt.Printf("bind it with: sluice binding add %s --destination <host> [--ports 443]\n", name)
 	return nil
@@ -99,6 +105,9 @@ func handlePoolList(args []string) error {
 			names = append(names, m.Credential)
 		}
 		fmt.Printf("%s (strategy: %s): %s\n", p.Name, p.Strategy, strings.Join(names, ", "))
+		if p.AuthResetTarget != "" {
+			fmt.Printf("  auth-reset target: %s\n", p.AuthResetTarget)
+		}
 	}
 	return nil
 }
@@ -151,6 +160,46 @@ func handlePoolStatus(args []string) error {
 		fmt.Printf("%s[%d] %s  %s\n", marker, m.Position, m.Credential, status)
 	}
 	fmt.Printf("active: %s\n", res.Active)
+	if res.AuthResetTarget != "" {
+		fmt.Printf("auth-reset target: %s\n", res.AuthResetTarget)
+	}
+	return nil
+}
+
+func handlePoolSetAuthReset(args []string) error {
+	fs := flag.NewFlagSet("pool set-auth-reset", flag.ContinueOnError)
+	dbPath := fs.String("db", "data/sluice.db", "path to SQLite database")
+	if err := fs.Parse(reorderFlagsBeforePositional(args, fs)); err != nil {
+		return err
+	}
+	if fs.NArg() < 2 {
+		return fmt.Errorf("usage: sluice pool set-auth-reset <name> <target|->  (a single - clears the target)")
+	}
+	name := fs.Arg(0)
+	target := fs.Arg(1)
+	// A single "-" is the channel-uniform clear sentinel.
+	if target == "-" {
+		target = ""
+	}
+
+	db, err := store.New(*dbPath)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if err := poolops.SetAuthResetTarget(db, name, target); err != nil {
+		var nf *poolops.PoolNotFoundError
+		if errors.As(err, &nf) {
+			return fmt.Errorf("pool %q not found", name)
+		}
+		return err
+	}
+	if target == "" {
+		fmt.Printf("pool %q auth-reset target cleared\n", name)
+	} else {
+		fmt.Printf("pool %q auth-reset target set to %q\n", name, target)
+	}
 	return nil
 }
 

@@ -652,6 +652,45 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/pools/{name}/auth-reset-target:
+    post:
+      operationId: postApiPoolsNameAuthResetTarget
+      summary: >-
+        Set or clear the per-pool agent auth-reset target run on the
+        exhausted->recovered edge
+      tags: [pools]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetPoolAuthResetTargetRequest"
+      responses:
+        "200":
+          description: Updated pool
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pool"
+        "400":
+          description: Invalid target
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Pool not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /api/audit/recent:
     get:
       operationId: getApiAuditRecent
@@ -1181,6 +1220,11 @@ components:
         strategy:
           type: string
           description: "Pool strategy (only 'failover' is supported)"
+        auth_reset_target:
+          type: string
+          description: >-
+            Agent auth-reset target run on the exhausted->recovered edge
+            (empty = no reset)
         created_at:
           type: string
           format: date-time
@@ -1207,11 +1251,25 @@ components:
         strategy:
           type: string
           description: "Pool strategy; defaults to 'failover' when omitted"
+        auth_reset_target:
+          type: string
+          description: >-
+            Optional agent auth-reset target run on the exhausted->recovered
+            edge (empty/omitted = no reset)
         members:
           type: array
           description: "Ordered member credential names (failover order)"
           items:
             type: string
+
+    SetPoolAuthResetTargetRequest:
+      type: object
+      required: [auth_reset_target]
+      properties:
+        auth_reset_target:
+          type: string
+          description: >-
+            Agent auth-reset target; an empty string clears it (no reset)
 
     PoolStatus:
       type: object
@@ -1224,6 +1282,11 @@ components:
         active:
           type: string
           description: "Currently active member credential name"
+        auth_reset_target:
+          type: string
+          description: >-
+            Agent auth-reset target run on the exhausted->recovered edge
+            (empty = no reset)
         members:
           type: array
           items:

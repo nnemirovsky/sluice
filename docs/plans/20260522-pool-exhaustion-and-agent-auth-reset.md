@@ -307,19 +307,22 @@ precedent) and emits an `agent_auth_reset` audit event.
 - Modify: Telegram `/pool` handler
 - Modify: matching `_test.go` for poolops + each channel adapter
 
-- [ ] add the operation to `internal/poolops` (channel-agnostic) so all channels are thin
-  adapters (CLAUDE.md anti-pattern note)
-- [ ] CLI: `--auth-reset-target` on `pool create`; `pool set-auth-reset <name> <target|->`
-  (set/clear); show target in `pool status`/`pool list`
-- [ ] REST: accept on `POST /api/pools`; add an **action route** `POST
-  /api/pools/{name}/auth-reset-target` (mirrors the existing `/rotate` style, not a bespoke
-  PATCH); edit `api/openapi.yaml`, run `make generate`, implement the generated
-  `ServerInterface` method in `server.go`
-- [ ] Telegram: accept on `/pool create`; add `/pool set-auth-reset <name> <target|->`
-- [ ] write tests: poolops set/clear/create-with-target; one adapter test per channel
-  asserting it routes through poolops (no inline logic)
-- [ ] run `go test ./... -race` for touched packages; `make generate` clean; gofumpt; vet —
-  pass before Task 6
+- [x] add the operation to `internal/poolops` (channel-agnostic) so all channels are thin
+  adapters (CLAUDE.md anti-pattern note) — `CreateWithAuthResetTarget`, `SetAuthResetTarget`,
+  `validateAuthResetTarget`/`ErrInvalidAuthResetTarget`, target on `StatusResult`
+- [x] CLI: `--auth-reset-target` on `pool create`; `pool set-auth-reset <name> <target|->`
+  (set/clear, `-` clears); show target in `pool status`/`pool list`
+- [x] REST: accept `auth_reset_target` on `POST /api/pools`; action route `POST
+  /api/pools/{name}/auth-reset-target` (mirrors `/rotate`, not a PATCH); edited
+  `api/openapi.yaml`, ran `make generate`, implemented `PostApiPoolsNameAuthResetTarget` in
+  `server.go`
+- [x] Telegram: accept target as the optional 3rd `/pool create` arg; added `/pool
+  set-auth-reset <name> <target|->`
+- [x] write tests: poolops set/clear/create-with-target unit tests; one adapter test per
+  channel (CLI, REST, Telegram) asserting it routes through poolops and the value reaches the
+  store
+- [x] run `go test ./... -race` for touched packages; `make generate` clean (byte-stable,
+  raw output committed); gofumpt; vet — pass before Task 6
 
 ### Task 6: Add optional exec user to the container exec path (prerequisite for hermes reset)
 
