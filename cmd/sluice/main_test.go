@@ -1770,8 +1770,9 @@ func newRecoveryTestStore(t *testing.T) *store.Store {
 	return db
 }
 
-func seedRecoveryPool(t *testing.T, db *store.Store, pool string, members []string) {
+func seedRecoveryPool(t *testing.T, db *store.Store, members []string) {
 	t.Helper()
+	const pool = "codex"
 	for _, m := range members {
 		if err := db.AddCredentialMeta(m, "oauth", "https://auth.example.com/token"); err != nil {
 			t.Fatalf("add credential meta %q: %v", m, err)
@@ -1787,7 +1788,7 @@ func seedRecoveryPool(t *testing.T, db *store.Store, pool string, members []stri
 // agent_auth_reset audit event on recovery.
 func TestPoolAuthResetFuncTargetSet(t *testing.T) {
 	db := newRecoveryTestStore(t)
-	seedRecoveryPool(t, db, "codex", []string{"acct_a", "acct_b"})
+	seedRecoveryPool(t, db, []string{"acct_a", "acct_b"})
 	if err := db.SetPoolAuthResetTarget("codex", "openai-codex"); err != nil {
 		t.Fatalf("SetPoolAuthResetTarget: %v", err)
 	}
@@ -1817,7 +1818,7 @@ func TestPoolAuthResetFuncTargetSet(t *testing.T) {
 // covered by TestPoolRecoveredNoticeFunc).
 func TestPoolAuthResetFuncNoTarget(t *testing.T) {
 	db := newRecoveryTestStore(t)
-	seedRecoveryPool(t, db, "codex", []string{"acct_a", "acct_b"})
+	seedRecoveryPool(t, db, []string{"acct_a", "acct_b"})
 
 	mgr := &mockContainerMgr{}
 	logger := &fakeAuditLogger{}
@@ -1839,7 +1840,7 @@ func TestPoolAuthResetFuncNoTarget(t *testing.T) {
 // panic, no audit event) and does not crash.
 func TestPoolAuthResetFuncErrorNotFatal(t *testing.T) {
 	db := newRecoveryTestStore(t)
-	seedRecoveryPool(t, db, "codex", []string{"acct_a", "acct_b"})
+	seedRecoveryPool(t, db, []string{"acct_a", "acct_b"})
 	if err := db.SetPoolAuthResetTarget("codex", "openai-codex"); err != nil {
 		t.Fatalf("SetPoolAuthResetTarget: %v", err)
 	}
@@ -1862,7 +1863,7 @@ func TestPoolAuthResetFuncErrorNotFatal(t *testing.T) {
 // (no panic), covering standalone deployments.
 func TestPoolAuthResetFuncNilManager(t *testing.T) {
 	db := newRecoveryTestStore(t)
-	seedRecoveryPool(t, db, "codex", []string{"acct_a", "acct_b"})
+	seedRecoveryPool(t, db, []string{"acct_a", "acct_b"})
 	if err := db.SetPoolAuthResetTarget("codex", "openai-codex"); err != nil {
 		t.Fatalf("SetPoolAuthResetTarget: %v", err)
 	}
@@ -1889,7 +1890,7 @@ func TestPoolRecoveredNoticeFunc(t *testing.T) {
 
 // TestPoolRecoveredNoticeFuncNoBroker asserts a nil broker yields a no-op
 // callback (no panic).
-func TestPoolRecoveredNoticeFuncNoBroker(t *testing.T) {
+func TestPoolRecoveredNoticeFuncNoBroker(_ *testing.T) {
 	fn := poolRecoveredNoticeFunc(nil)
 	fn("codex") // must not panic
 	time.Sleep(20 * time.Millisecond)

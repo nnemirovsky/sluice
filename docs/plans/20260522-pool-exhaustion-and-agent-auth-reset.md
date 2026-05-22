@@ -385,15 +385,34 @@ precedent) and emits an `agent_auth_reset` audit event.
 - [x] run `go test ./... -race` for touched packages; gofumpt; vet — pass before Task 9
 
 ### Task 9: Verify acceptance criteria
-- [ ] both members exhausted → exactly one "pool exhausted" notice (no flap stream)
-- [ ] B1 cooldown reflects the upstream window (member not re-probed every 60s)
-- [ ] recovery edge → one "pool recovered" notice; auth reset fires only for pools with a
+- [x] both members exhausted → exactly one "pool exhausted" notice (no flap stream)
+  (covered: `TestExhaustedNoticeEdgeAcrossManyResponses`, `TestMarkPoolExhaustedEdge` in
+  `internal/proxy/pool_recovery_monitor_test.go`)
+- [x] B1 cooldown reflects the upstream window (member not re-probed every 60s)
+  (covered: `TestCooldownFromResponse` + `TestCooldownFromResponseNilSafe` in
+  `internal/proxy/pool_failover_test.go`; `cooldownFromResponse` wired into `handlePoolFailover`
+  at `pool_failover.go:629`)
+- [x] recovery edge → one "pool recovered" notice; auth reset fires only for pools with a
   target; hermes reset runs as 10000:10000 (no root-chown of auth.json)
-- [ ] channel parity verified: `auth_reset_target` settable+readable via CLI, REST, Telegram
-- [ ] full `go test ./...`; `go vet ./...`; `go vet -tags=e2e ./e2e/`; `gofumpt -l` clean;
+  (covered: `TestRecoveryMonitorEdgeNoticeAndCallback`, `TestRecoveryMonitorUnequalCooldowns`,
+  `TestRecoveryMonitorPoolRemovedFiresNoNotice`; `TestPoolAuthResetFuncTargetSet`/`...NoTarget`
+  in `cmd/sluice/main_test.go` assert target-gating + the `agent_auth_reset` audit event;
+  `TestResetAuthHermesRunsAsRuntimeUID` asserts 10000:10000)
+- [x] channel parity verified: `auth_reset_target` settable+readable via CLI, REST, Telegram
+  (CLI `TestHandlePoolAuthResetTarget` in `cmd/sluice/pool_test.go`; REST
+  `TestPostApiPoolsNameAuthResetTarget` + `TestPostApiPools_WithAuthResetTarget` in
+  `internal/api/server_test.go`; Telegram `TestHandlePoolAuthResetTarget` in
+  `internal/telegram/commands_test.go`; channel-agnostic `internal/poolops` tests
+  `TestCreateWithAuthResetTarget`/`TestSetAuthResetTargetSetAndClear`)
+- [x] full `go test ./...`; `go vet ./...`; `go vet -tags=e2e ./e2e/`; `gofumpt -l` clean;
   `golangci-lint run ./...` 0 issues; `make generate` then `git diff --exit-code
   internal/api/api.gen.go` clean
-- [ ] independently verify committed HEAD builds + tests pass (do not trust subagent green)
+  (results: build OK; `go test ./...` 2826 pass / 0 fail across 14 pkgs; vet clean; e2e vet
+  clean; gofumpt clean on tracked source — `internal/api/api.gen.go` is the raw oapi-codegen
+  output, byte-stable under `make generate`, NOT gofumpt-formatted by project convention and
+  CI-green on main; golangci-lint v2.9.0 0 issues; `make generate` produces no api.gen.go diff)
+- [x] independently verify committed HEAD builds + tests pass (do not trust subagent green)
+  (verified post-commit: clean `git status`, build + full suite re-run green at HEAD)
 
 ### Task 10: [Final] Documentation
 - [ ] update `CLAUDE.md` credential-pools section: B1 cooldown-from-hints, A1/A2

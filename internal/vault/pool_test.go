@@ -955,7 +955,7 @@ func TestHasHealthyMember(t *testing.T) {
 	}{
 		{
 			name:  "both healthy",
-			setup: func(pr *PoolResolver) {},
+			setup: func(_ *PoolResolver) {},
 			pool:  "pool",
 			want:  true,
 		},
@@ -1001,7 +1001,7 @@ func TestHasHealthyMember(t *testing.T) {
 		},
 		{
 			name:  "unknown pool",
-			setup: func(pr *PoolResolver) {},
+			setup: func(_ *PoolResolver) {},
 			pool:  "nope",
 			want:  false,
 		},
@@ -1039,7 +1039,7 @@ func TestSoonestCooldown(t *testing.T) {
 	}{
 		{
 			name:   "no member cooling",
-			setup:  func(pr *PoolResolver, base time.Time) {},
+			setup:  func(_ *PoolResolver, _ time.Time) {},
 			pool:   "pool",
 			wantOK: false,
 		},
@@ -1085,7 +1085,7 @@ func TestSoonestCooldown(t *testing.T) {
 		},
 		{
 			name:   "unknown pool",
-			setup:  func(pr *PoolResolver, base time.Time) {},
+			setup:  func(_ *PoolResolver, _ time.Time) {},
 			pool:   "nope",
 			wantOK: false,
 		},

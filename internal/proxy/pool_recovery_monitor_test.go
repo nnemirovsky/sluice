@@ -36,9 +36,9 @@ default = "deny"
 
 // twoMemberPool builds a 2-member failover pool resolver and stores it on the
 // server. Returns the live resolver.
-func twoMemberPool(t *testing.T, srv *Server, name, a, b string) *vault.PoolResolver {
+func twoMemberPool(t *testing.T, srv *Server, a, b string) *vault.PoolResolver {
 	t.Helper()
-	pool := store.Pool{Name: name, Strategy: store.PoolStrategyFailover}
+	pool := store.Pool{Name: "p", Strategy: store.PoolStrategyFailover}
 	pool.Members = []store.PoolMember{
 		{Credential: a, Position: 0},
 		{Credential: b, Position: 1},
@@ -70,7 +70,7 @@ func TestMarkPoolExhaustedEdge(t *testing.T) {
 	// but here we only test the edge bookkeeping, so use a pool that stays
 	// exhausted (no resolver -> scanRecovery clears it). Store a resolver whose
 	// members are all cooling so it stays exhausted.
-	pr := twoMemberPool(t, srv, "p", "a", "b")
+	pr := twoMemberPool(t, srv, "a", "b")
 	far := time.Now().Add(time.Hour)
 	pr.MarkCooldown("a", far, "429")
 	pr.MarkCooldown("b", far, "429")
@@ -139,7 +139,7 @@ func TestExhaustedNoticeEdgeAcrossManyResponses(t *testing.T) {
 // exactly one onPoolRecovered call.
 func TestRecoveryMonitorEdgeNoticeAndCallback(t *testing.T) {
 	srv := newMonitorTestServer(t)
-	pr := twoMemberPool(t, srv, "p", "a", "b")
+	pr := twoMemberPool(t, srv, "a", "b")
 
 	var notices, resets int32
 	var mu sync.Mutex
@@ -195,7 +195,7 @@ func TestRecoveryMonitorEdgeNoticeAndCallback(t *testing.T) {
 // is still cooling. Uses short injected durations (no 60s sleep).
 func TestRecoveryMonitorUnequalCooldowns(t *testing.T) {
 	srv := newMonitorTestServer(t)
-	pr := twoMemberPool(t, srv, "p", "memA", "memB")
+	pr := twoMemberPool(t, srv, "memA", "memB")
 
 	var notices int32
 	srv.SetOnPoolRecoveredNotice(func(string) { atomic.AddInt32(&notices, 1) })
@@ -225,7 +225,7 @@ func TestRecoveryMonitorUnequalCooldowns(t *testing.T) {
 // exhausted has its state dropped and fires no recovered notice.
 func TestRecoveryMonitorPoolRemovedFiresNoNotice(t *testing.T) {
 	srv := newMonitorTestServer(t)
-	pr := twoMemberPool(t, srv, "p", "a", "b")
+	pr := twoMemberPool(t, srv, "a", "b")
 	pr.MarkCooldown("a", time.Now().Add(time.Hour), "429")
 	pr.MarkCooldown("b", time.Now().Add(time.Hour), "429")
 
@@ -291,7 +291,7 @@ func TestRecoveryMonitorStopsCleanly(t *testing.T) {
 	// stop must not be serviced (no recovered notice ever fires).
 	var notices int32
 	srv.SetOnPoolRecoveredNotice(func(string) { atomic.AddInt32(&notices, 1) })
-	pr := twoMemberPool(t, srv, "p", "a", "b")
+	pr := twoMemberPool(t, srv, "a", "b")
 	pr.MarkCooldown("a", time.Now().Add(20*time.Millisecond), "429")
 	pr.MarkCooldown("b", time.Now().Add(20*time.Millisecond), "429")
 	srv.markPoolExhausted("p")
