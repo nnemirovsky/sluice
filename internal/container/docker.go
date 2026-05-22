@@ -138,7 +138,7 @@ func (m *DockerManager) ResetAuth(ctx context.Context, target string) error {
 		log.Printf("agent profile %q has no auth-reset command; agent must recover on its own", m.profile.Name)
 		return nil
 	}
-	if err := validateResetAuthTarget(target); err != nil {
+	if err := ValidateResetAuthTarget(target); err != nil {
 		return err
 	}
 	return m.client.ExecInContainer(ctx, m.containerName, m.profile.ExecUser(), m.profile.ResetAuthCmd(target))

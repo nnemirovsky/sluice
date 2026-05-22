@@ -165,6 +165,15 @@ func TestHandlePoolAuthResetTarget(t *testing.T) {
 	if err := handlePoolCommand([]string{"set-auth-reset", "--db", dbPath, "codex"}); err == nil {
 		t.Error("expected usage error for set-auth-reset with too few args")
 	}
+
+	// A target outside the allowlist (space, slash) is rejected at set time, not
+	// stored with success and then silently un-executable at recovery (F1).
+	for name, target := range map[string]string{"space": "openai codex", "slash": "openai/codex"} {
+		if err := handlePoolCommand([]string{"set-auth-reset", "--db", dbPath, "codex", target}); err == nil {
+			t.Errorf("%s target: expected rejection, got nil error", name)
+		}
+		assertStoredAuthResetTarget(t, dbPath, "codex", "")
+	}
 }
 
 func assertStoredAuthResetTarget(t *testing.T, dbPath, pool, want string) {

@@ -3082,6 +3082,15 @@ func (s *Server) clearPoolExhausted(pool string) {
 // "pool recovered" notice, and invokes onPoolRecovered once. The state flip and
 // callback snapshot happen under poolExhaustMu so two concurrent passes cannot
 // both recover the same pool.
+//
+// Concurrency with a re-exhaustion: a 429 arriving between this scan's
+// HasHealthyMember==true and the delete below races markPoolExhausted, but both
+// transitions are guarded by poolExhaustMu (no torn state) and the machine
+// self-corrects. If markPoolExhausted re-sets the flag after this delete, it
+// returns true (a fresh edge), re-emits the exhausted notice, and wakes the
+// monitor, which re-evaluates HasHealthyMember on the next scan. The worst case
+// is one extra recovered/exhausted notice pair during a genuine flap — correct
+// behavior, not a stuck state.
 func (s *Server) recoverPool(pool string) {
 	s.poolExhaustMu.Lock()
 	if !s.poolExhausted[pool] {

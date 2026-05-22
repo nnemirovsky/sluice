@@ -3098,10 +3098,22 @@ func TestPostApiPoolsNameAuthResetTarget(t *testing.T) {
 		t.Fatalf("after clear stored AuthResetTarget = %q, want empty", got.AuthResetTarget)
 	}
 
-	// Invalid target (newline) -> 400.
-	rec = post(`{"auth_reset_target": "bad\ntarget"}`)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("invalid target: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	// Invalid targets -> 400 and no store mutation. Newline was caught by the
+	// old looser rule; a space and a slash were NOT (F1) and are the cases that
+	// would otherwise store with 200 and fail silently at recovery.
+	for name, target := range map[string]string{
+		"newline": `bad\ntarget`,
+		"space":   `openai codex`,
+		"slash":   `openai/codex`,
+	} {
+		rec = post(`{"auth_reset_target": "` + target + `"}`)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s target: expected 400, got %d: %s", name, rec.Code, rec.Body.String())
+		}
+		got, _ = st.GetPool("pool1")
+		if got.AuthResetTarget != "" {
+			t.Fatalf("%s target: store mutated to %q despite 400", name, got.AuthResetTarget)
+		}
 	}
 
 	// Unknown pool -> 404.

@@ -40,7 +40,7 @@ type AgentProfile struct {
 	// given target so it retries after a pool quota window passes. It is
 	// pure argv (no `sh -c` wrapper), so there is no shell-metacharacter
 	// threat from the interpolated target; the target is still validated
-	// (validateResetAuthTarget) before exec as defense in depth.
+	// (ValidateResetAuthTarget) before exec as defense in depth.
 	// Returning nil means the profile has no auth-reset mechanism; the
 	// caller should log a notice and rely on the agent recovering on its
 	// own (mirrors a nil ReloadCmd).
@@ -153,7 +153,7 @@ var HermesProfile = &AgentProfile{
 	// ResetAuthCmd un-latches hermes' local auth state for the given
 	// target via `hermes auth reset <target>`. It is pure argv (no
 	// `sh -c`), so the target cannot smuggle shell metacharacters — but
-	// the caller still validates it (validateResetAuthTarget) before
+	// the caller still validates it (ValidateResetAuthTarget) before
 	// exec. The exec must run as the runtime UID (see execUser above) or
 	// it root-chowns hermes-owned auth files and bricks the gateway.
 	ResetAuthCmd: func(target string) []string {

@@ -2244,6 +2244,17 @@ func TestHandlePoolAuthResetTarget(t *testing.T) {
 	if !strings.Contains(got, "Usage:") {
 		t.Errorf("set-auth-reset too few args = %q", got)
 	}
+
+	// A target outside the allowlist (a slash; a space can't survive Telegram's
+	// space-split arg parsing) is rejected, not stored with a success message
+	// and then silently un-executable at recovery (F1).
+	got = h.Handle(&Command{Name: "pool", Args: []string{"set-auth-reset", "codex", "openai/codex"}})
+	if !strings.Contains(got, "Failed to set auth-reset target") {
+		t.Errorf("slash target: expected failure message, got %q", got)
+	}
+	if p, _ := s.GetPool("codex"); p.AuthResetTarget != "" {
+		t.Errorf("slash target: store mutated to %q despite rejection", p.AuthResetTarget)
+	}
 }
 
 func TestHandlePoolCreateNoMembers(t *testing.T) {

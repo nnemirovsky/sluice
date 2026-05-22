@@ -128,12 +128,19 @@ func ValidateEnvVarKey(key string) error {
 // shell), so this allowlist is defense in depth, not a shell-escape.
 var resetAuthTargetRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`)
 
-// validateResetAuthTarget checks that an auth-reset target is non-empty,
+// ValidateResetAuthTarget checks that an auth-reset target is non-empty,
 // free of NUL bytes, and within the allowlisted charset before it is
 // passed to ContainerManager.ResetAuth. Mirrors ValidateEnvVarKey's
 // fail-closed style: an invalid target is rejected (no exec) rather than
 // sanitized.
-func validateResetAuthTarget(target string) error {
+//
+// This is the single canonical auth-reset-target validator. It is shared by
+// the channel-agnostic poolops layer (set-time validation on CLI/REST/
+// Telegram) and by every container backend (exec-time defense in depth) so
+// the two surfaces cannot drift: a target that the store accepts is always a
+// target ResetAuth can exec. An empty target ("") means "clear / no reset"
+// and is rejected here; poolops normalizes that sentinel away before calling.
+func ValidateResetAuthTarget(target string) error {
 	if target == "" {
 		return fmt.Errorf("auth-reset target is empty")
 	}

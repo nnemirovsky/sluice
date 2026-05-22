@@ -294,12 +294,20 @@ func (m *TartManager) ReloadSecrets(ctx context.Context) error {
 // ResetAuth clears the agent's local auth state for target. The mechanism
 // is profile-specific; a nil ResetAuthCmd is a logged no-op (mirrors
 // ReloadSecrets). The target is validated before exec.
+//
+// Unlike DockerManager, this does not thread profile.ExecUser() into the exec:
+// cli.Exec (the tart CLI) has no per-exec user flag. That is acceptable because
+// the only profile needing a non-root exec UID is hermes, which is
+// docker/local-only (per CLAUDE.md the Apple/tart backends do not run hermes),
+// so the root-chown hazard ExecUser guards against on docker cannot arise here.
+// If a future profile needs a runtime UID on this backend, the CLI invocation
+// must be extended to pass it.
 func (m *TartManager) ResetAuth(ctx context.Context, target string) error {
 	if m.profile.ResetAuthCmd == nil {
 		log.Printf("agent profile %q has no auth-reset command; agent must recover on its own", m.profile.Name)
 		return nil
 	}
-	if err := validateResetAuthTarget(target); err != nil {
+	if err := ValidateResetAuthTarget(target); err != nil {
 		return err
 	}
 	_, err := m.cli.Exec(ctx, m.vmName, m.profile.ResetAuthCmd(target))

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nemirovsky/sluice/internal/container"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
 )
@@ -110,22 +111,26 @@ func ParseMembers(membersStr string) ([]string, error) {
 	return members, nil
 }
 
-// ErrInvalidAuthResetTarget is returned when a non-empty auth-reset target
-// contains a NUL byte or newline. The target is consumed as argv (never
-// shell-interpolated), so this is a minimal structural guard, not a
-// shell-metachar check; channels that exec the target apply any stricter
-// allowlist at exec time.
-var ErrInvalidAuthResetTarget = errors.New("invalid auth_reset_target: must not contain NUL or newline characters")
+// ErrInvalidAuthResetTarget wraps a non-empty auth-reset target that fails the
+// canonical allowlist (container.ValidateResetAuthTarget: [A-Za-z0-9_.:-]+).
+// Channels can errors.Is against it for a uniform "bad target" mapping; the
+// wrapped error carries the specific reason. Set-time validation here matches
+// the exec-time validation exactly so a target the store accepts is always one
+// ResetAuth can exec — there is no longer a looser set-time rule that lets an
+// unexecutable target (a space, a slash) store with success and then fail
+// silently in the detached recovery goroutine.
+var ErrInvalidAuthResetTarget = errors.New("invalid auth_reset_target")
 
-// validateAuthResetTarget rejects a non-empty target containing a NUL byte or
-// a newline. An empty target ("") is always valid and means "clear / no
-// reset", so callers normalize the clear sentinel before validating.
+// validateAuthResetTarget validates a non-empty target against the single
+// canonical allowlist used at exec time (container.ValidateResetAuthTarget).
+// An empty target ("") is always valid and means "clear / no reset", so
+// callers normalize the clear sentinel before validating.
 func validateAuthResetTarget(target string) error {
 	if target == "" {
 		return nil
 	}
-	if strings.ContainsAny(target, "\x00\n\r") {
-		return ErrInvalidAuthResetTarget
+	if err := container.ValidateResetAuthTarget(target); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidAuthResetTarget, err)
 	}
 	return nil
 }

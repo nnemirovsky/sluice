@@ -147,19 +147,35 @@ func TestCreateWithEmptyAuthResetTargetDefaultsEmpty(t *testing.T) {
 	}
 }
 
+// TestCreateWithInvalidAuthResetTarget asserts a target that the exec-time
+// allowlist (container.ValidateResetAuthTarget: [A-Za-z0-9_.:-]+) would reject
+// is also rejected at create time, on the channel-agnostic path, so it never
+// stores with success and then fails silently in the detached recovery
+// goroutine. A newline/NUL was caught by the old looser rule; a space and a
+// slash were NOT (the F1 silent-failure bug) and are the load-bearing cases.
 func TestCreateWithInvalidAuthResetTarget(t *testing.T) {
-	db := newTestStore(t, "acct_a")
-	err := poolops.CreateWithAuthResetTarget(db, "p", "", []string{"acct_a"}, "bad\ntarget")
-	if !errors.Is(err, poolops.ErrInvalidAuthResetTarget) {
-		t.Fatalf("err = %v, want ErrInvalidAuthResetTarget", err)
+	cases := map[string]string{
+		"newline": "bad\ntarget",
+		"nul":     "bad\x00target",
+		"space":   "openai codex",
+		"slash":   "openai/codex",
 	}
-	// The pool must not have been created when the target is invalid.
-	p, err := db.GetPool("p")
-	if err != nil {
-		t.Fatalf("GetPool: %v", err)
-	}
-	if p != nil {
-		t.Fatalf("pool created despite invalid target: %+v", p)
+	for name, target := range cases {
+		t.Run(name, func(t *testing.T) {
+			db := newTestStore(t, "acct_a")
+			err := poolops.CreateWithAuthResetTarget(db, "p", "", []string{"acct_a"}, target)
+			if !errors.Is(err, poolops.ErrInvalidAuthResetTarget) {
+				t.Fatalf("err = %v, want ErrInvalidAuthResetTarget", err)
+			}
+			// The pool must not have been created when the target is invalid.
+			p, err := db.GetPool("p")
+			if err != nil {
+				t.Fatalf("GetPool: %v", err)
+			}
+			if p != nil {
+				t.Fatalf("pool created despite invalid target: %+v", p)
+			}
+		})
 	}
 }
 
@@ -202,12 +218,32 @@ func TestSetAuthResetTargetUnknownPool(t *testing.T) {
 }
 
 func TestSetAuthResetTargetInvalid(t *testing.T) {
-	db := newTestStore(t, "acct_a")
-	if err := poolops.Create(db, "p", "", []string{"acct_a"}); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if err := poolops.SetAuthResetTarget(db, "p", "bad\x00target"); !errors.Is(err, poolops.ErrInvalidAuthResetTarget) {
-		t.Fatalf("err = %v, want ErrInvalidAuthResetTarget", err)
+	// Set-time validation mirrors the exec-time allowlist exactly: a space or
+	// slash (not just NUL/newline) is rejected before the store write, so an
+	// unexecutable target can never be persisted.
+	for name, target := range map[string]string{
+		"nul":     "bad\x00target",
+		"newline": "bad\ntarget",
+		"space":   "openai codex",
+		"slash":   "openai/codex",
+	} {
+		t.Run(name, func(t *testing.T) {
+			db := newTestStore(t, "acct_a")
+			if err := poolops.Create(db, "p", "", []string{"acct_a"}); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if err := poolops.SetAuthResetTarget(db, "p", target); !errors.Is(err, poolops.ErrInvalidAuthResetTarget) {
+				t.Fatalf("err = %v, want ErrInvalidAuthResetTarget", err)
+			}
+			// Store must not have been mutated.
+			p, err := db.GetPool("p")
+			if err != nil {
+				t.Fatalf("GetPool: %v", err)
+			}
+			if p.AuthResetTarget != "" {
+				t.Fatalf("target persisted despite invalid value: %q", p.AuthResetTarget)
+			}
+		})
 	}
 }
 
