@@ -510,7 +510,15 @@ func main() {
 					log.Printf("[POOL-FAILOVER] durable health write for %q skipped: no longer a live member of pool %q at epoch %d (removed/re-added before failover landed)", ev.From, ev.Pool, ev.Epoch)
 				}
 			}
-			if failoverBroker != nil {
+			// The durable health write above runs for EVERY failover event
+			// (decoupled from the notice dedup) so the persisted cooldown
+			// stays monotonic through a sustained exhaustion. The operator
+			// notice, by contrast, is gated on ev.Notify — true only when
+			// this event passed the dedup gate in handlePoolFailover (a real
+			// transition's 30s window or the healthy->exhausted edge) — so a
+			// suppressed/deduped event still persists but does not re-spam
+			// the operator.
+			if failoverBroker != nil && ev.Notify {
 				// Plain text: TelegramChannel.Notify sends with no parse
 				// mode, so markdown backticks would render literally.
 				// Exhausted: no distinct member to fail over to (every

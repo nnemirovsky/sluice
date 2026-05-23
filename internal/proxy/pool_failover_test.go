@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1075,13 +1076,15 @@ func TestFailoverPoolExhaustedNoSelfFailoverSpam(t *testing.T) {
 	// itself -> ResolveActive degrades to memA -> no distinct target.
 	prPtr.Load().MarkCooldown("memB", time.Now().Add(10*time.Minute), "401")
 
-	var calls int32
-	var last FailoverEvent
-	done := make(chan struct{}, 4)
+	// The callback fires synchronously inside addon.Response (the production
+	// detaching happens in main.go's SetOnFailover closure, not here), so the
+	// per-call records are stable to read after the loop.
+	var mu sync.Mutex
+	var events []FailoverEvent
 	addon.SetOnFailover(func(ev FailoverEvent) {
-		atomic.AddInt32(&calls, 1)
-		last = ev
-		done <- struct{}{}
+		mu.Lock()
+		events = append(events, ev)
+		mu.Unlock()
 	})
 
 	// Two back-to-back identical 429s (the agent's retry storm).
@@ -1091,25 +1094,38 @@ func TestFailoverPoolExhaustedNoSelfFailoverSpam(t *testing.T) {
 		addon.Response(f)
 	}
 
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("onFailover callback not invoked")
+	mu.Lock()
+	got := append([]FailoverEvent(nil), events...)
+	mu.Unlock()
+
+	// New contract: the durable callback fires for EVERY qualifying failover
+	// response (decoupled from the notice dedup), with Notify reflecting the
+	// dedup decision — true on the first (edge) event, false on the suppressed
+	// retry. This is what keeps the durable store write monotonic across a
+	// sustained exhaustion while the notice/audit stay deduped.
+	if len(got) != 2 {
+		t.Fatalf("onFailover invoked %d times, want exactly 2 (one per qualifying response; durability decoupled from notice dedup)", len(got))
 	}
-	// Dedup: the second identical signal within the window is suppressed.
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Fatalf("onFailover invoked %d times, want exactly 1 (dedup window must collapse the retry storm)", got)
+	if !got[0].Notify {
+		t.Fatalf("first onFailover Notify = false, want true (healthy->exhausted edge passes the dedup gate)")
 	}
-	if !last.Exhausted {
-		t.Fatalf("FailoverEvent.Exhausted = false, want true (no distinct failover target)")
+	if got[1].Notify {
+		t.Fatalf("second onFailover Notify = true, want false (the retry-storm repeat is notice-suppressed but still persisted)")
 	}
-	if last.From != "memA" || last.To != "memA" {
-		t.Fatalf("FailoverEvent from=%q to=%q, want memA/memA (degraded to self)", last.From, last.To)
+	for i, ev := range got {
+		if !ev.Exhausted {
+			t.Fatalf("event %d Exhausted = false, want true (no distinct failover target)", i)
+		}
+		if ev.From != "memA" || ev.To != "memA" {
+			t.Fatalf("event %d from=%q to=%q, want memA/memA (degraded to self)", i, ev.From, ev.To)
+		}
 	}
 
 	if err := logger.Close(); err != nil {
 		t.Fatalf("logger close: %v", err)
 	}
+	// The audit row stays gated on the dedup decision (only the edge event
+	// emits), so exactly one row despite two callback invocations.
 	if n := auditActionCount(t, logPath, "pool_exhausted"); n != 1 {
 		t.Fatalf("pool_exhausted audit rows = %d, want exactly 1 (no per-retry spam)", n)
 	}
@@ -1150,14 +1166,15 @@ func TestFailoverExhaustedDedupCollapsesFlapDirection(t *testing.T) {
 	prPtr.Load().MarkCooldown("memA", time.Now().Add(5*time.Minute), "429")
 	prPtr.Load().MarkCooldown("memB", time.Now().Add(10*time.Minute), "401")
 
-	var calls int32
-	done := make(chan struct{}, 4)
+	var mu sync.Mutex
+	var events []FailoverEvent
 	addon.SetOnFailover(func(ev FailoverEvent) {
 		if !ev.Exhausted {
 			t.Errorf("FailoverEvent.Exhausted = false, want true (pool exhausted)")
 		}
-		atomic.AddInt32(&calls, 1)
-		done <- struct{}{}
+		mu.Lock()
+		events = append(events, ev)
+		mu.Unlock()
 	})
 
 	// Two failing responses, attributed to DIFFERENT members (flap directions).
@@ -1167,15 +1184,24 @@ func TestFailoverExhaustedDedupCollapsesFlapDirection(t *testing.T) {
 		addon.Response(f)
 	}
 
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("onFailover callback not invoked")
+	mu.Lock()
+	got := append([]FailoverEvent(nil), events...)
+	mu.Unlock()
+
+	// New contract: the durable callback fires once per qualifying response
+	// (both flap directions), but the COLLAPSED exhausted dedup key suppresses
+	// the notice on the second, so exactly one event carries Notify=true.
+	if len(got) != 2 {
+		t.Fatalf("onFailover invoked %d times, want exactly 2 (one per qualifying response; durability decoupled from notice dedup)", len(got))
 	}
-	// Give any erroneous second call a moment to surface before asserting.
-	time.Sleep(50 * time.Millisecond)
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Fatalf("onFailover invoked %d times, want exactly 1 (collapsed exhausted dedup key must absorb both flap directions)", got)
+	notify := 0
+	for _, ev := range got {
+		if ev.Notify {
+			notify++
+		}
+	}
+	if notify != 1 {
+		t.Fatalf("onFailover Notify=true on %d events, want exactly 1 (collapsed exhausted dedup key must absorb both flap directions)", notify)
 	}
 
 	if err := logger.Close(); err != nil {

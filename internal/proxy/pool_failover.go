@@ -324,6 +324,12 @@ type FailoverEvent struct {
 	// so a late callback firing after a remove/re-add cannot persist this
 	// cooldown onto the re-created same-name successor (Cluster A #2).
 	Epoch int64
+	// Notify is true only when the operator notice/audit for this event
+	// passed the dedup gate (a real transition's 30s window, or the
+	// healthy->exhausted edge). The durable store write runs regardless of
+	// Notify; only the Telegram notice is gated by it, so cooldown
+	// persistence stays monotonic even when notices are suppressed.
+	Notify bool
 }
 
 // humanizeFailoverReason maps a short reason tag (the same tag embedded in the
@@ -628,8 +634,13 @@ func (a *SluiceAddon) poolForResponse(f *mitmproxy.Flow) (pool, activeMember, pr
 //     below only reconciles for durability across restarts.
 //  2. Computes the next active member (post-cooldown) for the audit/notice.
 //  3. Hands a FailoverEvent to the onFailover callback (async, best-effort):
-//     the callback persists SetCredentialHealth to the store and fires the
-//     Telegram notice. The callback MUST NOT block the response path.
+//     the callback persists SetCredentialHealth to the store (ALWAYS) and
+//     fires the Telegram notice (only when ev.Notify is true). The callback is
+//     invoked unconditionally — even for a notice-suppressed (deduped) event —
+//     so the durable store write is decoupled from the notice gate and the
+//     persisted cooldown stays monotonic through a sustained exhaustion. The
+//     callback MUST NOT block the response path. Only the spam-prone log line
+//     and audit row stay gated on the dedup decision (ev.Notify).
 //
 // No in-flight retry: the triggering request still returns its own upstream
 // error to the agent unmodified. The agent (or its SDK) retries on its own
@@ -733,6 +744,37 @@ func (a *SluiceAddon) handlePoolFailover(f *mitmproxy.Flow) {
 	} else {
 		emit = a.shouldEmitPoolNotice(pool, from, to, tag)
 	}
+
+	// (3) Durability + Telegram via the callback. The callback is responsible
+	// for being non-blocking (it runs the store write and the Telegram send in
+	// its own goroutine); we still guard with a nil check. Fired
+	// UNCONDITIONALLY — even when the notice is deduped (emit == false) — so the
+	// durable cooldown write is decoupled from the notice gate: the store stays
+	// monotonically up to date through a sustained exhaustion/retry storm where
+	// every notice after the first edge is suppressed. Only the operator-facing
+	// Telegram notice is gated, via Notify=emit; the callback itself runs the
+	// durable store write regardless of Notify. The member did fail in every
+	// case (the in-memory cooldown above already reflects that), exhausted just
+	// changes the operator-facing wording.
+	if a.onFailover != nil {
+		a.onFailover(FailoverEvent{
+			Pool:      pool,
+			From:      from,
+			To:        to,
+			Reason:    tag,
+			Class:     class,
+			Until:     until,
+			Exhausted: exhausted,
+			Epoch:     idEpoch,
+			Notify:    emit,
+		})
+	}
+
+	// The log line + audit row below stay gated on the dedup decision: they are
+	// the spam-prone surfaces a retry storm would flood, so a suppressed notice
+	// (deduped window, or an already-exhausted pool whose edge already fired)
+	// must not append a fresh log/audit entry. The durable store write already
+	// ran above via the unconditional callback.
 	if !emit {
 		return
 	}
@@ -775,24 +817,6 @@ func (a *SluiceAddon) handlePoolFailover(f *mitmproxy.Flow) {
 		if err := a.auditLog.Log(evt); err != nil {
 			log.Printf("[POOL-FAILOVER] audit log error: %v", err)
 		}
-	}
-
-	// (3) Durability + Telegram via the callback. The callback is
-	// responsible for being non-blocking (it runs the store write and the
-	// Telegram send in its own goroutine); we still guard with a nil check.
-	// The durable cooldown is persisted even when exhausted (the member did
-	// fail); only the operator-facing wording differs.
-	if a.onFailover != nil {
-		a.onFailover(FailoverEvent{
-			Pool:      pool,
-			From:      from,
-			To:        to,
-			Reason:    tag,
-			Class:     class,
-			Until:     until,
-			Exhausted: exhausted,
-			Epoch:     idEpoch,
-		})
 	}
 }
 

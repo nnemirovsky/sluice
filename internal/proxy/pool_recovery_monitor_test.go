@@ -105,13 +105,22 @@ func TestExhaustedNoticeEdgeAcrossManyResponses(t *testing.T) {
 	prPtr.Load().MarkCooldown("memA", time.Now().Add(time.Hour), "429")
 	prPtr.Load().MarkCooldown("memB", time.Now().Add(time.Hour), "401")
 
-	var notices int32
+	// New contract: the durable callback fires once per qualifying response
+	// (decoupled from the notice dedup), but exactly one event carries
+	// Notify=true — the healthy->exhausted edge. The operator notice is gated on
+	// Notify, so this still proves "one exhausted notice across many responses"
+	// (edge-gated, not per-response) while the durable store write runs on every
+	// call.
+	var calls, notices int32
 	done := make(chan struct{}, 16)
 	addon.SetOnFailover(func(ev FailoverEvent) {
 		if !ev.Exhausted {
 			t.Errorf("FailoverEvent.Exhausted = false, want true")
 		}
-		atomic.AddInt32(&notices, 1)
+		atomic.AddInt32(&calls, 1)
+		if ev.Notify {
+			atomic.AddInt32(&notices, 1)
+		}
 		done <- struct{}{}
 	})
 
@@ -130,7 +139,11 @@ func TestExhaustedNoticeEdgeAcrossManyResponses(t *testing.T) {
 	// Let any erroneous extra notice surface.
 	time.Sleep(50 * time.Millisecond)
 	if got := atomic.LoadInt32(&notices); got != 1 {
-		t.Fatalf("exhausted notices = %d, want exactly 1 (edge-gated, not per-response)", got)
+		t.Fatalf("exhausted notices (Notify=true) = %d, want exactly 1 (edge-gated, not per-response)", got)
+	}
+	// The durable callback itself ran for every qualifying response.
+	if got := atomic.LoadInt32(&calls); got != 10 {
+		t.Fatalf("onFailover calls = %d, want 10 (durable callback fires per response, decoupled from the notice gate)", got)
 	}
 }
 
