@@ -1561,7 +1561,7 @@ func TestDeleteApiCredentials_PoolGuardVsStoreFault(t *testing.T) {
 				t.Fatalf("seed oauth cred %q: %v", n, err)
 			}
 		}
-		if err := st.CreatePoolWithMembers("p", "failover", []string{"m", "n"}); err != nil {
+		if err := st.CreatePoolWithMembers("p", "failover", []string{"m", "n"}, ""); err != nil {
 			t.Fatalf("create pool: %v", err)
 		}
 
@@ -2801,7 +2801,7 @@ func TestPostApiPools_DuplicateName(t *testing.T) {
 	st := newTestStore(t)
 	enableHTTPChannel(t, st)
 	seedOAuthCred(t, st, "credA", "credB")
-	if err := st.CreatePoolWithMembers("dup_pool", store.PoolStrategyFailover, []string{"credA"}); err != nil {
+	if err := st.CreatePoolWithMembers("dup_pool", store.PoolStrategyFailover, []string{"credA"}, ""); err != nil {
 		t.Fatalf("seed pool: %v", err)
 	}
 	srv := api.NewServer(st, nil, nil, "")
@@ -2851,7 +2851,7 @@ func TestPostApiPools_MemberAlreadyPooled(t *testing.T) {
 	st := newTestStore(t)
 	enableHTTPChannel(t, st)
 	seedOAuthCred(t, st, "credA", "credB")
-	if err := st.CreatePoolWithMembers("pool_one", store.PoolStrategyFailover, []string{"credA"}); err != nil {
+	if err := st.CreatePoolWithMembers("pool_one", store.PoolStrategyFailover, []string{"credA"}, ""); err != nil {
 		t.Fatalf("seed pool: %v", err)
 	}
 	srv := api.NewServer(st, nil, nil, "")
@@ -2955,7 +2955,7 @@ func TestGetApiPoolsName_Status(t *testing.T) {
 	st := newTestStore(t)
 	enableHTTPChannel(t, st)
 	seedOAuthCred(t, st, "credA", "credB")
-	if err := st.CreatePoolWithMembers("pool1", store.PoolStrategyFailover, []string{"credA", "credB"}); err != nil {
+	if err := st.CreatePoolWithMembers("pool1", store.PoolStrategyFailover, []string{"credA", "credB"}, ""); err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 	srv := api.NewServer(st, nil, nil, "")
@@ -3011,7 +3011,7 @@ func TestPostApiPoolsNameRotate_Success(t *testing.T) {
 	st := newTestStore(t)
 	enableHTTPChannel(t, st)
 	seedOAuthCred(t, st, "credA", "credB")
-	if err := st.CreatePoolWithMembers("pool1", store.PoolStrategyFailover, []string{"credA", "credB"}); err != nil {
+	if err := st.CreatePoolWithMembers("pool1", store.PoolStrategyFailover, []string{"credA", "credB"}, ""); err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 	srv := api.NewServer(st, nil, nil, "")
@@ -3042,6 +3042,198 @@ func TestPostApiPoolsNameRotate_Success(t *testing.T) {
 	}
 }
 
+// TestPostApiPoolsNameAuthResetTarget exercises the REST adapter for the
+// per-pool auth_reset_target action route. It asserts the value reaches the
+// store (the REST handler is a thin poolops adapter), that clearing with an
+// empty string works, and that an invalid target is a 400 and an unknown
+// pool a 404.
+func TestPostApiPoolsNameAuthResetTarget(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	seedOAuthCred(t, st, "credA", "credB")
+	if err := st.CreatePoolWithMembers("pool1", store.PoolStrategyFailover, []string{"credA", "credB"}, ""); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	srv := api.NewServer(st, nil, nil, "")
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	post := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/pools/pool1/auth-reset-target", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer tok")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Set a target. The 200 path returns the full, schema-complete pool via a
+	// read-back: name+strategy+members are all required by the OpenAPI Pool
+	// schema. (The read-back-failure fallback returns 204 No Content rather
+	// than a partial Pool that would violate that schema — Copilot #2 — but
+	// that path is not reachable here without failing the store mid-handler,
+	// which the concrete *store.Store gives no seam for.)
+	rec := post(`{"auth_reset_target": "openai-codex"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var p api.Pool
+	if err := json.NewDecoder(rec.Body).Decode(&p); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if p.AuthResetTarget == nil || *p.AuthResetTarget != "openai-codex" {
+		t.Fatalf("response AuthResetTarget = %v, want openai-codex", p.AuthResetTarget)
+	}
+	// Schema completeness: the OpenAPI Pool schema requires name+strategy+members.
+	if p.Name != "pool1" {
+		t.Errorf("200 body name = %q, want pool1", p.Name)
+	}
+	if p.Strategy != store.PoolStrategyFailover {
+		t.Errorf("200 body strategy = %q, want %q", p.Strategy, store.PoolStrategyFailover)
+	}
+	if len(p.Members) != 2 {
+		t.Fatalf("200 body members = %+v, want 2 (credA, credB)", p.Members)
+	}
+	// Reached the store (no inline logic; routed through poolops).
+	got, err := st.GetPool("pool1")
+	if err != nil {
+		t.Fatalf("GetPool: %v", err)
+	}
+	if got.AuthResetTarget != "openai-codex" {
+		t.Fatalf("stored AuthResetTarget = %q, want openai-codex", got.AuthResetTarget)
+	}
+
+	// Clear with an empty string.
+	rec = post(`{"auth_reset_target": ""}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, _ = st.GetPool("pool1")
+	if got.AuthResetTarget != "" {
+		t.Fatalf("after clear stored AuthResetTarget = %q, want empty", got.AuthResetTarget)
+	}
+
+	// Invalid targets -> 400 and no store mutation. Newline was caught by the
+	// old looser rule; a space and a slash were NOT (F1) and are the cases that
+	// would otherwise store with 200 and fail silently at recovery. A literal
+	// "-" is the CLI/Telegram clear sentinel: CLI/Telegram translate it to ""
+	// before poolops, but REST forwards it verbatim, so it must be a 400 here
+	// (cross-channel parity) rather than a nonsensical stored target.
+	for name, target := range map[string]string{
+		"newline":  `bad\ntarget`,
+		"space":    `openai codex`,
+		"slash":    `openai/codex`,
+		"sentinel": `-`,
+	} {
+		rec = post(`{"auth_reset_target": "` + target + `"}`)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s target: expected 400, got %d: %s", name, rec.Code, rec.Body.String())
+		}
+		got, _ = st.GetPool("pool1")
+		if got.AuthResetTarget != "" {
+			t.Fatalf("%s target: store mutated to %q despite 400", name, got.AuthResetTarget)
+		}
+	}
+
+	// Unknown pool -> 404.
+	req := httptest.NewRequest("POST", "/api/pools/nope/auth-reset-target", strings.NewReader(`{"auth_reset_target": "x"}`))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown pool: expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPostApiPoolsNameAuthResetTarget_RequiredField asserts auth_reset_target is
+// a REQUIRED field on the set route (Copilot re-review): an empty "{}" body that
+// OMITS the field is a 400 and must NOT silently clear the stored target, while
+// an EXPLICIT empty string ("") is still accepted and clears it (the documented
+// clear path).
+func TestPostApiPoolsNameAuthResetTarget_RequiredField(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	seedOAuthCred(t, st, "credA", "credB")
+	if err := st.CreatePoolWithMembers("pool1", store.PoolStrategyFailover, []string{"credA", "credB"}, "openai-codex"); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	srv := api.NewServer(st, nil, nil, "")
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	post := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/pools/pool1/auth-reset-target", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer tok")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Omitting the field -> 400, and the pre-existing target is untouched.
+	rec := post(`{}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("omitted field: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, err := st.GetPool("pool1")
+	if err != nil {
+		t.Fatalf("GetPool: %v", err)
+	}
+	if got.AuthResetTarget != "openai-codex" {
+		t.Fatalf("omitted field cleared the target to %q; expected it untouched (openai-codex)", got.AuthResetTarget)
+	}
+
+	// Explicit empty string -> still accepted and clears the target.
+	rec = post(`{"auth_reset_target": ""}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("explicit clear: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	got, _ = st.GetPool("pool1")
+	if got.AuthResetTarget != "" {
+		t.Fatalf("explicit clear: stored AuthResetTarget = %q, want empty", got.AuthResetTarget)
+	}
+}
+
+// TestPostApiPools_WithAuthResetTarget asserts the create body accepts
+// auth_reset_target and persists it via poolops.
+func TestPostApiPools_WithAuthResetTarget(t *testing.T) {
+	st := newTestStore(t)
+	enableHTTPChannel(t, st)
+	seedOAuthCred(t, st, "credA", "credB")
+	srv := api.NewServer(st, nil, nil, "")
+	t.Setenv("SLUICE_API_TOKEN", "tok")
+	handler := newTestHandler(t, srv, st)
+
+	body := `{"name": "codex", "members": ["credA", "credB"], "auth_reset_target": "openai-codex"}`
+	req := httptest.NewRequest("POST", "/api/pools", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// The 201 response body must reflect the configured target. The synthetic
+	// store.Pool the handler builds when the read-back is skipped/fails used to
+	// omit it (Copilot #1), so assert it round-trips through the JSON body.
+	var p api.Pool
+	if err := json.NewDecoder(rec.Body).Decode(&p); err != nil {
+		t.Fatalf("decode 201 body: %v", err)
+	}
+	if p.AuthResetTarget == nil || *p.AuthResetTarget != "openai-codex" {
+		t.Fatalf("201 body AuthResetTarget = %v, want openai-codex", p.AuthResetTarget)
+	}
+	got, err := st.GetPool("codex")
+	if err != nil {
+		t.Fatalf("GetPool: %v", err)
+	}
+	if got.AuthResetTarget != "openai-codex" {
+		t.Fatalf("stored AuthResetTarget = %q, want openai-codex", got.AuthResetTarget)
+	}
+}
+
 func TestPostApiPoolsNameRotate_NotFound(t *testing.T) {
 	st := newTestStore(t)
 	enableHTTPChannel(t, st)
@@ -3064,7 +3256,7 @@ func TestDeleteApiPoolsName_Success(t *testing.T) {
 	st := newTestStore(t)
 	enableHTTPChannel(t, st)
 	seedOAuthCred(t, st, "credA", "credB")
-	if err := st.CreatePoolWithMembers("pool1", store.PoolStrategyFailover, []string{"credA", "credB"}); err != nil {
+	if err := st.CreatePoolWithMembers("pool1", store.PoolStrategyFailover, []string{"credA", "credB"}, ""); err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 	srv := api.NewServer(st, nil, nil, "")
@@ -3111,7 +3303,7 @@ func TestDeleteApiPoolsName_ReferencedByBinding(t *testing.T) {
 	st := newTestStore(t)
 	enableHTTPChannel(t, st)
 	seedOAuthCred(t, st, "credA", "credB")
-	if err := st.CreatePoolWithMembers("pool1", store.PoolStrategyFailover, []string{"credA", "credB"}); err != nil {
+	if err := st.CreatePoolWithMembers("pool1", store.PoolStrategyFailover, []string{"credA", "credB"}, ""); err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 	// A binding referencing the pool by name keeps it from being removed.
@@ -3674,6 +3866,10 @@ func (m *mockContainerMgr) Stop(_ context.Context) error {
 }
 
 func (m *mockContainerMgr) ReloadSecrets(_ context.Context) error {
+	return nil
+}
+
+func (m *mockContainerMgr) ResetAuth(_ context.Context, _ string) error {
 	return nil
 }
 

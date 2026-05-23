@@ -15,7 +15,11 @@ type ContainerClient interface { //nolint:revive // stuttering accepted for clar
 	RemoveContainer(ctx context.Context, name string) error
 	CreateContainer(ctx context.Context, spec ContainerSpec) (string, error)
 	StartContainer(ctx context.Context, id string) error
-	ExecInContainer(ctx context.Context, name string, cmd []string) error
+	// ExecInContainer runs cmd inside the named container. user is the
+	// optional UID:GID (or user name) the exec runs as; an empty string
+	// preserves the historical behavior of running as the image's USER
+	// (typically root for agent containers).
+	ExecInContainer(ctx context.Context, name, user string, cmd []string) error
 }
 
 // ContainerState holds the result of inspecting a container.
@@ -94,7 +98,10 @@ func (m *DockerManager) InjectEnvVars(ctx context.Context, envMap map[string]str
 		return fmt.Errorf("build env injection script: %w", err)
 	}
 
-	if execErr := m.client.ExecInContainer(ctx, m.containerName,
+	// Pass the empty user so the env-injection exec keeps its historical
+	// root behavior; the generated script chowns the file back to the
+	// runtime user itself (see BuildEnvInjectionScriptForProfile).
+	if execErr := m.client.ExecInContainer(ctx, m.containerName, "",
 		[]string{"sh", "-c", script}); execErr != nil {
 		return fmt.Errorf("inject env vars: %w", execErr)
 	}
@@ -117,7 +124,24 @@ func (m *DockerManager) ReloadSecrets(ctx context.Context) error {
 		log.Printf("agent profile %q has no in-place reload; new secrets take effect on next agent run", m.profile.Name)
 		return nil
 	}
-	return m.client.ExecInContainer(ctx, m.containerName, m.profile.ReloadCmd())
+	return m.client.ExecInContainer(ctx, m.containerName, "", m.profile.ReloadCmd())
+}
+
+// ResetAuth clears the agent's local auth state for target so it retries
+// after a credential-pool quota window passes. The mechanism is
+// profile-specific (hermes runs `hermes auth reset <target>`); a nil
+// ResetAuthCmd is a logged no-op (mirrors ReloadSecrets). The exec runs
+// as the profile's ExecUser (UID 10000:10000 for hermes) so it does not
+// root-chown the agent's auth files and brick the gateway.
+func (m *DockerManager) ResetAuth(ctx context.Context, target string) error {
+	if m.profile.ResetAuthCmd == nil {
+		log.Printf("agent profile %q has no auth-reset command; agent must recover on its own", m.profile.Name)
+		return nil
+	}
+	if err := ValidateResetAuthTarget(target); err != nil {
+		return err
+	}
+	return m.client.ExecInContainer(ctx, m.containerName, m.profile.ExecUser(), m.profile.ResetAuthCmd(target))
 }
 
 // WireMCPGateway registers sluice's MCP gateway URL inside the agent's
@@ -137,7 +161,7 @@ func (m *DockerManager) WireMCPGateway(ctx context.Context, name, sluiceURL stri
 		log.Printf("agent profile %q does not support automatic MCP wiring; configure %s manually", m.profile.Name, sluiceURL)
 		return nil
 	}
-	err := m.client.ExecInContainer(ctx, m.containerName, m.profile.WireMCPCmd(name, sluiceURL))
+	err := m.client.ExecInContainer(ctx, m.containerName, "", m.profile.WireMCPCmd(name, sluiceURL))
 	if err != nil && m.profile.Name == OpenclawProfile.Name &&
 		strings.Contains(err.Error(), "exit") && strings.Contains(err.Error(), "137") {
 		return nil

@@ -95,6 +95,107 @@ func TestHandlePoolCreateListStatusRemove(t *testing.T) {
 	}
 }
 
+// TestHandlePoolAuthResetTarget exercises the CLI adapter for the per-pool
+// auth_reset_target: --auth-reset-target on create, the set-auth-reset
+// subcommand (set and clear via "-"), and that the value reaches the store
+// and is surfaced in list/status output. The CLI is a thin poolops adapter,
+// so this asserts the value round-trips through the store the same way the
+// REST and Telegram adapters do.
+func TestHandlePoolAuthResetTarget(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := setupVaultDB(t, dir)
+	seedPoolCred(t, dbPath, dir, "acct_a")
+	seedPoolCred(t, dbPath, dir, "acct_b")
+
+	out := captureStdout(t, func() {
+		if err := handlePoolCommand([]string{
+			"create", "--db", dbPath, "--members", "acct_a,acct_b",
+			"--auth-reset-target", "openai-codex", "codex",
+		}); err != nil {
+			t.Fatalf("pool create: %v", err)
+		}
+	})
+	if !strings.Contains(out, "auth-reset target: openai-codex") {
+		t.Errorf("create output missing target: %q", out)
+	}
+
+	// Value reached the store.
+	assertStoredAuthResetTarget(t, dbPath, "openai-codex")
+
+	// Surfaced in list and status.
+	out = captureStdout(t, func() {
+		_ = handlePoolCommand([]string{"list", "--db", dbPath})
+	})
+	if !strings.Contains(out, "auth-reset target: openai-codex") {
+		t.Errorf("list output missing target: %q", out)
+	}
+	out = captureStdout(t, func() {
+		_ = handlePoolCommand([]string{"status", "--db", dbPath, "codex"})
+	})
+	if !strings.Contains(out, "auth-reset target: openai-codex") {
+		t.Errorf("status output missing target: %q", out)
+	}
+
+	// set-auth-reset to a new value.
+	out = captureStdout(t, func() {
+		if err := handlePoolCommand([]string{"set-auth-reset", "--db", dbPath, "codex", "other-target"}); err != nil {
+			t.Fatalf("set-auth-reset: %v", err)
+		}
+	})
+	if !strings.Contains(out, "set to \"other-target\"") {
+		t.Errorf("set-auth-reset output = %q", out)
+	}
+	assertStoredAuthResetTarget(t, dbPath, "other-target")
+
+	// Clear with the "-" sentinel.
+	out = captureStdout(t, func() {
+		if err := handlePoolCommand([]string{"set-auth-reset", "--db", dbPath, "codex", "-"}); err != nil {
+			t.Fatalf("set-auth-reset clear: %v", err)
+		}
+	})
+	if !strings.Contains(out, "cleared") {
+		t.Errorf("clear output = %q", out)
+	}
+	assertStoredAuthResetTarget(t, dbPath, "")
+
+	// Unknown pool and bad usage.
+	if err := handlePoolCommand([]string{"set-auth-reset", "--db", dbPath, "missing", "x"}); err == nil {
+		t.Error("expected error for set-auth-reset on missing pool")
+	}
+	if err := handlePoolCommand([]string{"set-auth-reset", "--db", dbPath, "codex"}); err == nil {
+		t.Error("expected usage error for set-auth-reset with too few args")
+	}
+
+	// A target outside the allowlist (space, slash) is rejected at set time, not
+	// stored with success and then silently un-executable at recovery (F1).
+	for name, target := range map[string]string{"space": "openai codex", "slash": "openai/codex"} {
+		if err := handlePoolCommand([]string{"set-auth-reset", "--db", dbPath, "codex", target}); err == nil {
+			t.Errorf("%s target: expected rejection, got nil error", name)
+		}
+		assertStoredAuthResetTarget(t, dbPath, "")
+	}
+}
+
+func assertStoredAuthResetTarget(t *testing.T, dbPath, want string) {
+	t.Helper()
+	db, err := store.New(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	const pool = "codex"
+	p, err := db.GetPool(pool)
+	if err != nil {
+		t.Fatalf("GetPool: %v", err)
+	}
+	if p == nil {
+		t.Fatalf("pool %q not found", pool)
+	}
+	if p.AuthResetTarget != want {
+		t.Fatalf("stored AuthResetTarget = %q, want %q", p.AuthResetTarget, want)
+	}
+}
+
 func TestHandlePoolErrorPaths(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := setupVaultDB(t, dir)
@@ -401,7 +502,7 @@ func TestPoolRotateGuardedAgainstConcurrentRemoval(t *testing.T) {
 		_ = db.Close()
 		t.Fatalf("RemovePool: %v", rerr)
 	}
-	if cerr := db.CreatePoolWithMembers("codex", "failover", []string{"acct_a"}); cerr != nil {
+	if cerr := db.CreatePoolWithMembers("codex", "failover", []string{"acct_a"}, ""); cerr != nil {
 		_ = db.Close()
 		t.Fatalf("recreate pool: %v", cerr)
 	}
@@ -433,7 +534,7 @@ func TestPoolRotateGuardedAgainstConcurrentRemoval(t *testing.T) {
 	if _, rerr := db.RemovePool("codex"); rerr != nil {
 		t.Fatalf("final RemovePool: %v", rerr)
 	}
-	if cerr := db.CreatePoolWithMembers("codex", "failover", []string{"acct_a", "acct_b"}); cerr != nil {
+	if cerr := db.CreatePoolWithMembers("codex", "failover", []string{"acct_a", "acct_b"}, ""); cerr != nil {
 		t.Fatalf("final recreate pool: %v", cerr)
 	}
 	rows, lerr := db.ListCredentialHealth()
@@ -506,7 +607,7 @@ func TestPoolRotateEpochScopedRejectsCrossPoolReAdd(t *testing.T) {
 		_ = db.Close()
 		t.Fatalf("RemovePool(P): %v", rerr)
 	}
-	if cerr := db.CreatePoolWithMembers("Q", "failover", []string{"c", "d"}); cerr != nil {
+	if cerr := db.CreatePoolWithMembers("Q", "failover", []string{"c", "d"}, ""); cerr != nil {
 		_ = db.Close()
 		t.Fatalf("recreate c,d into Q: %v", cerr)
 	}

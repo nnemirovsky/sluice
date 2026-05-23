@@ -2186,6 +2186,77 @@ func TestHandlePoolCreateListStatusRotateRemove(t *testing.T) {
 	}
 }
 
+// TestHandlePoolAuthResetTarget exercises the Telegram adapter for the
+// per-pool auth_reset_target: the optional 3rd create arg, the
+// set-auth-reset subcommand (set and clear via "-"), and that the value
+// reaches the store (the handler is a thin poolops adapter) and is surfaced
+// in list/status output.
+func TestHandlePoolAuthResetTarget(t *testing.T) {
+	s := newTestStore(t)
+	seedPoolOAuthMeta(t, s, "acct_a", "acct_b")
+	h := newTestHandlerWithStore(t, s, nil, "")
+
+	// Create with target as 3rd positional arg.
+	got := h.Handle(&Command{Name: "pool", Args: []string{"create", "codex", "acct_a,acct_b", "openai-codex"}})
+	if !strings.Contains(got, "auth-reset target: ") || !strings.Contains(got, "openai-codex") {
+		t.Fatalf("pool create with target = %q", got)
+	}
+	if p, err := s.GetPool("codex"); err != nil {
+		t.Fatalf("GetPool: %v", err)
+	} else if p.AuthResetTarget != "openai-codex" {
+		t.Fatalf("stored AuthResetTarget = %q, want openai-codex", p.AuthResetTarget)
+	}
+
+	// Surfaced in list and status.
+	got = h.Handle(&Command{Name: "pool", Args: []string{"list"}})
+	if !strings.Contains(got, "openai-codex") {
+		t.Errorf("pool list missing target = %q", got)
+	}
+	got = h.Handle(&Command{Name: "pool", Args: []string{"status", "codex"}})
+	if !strings.Contains(got, "auth-reset target: ") || !strings.Contains(got, "openai-codex") {
+		t.Errorf("pool status missing target = %q", got)
+	}
+
+	// set-auth-reset to a new value.
+	got = h.Handle(&Command{Name: "pool", Args: []string{"set-auth-reset", "codex", "other-target"}})
+	if !strings.Contains(got, "Set auth-reset target") || !strings.Contains(got, "other-target") {
+		t.Fatalf("set-auth-reset = %q", got)
+	}
+	if p, _ := s.GetPool("codex"); p.AuthResetTarget != "other-target" {
+		t.Fatalf("after set stored target = %q, want other-target", p.AuthResetTarget)
+	}
+
+	// Clear with "-".
+	got = h.Handle(&Command{Name: "pool", Args: []string{"set-auth-reset", "codex", "-"}})
+	if !strings.Contains(got, "Cleared auth-reset target") {
+		t.Fatalf("clear = %q", got)
+	}
+	if p, _ := s.GetPool("codex"); p.AuthResetTarget != "" {
+		t.Fatalf("after clear stored target = %q, want empty", p.AuthResetTarget)
+	}
+
+	// Unknown pool and usage.
+	got = h.Handle(&Command{Name: "pool", Args: []string{"set-auth-reset", "ghost", "x"}})
+	if !strings.Contains(got, "No pool named") {
+		t.Errorf("set-auth-reset unknown pool = %q", got)
+	}
+	got = h.Handle(&Command{Name: "pool", Args: []string{"set-auth-reset", "codex"}})
+	if !strings.Contains(got, "Usage:") {
+		t.Errorf("set-auth-reset too few args = %q", got)
+	}
+
+	// A target outside the allowlist (a slash; a space can't survive Telegram's
+	// space-split arg parsing) is rejected, not stored with a success message
+	// and then silently un-executable at recovery (F1).
+	got = h.Handle(&Command{Name: "pool", Args: []string{"set-auth-reset", "codex", "openai/codex"}})
+	if !strings.Contains(got, "Failed to set auth-reset target") {
+		t.Errorf("slash target: expected failure message, got %q", got)
+	}
+	if p, _ := s.GetPool("codex"); p.AuthResetTarget != "" {
+		t.Errorf("slash target: store mutated to %q despite rejection", p.AuthResetTarget)
+	}
+}
+
 func TestHandlePoolCreateNoMembers(t *testing.T) {
 	s := newTestStore(t)
 	h := newTestHandlerWithStore(t, s, nil, "")
@@ -2237,7 +2308,7 @@ func TestHandlePoolRemoveUnknown(t *testing.T) {
 func TestHandlePoolRemoveReferencedByBinding(t *testing.T) {
 	s := newTestStore(t)
 	seedPoolOAuthMeta(t, s, "acct_a", "acct_b")
-	if err := s.CreatePoolWithMembers("codex", store.PoolStrategyFailover, []string{"acct_a", "acct_b"}); err != nil {
+	if err := s.CreatePoolWithMembers("codex", store.PoolStrategyFailover, []string{"acct_a", "acct_b"}, ""); err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 	// A binding referencing the pool by name keeps it from being removed.
@@ -2257,7 +2328,7 @@ func TestPoolStatusFormatMatchesCLI(t *testing.T) {
 	// doesn't drift from cmd/sluice/pool.go.
 	s := newTestStore(t)
 	seedPoolOAuthMeta(t, s, "m0", "m1")
-	if err := s.CreatePoolWithMembers("p", store.PoolStrategyFailover, []string{"m0", "m1"}); err != nil {
+	if err := s.CreatePoolWithMembers("p", store.PoolStrategyFailover, []string{"m0", "m1"}, ""); err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 	// Park m0 so it shows a cooldown line with the reason.
@@ -2281,7 +2352,7 @@ func TestPoolStatusEscapesLastFailureReason(t *testing.T) {
 	// < > & must be HTML-escaped or the Bot API rejects/garbles the message.
 	s := newTestStore(t)
 	seedPoolOAuthMeta(t, s, "m0", "m1")
-	if err := s.CreatePoolWithMembers("p", store.PoolStrategyFailover, []string{"m0", "m1"}); err != nil {
+	if err := s.CreatePoolWithMembers("p", store.PoolStrategyFailover, []string{"m0", "m1"}, ""); err != nil {
 		t.Fatalf("create pool: %v", err)
 	}
 	rawReason := `429 <too many> & "retry"`

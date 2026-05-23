@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/nemirovsky/sluice/internal/api"
+	"github.com/nemirovsky/sluice/internal/audit"
+	"github.com/nemirovsky/sluice/internal/channel"
 	"github.com/nemirovsky/sluice/internal/container"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/proxy"
@@ -1420,8 +1422,19 @@ func TestStandaloneModeCredentialInjection(t *testing.T) {
 
 // mockContainerMgr implements container.ContainerManager for testing.
 type mockContainerMgr struct {
-	injectedEnv map[string]string
-	injectErr   error
+	mu             sync.Mutex
+	injectedEnv    map[string]string
+	injectErr      error
+	resetAuthCalls []string
+	resetAuthErr   error
+}
+
+func (m *mockContainerMgr) resetAuthTargets() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, len(m.resetAuthCalls))
+	copy(out, m.resetAuthCalls)
+	return out
 }
 
 func (m *mockContainerMgr) InjectEnvVars(_ context.Context, envMap map[string]string, _ bool) error {
@@ -1451,6 +1464,14 @@ func (m *mockContainerMgr) WireMCPGateway(_ context.Context, _, _ string) error 
 
 func (m *mockContainerMgr) ReloadSecrets(_ context.Context) error {
 	return nil
+}
+
+func (m *mockContainerMgr) ResetAuth(_ context.Context, target string) error {
+	m.mu.Lock()
+	m.resetAuthCalls = append(m.resetAuthCalls, target)
+	err := m.resetAuthErr
+	m.mu.Unlock()
+	return err
 }
 
 func (m *mockContainerMgr) Runtime() container.Runtime {
@@ -1667,4 +1688,230 @@ func TestDeriveMCPBaseURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// recoveryMockChannel implements channel.Channel for wirePoolRecovery tests.
+// It records every Notify message so the test can assert the recovered notice
+// fired across the broker's channels.
+type recoveryMockChannel struct {
+	mu       sync.Mutex
+	notified []string
+}
+
+func (c *recoveryMockChannel) RequestApproval(_ context.Context, _ channel.ApprovalRequest) error {
+	return nil
+}
+func (c *recoveryMockChannel) CancelApproval(_ string) error { return nil }
+func (c *recoveryMockChannel) Commands() <-chan channel.Command {
+	return nil
+}
+
+func (c *recoveryMockChannel) Notify(_ context.Context, msg string) error {
+	c.mu.Lock()
+	c.notified = append(c.notified, msg)
+	c.mu.Unlock()
+	return nil
+}
+func (c *recoveryMockChannel) Start() error { return nil }
+func (c *recoveryMockChannel) Stop()        {}
+func (c *recoveryMockChannel) Type() channel.ChannelType {
+	return channel.ChannelTelegram
+}
+
+func (c *recoveryMockChannel) messages() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]string, len(c.notified))
+	copy(out, c.notified)
+	return out
+}
+
+// fakeAuditLogger captures audit events for wirePoolRecovery tests.
+type fakeAuditLogger struct {
+	mu     sync.Mutex
+	events []audit.Event
+}
+
+func (f *fakeAuditLogger) Log(evt audit.Event) error {
+	f.mu.Lock()
+	f.events = append(f.events, evt)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeAuditLogger) snapshot() []audit.Event {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]audit.Event, len(f.events))
+	copy(out, f.events)
+	return out
+}
+
+// waitFor polls cond up to ~2s; fails the test if it never becomes true.
+func waitFor(t *testing.T, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("condition never met: %s", msg)
+}
+
+func newRecoveryTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	db, err := store.New(":memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+func seedRecoveryPool(t *testing.T, db *store.Store, members []string) {
+	t.Helper()
+	const pool = "codex"
+	for _, m := range members {
+		if err := db.AddCredentialMeta(m, "oauth", "https://auth.example.com/token"); err != nil {
+			t.Fatalf("add credential meta %q: %v", m, err)
+		}
+	}
+	if err := db.CreatePoolWithMembers(pool, "", members, ""); err != nil {
+		t.Fatalf("create pool %q: %v", pool, err)
+	}
+}
+
+// TestPoolAuthResetFuncTargetSet asserts a pool with a non-empty
+// auth_reset_target triggers exactly one ResetAuth(target) call and one
+// agent_auth_reset audit event on recovery.
+func TestPoolAuthResetFuncTargetSet(t *testing.T) {
+	db := newRecoveryTestStore(t)
+	seedRecoveryPool(t, db, []string{"acct_a", "acct_b"})
+	if err := db.SetPoolAuthResetTarget("codex", "openai-codex"); err != nil {
+		t.Fatalf("SetPoolAuthResetTarget: %v", err)
+	}
+
+	mgr := &mockContainerMgr{}
+	logger := &fakeAuditLogger{}
+	fn := poolAuthResetFunc(db, mgr, logger)
+
+	fn("codex")
+
+	waitFor(t, func() bool { return len(mgr.resetAuthTargets()) == 1 }, "ResetAuth called once")
+	targets := mgr.resetAuthTargets()
+	if targets[0] != "openai-codex" {
+		t.Errorf("ResetAuth target = %q, want %q", targets[0], "openai-codex")
+	}
+
+	waitFor(t, func() bool { return len(logger.snapshot()) == 1 }, "one audit event")
+	evts := logger.snapshot()
+	e := evts[0]
+	if e.Action != "agent_auth_reset" || e.Verdict != "recover" || e.Credential != "codex" || e.Reason != "openai-codex" {
+		t.Errorf("audit event = %+v, want action=agent_auth_reset verdict=recover credential=codex reason=openai-codex", e)
+	}
+}
+
+// TestPoolAuthResetFuncNoTarget asserts a pool with an empty auth_reset_target
+// triggers no ResetAuth call (the recovered notice path is independent and
+// covered by TestPoolRecoveredNoticeFunc).
+func TestPoolAuthResetFuncNoTarget(t *testing.T) {
+	db := newRecoveryTestStore(t)
+	seedRecoveryPool(t, db, []string{"acct_a", "acct_b"})
+
+	mgr := &mockContainerMgr{}
+	logger := &fakeAuditLogger{}
+	fn := poolAuthResetFunc(db, mgr, logger)
+
+	fn("codex")
+
+	// Give the detached goroutine time to run; it must not call ResetAuth.
+	time.Sleep(100 * time.Millisecond)
+	if got := mgr.resetAuthTargets(); len(got) != 0 {
+		t.Errorf("ResetAuth calls = %v, want none for a pool with empty auth_reset_target", got)
+	}
+	if got := logger.snapshot(); len(got) != 0 {
+		t.Errorf("audit events = %+v, want none", got)
+	}
+}
+
+// TestPoolAuthResetFuncErrorNotFatal asserts a ResetAuth error is logged (no
+// panic, no audit event) and does not crash.
+func TestPoolAuthResetFuncErrorNotFatal(t *testing.T) {
+	db := newRecoveryTestStore(t)
+	seedRecoveryPool(t, db, []string{"acct_a", "acct_b"})
+	if err := db.SetPoolAuthResetTarget("codex", "openai-codex"); err != nil {
+		t.Fatalf("SetPoolAuthResetTarget: %v", err)
+	}
+
+	mgr := &mockContainerMgr{resetAuthErr: fmt.Errorf("reset boom")}
+	logger := &fakeAuditLogger{}
+	fn := poolAuthResetFunc(db, mgr, logger)
+
+	fn("codex")
+
+	waitFor(t, func() bool { return len(mgr.resetAuthTargets()) == 1 }, "ResetAuth attempted once")
+	// On error, no audit event is emitted; give the goroutine time to settle.
+	time.Sleep(100 * time.Millisecond)
+	if got := logger.snapshot(); len(got) != 0 {
+		t.Errorf("audit events = %+v, want none on ResetAuth error", got)
+	}
+}
+
+// TestPoolAuthResetFuncNilManager asserts a nil container manager is a no-op
+// (no panic), covering standalone deployments.
+func TestPoolAuthResetFuncNilManager(t *testing.T) {
+	db := newRecoveryTestStore(t)
+	seedRecoveryPool(t, db, []string{"acct_a", "acct_b"})
+	if err := db.SetPoolAuthResetTarget("codex", "openai-codex"); err != nil {
+		t.Fatalf("SetPoolAuthResetTarget: %v", err)
+	}
+	fn := poolAuthResetFunc(db, nil, &fakeAuditLogger{})
+	fn("codex") // must not panic
+	time.Sleep(50 * time.Millisecond)
+}
+
+// TestPoolRecoveredNoticeFunc asserts the recovered notice fires across the
+// broker's channels even when no auth_reset_target is configured.
+func TestPoolRecoveredNoticeFunc(t *testing.T) {
+	ch := &recoveryMockChannel{}
+	broker := channel.NewBroker([]channel.Channel{ch})
+	fn := poolRecoveredNoticeFunc(broker)
+
+	fn("codex")
+
+	waitFor(t, func() bool { return len(ch.messages()) == 1 }, "one recovered notice")
+	want := proxy.FormatPoolRecoveredNotice("codex")
+	if got := ch.messages(); got[0] != want {
+		t.Errorf("notice = %q, want %q", got[0], want)
+	}
+}
+
+// TestPoolRecoveredNoticeFuncNoBroker asserts a nil broker yields a no-op
+// callback (no panic).
+func TestPoolRecoveredNoticeFuncNoBroker(_ *testing.T) {
+	fn := poolRecoveredNoticeFunc(nil)
+	fn("codex") // must not panic
+	time.Sleep(20 * time.Millisecond)
+}
+
+// TestWirePoolRecoveryRegisters asserts wirePoolRecovery wires both callbacks
+// onto the server without panicking (smoke test of the registration path).
+func TestWirePoolRecoveryRegisters(t *testing.T) {
+	db := newRecoveryTestStore(t)
+	eng, err := policy.LoadFromStore(db)
+	if err != nil {
+		t.Fatalf("LoadFromStore: %v", err)
+	}
+	srv, err := proxy.New(proxy.Config{ListenAddr: "127.0.0.1:0", Policy: eng})
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	ch := &recoveryMockChannel{}
+	broker := channel.NewBroker([]channel.Channel{ch})
+	mgr := &mockContainerMgr{}
+	wirePoolRecovery(srv, db, mgr, broker, &fakeAuditLogger{})
 }

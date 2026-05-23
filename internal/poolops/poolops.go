@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nemirovsky/sluice/internal/container"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
 )
@@ -23,12 +24,13 @@ import (
 // interface lets each channel pass its own already-open store and lets the
 // tests substitute a fake.
 type Store interface {
-	CreatePoolWithMembers(name, strategy string, members []string) error
+	CreatePoolWithMembers(name, strategy string, members []string, authResetTarget string) error
 	GetPool(name string) (*store.Pool, error)
 	ListPools() ([]store.Pool, error)
 	RemovePoolIfUnreferenced(name string) (bool, error)
 	ListCredentialHealth() ([]store.CredentialHealth, error)
 	SetCredentialHealthIfPoolMemberEpoch(credential, pool string, epoch int64, status string, cooldownUntil time.Time, reason string) (bool, error)
+	SetPoolAuthResetTarget(name, target string) error
 }
 
 // ErrNoMembers is returned by Create when the member list is empty.
@@ -78,7 +80,9 @@ type StatusResult struct {
 	Name     string
 	Strategy string
 	Active   string
-	Members  []MemberStatus
+	// AuthResetTarget is the per-pool agent auth-reset target (empty = none).
+	AuthResetTarget string
+	Members         []MemberStatus
 }
 
 // RotateResult is the outcome of a successful Rotate.
@@ -107,18 +111,95 @@ func ParseMembers(membersStr string) ([]string, error) {
 	return members, nil
 }
 
+// ErrInvalidAuthResetTarget wraps a non-empty auth-reset target that fails the
+// canonical allowlist (container.ValidateResetAuthTarget: [A-Za-z0-9_.:-]+).
+// Channels can errors.Is against it for a uniform "bad target" mapping; the
+// wrapped error carries the specific reason. Set-time validation here matches
+// the exec-time validation exactly so a target the store accepts is always one
+// ResetAuth can exec — there is no longer a looser set-time rule that lets an
+// unexecutable target (a space, a slash) store with success and then fail
+// silently in the detached recovery goroutine.
+var ErrInvalidAuthResetTarget = errors.New("invalid auth_reset_target")
+
+// validateAuthResetTarget validates a non-empty target against the single
+// canonical allowlist used at exec time (container.ValidateResetAuthTarget).
+// An empty target ("") is always valid and means "clear / no reset", so
+// callers normalize the clear sentinel before validating.
+func validateAuthResetTarget(target string) error {
+	if target == "" {
+		return nil
+	}
+	// "-" is the CLI/Telegram clear sentinel (converted to "" before reaching
+	// here), so a literal "-" is never a valid stored target on any channel.
+	// container.ValidateResetAuthTarget permits "-" ([A-Za-z0-9_.:-]+), so
+	// without this guard REST — which forwards the value verbatim instead of
+	// translating the sentinel — could store auth_reset_target="-" while
+	// CLI/Telegram cannot. Reject it here so the gap is closed cross-channel.
+	if target == "-" {
+		return fmt.Errorf("%w: %q is reserved as the clear sentinel", ErrInvalidAuthResetTarget, "-")
+	}
+	if err := container.ValidateResetAuthTarget(target); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidAuthResetTarget, err)
+	}
+	return nil
+}
+
 // Create creates a pool with the given ordered members. An empty strategy
 // defaults to the only supported strategy (failover). Sentinel errors from
 // the store (namespace collision, static member, unknown member) propagate
 // unchanged so channels can map them.
 func Create(s Store, name, strategy string, members []string) error {
+	return CreateWithAuthResetTarget(s, name, strategy, members, "")
+}
+
+// CreateWithAuthResetTarget is Create plus an optional per-pool
+// auth_reset_target (empty = no reset). The target is bound in the same store
+// transaction that creates the pool and its members, so create-with-target is
+// atomic: a partial state where the pool exists without its target can never
+// be observed, and there is no second write whose failure would leave a
+// created pool plus an error (which a retry would then 409 on). Channels that
+// don't accept a target call Create, which threads "". Used by every channel's
+// create adapter so the create-with-target path has a single source of truth.
+func CreateWithAuthResetTarget(s Store, name, strategy string, members []string, authResetTarget string) error {
 	if strategy == "" {
 		strategy = store.PoolStrategyFailover
 	}
 	if len(members) == 0 {
 		return ErrNoMembers
 	}
-	return s.CreatePoolWithMembers(name, strategy, members)
+	if err := validateAuthResetTarget(authResetTarget); err != nil {
+		return err
+	}
+	return s.CreatePoolWithMembers(name, strategy, members, authResetTarget)
+}
+
+// SetAuthResetTarget sets (target != "") or clears (target == "") the
+// per-pool auth_reset_target. Channels normalize their clear sentinel (CLI /
+// Telegram use a single "-") to "" before calling. A missing pool surfaces as
+// the store's "does not exist" error; channels may also wrap it as a
+// *PoolNotFoundError by checking existence first.
+func SetAuthResetTarget(s Store, name, target string) error {
+	if err := validateAuthResetTarget(target); err != nil {
+		return err
+	}
+	if _, err := mustExist(s, name); err != nil {
+		return err
+	}
+	return s.SetPoolAuthResetTarget(name, target)
+}
+
+// mustExist returns the pool or a *PoolNotFoundError, so channels get the same
+// typed not-found error from SetAuthResetTarget that Status/Rotate/Remove
+// already return.
+func mustExist(s Store, name string) (*store.Pool, error) {
+	p, err := s.GetPool(name)
+	if err != nil {
+		return nil, err
+	}
+	if p == nil {
+		return nil, &PoolNotFoundError{Name: name}
+	}
+	return p, nil
 }
 
 // List returns every configured pool, ordered as the store returns them.
@@ -151,7 +232,7 @@ func Status(s Store, name string) (*StatusResult, error) {
 	}
 
 	now := time.Now()
-	res := &StatusResult{Name: p.Name, Strategy: p.Strategy, Active: active}
+	res := &StatusResult{Name: p.Name, Strategy: p.Strategy, Active: active, AuthResetTarget: p.AuthResetTarget}
 	for _, m := range p.Members {
 		ms := MemberStatus{
 			Credential: m.Credential,

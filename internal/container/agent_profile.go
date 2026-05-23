@@ -34,6 +34,37 @@ type AgentProfile struct {
 	// config in place and the operator must wire the MCP gateway
 	// manually before starting the agent.
 	WireMCPCmd func(name, url string) []string
+
+	// ResetAuthCmd returns the argv to exec inside the agent container in
+	// order to clear ("un-latch") the agent's local auth state for the
+	// given target so it retries after a pool quota window passes. It is
+	// pure argv (no `sh -c` wrapper), so there is no shell-metacharacter
+	// threat from the interpolated target; the target is still validated
+	// (ValidateResetAuthTarget) before exec as defense in depth.
+	// Returning nil means the profile has no auth-reset mechanism; the
+	// caller should log a notice and rely on the agent recovering on its
+	// own (mirrors a nil ReloadCmd).
+	ResetAuthCmd func(target string) []string
+
+	// execUser is the UID:GID (or user name) that file-writing execs
+	// should run as inside the agent container. Empty means run as the
+	// image's USER (typically root). Hermes runs its gateway as a
+	// non-root runtime user (UID 10000), so an exec that writes a
+	// hermes-owned file (e.g. `hermes auth reset`) must run as that
+	// user or it root-chowns the file and bricks the gateway. Read it
+	// via the ExecUser accessor, which is nil-safe.
+	execUser string
+}
+
+// ExecUser returns the UID:GID (or user name) that file-writing execs
+// should run as for this profile, or "" to run as the image's USER. The
+// receiver is nil-safe so callers holding a possibly-nil profile can call
+// it directly.
+func (p *AgentProfile) ExecUser() string {
+	if p == nil {
+		return ""
+	}
+	return p.execUser
 }
 
 // OpenclawProfile is the default profile. Openclaw stores secrets at
@@ -49,6 +80,12 @@ var OpenclawProfile = &AgentProfile{
 	WireMCPCmd: func(name, url string) []string {
 		return GatewayRPCNodeCommand("wire-mcp", name, url)
 	},
+	// ResetAuthCmd is nil pending verification of whether openclaw
+	// latches its auth state on a usage-limit exhaustion the way hermes
+	// does. If it turns out openclaw needs an explicit un-latch, this is
+	// the place to add the gateway-RPC command (see Post-Completion in
+	// docs/plans/20260522-pool-exhaustion-and-agent-auth-reset.md).
+	ResetAuthCmd: nil,
 }
 
 // hermesMCPWireScript is a small Python script that registers an MCP
@@ -100,6 +137,9 @@ var HermesProfile = &AgentProfile{
 	Name:           "hermes",
 	EnvFileRelPath: ".hermes/.env",
 	ReloadCmd:      nil,
+	// Hermes' gateway runs as UID 10000; file-writing execs must match
+	// so they don't root-chown hermes-owned files and brick the gateway.
+	execUser: "10000:10000",
 	WireMCPCmd: func(name, url string) []string {
 		return []string{
 			"sh",
@@ -109,6 +149,15 @@ var HermesProfile = &AgentProfile{
 			name,
 			url,
 		}
+	},
+	// ResetAuthCmd un-latches hermes' local auth state for the given
+	// target via `hermes auth reset <target>`. It is pure argv (no
+	// `sh -c`), so the target cannot smuggle shell metacharacters — but
+	// the caller still validates it (ValidateResetAuthTarget) before
+	// exec. The exec must run as the runtime UID (see execUser above) or
+	// it root-chowns hermes-owned auth files and bricks the gateway.
+	ResetAuthCmd: func(target string) []string {
+		return []string{"/opt/hermes/.venv/bin/hermes", "auth", "reset", target}
 	},
 }
 

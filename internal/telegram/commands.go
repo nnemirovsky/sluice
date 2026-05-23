@@ -1187,7 +1187,7 @@ func (h *CommandHandler) handleAudit(args []string) string {
 }
 
 // poolUsage is the usage banner for /pool.
-const poolUsage = "Usage: /pool create <name> <a,b[,c]> | /pool list | /pool status <name> | /pool rotate <name> | /pool remove <name>"
+const poolUsage = "Usage: /pool create <name> <a,b[,c]> [auth-reset-target] | /pool list | /pool status <name> | /pool rotate <name> | /pool set-auth-reset <name> <target|-> | /pool remove <name>"
 
 // handlePool dispatches /pool subcommands to the channel-agnostic
 // internal/poolops package, the same package the CLI and REST API call, so
@@ -1221,6 +1221,11 @@ func (h *CommandHandler) handlePool(args []string) string {
 			return "Usage: /pool rotate <name>"
 		}
 		return h.poolRotate(args[1])
+	case "set-auth-reset":
+		if len(args) < 3 {
+			return "Usage: /pool set-auth-reset <name> <target|->  (a single - clears the target)"
+		}
+		return h.poolSetAuthReset(args[1], args[2])
 	case "remove":
 		if len(args) < 2 {
 			return "Usage: /pool remove <name>"
@@ -1233,14 +1238,19 @@ func (h *CommandHandler) handlePool(args []string) string {
 
 func (h *CommandHandler) poolCreate(args []string) string {
 	if len(args) < 2 {
-		return "Usage: /pool create <name> <a,b[,c]>"
+		return "Usage: /pool create <name> <a,b[,c]> [auth-reset-target]"
 	}
 	name := args[0]
 	members, err := poolops.ParseMembers(args[1])
 	if err != nil {
 		return fmt.Sprintf("Failed to create pool: %v", err)
 	}
-	if err := poolops.Create(h.store, name, "", members); err != nil {
+	// Optional 3rd positional arg is the per-pool auth-reset target.
+	authResetTarget := ""
+	if len(args) >= 3 {
+		authResetTarget = args[2]
+	}
+	if err := poolops.CreateWithAuthResetTarget(h.store, name, "", members, authResetTarget); err != nil {
 		return fmt.Sprintf("Failed to create pool: %v", err)
 	}
 	var b strings.Builder
@@ -1248,8 +1258,29 @@ func (h *CommandHandler) poolCreate(args []string) string {
 	for i, m := range members {
 		fmt.Fprintf(&b, "  [%d] %s\n", i, htmlCode(m))
 	}
+	if authResetTarget != "" {
+		fmt.Fprintf(&b, "auth-reset target: %s\n", htmlCode(authResetTarget))
+	}
 	b.WriteString("Bind it with /policy or " + htmlCode("sluice binding add "+name+" --destination <host>"))
 	return b.String()
+}
+
+func (h *CommandHandler) poolSetAuthReset(name, target string) string {
+	// A single "-" is the channel-uniform clear sentinel.
+	if target == "-" {
+		target = ""
+	}
+	if err := poolops.SetAuthResetTarget(h.store, name, target); err != nil {
+		var nf *poolops.PoolNotFoundError
+		if errors.As(err, &nf) {
+			return fmt.Sprintf("No pool named %s", htmlCode(name))
+		}
+		return fmt.Sprintf("Failed to set auth-reset target: %v", err)
+	}
+	if target == "" {
+		return fmt.Sprintf("Cleared auth-reset target for pool %s", htmlCode(name))
+	}
+	return fmt.Sprintf("Set auth-reset target for pool %s to %s", htmlCode(name), htmlCode(target))
 }
 
 func (h *CommandHandler) poolList() string {
@@ -1269,6 +1300,9 @@ func (h *CommandHandler) poolList() string {
 		}
 		fmt.Fprintf(&b, "%s (strategy: %s): %s\n",
 			htmlCode(p.Name), htmlCode(p.Strategy), htmlCode(strings.Join(names, ", ")))
+		if p.AuthResetTarget != "" {
+			fmt.Fprintf(&b, "  auth-reset target: %s\n", htmlCode(p.AuthResetTarget))
+		}
 	}
 	return b.String()
 }
@@ -1309,6 +1343,9 @@ func (h *CommandHandler) poolStatus(name string) string {
 		fmt.Fprintf(&b, "%s[%d] %s  %s\n", marker, m.Position, htmlCode(m.Credential), status)
 	}
 	fmt.Fprintf(&b, "active: %s\n", htmlCode(res.Active))
+	if res.AuthResetTarget != "" {
+		fmt.Fprintf(&b, "auth-reset target: %s\n", htmlCode(res.AuthResetTarget))
+	}
 	return b.String()
 }
 
@@ -1387,8 +1424,8 @@ MCP Upstreams
 /mcp remove <name>
 
 Credential Pools
-/pool create <name> <a,b[,c]> | /pool list | /pool status <name>
-/pool rotate <name> | /pool remove <name>`
+/pool create <name> <a,b[,c]> [auth-reset-target] | /pool list | /pool status <name>
+/pool rotate <name> | /pool set-auth-reset <name> <target|-> | /pool remove <name>`
 	}
 
 	help += `

@@ -6,7 +6,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1074,13 +1076,15 @@ func TestFailoverPoolExhaustedNoSelfFailoverSpam(t *testing.T) {
 	// itself -> ResolveActive degrades to memA -> no distinct target.
 	prPtr.Load().MarkCooldown("memB", time.Now().Add(10*time.Minute), "401")
 
-	var calls int32
-	var last FailoverEvent
-	done := make(chan struct{}, 4)
+	// The callback fires synchronously inside addon.Response (the production
+	// detaching happens in main.go's SetOnFailover closure, not here), so the
+	// per-call records are stable to read after the loop.
+	var mu sync.Mutex
+	var events []FailoverEvent
 	addon.SetOnFailover(func(ev FailoverEvent) {
-		atomic.AddInt32(&calls, 1)
-		last = ev
-		done <- struct{}{}
+		mu.Lock()
+		events = append(events, ev)
+		mu.Unlock()
 	})
 
 	// Two back-to-back identical 429s (the agent's retry storm).
@@ -1090,30 +1094,124 @@ func TestFailoverPoolExhaustedNoSelfFailoverSpam(t *testing.T) {
 		addon.Response(f)
 	}
 
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("onFailover callback not invoked")
+	mu.Lock()
+	got := append([]FailoverEvent(nil), events...)
+	mu.Unlock()
+
+	// New contract: the durable callback fires for EVERY qualifying failover
+	// response (decoupled from the notice dedup), with Notify reflecting the
+	// dedup decision — true on the first (edge) event, false on the suppressed
+	// retry. This is what keeps the durable store write monotonic across a
+	// sustained exhaustion while the notice/audit stay deduped.
+	if len(got) != 2 {
+		t.Fatalf("onFailover invoked %d times, want exactly 2 (one per qualifying response; durability decoupled from notice dedup)", len(got))
 	}
-	// Dedup: the second identical signal within the window is suppressed.
-	if got := atomic.LoadInt32(&calls); got != 1 {
-		t.Fatalf("onFailover invoked %d times, want exactly 1 (dedup window must collapse the retry storm)", got)
+	if !got[0].Notify {
+		t.Fatalf("first onFailover Notify = false, want true (healthy->exhausted edge passes the dedup gate)")
 	}
-	if !last.Exhausted {
-		t.Fatalf("FailoverEvent.Exhausted = false, want true (no distinct failover target)")
+	if got[1].Notify {
+		t.Fatalf("second onFailover Notify = true, want false (the retry-storm repeat is notice-suppressed but still persisted)")
 	}
-	if last.From != "memA" || last.To != "memA" {
-		t.Fatalf("FailoverEvent from=%q to=%q, want memA/memA (degraded to self)", last.From, last.To)
+	for i, ev := range got {
+		if !ev.Exhausted {
+			t.Fatalf("event %d Exhausted = false, want true (no distinct failover target)", i)
+		}
+		if ev.From != "memA" || ev.To != "memA" {
+			t.Fatalf("event %d from=%q to=%q, want memA/memA (degraded to self)", i, ev.From, ev.To)
+		}
+	}
+
+	if err := logger.Close(); err != nil {
+		t.Fatalf("logger close: %v", err)
+	}
+	// The audit row stays gated on the dedup decision (only the edge event
+	// emits), so exactly one row despite two callback invocations.
+	if n := auditActionCount(t, logPath, "pool_exhausted"); n != 1 {
+		t.Fatalf("pool_exhausted audit rows = %d, want exactly 1 (no per-retry spam)", n)
+	}
+	if n := auditActionCount(t, logPath, "cred_failover"); n != 0 {
+		t.Fatalf("cred_failover audit rows = %d, want 0 (a self-failover is NOT a real failover)", n)
+	}
+}
+
+// TestFailoverExhaustedDedupCollapsesFlapDirection is the A1 dedup-collapse
+// regression. When both members are exhausted, the degrade target ResolveActive
+// picks can differ depending on which member a given failing response is
+// attributed to (the "flap direction"). The OLD per-(pool,from,to,tag) dedup
+// key minted a DISTINCT key per direction, so a retry storm hitting both
+// members produced two notices even though the pool is in one exhausted state.
+//
+// A1 collapses the exhausted path to the single key (pool,"*","*","exhausted")
+// so the direction can't create two keys.
+//
+// Fail-before (per-tuple key): two responses attributed to memA and memB emit
+// two pool_exhausted rows / two onFailover calls. Pass-after (collapsed key):
+// exactly one of each within the dedup window.
+func TestFailoverExhaustedDedupCollapsesFlapDirection(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.log")
+	logger, err := audit.NewFileLogger(logPath)
+	if err != nil {
+		t.Fatalf("NewFileLogger: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Close() })
+
+	addon, _, prPtr := setupPoolAddon(t, "memA", "memB")
+	addon.auditLog = logger
+	client := setupAddonConn(addon, "auth.example.com:443")
+
+	// Both members already genuinely failure-cooled (the pool is exhausted).
+	// Unequal future expiries so the degrade target differs by which member
+	// each request is attributed to (the flap direction the old key split on).
+	prPtr.Load().MarkCooldown("memA", time.Now().Add(5*time.Minute), "429")
+	prPtr.Load().MarkCooldown("memB", time.Now().Add(10*time.Minute), "401")
+
+	var mu sync.Mutex
+	var events []FailoverEvent
+	addon.SetOnFailover(func(ev FailoverEvent) {
+		if !ev.Exhausted {
+			t.Errorf("FailoverEvent.Exhausted = false, want true (pool exhausted)")
+		}
+		mu.Lock()
+		events = append(events, ev)
+		mu.Unlock()
+	})
+
+	// Two failing responses, attributed to DIFFERENT members (flap directions).
+	for _, member := range []string{"memA", "memB"} {
+		f := newPoolRespFlow(client, 429, []byte(`{"error":"rate_limited"}`))
+		addon.flowInjected.Tag(f.Id, member)
+		addon.Response(f)
+	}
+
+	mu.Lock()
+	got := append([]FailoverEvent(nil), events...)
+	mu.Unlock()
+
+	// New contract: the durable callback fires once per qualifying response
+	// (both flap directions), but the COLLAPSED exhausted dedup key suppresses
+	// the notice on the second, so exactly one event carries Notify=true.
+	if len(got) != 2 {
+		t.Fatalf("onFailover invoked %d times, want exactly 2 (one per qualifying response; durability decoupled from notice dedup)", len(got))
+	}
+	notify := 0
+	for _, ev := range got {
+		if ev.Notify {
+			notify++
+		}
+	}
+	if notify != 1 {
+		t.Fatalf("onFailover Notify=true on %d events, want exactly 1 (collapsed exhausted dedup key must absorb both flap directions)", notify)
 	}
 
 	if err := logger.Close(); err != nil {
 		t.Fatalf("logger close: %v", err)
 	}
 	if n := auditActionCount(t, logPath, "pool_exhausted"); n != 1 {
-		t.Fatalf("pool_exhausted audit rows = %d, want exactly 1 (no per-retry spam)", n)
+		t.Fatalf("pool_exhausted audit rows = %d, want exactly 1 (one collapsed key across both flap directions)", n)
 	}
 	if n := auditActionCount(t, logPath, "cred_failover"); n != 0 {
-		t.Fatalf("cred_failover audit rows = %d, want 0 (a self-failover is NOT a real failover)", n)
+		t.Fatalf("cred_failover audit rows = %d, want 0 (exhausted is not a real failover)", n)
 	}
 }
 
@@ -1178,5 +1276,241 @@ func TestFailoverToManualRotateParkedPeer(t *testing.T) {
 	}
 	if n := auditActionCount(t, logPath, "pool_exhausted"); n != 0 {
 		t.Fatalf("pool_exhausted audit rows = %d, want 0 (a healthy parked peer exists)", n)
+	}
+}
+
+// TestCooldownFromResponse exercises B1's header-derived cooldown parsing and
+// clamping. These assertions are intentionally GENERIC about the parsing/clamp
+// mechanics and do NOT bake in which header OpenAI's usage-limit 429 actually
+// sends — that header winner is resolved by the Post-Completion live capture.
+func TestCooldownFromResponse(t *testing.T) {
+	now := time.Now()
+	resp := func(class failoverClass, set func(h http.Header)) (failoverClass, http.Header) {
+		h := make(http.Header)
+		if set != nil {
+			set(h)
+		}
+		return class, h
+	}
+
+	tests := []struct {
+		name  string
+		class failoverClass
+		setup func(h http.Header)
+		want  time.Duration
+		// approx: when true, want is treated as a target and the result must
+		// be within tolerance (HTTP-date / absolute-epoch cases lose sub-second
+		// precision against a freshly-sampled now inside cooldownFromResponse).
+		approx bool
+	}{
+		{
+			name:  "no headers falls back to rate-limit class default",
+			class: failoverRateLimited,
+			want:  vault.RateLimitCooldown,
+		},
+		{
+			name:  "no headers falls back to auth-failure class default",
+			class: failoverAuthFailure,
+			want:  vault.AuthFailCooldown,
+		},
+		{
+			name:  "Retry-After delta seconds honored",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "120") },
+			want:  120 * time.Second,
+		},
+		{
+			name:   "Retry-After HTTP-date honored",
+			class:  failoverRateLimited,
+			setup:  func(h http.Header) { h.Set("Retry-After", now.Add(90*time.Second).UTC().Format(http.TimeFormat)) },
+			want:   90 * time.Second,
+			approx: true,
+		},
+		{
+			name:  "x-ratelimit-reset unix epoch honored",
+			class: failoverRateLimited,
+			setup: func(h http.Header) {
+				h.Set("x-ratelimit-reset", strconv.FormatInt(now.Add(300*time.Second).Unix(), 10))
+			},
+			want:   300 * time.Second,
+			approx: true,
+		},
+		{
+			name:  "x-ratelimit-reset-requests delta seconds honored",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("x-ratelimit-reset-requests", "45") },
+			want:  45 * time.Second,
+		},
+		{
+			name:  "x-ratelimit-reset-tokens unit-suffixed duration honored",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("x-ratelimit-reset-tokens", "1500ms") },
+			// 1500ms is below MinRateLimitFloor, so the parsed hint clamps up to
+			// the floor; want is the post-clamp value the generic check asserts.
+			want: vault.MinRateLimitFloor,
+		},
+		{
+			name:  "absurd value capped at MaxCooldown",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "999999999") },
+			want:  vault.MaxCooldown,
+		},
+		{
+			name:  "tiny rate-limit value floored at MinRateLimitFloor",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "2") },
+			want:  vault.MinRateLimitFloor,
+		},
+		{
+			name:  "auth-failure hint floored at AuthFailCooldown",
+			class: failoverAuthFailure,
+			setup: func(h http.Header) { h.Set("Retry-After", "5") },
+			want:  vault.AuthFailCooldown,
+		},
+		{
+			name:  "auth-failure long hint honored above its floor",
+			class: failoverAuthFailure,
+			setup: func(h http.Header) { h.Set("Retry-After", "1200") },
+			want:  1200 * time.Second,
+		},
+		{
+			name:  "Retry-After precedence over reset family",
+			class: failoverRateLimited,
+			setup: func(h http.Header) {
+				h.Set("Retry-After", "120")
+				h.Set("x-ratelimit-reset", "30")
+			},
+			want: 120 * time.Second,
+		},
+		{
+			name:  "unparseable header ignored falls back to default",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "soon-ish") },
+			want:  vault.RateLimitCooldown,
+		},
+		{
+			name:  "negative delta ignored falls back to default",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "-5") },
+			want:  vault.RateLimitCooldown,
+		},
+		{
+			name:  "NaN delta ignored falls back to default",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "NaN") },
+			want:  vault.RateLimitCooldown,
+		},
+		{
+			name:  "Inf delta ignored falls back to default",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "Inf") },
+			want:  vault.RateLimitCooldown,
+		},
+		{
+			name:  "+Inf delta ignored falls back to default",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "+Inf") },
+			want:  vault.RateLimitCooldown,
+		},
+		{
+			name:  "-Inf delta ignored falls back to default",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "-Inf") },
+			want:  vault.RateLimitCooldown,
+		},
+		{
+			name:  "overflow-magnitude delta ignored falls back to default",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "1e308") },
+			want:  vault.RateLimitCooldown,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			class, h := resp(tt.class, tt.setup)
+			got := cooldownFromResponse(class, h)
+			if tt.approx {
+				const tol = 2 * time.Second
+				diff := got - tt.want
+				if diff < 0 {
+					diff = -diff
+				}
+				if diff > tol {
+					t.Fatalf("cooldownFromResponse = %v, want ~%v (tol %v)", got, tt.want, tol)
+				}
+				return
+			}
+			if got != tt.want {
+				t.Fatalf("cooldownFromResponse = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCooldownFromResponseNilSafe verifies the nil-header guard returns the
+// class default rather than panicking.
+func TestCooldownFromResponseNilSafe(t *testing.T) {
+	if got := cooldownFromResponse(failoverRateLimited, nil); got != vault.RateLimitCooldown {
+		t.Fatalf("nil header: got %v, want %v", got, vault.RateLimitCooldown)
+	}
+	if got := cooldownFromResponse(failoverAuthFailure, nil); got != vault.AuthFailCooldown {
+		t.Fatalf("nil header (auth): got %v, want %v", got, vault.AuthFailCooldown)
+	}
+}
+
+// TestParseRecoveryHintRejectsNonFinite verifies the bare-numeric branch
+// rejects NaN/±Inf and absurdly large finite magnitudes up front (ok=false,
+// d=0) instead of letting strconv.ParseFloat's acceptance of those tokens slip
+// past the `secs < 0` guard into an implementation-defined float->int64
+// conversion that could wrap to a wrong/negative duration. Exercised on both
+// the delta header (Retry-After) and the epoch-branch reset family (where the
+// int64(secs) conversion lives).
+func TestParseRecoveryHintRejectsNonFinite(t *testing.T) {
+	now := time.Now()
+	headers := []string{"Retry-After", "x-ratelimit-reset"}
+	for _, h := range headers {
+		for _, raw := range []string{"NaN", "Inf", "+Inf", "-Inf", "1e308"} {
+			if d, ok := parseRecoveryHint(h, raw, now); ok || d != 0 {
+				t.Errorf("parseRecoveryHint(%q, %q) = (%v, %v), want (0, false)", h, raw, d, ok)
+			}
+		}
+	}
+}
+
+// TestParseRecoveryHintHTTPDateGatedToRetryAfter verifies the HTTP-date branch
+// is reachable only for Retry-After (RFC 9110). A reset-family header carrying
+// an HTTP-date string must NOT be coerced through http.ParseTime — those
+// headers are numeric (delta-seconds / epoch / unit-suffixed duration), so a
+// date value is simply not a usable hint and parseRecoveryHint reports ok=false.
+func TestParseRecoveryHintHTTPDateGatedToRetryAfter(t *testing.T) {
+	now := time.Now()
+	httpDate := now.Add(90 * time.Second).UTC().Format(http.TimeFormat)
+
+	// Retry-After with an HTTP-date still yields a positive duration.
+	d, ok := parseRecoveryHint("Retry-After", httpDate, now)
+	if !ok || d <= 0 {
+		t.Fatalf("Retry-After HTTP-date: got (%v, %v), want a positive duration", d, ok)
+	}
+
+	// The reset family must not parse an HTTP-date as a date: no usable hint.
+	for _, h := range []string{"x-ratelimit-reset", "x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"} {
+		if d, ok := parseRecoveryHint(h, httpDate, now); ok || d != 0 {
+			t.Fatalf("%s HTTP-date: got (%v, %v), want (0, false) — date form must be Retry-After only", h, d, ok)
+		}
+	}
+
+	// And end-to-end through cooldownFromResponse: a reset-family HTTP-date is
+	// ignored and the class default applies, while the same date on Retry-After
+	// is honored.
+	resetHdr := make(http.Header)
+	resetHdr.Set("x-ratelimit-reset-requests", httpDate)
+	if got := cooldownFromResponse(failoverRateLimited, resetHdr); got != vault.RateLimitCooldown {
+		t.Fatalf("reset-family HTTP-date: got %v, want fallback %v", got, vault.RateLimitCooldown)
+	}
+	retryHdr := make(http.Header)
+	retryHdr.Set("Retry-After", httpDate)
+	if got := cooldownFromResponse(failoverRateLimited, retryHdr); got <= 0 || got > vault.MaxCooldown {
+		t.Fatalf("Retry-After HTTP-date: got %v, want a clamped positive duration", got)
 	}
 }

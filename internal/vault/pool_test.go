@@ -940,3 +940,189 @@ func TestSetCurrentMembersPrunesStaleActive(t *testing.T) {
 		t.Fatal("Finding 1: SetCurrentMembers did not prune the stale sticky pointer for a dropped/epoch-bumped member")
 	}
 }
+
+// TestHasHealthyMember pins A1's exhaustion signal: a pool is exhausted iff no
+// member is healthy. The check mirrors ResolveActive's cooling()/lazy-expiry
+// semantics exactly (an already-passed cooldown still in the map counts as
+// healthy) and treats a ManualRotateReason park as servable.
+func TestHasHealthyMember(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name  string
+		setup func(pr *PoolResolver)
+		pool  string
+		want  bool
+	}{
+		{
+			name:  "both healthy",
+			setup: func(_ *PoolResolver) {},
+			pool:  "pool",
+			want:  true,
+		},
+		{
+			name: "one cooling one healthy",
+			setup: func(pr *PoolResolver) {
+				pr.MarkCooldown("a", now.Add(60*time.Second), "429")
+			},
+			pool: "pool",
+			want: true,
+		},
+		{
+			name: "both cooling -> exhausted",
+			setup: func(pr *PoolResolver) {
+				pr.MarkCooldown("a", now.Add(60*time.Second), "429")
+				pr.MarkCooldown("b", now.Add(10*time.Minute), "401")
+			},
+			pool: "pool",
+			want: false,
+		},
+		{
+			name: "lazily-expired cooldown still in map counts as healthy",
+			setup: func(pr *PoolResolver) {
+				// b genuinely cooling; a has a stored cooldown already in the
+				// past (lazy expiry) -> a is healthy, so the pool is not
+				// exhausted.
+				pr.MarkCooldown("a", now.Add(-1*time.Second), "429")
+				pr.MarkCooldown("b", now.Add(10*time.Minute), "401")
+			},
+			pool: "pool",
+			want: true,
+		},
+		{
+			name: "manual-rotate park counts as servable",
+			setup: func(pr *PoolResolver) {
+				// a genuinely failed; b operator-parked (deprioritized but
+				// servable) -> the pool is NOT exhausted.
+				pr.MarkCooldown("a", now.Add(60*time.Second), "429")
+				pr.MarkCooldown("b", now.Add(5*time.Minute), ManualRotateReason)
+			},
+			pool: "pool",
+			want: true,
+		},
+		{
+			name:  "unknown pool",
+			setup: func(_ *PoolResolver) {},
+			pool:  "nope",
+			want:  false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pr := NewPoolResolver([]store.Pool{mkPool("pool", "a", "b")}, nil)
+			tc.setup(pr)
+			if got := pr.HasHealthyMember(tc.pool); got != tc.want {
+				t.Fatalf("HasHealthyMember(%q) = %v, want %v", tc.pool, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHasHealthyMemberNil pins the nil-receiver guard.
+func TestHasHealthyMemberNil(t *testing.T) {
+	var pr *PoolResolver
+	if pr.HasHealthyMember("pool") {
+		t.Fatal("nil resolver HasHealthyMember = true, want false")
+	}
+}
+
+// TestSoonestCooldown pins that SoonestCooldown returns the minimum
+// STRICTLY-FUTURE member cooldown, skipping already-passed entries (lazy
+// expiry), and reports ok=false when no member is currently cooling.
+func TestSoonestCooldown(t *testing.T) {
+	tests := []struct {
+		name   string
+		setup  func(pr *PoolResolver, base time.Time)
+		pool   string
+		wantOK bool
+		// wantOffset is the intended soonest cooldown expressed as an offset
+		// from the per-subtest `base` (the same `base` passed into setup), so
+		// the expected value derives from the SAME clock sample the cooldowns
+		// were set against. Comparing against the outer `now` instead let slow
+		// CI / -race / GC widen the now-vs-base gap past the tolerance and
+		// flake; deriving both sides from `base` makes it exact.
+		wantOffset time.Duration
+	}{
+		{
+			name:   "no member cooling",
+			setup:  func(_ *PoolResolver, _ time.Time) {},
+			pool:   "pool",
+			wantOK: false,
+		},
+		{
+			name: "single cooling member",
+			setup: func(pr *PoolResolver, base time.Time) {
+				pr.MarkCooldown("a", base.Add(60*time.Second), "429")
+			},
+			pool:       "pool",
+			wantOK:     true,
+			wantOffset: 60 * time.Second,
+		},
+		{
+			name: "two cooling -> min wins",
+			setup: func(pr *PoolResolver, base time.Time) {
+				pr.MarkCooldown("a", base.Add(10*time.Minute), "401")
+				pr.MarkCooldown("b", base.Add(60*time.Second), "429")
+			},
+			pool:       "pool",
+			wantOK:     true,
+			wantOffset: 60 * time.Second,
+		},
+		{
+			name: "already-passed entry skipped",
+			setup: func(pr *PoolResolver, base time.Time) {
+				// a is in the past (lazy-expired) -> ignored; b is the only
+				// currently-cooling member.
+				pr.MarkCooldown("a", base.Add(-1*time.Second), "429")
+				pr.MarkCooldown("b", base.Add(120*time.Second), "401")
+			},
+			pool:       "pool",
+			wantOK:     true,
+			wantOffset: 120 * time.Second,
+		},
+		{
+			name: "all passed -> not cooling",
+			setup: func(pr *PoolResolver, base time.Time) {
+				pr.MarkCooldown("a", base.Add(-2*time.Second), "429")
+				pr.MarkCooldown("b", base.Add(-1*time.Second), "401")
+			},
+			pool:   "pool",
+			wantOK: false,
+		},
+		{
+			name:   "unknown pool",
+			setup:  func(_ *PoolResolver, _ time.Time) {},
+			pool:   "nope",
+			wantOK: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pr := NewPoolResolver([]store.Pool{mkPool("pool", "a", "b")}, nil)
+			base := time.Now()
+			tc.setup(pr, base)
+			got, ok := pr.SoonestCooldown(tc.pool)
+			if ok != tc.wantOK {
+				t.Fatalf("SoonestCooldown(%q) ok = %v, want %v", tc.pool, ok, tc.wantOK)
+			}
+			if !tc.wantOK {
+				return
+			}
+			// MarkCooldown stores `until` verbatim and SoonestCooldown returns
+			// it unchanged, so the expected value is exactly base+offset (both
+			// derived from the same `base`). Assert exact equality — there is
+			// no clock skew between the stored value and the expectation.
+			want := base.Add(tc.wantOffset)
+			if !got.Equal(want) {
+				t.Fatalf("SoonestCooldown(%q) = %v, want %v (delta %v)", tc.pool, got, want, got.Sub(want))
+			}
+		})
+	}
+}
+
+// TestSoonestCooldownNil pins the nil-receiver guard.
+func TestSoonestCooldownNil(t *testing.T) {
+	var pr *PoolResolver
+	if _, ok := pr.SoonestCooldown("pool"); ok {
+		t.Fatal("nil resolver SoonestCooldown ok = true, want false")
+	}
+}

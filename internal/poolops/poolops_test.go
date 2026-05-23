@@ -109,6 +109,190 @@ func TestCreateListStatusRotateRemove(t *testing.T) {
 	}
 }
 
+// TestCreateWithAuthResetTarget asserts create-with-target persists the target
+// in the single CreatePoolWithMembers call (the target is bound in the same
+// store transaction that creates the pool, not a separate follow-up
+// SetPoolAuthResetTarget write — Copilot #5). Both the GetPool read-back and
+// the derived Status reflect the configured target.
+func TestCreateWithAuthResetTarget(t *testing.T) {
+	db := newTestStore(t, "acct_a", "acct_b")
+
+	if err := poolops.CreateWithAuthResetTarget(db, "codex", "", []string{"acct_a", "acct_b"}, "openai-codex"); err != nil {
+		t.Fatalf("CreateWithAuthResetTarget: %v", err)
+	}
+
+	p, err := db.GetPool("codex")
+	if err != nil {
+		t.Fatalf("GetPool: %v", err)
+	}
+	if p.AuthResetTarget != "openai-codex" {
+		t.Fatalf("AuthResetTarget = %q, want openai-codex", p.AuthResetTarget)
+	}
+
+	st, err := poolops.Status(db, "codex")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.AuthResetTarget != "openai-codex" {
+		t.Fatalf("Status.AuthResetTarget = %q, want openai-codex", st.AuthResetTarget)
+	}
+}
+
+func TestCreateWithEmptyAuthResetTargetDefaultsEmpty(t *testing.T) {
+	db := newTestStore(t, "acct_a")
+	if err := poolops.CreateWithAuthResetTarget(db, "p", "", []string{"acct_a"}, ""); err != nil {
+		t.Fatalf("CreateWithAuthResetTarget: %v", err)
+	}
+	p, err := db.GetPool("p")
+	if err != nil {
+		t.Fatalf("GetPool: %v", err)
+	}
+	if p.AuthResetTarget != "" {
+		t.Fatalf("AuthResetTarget = %q, want empty", p.AuthResetTarget)
+	}
+}
+
+// TestCreateWithInvalidAuthResetTarget asserts a target that the exec-time
+// allowlist (container.ValidateResetAuthTarget: [A-Za-z0-9_.:-]+) would reject
+// is also rejected at create time, on the channel-agnostic path, so it never
+// stores with success and then fails silently in the detached recovery
+// goroutine. A newline/NUL was caught by the old looser rule; a space and a
+// slash were NOT (the F1 silent-failure bug) and are the load-bearing cases.
+func TestCreateWithInvalidAuthResetTarget(t *testing.T) {
+	cases := map[string]string{
+		"newline": "bad\ntarget",
+		"nul":     "bad\x00target",
+		"space":   "openai codex",
+		"slash":   "openai/codex",
+	}
+	for name, target := range cases {
+		t.Run(name, func(t *testing.T) {
+			db := newTestStore(t, "acct_a")
+			err := poolops.CreateWithAuthResetTarget(db, "p", "", []string{"acct_a"}, target)
+			if !errors.Is(err, poolops.ErrInvalidAuthResetTarget) {
+				t.Fatalf("err = %v, want ErrInvalidAuthResetTarget", err)
+			}
+			// The pool must not have been created when the target is invalid.
+			p, err := db.GetPool("p")
+			if err != nil {
+				t.Fatalf("GetPool: %v", err)
+			}
+			if p != nil {
+				t.Fatalf("pool created despite invalid target: %+v", p)
+			}
+		})
+	}
+}
+
+// TestAuthResetTargetDashSentinelRejected pins the cross-channel gap fix: a
+// literal "-" is the CLI/Telegram clear sentinel (converted to "" before
+// reaching poolops), so it must never be a valid STORED target on any channel.
+// REST forwards the value verbatim, so without this guard it could persist
+// auth_reset_target="-" while CLI/Telegram cannot. Both the create path and
+// the set path must reject a literal "-".
+func TestAuthResetTargetDashSentinelRejected(t *testing.T) {
+	t.Run("set", func(t *testing.T) {
+		db := newTestStore(t, "acct_a")
+		if err := poolops.Create(db, "p", "", []string{"acct_a"}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := poolops.SetAuthResetTarget(db, "p", "-"); !errors.Is(err, poolops.ErrInvalidAuthResetTarget) {
+			t.Fatalf("SetAuthResetTarget(\"-\") err = %v, want ErrInvalidAuthResetTarget", err)
+		}
+		p, err := db.GetPool("p")
+		if err != nil {
+			t.Fatalf("GetPool: %v", err)
+		}
+		if p.AuthResetTarget != "" {
+			t.Fatalf("sentinel persisted despite rejection: %q", p.AuthResetTarget)
+		}
+	})
+
+	t.Run("create", func(t *testing.T) {
+		db := newTestStore(t, "acct_a")
+		err := poolops.CreateWithAuthResetTarget(db, "p", "", []string{"acct_a"}, "-")
+		if !errors.Is(err, poolops.ErrInvalidAuthResetTarget) {
+			t.Fatalf("create-with-target \"-\" err = %v, want ErrInvalidAuthResetTarget", err)
+		}
+		// The pool must not have been created when the target is invalid.
+		p, err := db.GetPool("p")
+		if err != nil {
+			t.Fatalf("GetPool: %v", err)
+		}
+		if p != nil {
+			t.Fatalf("pool created despite sentinel target: %+v", p)
+		}
+	})
+}
+
+func TestSetAuthResetTargetSetAndClear(t *testing.T) {
+	db := newTestStore(t, "acct_a", "acct_b")
+	if err := poolops.Create(db, "codex", "", []string{"acct_a", "acct_b"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if err := poolops.SetAuthResetTarget(db, "codex", "openai-codex"); err != nil {
+		t.Fatalf("SetAuthResetTarget set: %v", err)
+	}
+	st, err := poolops.Status(db, "codex")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.AuthResetTarget != "openai-codex" {
+		t.Fatalf("after set AuthResetTarget = %q, want openai-codex", st.AuthResetTarget)
+	}
+
+	if err := poolops.SetAuthResetTarget(db, "codex", ""); err != nil {
+		t.Fatalf("SetAuthResetTarget clear: %v", err)
+	}
+	st, err = poolops.Status(db, "codex")
+	if err != nil {
+		t.Fatalf("Status post-clear: %v", err)
+	}
+	if st.AuthResetTarget != "" {
+		t.Fatalf("after clear AuthResetTarget = %q, want empty", st.AuthResetTarget)
+	}
+}
+
+func TestSetAuthResetTargetUnknownPool(t *testing.T) {
+	db := newTestStore(t)
+	err := poolops.SetAuthResetTarget(db, "missing", "x")
+	var nf *poolops.PoolNotFoundError
+	if !errors.As(err, &nf) {
+		t.Fatalf("SetAuthResetTarget unknown pool err = %v, want PoolNotFoundError", err)
+	}
+}
+
+func TestSetAuthResetTargetInvalid(t *testing.T) {
+	// Set-time validation mirrors the exec-time allowlist exactly: a space or
+	// slash (not just NUL/newline) is rejected before the store write, so an
+	// unexecutable target can never be persisted.
+	for name, target := range map[string]string{
+		"nul":     "bad\x00target",
+		"newline": "bad\ntarget",
+		"space":   "openai codex",
+		"slash":   "openai/codex",
+	} {
+		t.Run(name, func(t *testing.T) {
+			db := newTestStore(t, "acct_a")
+			if err := poolops.Create(db, "p", "", []string{"acct_a"}); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if err := poolops.SetAuthResetTarget(db, "p", target); !errors.Is(err, poolops.ErrInvalidAuthResetTarget) {
+				t.Fatalf("err = %v, want ErrInvalidAuthResetTarget", err)
+			}
+			// Store must not have been mutated.
+			p, err := db.GetPool("p")
+			if err != nil {
+				t.Fatalf("GetPool: %v", err)
+			}
+			if p.AuthResetTarget != "" {
+				t.Fatalf("target persisted despite invalid value: %q", p.AuthResetTarget)
+			}
+		})
+	}
+}
+
 func TestCreateErrors(t *testing.T) {
 	db := newTestStore(t, "acct_a")
 

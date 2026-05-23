@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"math"
+	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -130,6 +133,174 @@ func bodyContainsAny(body []byte, subs ...string) bool {
 	return false
 }
 
+// minFloorForClass returns the lower clamp bound for a derived cooldown. A
+// rate-limited member may be honored down to MinRateLimitFloor (a short real
+// recovery window must be respected — the whole point of B1). An auth failure
+// must never be retried in seconds: a revoked/expired token will not self-heal
+// quickly, so the floor stays at AuthFailCooldown regardless of any hint.
+func minFloorForClass(class failoverClass) time.Duration {
+	if class == failoverAuthFailure {
+		return vault.AuthFailCooldown
+	}
+	return vault.MinRateLimitFloor
+}
+
+// classDefaultCooldown is the flat fallback applied when the upstream sends no
+// usable recovery hint header.
+func classDefaultCooldown(class failoverClass) time.Duration {
+	if class == failoverAuthFailure {
+		return vault.AuthFailCooldown
+	}
+	return vault.RateLimitCooldown
+}
+
+// recoveryHintHeaders are the response headers, in precedence order, from
+// which cooldownFromResponse derives the real recovery window. Retry-After is
+// the standard signal; the x-ratelimit-reset* family is provider-specific
+// (OpenAI emits per-resource reset hints). Each value is parsed as either a
+// delta-seconds count, an HTTP-date (Retry-After only), or — for the reset
+// family — a unix epoch.
+var recoveryHintHeaders = []string{
+	"Retry-After",
+	"x-ratelimit-reset",
+	"x-ratelimit-reset-requests",
+	"x-ratelimit-reset-tokens",
+}
+
+// cooldownFromResponse derives the cooldown duration for a failed pool member
+// from the upstream's recovery hint headers, clamped to the class bounds.
+//
+// Precedence: Retry-After (delta-seconds or HTTP-date), then the
+// x-ratelimit-reset* family (delta-seconds or unix epoch). The first header
+// that yields a positive duration wins. With NO usable hint the flat class
+// default is returned (RateLimitCooldown / AuthFailCooldown), so behavior is
+// unchanged from before B1 on responses that carry no hint.
+//
+// The parsed window is clamped to [minFloorForClass(class), MaxCooldown]: a
+// rate-limit hint may shrink the cooldown down to MinRateLimitFloor (honoring
+// a short real window), an auth failure stays floored at AuthFailCooldown, and
+// any absurd/hostile value is capped at MaxCooldown so a member is never
+// parked indefinitely.
+//
+// No body parsing in v1 (deferred until a real Codex 429 is captured — see the
+// plan's Post-Completion note); only headers are consulted.
+//
+// Takes the response header directly (not *http.Response) so it works
+// uniformly against the go-mitmproxy Flow's Response.Header at the call site
+// and a plain http.Header in tests.
+func cooldownFromResponse(class failoverClass, header http.Header) time.Duration {
+	if header == nil {
+		return classDefaultCooldown(class)
+	}
+	now := time.Now()
+	for _, h := range recoveryHintHeaders {
+		raw := strings.TrimSpace(header.Get(h))
+		if raw == "" {
+			continue
+		}
+		d, ok := parseRecoveryHint(h, raw, now)
+		if !ok || d <= 0 {
+			continue
+		}
+		return clampCooldown(class, d)
+	}
+	return classDefaultCooldown(class)
+}
+
+// parseRecoveryHint parses a single recovery-hint header value into a positive
+// duration relative to now. It tries, in order:
+//
+//   - delta-seconds: a bare integer/decimal count of seconds from now (all
+//     headers).
+//   - HTTP-date: an absolute time (Retry-After only, per RFC 9110); the
+//     duration is its distance from now.
+//   - unix epoch: a large integer treated as seconds-since-epoch (the
+//     x-ratelimit-reset* family commonly emits an absolute epoch).
+//
+// Returns ok=false when the value parses to nothing usable (negative,
+// zero-after-now, unparseable). A delta value carrying a unit suffix (OpenAI's
+// "1.5s" / "60ms" form) is handled via time.ParseDuration as a fallback.
+//
+// Non-finite (NaN, +Inf, -Inf) and out-of-range bare-numeric values are
+// rejected up front: strconv.ParseFloat accepts all of them, NaN<0 and Inf<0
+// are both false so the old `secs < 0` guard let them through, and the
+// subsequent float->int64 conversion (delta `time.Duration(secs*1e9)` and
+// epoch `int64(secs)`) is implementation-defined for those inputs and can wrap
+// to a wrong (even negative) duration before clampCooldown runs. Any finite
+// magnitude above maxRecoveryHintSeconds is also rejected — it is far larger
+// than any real Retry-After / reset / epoch and would overflow int64 once
+// multiplied into nanoseconds.
+// maxRecoveryHintSeconds is the upper bound for a bare-numeric recovery hint
+// (~31,000 years). Any larger value is not a real Retry-After / reset / unix
+// epoch and is rejected: it is comfortably above a present-day epoch (~1.7e9)
+// yet small enough that int64(secs) cannot overflow on the epoch branch.
+const maxRecoveryHintSeconds = 1e12
+
+func parseRecoveryHint(header, raw string, now time.Time) (time.Duration, bool) {
+	// Bare numeric: delta-seconds for Retry-After; for the reset family it may
+	// be either delta-seconds OR a unix epoch. Disambiguate by magnitude — a
+	// value large enough to be a plausible epoch (>= ~ year 2001) is treated
+	// as absolute, otherwise as a delta.
+	if secs, err := strconv.ParseFloat(raw, 64); err == nil {
+		// Reject negative, non-finite (NaN/±Inf), and absurdly large
+		// magnitudes before any float->int64 conversion. maxRecoveryHintSeconds
+		// (~31,000 years) comfortably exceeds any real epoch (~1.7e9 today) or
+		// recovery delta, while staying well within int64 for the epoch
+		// branch's int64(secs); the delta branch additionally caps in float
+		// space (below) so secs*1e9 can never overflow int64 (~9.2e18).
+		if secs < 0 || math.IsNaN(secs) || math.IsInf(secs, 0) || secs > maxRecoveryHintSeconds {
+			return 0, false
+		}
+		const epochThreshold = 1_000_000_000 // ~2001-09; below this, treat as delta-seconds
+		if header != "Retry-After" && secs >= epochThreshold {
+			until := time.Unix(int64(secs), 0)
+			if d := until.Sub(now); d > 0 {
+				return d, true
+			}
+			return 0, false
+		}
+		// Delta path: cap in float space before the *float64(time.Second)
+		// multiply so the int64(time.Duration) conversion can never overflow.
+		// clampCooldown applies the real ceiling (MaxCooldown) afterward; this
+		// only prevents the conversion itself from wrapping.
+		deltaSec := secs
+		if maxSec := vault.MaxCooldown.Seconds(); deltaSec > maxSec {
+			deltaSec = maxSec
+		}
+		return time.Duration(deltaSec * float64(time.Second)), true
+	}
+	// HTTP-date (Retry-After absolute form, per RFC 9110). Only Retry-After is
+	// permitted to carry an absolute HTTP-date; the x-ratelimit-reset* family is
+	// numeric (delta-seconds / unix epoch / unit-suffixed duration) and must not
+	// be coerced through HTTP-date parsing.
+	if header == "Retry-After" {
+		if t, err := http.ParseTime(raw); err == nil {
+			if d := t.Sub(now); d > 0 {
+				return d, true
+			}
+			return 0, false
+		}
+	}
+	// Unit-suffixed duration (e.g. OpenAI "1.5s", "60ms").
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d, true
+	}
+	return 0, false
+}
+
+// clampCooldown bounds a derived cooldown to [minFloorForClass(class),
+// MaxCooldown].
+func clampCooldown(class failoverClass, d time.Duration) time.Duration {
+	floor := minFloorForClass(class)
+	if d < floor {
+		return floor
+	}
+	if d > vault.MaxCooldown {
+		return vault.MaxCooldown
+	}
+	return d
+}
+
 // FailoverEvent describes a completed pool failover. It is handed to the
 // optional onFailover callback (store durability write + Telegram notice)
 // configured via SetOnFailover.
@@ -153,6 +324,12 @@ type FailoverEvent struct {
 	// so a late callback firing after a remove/re-add cannot persist this
 	// cooldown onto the re-created same-name successor (Cluster A #2).
 	Epoch int64
+	// Notify is true only when the operator notice/audit for this event
+	// passed the dedup gate (a real transition's 30s window, or the
+	// healthy->exhausted edge). The durable store write runs regardless of
+	// Notify; only the Telegram notice is gated by it, so cooldown
+	// persistence stays monotonic even when notices are suppressed.
+	Notify bool
 }
 
 // humanizeFailoverReason maps a short reason tag (the same tag embedded in the
@@ -212,6 +389,15 @@ func FormatFailoverNotice(ev FailoverEvent) string {
 	}
 	return fmt.Sprintf("Pool %q failed over from %q to %q after %s.",
 		ev.Pool, ev.From, ev.To, reason)
+}
+
+// FormatPoolRecoveredNotice builds the plain-text, single-line operator notice
+// emitted on the exhausted->recovered edge by the recovery monitor. Kept next
+// to FormatFailoverNotice as a pure, directly-testable function. Plain text /
+// sentence style for the same reason (the notice path sends with no parse
+// mode, so markdown/HTML would render literally).
+func FormatPoolRecoveredNotice(pool string) string {
+	return fmt.Sprintf("Pool %q recovered: a healthy account is available again.", pool)
 }
 
 // poolForResponse maps a response's CONNECT destination back to a pooled
@@ -448,8 +634,13 @@ func (a *SluiceAddon) poolForResponse(f *mitmproxy.Flow) (pool, activeMember, pr
 //     below only reconciles for durability across restarts.
 //  2. Computes the next active member (post-cooldown) for the audit/notice.
 //  3. Hands a FailoverEvent to the onFailover callback (async, best-effort):
-//     the callback persists SetCredentialHealth to the store and fires the
-//     Telegram notice. The callback MUST NOT block the response path.
+//     the callback persists SetCredentialHealth to the store (ALWAYS) and
+//     fires the Telegram notice (only when ev.Notify is true). The callback is
+//     invoked unconditionally — even for a notice-suppressed (deduped) event —
+//     so the durable store write is decoupled from the notice gate and the
+//     persisted cooldown stays monotonic through a sustained exhaustion. The
+//     callback MUST NOT block the response path. Only the spam-prone log line
+//     and audit row stay gated on the dedup decision (ev.Notify).
 //
 // No in-flight retry: the triggering request still returns its own upstream
 // error to the agent unmodified. The agent (or its SDK) retries on its own
@@ -476,10 +667,13 @@ func (a *SluiceAddon) handlePoolFailover(f *mitmproxy.Flow) {
 		return
 	}
 
-	ttl := vault.RateLimitCooldown
-	if class == failoverAuthFailure {
-		ttl = vault.AuthFailCooldown
-	}
+	// B1: derive the cooldown window from the upstream's recovery hints
+	// (Retry-After / x-ratelimit-reset*) instead of the flat class TTL, so a
+	// quota-exhausted member is parked for the REAL window rather than being
+	// re-probed every RateLimitCooldown (60s). cooldownFromResponse clamps to
+	// the class bounds and falls back to the flat default when no hint header
+	// is present.
+	ttl := cooldownFromResponse(class, f.Response.Header)
 	until := time.Now().Add(ttl)
 	tag := failoverReasonTag(class, f.Response.StatusCode, bodyTag)
 
@@ -513,23 +707,75 @@ func (a *SluiceAddon) handlePoolFailover(f *mitmproxy.Flow) {
 		to = next
 	}
 
-	// to == from means ResolveActive degraded back to the member that just
-	// failed: every member is cooling and the soonest-recovering one IS
-	// `from`. There is NO distinct member to fail over to. Emitting a
-	// "<from> -> <from>" cred_failover here (and one Telegram notice per
-	// request) was both meaningless and a notification storm — the agent
-	// retries N times, each retry re-fails on the still-exhausted member
-	// and re-entered this path, producing N identical "failed over A -> A"
-	// notices. Classify it honestly as pool exhaustion instead.
-	exhausted := to == from
+	// A1: the pool is exhausted when NO member is healthy, not merely when
+	// ResolveActive degraded back to `from` (to == from). The old `to == from`
+	// test missed the flap case where the soonest-recovering degrade target is
+	// a DIFFERENT still-cooling member: that produced a meaningless
+	// "<from> -> <other>" cred_failover plus one Telegram notice per agent
+	// retry even though there was no healthy account to serve. HasHealthyMember
+	// mirrors ResolveActive's cooling()/lazy-expiry exactly, so it agrees with
+	// the degrade decision made just above. `to` is still computed for the
+	// real-transition notice/audit (the not-exhausted branch).
+	exhausted := !pr.HasHealthyMember(pool)
 
 	// Deduplicate identical signals within a short window. Concurrent
 	// in-flight requests (pipelined agents) and retries that race the
 	// synchronous MarkCooldown above would otherwise each emit one audit
-	// row + one operator notice. One per (pool,from,to,tag) per window is
-	// all the operator needs; the cooldown itself was already applied
+	// row + one operator notice.
+	//
+	// A2: the "exhausted" notice is gated on the healthy->exhausted EDGE, not
+	// the 30s window. onPoolExhausted (set by the Server) flips the per-pool
+	// exhaustion state on the long-lived Server and returns true only on the
+	// false->true edge, so a retry storm against an already-exhausted pool
+	// emits exactly one notice and the edge also wakes the recovery monitor.
+	// When the hook is unset (addon-only unit tests) fall back to the A1
+	// collapsed 30s-window key so those tests keep their existing behavior.
+	//
+	// A real from->to transition is unchanged: it keeps its (pool, from, to,
+	// tag) 30s-window key. The cooldown itself was already applied
 	// unconditionally above, so suppressing the notice loses nothing.
-	if !a.shouldEmitPoolNotice(pool, from, to, tag) {
+	emit := false
+	if exhausted {
+		if a.onPoolExhausted != nil {
+			emit = a.onPoolExhausted(pool)
+		} else {
+			emit = a.shouldEmitPoolNotice(pool, "*", "*", "exhausted")
+		}
+	} else {
+		emit = a.shouldEmitPoolNotice(pool, from, to, tag)
+	}
+
+	// (3) Durability + Telegram via the callback. The callback is responsible
+	// for being non-blocking (it runs the store write and the Telegram send in
+	// its own goroutine); we still guard with a nil check. Fired
+	// UNCONDITIONALLY — even when the notice is deduped (emit == false) — so the
+	// durable cooldown write is decoupled from the notice gate: the store stays
+	// monotonically up to date through a sustained exhaustion/retry storm where
+	// every notice after the first edge is suppressed. Only the operator-facing
+	// Telegram notice is gated, via Notify=emit; the callback itself runs the
+	// durable store write regardless of Notify. The member did fail in every
+	// case (the in-memory cooldown above already reflects that), exhausted just
+	// changes the operator-facing wording.
+	if a.onFailover != nil {
+		a.onFailover(FailoverEvent{
+			Pool:      pool,
+			From:      from,
+			To:        to,
+			Reason:    tag,
+			Class:     class,
+			Until:     until,
+			Exhausted: exhausted,
+			Epoch:     idEpoch,
+			Notify:    emit,
+		})
+	}
+
+	// The log line + audit row below stay gated on the dedup decision: they are
+	// the spam-prone surfaces a retry storm would flood, so a suppressed notice
+	// (deduped window, or an already-exhausted pool whose edge already fired)
+	// must not append a fresh log/audit entry. The durable store write already
+	// ran above via the unconditional callback.
+	if !emit {
 		return
 	}
 
@@ -571,24 +817,6 @@ func (a *SluiceAddon) handlePoolFailover(f *mitmproxy.Flow) {
 		if err := a.auditLog.Log(evt); err != nil {
 			log.Printf("[POOL-FAILOVER] audit log error: %v", err)
 		}
-	}
-
-	// (3) Durability + Telegram via the callback. The callback is
-	// responsible for being non-blocking (it runs the store write and the
-	// Telegram send in its own goroutine); we still guard with a nil check.
-	// The durable cooldown is persisted even when exhausted (the member did
-	// fail); only the operator-facing wording differs.
-	if a.onFailover != nil {
-		a.onFailover(FailoverEvent{
-			Pool:      pool,
-			From:      from,
-			To:        to,
-			Reason:    tag,
-			Class:     class,
-			Until:     until,
-			Exhausted: exhausted,
-			Epoch:     idEpoch,
-		})
 	}
 }
 

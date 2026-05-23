@@ -18,6 +18,21 @@ const (
 	AuthFailCooldown  = 300 * time.Second
 )
 
+// Cooldown bounds applied when the cooldown window is derived from an
+// upstream recovery hint (Retry-After / rate-limit-reset headers) instead of
+// the flat class default. MaxCooldown caps an absurd or malicious hint so a
+// member can never be parked indefinitely; MinRateLimitFloor is the lower
+// bound for a rate-limited member — deliberately well below RateLimitCooldown
+// so a SHORT real recovery window from the upstream is honored (the point of
+// B1 is that the flat 60s is too LONG-floored, re-probing an exhausted account
+// every minute, not too short). Exported so the proxy package's
+// cooldownFromResponse can clamp against them (mirrors RateLimitCooldown /
+// AuthFailCooldown, which are likewise consumed from proxy).
+const (
+	MaxCooldown       = 6 * time.Hour
+	MinRateLimitFloor = 10 * time.Second
+)
+
 // ManualRotateReason is the cooldown reason stamped by `sluice pool rotate`
 // when it parks the previously-active member. A member parked for this
 // reason is operationally deprioritized BY AN OPERATOR, not unhealthy: it
@@ -741,6 +756,80 @@ func (pr *PoolResolver) MergeLiveCooldowns(prev *PoolResolver) {
 			pr.health.health[cred] = ph
 		}
 	}
+}
+
+// HasHealthyMember reports whether the pool has at least one SERVABLE member.
+// It RLock-reads the shared health map once and evaluates every member against
+// a SINGLE freshly-sampled `now`, mirroring ResolveActive's `cooling()`
+// lazy-expiry semantics (a member whose cooldown is untracked, zero, or
+// lazily-expired vs `now` is healthy — this is NOT a status-field check). It
+// is the A1 exhaustion signal: a pool is exhausted iff !HasHealthyMember(pool).
+// A non-pool name or unknown pool returns false (no member, nothing to serve).
+//
+// A member parked for ManualRotateReason is operator-DEPRIORITIZED, not
+// unhealthy: ResolveActive's degrade path explicitly treats it as a
+// "parked-but-healthy" servable target (preferred over a genuinely failed
+// member). So such a member counts as healthy here too — otherwise a 429 on
+// the rotated-to member while the rotated-from peer is operator-parked would
+// be misclassified as pool exhaustion even though the parked peer is a valid
+// failover target. This keeps HasHealthyMember in agreement with the degrade
+// decision the failover path makes from the same health view.
+func (pr *PoolResolver) HasHealthyMember(pool string) bool {
+	if pr == nil {
+		return false
+	}
+	members, isPool := pr.pools[pool]
+	if !isPool || len(members) == 0 {
+		return false
+	}
+	now := time.Now()
+	pr.health.mu.RLock()
+	defer pr.health.mu.RUnlock()
+	for _, m := range members {
+		h, tracked := pr.health.health[m]
+		if !tracked || h.cooldownUntil.IsZero() || !h.cooldownUntil.After(now) {
+			// Not cooling (untracked, zero, or lazily expired vs `now`).
+			return true
+		}
+		if h.reason == ManualRotateReason {
+			// Operator-parked but servable (matches the degrade path).
+			return true
+		}
+	}
+	return false
+}
+
+// SoonestCooldown returns the minimum member cooldown expiry that is STRICTLY
+// GREATER than a freshly-sampled `now` (i.e. only members currently cooling
+// are considered; an already-passed cooldown still in the map is skipped,
+// mirroring `cooling()`'s lazy-expiry). ok is false when no member of the pool
+// is currently cooling (the recovery monitor uses this to decide whether to
+// reschedule a wake). A non-pool name or unknown pool returns ok=false. It
+// RLock-reads the shared health map once against the single `now`.
+func (pr *PoolResolver) SoonestCooldown(pool string) (time.Time, bool) {
+	if pr == nil {
+		return time.Time{}, false
+	}
+	members, isPool := pr.pools[pool]
+	if !isPool || len(members) == 0 {
+		return time.Time{}, false
+	}
+	now := time.Now()
+	pr.health.mu.RLock()
+	defer pr.health.mu.RUnlock()
+	var soonest time.Time
+	found := false
+	for _, m := range members {
+		h, tracked := pr.health.health[m]
+		if !tracked || h.cooldownUntil.IsZero() || !h.cooldownUntil.After(now) {
+			continue // not currently cooling (lazy-expiry skip)
+		}
+		if !found || h.cooldownUntil.Before(soonest) {
+			soonest = h.cooldownUntil
+			found = true
+		}
+	}
+	return soonest, found
 }
 
 // CooldownUntil returns the in-memory cooldown expiry for a credential and

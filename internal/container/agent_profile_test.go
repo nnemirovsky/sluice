@@ -348,3 +348,44 @@ func TestResolveProfile_NilDefaultsToOpenclaw(t *testing.T) {
 		t.Error("non-nil profile should be returned as-is")
 	}
 }
+
+func TestProfileExecUser(t *testing.T) {
+	if got := HermesProfile.ExecUser(); got != "10000:10000" {
+		t.Errorf("HermesProfile.ExecUser() = %q, want 10000:10000", got)
+	}
+	if got := OpenclawProfile.ExecUser(); got != "" {
+		t.Errorf("OpenclawProfile.ExecUser() = %q, want empty", got)
+	}
+	// Nil-safe accessor.
+	var p *AgentProfile
+	if got := p.ExecUser(); got != "" {
+		t.Errorf("(*AgentProfile)(nil).ExecUser() = %q, want empty", got)
+	}
+}
+
+func TestHermesProfile_ResetAuthCmd(t *testing.T) {
+	if HermesProfile.ResetAuthCmd == nil {
+		t.Fatal("hermes profile should have a ResetAuthCmd")
+	}
+	got := HermesProfile.ResetAuthCmd("openai-codex")
+	want := []string{"/opt/hermes/.venv/bin/hermes", "auth", "reset", "openai-codex"}
+	if len(got) != len(want) {
+		t.Fatalf("ResetAuthCmd argv = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("ResetAuthCmd[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	// Pure argv: no sh -c wrapper, so the target lands as its own
+	// element and cannot smuggle shell metacharacters.
+	if got[0] == "sh" {
+		t.Errorf("ResetAuthCmd should be pure argv, not an sh -c wrapper: %v", got)
+	}
+}
+
+func TestOpenclawProfile_ResetAuthCmdIsNil(t *testing.T) {
+	if OpenclawProfile.ResetAuthCmd != nil {
+		t.Error("openclaw profile should have nil ResetAuthCmd (pending verification it latches)")
+	}
+}

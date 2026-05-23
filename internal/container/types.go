@@ -76,6 +76,15 @@ type ContainerManager interface { //nolint:revive // stuttering accepted for cla
 	// ReloadSecrets signals the agent to re-read secrets from the env file.
 	ReloadSecrets(ctx context.Context) error
 
+	// ResetAuth clears ("un-latches") the agent's local auth state for the
+	// given target so the agent retries after a credential-pool quota
+	// window passes (the agent will not self-recover otherwise). The
+	// mechanism is profile-specific (hermes runs `hermes auth reset
+	// <target>` as its runtime UID; openclaw has no reset yet). When the
+	// profile provides no reset command this is a logged no-op so callers
+	// can treat it as best-effort. The target is validated before exec.
+	ResetAuth(ctx context.Context, target string) error
+
 	// WireMCPGateway registers sluice's MCP gateway URL under
 	// mcp.servers.<name> in the agent's config so the embedded runtime
 	// discovers sluice as an MCP server. Idempotent: a second call with
@@ -108,6 +117,38 @@ var envVarKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 func ValidateEnvVarKey(key string) error {
 	if !envVarKeyRe.MatchString(key) {
 		return fmt.Errorf("invalid env var key %q: must match [A-Za-z_][A-Za-z0-9_]*", key)
+	}
+	return nil
+}
+
+// resetAuthTargetRe matches an allowlisted auth-reset target: one or more
+// letters, digits, dash, underscore, dot, or colon. Targets are agent
+// identifiers like "openai-codex"; the colon allows scoped names such as
+// "provider:account". The target is exec'd as a pure argv element (no
+// shell), so this allowlist is defense in depth, not a shell-escape.
+var resetAuthTargetRe = regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`)
+
+// ValidateResetAuthTarget checks that an auth-reset target is non-empty,
+// free of NUL bytes, and within the allowlisted charset before it is
+// passed to ContainerManager.ResetAuth. Mirrors ValidateEnvVarKey's
+// fail-closed style: an invalid target is rejected (no exec) rather than
+// sanitized.
+//
+// This is the single canonical auth-reset-target validator. It is shared by
+// the channel-agnostic poolops layer (set-time validation on CLI/REST/
+// Telegram) and by every container backend (exec-time defense in depth) so
+// the two surfaces cannot drift: a target that the store accepts is always a
+// target ResetAuth can exec. An empty target ("") means "clear / no reset"
+// and is rejected here; poolops normalizes that sentinel away before calling.
+func ValidateResetAuthTarget(target string) error {
+	if target == "" {
+		return fmt.Errorf("auth-reset target is empty")
+	}
+	if strings.ContainsRune(target, 0) {
+		return fmt.Errorf("auth-reset target contains NUL byte")
+	}
+	if !resetAuthTargetRe.MatchString(target) {
+		return fmt.Errorf("invalid auth-reset target %q: must match [A-Za-z0-9_.:-]+", target)
 	}
 	return nil
 }

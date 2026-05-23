@@ -56,10 +56,14 @@ var (
 // Pool is a named group of OAuth credentials backing a single phantom
 // identity. Members are returned ordered by position (failover order).
 type Pool struct {
-	Name      string
-	Strategy  string
-	CreatedAt string
-	Members   []PoolMember
+	Name     string
+	Strategy string
+	// AuthResetTarget is the opt-in, per-pool agent auth-reset target sluice
+	// resets on the exhausted -> recovered edge (e.g. the hermes
+	// "openai-codex" auth entry). Empty (the default) means no reset runs.
+	AuthResetTarget string
+	CreatedAt       string
+	Members         []PoolMember
 }
 
 // PoolMember is one credential entry in a pool. Position determines the
@@ -192,7 +196,10 @@ func assertCredentialNotInAnotherPoolTx(tx *sql.Tx, credential, newPool string) 
 // existing oauth credential with a token_url. At least two members are
 // required for failover to be meaningful, but a single-member pool is
 // permitted (it degrades to a plain indirection with no failover target).
-func (s *Store) CreatePoolWithMembers(name, strategy string, members []string) error {
+// authResetTarget is stored verbatim in the same transaction (empty = none),
+// so create-with-target is atomic: there is no window where the pool exists
+// without its configured target.
+func (s *Store) CreatePoolWithMembers(name, strategy string, members []string, authResetTarget string) error {
 	if name == "" {
 		return fmt.Errorf("%w: pool name is required", ErrPoolNoMembers)
 	}
@@ -249,7 +256,7 @@ func (s *Store) CreatePoolWithMembers(name, strategy string, members []string) e
 	}
 
 	if _, err := tx.Exec(
-		"INSERT INTO credential_pools (name, strategy) VALUES (?, ?)", name, strategy,
+		"INSERT INTO credential_pools (name, strategy, auth_reset_target) VALUES (?, ?, ?)", name, strategy, authResetTarget,
 	); err != nil {
 		return fmt.Errorf("insert pool %q: %w", name, err)
 	}
@@ -284,13 +291,37 @@ func (s *Store) CreatePoolWithMembers(name, strategy string, members []string) e
 	return nil
 }
 
+// SetPoolAuthResetTarget sets (or clears, when target is "") the per-pool
+// auth_reset_target. Returns ErrPoolNoMembers when the pool name is empty and
+// sql.ErrNoRows-wrapped behavior is intentionally avoided: a missing pool is
+// reported via the returned error so every management channel can surface a
+// "no such pool" message. The target value itself is stored verbatim;
+// charset/validation of the target is the channel/ops layer's concern (the
+// stored string is consumed as argv, never shell-interpolated).
+func (s *Store) SetPoolAuthResetTarget(name, target string) error {
+	if name == "" {
+		return fmt.Errorf("%w: pool name is required", ErrPoolNoMembers)
+	}
+	res, err := s.db.Exec(
+		"UPDATE credential_pools SET auth_reset_target = ? WHERE name = ?", target, name,
+	)
+	if err != nil {
+		return fmt.Errorf("set auth_reset_target for pool %q: %w", name, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("pool %q does not exist", name)
+	}
+	return nil
+}
+
 // GetPool returns a pool by name with members ordered by position, or nil if
 // the pool does not exist.
 func (s *Store) GetPool(name string) (*Pool, error) {
 	var p Pool
 	err := s.db.QueryRow(
-		"SELECT name, strategy, created_at FROM credential_pools WHERE name = ?", name,
-	).Scan(&p.Name, &p.Strategy, &p.CreatedAt)
+		"SELECT name, strategy, auth_reset_target, created_at FROM credential_pools WHERE name = ?", name,
+	).Scan(&p.Name, &p.Strategy, &p.AuthResetTarget, &p.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -320,7 +351,7 @@ func (s *Store) GetPool(name string) (*Pool, error) {
 
 // ListPools returns all pools with their members ordered by position.
 func (s *Store) ListPools() ([]Pool, error) {
-	rows, err := s.db.Query("SELECT name, strategy, created_at FROM credential_pools ORDER BY name")
+	rows, err := s.db.Query("SELECT name, strategy, auth_reset_target, created_at FROM credential_pools ORDER BY name")
 	if err != nil {
 		return nil, fmt.Errorf("list pools: %w", err)
 	}
@@ -328,7 +359,7 @@ func (s *Store) ListPools() ([]Pool, error) {
 	pools := make(map[string]*Pool)
 	for rows.Next() {
 		var p Pool
-		if err := rows.Scan(&p.Name, &p.Strategy, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.Name, &p.Strategy, &p.AuthResetTarget, &p.CreatedAt); err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("scan pool: %w", err)
 		}

@@ -167,6 +167,16 @@ type SluiceAddon struct {
 	// means failover is in-memory only (no durability, no notice).
 	onFailover func(FailoverEvent)
 
+	// onPoolExhausted, when set, is called from handlePoolFailover on every
+	// response classified as pool-exhausting (no healthy member). It performs
+	// the healthy->exhausted EDGE bookkeeping on the long-lived Server and
+	// returns true ONLY on the false->true edge — that edge, not the addon's
+	// 30s notice window, is authoritative for the "pool exhausted" notice (A2).
+	// When this hook is nil (addon constructed without a Server, e.g. unit
+	// tests that exercise the failover path in isolation) the addon falls back
+	// to its own 30s-window dedup so those tests keep their existing behavior.
+	onPoolExhausted func(pool string) bool
+
 	// persistDone is an optional channel signaled when an async OAuth
 	// token persist goroutine completes. Used by tests to avoid
 	// time.Sleep-based synchronization. Nil in production.
@@ -387,6 +397,15 @@ func (a *SluiceAddon) SetOnOAuthRefresh(fn func(credName string)) {
 // unset (in-memory-only failover).
 func (a *SluiceAddon) SetOnFailover(fn func(FailoverEvent)) {
 	a.onFailover = fn
+}
+
+// SetOnPoolExhausted configures the healthy->exhausted edge hook. The Server
+// sets this (mirroring SetOnFailover) so handlePoolFailover can flip the
+// per-pool exhaustion state and wake the recovery monitor. The hook returns
+// true only on the edge, gating the one-time "exhausted" notice. Safe to leave
+// unset: the addon then uses its own 30s-window dedup (legacy behavior).
+func (a *SluiceAddon) SetOnPoolExhausted(fn func(pool string) bool) {
+	a.onPoolExhausted = fn
 }
 
 // UpdateOAuthIndex rebuilds the OAuth token URL index from credential
