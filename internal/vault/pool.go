@@ -33,6 +33,15 @@ const (
 	MinRateLimitFloor = 10 * time.Second
 )
 
+// MaxUsageLimitCooldown caps a cooldown window derived from the 429 RESPONSE
+// BODY (OpenAI Codex usage_limit_reached, which carries resets_in_seconds /
+// resets_at instead of a Retry-After / x-ratelimit-reset header). The body
+// reset is authoritative and can be many hours or days out, so it is bounded
+// far higher than MaxCooldown (which caps transient header windows): a member
+// is never parked indefinitely, but a real multi-hour usage reset is honored
+// rather than re-probed every RateLimitCooldown.
+const MaxUsageLimitCooldown = 24 * time.Hour
+
 // ManualRotateReason is the cooldown reason stamped by `sluice pool rotate`
 // when it parks the previously-active member. A member parked for this
 // reason is operationally deprioritized BY AN OPERATOR, not unhealthy: it
