@@ -184,6 +184,47 @@ func TestCreateWithInvalidAuthResetTarget(t *testing.T) {
 	}
 }
 
+// TestAuthResetTargetDashSentinelRejected pins the cross-channel gap fix: a
+// literal "-" is the CLI/Telegram clear sentinel (converted to "" before
+// reaching poolops), so it must never be a valid STORED target on any channel.
+// REST forwards the value verbatim, so without this guard it could persist
+// auth_reset_target="-" while CLI/Telegram cannot. Both the create path and
+// the set path must reject a literal "-".
+func TestAuthResetTargetDashSentinelRejected(t *testing.T) {
+	t.Run("set", func(t *testing.T) {
+		db := newTestStore(t, "acct_a")
+		if err := poolops.Create(db, "p", "", []string{"acct_a"}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := poolops.SetAuthResetTarget(db, "p", "-"); !errors.Is(err, poolops.ErrInvalidAuthResetTarget) {
+			t.Fatalf("SetAuthResetTarget(\"-\") err = %v, want ErrInvalidAuthResetTarget", err)
+		}
+		p, err := db.GetPool("p")
+		if err != nil {
+			t.Fatalf("GetPool: %v", err)
+		}
+		if p.AuthResetTarget != "" {
+			t.Fatalf("sentinel persisted despite rejection: %q", p.AuthResetTarget)
+		}
+	})
+
+	t.Run("create", func(t *testing.T) {
+		db := newTestStore(t, "acct_a")
+		err := poolops.CreateWithAuthResetTarget(db, "p", "", []string{"acct_a"}, "-")
+		if !errors.Is(err, poolops.ErrInvalidAuthResetTarget) {
+			t.Fatalf("create-with-target \"-\" err = %v, want ErrInvalidAuthResetTarget", err)
+		}
+		// The pool must not have been created when the target is invalid.
+		p, err := db.GetPool("p")
+		if err != nil {
+			t.Fatalf("GetPool: %v", err)
+		}
+		if p != nil {
+			t.Fatalf("pool created despite sentinel target: %+v", p)
+		}
+	})
+}
+
 func TestSetAuthResetTargetSetAndClear(t *testing.T) {
 	db := newTestStore(t, "acct_a", "acct_b")
 	if err := poolops.Create(db, "codex", "", []string{"acct_a", "acct_b"}); err != nil {

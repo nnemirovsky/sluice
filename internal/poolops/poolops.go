@@ -129,6 +129,15 @@ func validateAuthResetTarget(target string) error {
 	if target == "" {
 		return nil
 	}
+	// "-" is the CLI/Telegram clear sentinel (converted to "" before reaching
+	// here), so a literal "-" is never a valid stored target on any channel.
+	// container.ValidateResetAuthTarget permits "-" ([A-Za-z0-9_.:-]+), so
+	// without this guard REST — which forwards the value verbatim instead of
+	// translating the sentinel — could store auth_reset_target="-" while
+	// CLI/Telegram cannot. Reject it here so the gap is closed cross-channel.
+	if target == "-" {
+		return fmt.Errorf("%w: %q is reserved as the clear sentinel", ErrInvalidAuthResetTarget, "-")
+	}
 	if err := container.ValidateResetAuthTarget(target); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidAuthResetTarget, err)
 	}

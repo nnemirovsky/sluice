@@ -3115,11 +3115,15 @@ func TestPostApiPoolsNameAuthResetTarget(t *testing.T) {
 
 	// Invalid targets -> 400 and no store mutation. Newline was caught by the
 	// old looser rule; a space and a slash were NOT (F1) and are the cases that
-	// would otherwise store with 200 and fail silently at recovery.
+	// would otherwise store with 200 and fail silently at recovery. A literal
+	// "-" is the CLI/Telegram clear sentinel: CLI/Telegram translate it to ""
+	// before poolops, but REST forwards it verbatim, so it must be a 400 here
+	// (cross-channel parity) rather than a nonsensical stored target.
 	for name, target := range map[string]string{
-		"newline": `bad\ntarget`,
-		"space":   `openai codex`,
-		"slash":   `openai/codex`,
+		"newline":  `bad\ntarget`,
+		"space":    `openai codex`,
+		"slash":    `openai/codex`,
+		"sentinel": `-`,
 	} {
 		rec = post(`{"auth_reset_target": "` + target + `"}`)
 		if rec.Code != http.StatusBadRequest {

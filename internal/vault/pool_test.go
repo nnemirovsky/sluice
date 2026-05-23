@@ -1029,13 +1029,18 @@ func TestHasHealthyMemberNil(t *testing.T) {
 // STRICTLY-FUTURE member cooldown, skipping already-passed entries (lazy
 // expiry), and reports ok=false when no member is currently cooling.
 func TestSoonestCooldown(t *testing.T) {
-	now := time.Now()
 	tests := []struct {
-		name     string
-		setup    func(pr *PoolResolver, base time.Time)
-		pool     string
-		wantOK   bool
-		wantBase time.Time // expected soonest when wantOK (exact, set in setup)
+		name   string
+		setup  func(pr *PoolResolver, base time.Time)
+		pool   string
+		wantOK bool
+		// wantOffset is the intended soonest cooldown expressed as an offset
+		// from the per-subtest `base` (the same `base` passed into setup), so
+		// the expected value derives from the SAME clock sample the cooldowns
+		// were set against. Comparing against the outer `now` instead let slow
+		// CI / -race / GC widen the now-vs-base gap past the tolerance and
+		// flake; deriving both sides from `base` makes it exact.
+		wantOffset time.Duration
 	}{
 		{
 			name:   "no member cooling",
@@ -1048,9 +1053,9 @@ func TestSoonestCooldown(t *testing.T) {
 			setup: func(pr *PoolResolver, base time.Time) {
 				pr.MarkCooldown("a", base.Add(60*time.Second), "429")
 			},
-			pool:     "pool",
-			wantOK:   true,
-			wantBase: now.Add(60 * time.Second),
+			pool:       "pool",
+			wantOK:     true,
+			wantOffset: 60 * time.Second,
 		},
 		{
 			name: "two cooling -> min wins",
@@ -1058,9 +1063,9 @@ func TestSoonestCooldown(t *testing.T) {
 				pr.MarkCooldown("a", base.Add(10*time.Minute), "401")
 				pr.MarkCooldown("b", base.Add(60*time.Second), "429")
 			},
-			pool:     "pool",
-			wantOK:   true,
-			wantBase: now.Add(60 * time.Second),
+			pool:       "pool",
+			wantOK:     true,
+			wantOffset: 60 * time.Second,
 		},
 		{
 			name: "already-passed entry skipped",
@@ -1070,9 +1075,9 @@ func TestSoonestCooldown(t *testing.T) {
 				pr.MarkCooldown("a", base.Add(-1*time.Second), "429")
 				pr.MarkCooldown("b", base.Add(120*time.Second), "401")
 			},
-			pool:     "pool",
-			wantOK:   true,
-			wantBase: now.Add(120 * time.Second),
+			pool:       "pool",
+			wantOK:     true,
+			wantOffset: 120 * time.Second,
 		},
 		{
 			name: "all passed -> not cooling",
@@ -1093,9 +1098,6 @@ func TestSoonestCooldown(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			pr := NewPoolResolver([]store.Pool{mkPool("pool", "a", "b")}, nil)
-			// Use a base far enough in the future that the "already-passed"
-			// negative offsets are still safely in the past relative to the
-			// SoonestCooldown's own time.Now() sample.
 			base := time.Now()
 			tc.setup(pr, base)
 			got, ok := pr.SoonestCooldown(tc.pool)
@@ -1105,12 +1107,13 @@ func TestSoonestCooldown(t *testing.T) {
 			if !tc.wantOK {
 				return
 			}
-			// The stored cooldown is exact (MarkCooldown stores `until`
-			// verbatim); SoonestCooldown returns it unchanged, so compare
-			// against the value set in setup within a small tolerance for the
-			// base/now skew.
-			if d := got.Sub(tc.wantBase); d < -2*time.Second || d > 2*time.Second {
-				t.Fatalf("SoonestCooldown(%q) = %v, want ~%v (delta %v)", tc.pool, got, tc.wantBase, d)
+			// MarkCooldown stores `until` verbatim and SoonestCooldown returns
+			// it unchanged, so the expected value is exactly base+offset (both
+			// derived from the same `base`). Assert exact equality — there is
+			// no clock skew between the stored value and the expectation.
+			want := base.Add(tc.wantOffset)
+			if !got.Equal(want) {
+				t.Fatalf("SoonestCooldown(%q) = %v, want %v (delta %v)", tc.pool, got, want, got.Sub(want))
 			}
 		})
 	}
