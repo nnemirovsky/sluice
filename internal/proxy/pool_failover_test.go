@@ -1319,8 +1319,9 @@ func TestCooldownFromResponse(t *testing.T) {
 			name:  "x-ratelimit-reset-tokens unit-suffixed duration honored",
 			class: failoverRateLimited,
 			setup: func(h http.Header) { h.Set("x-ratelimit-reset-tokens", "1500ms") },
-			want:  1500 * time.Millisecond,
-			// 1.5s is below MinRateLimitFloor so it clamps up; assert clamp below.
+			// 1500ms is below MinRateLimitFloor, so the parsed hint clamps up to
+			// the floor; want is the post-clamp value the generic check asserts.
+			want: vault.MinRateLimitFloor,
 		},
 		{
 			name:  "absurd value capped at MaxCooldown",
@@ -1411,13 +1412,6 @@ func TestCooldownFromResponse(t *testing.T) {
 				}
 				if diff > tol {
 					t.Fatalf("cooldownFromResponse = %v, want ~%v (tol %v)", got, tt.want, tol)
-				}
-				return
-			}
-			// The unit-suffixed 1.5s case clamps up to MinRateLimitFloor.
-			if tt.name == "x-ratelimit-reset-tokens unit-suffixed duration honored" {
-				if got != vault.MinRateLimitFloor {
-					t.Fatalf("cooldownFromResponse = %v, want clamp to %v", got, vault.MinRateLimitFloor)
 				}
 				return
 			}

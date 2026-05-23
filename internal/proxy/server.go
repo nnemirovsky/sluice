@@ -3102,7 +3102,7 @@ func (s *Server) recoverPool(pool string) {
 	noticeCb := s.onPoolRecoveredNotice
 	s.poolExhaustMu.Unlock()
 
-	log.Printf("[POOL-FAILOVER] %s", FormatPoolRecoveredNotice(pool))
+	log.Printf("[POOL-RECOVERY] %s", FormatPoolRecoveredNotice(pool))
 	// Notice always fires on the recovery edge (independent of auth-reset).
 	if noticeCb != nil {
 		noticeCb(pool)
