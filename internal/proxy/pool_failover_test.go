@@ -1378,9 +1378,63 @@ func TestCooldownFromResponse(t *testing.T) {
 			class: failoverRateLimited,
 			setup: func(h http.Header) {
 				h.Set("Retry-After", "120")
-				h.Set("x-ratelimit-reset", "30")
+				h.Set("x-ratelimit-reset-requests", "30")
 			},
 			want: 120 * time.Second,
+		},
+		{
+			name:  "RateLimit-Reset delta seconds honored (IETF draft)",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("RateLimit-Reset", "120") },
+			want:  120 * time.Second,
+		},
+		{
+			name:  "X-RateLimit-Reset future epoch honored (GitHub/Twitter)",
+			class: failoverRateLimited,
+			setup: func(h http.Header) {
+				h.Set("X-RateLimit-Reset", strconv.FormatInt(now.Add(300*time.Second).Unix(), 10))
+			},
+			want:   300 * time.Second,
+			approx: true,
+		},
+		{
+			name:  "X-RateLimit-Reset small delta honored (non-epoch magnitude)",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("X-RateLimit-Reset", "90") },
+			want:  90 * time.Second,
+		},
+		{
+			name:  "X-RateLimit-Reset-After float floored at MinRateLimitFloor (Discord)",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("X-RateLimit-Reset-After", "1.5") },
+			want:  vault.MinRateLimitFloor,
+		},
+		{
+			name:  "anthropic-ratelimit-tokens-reset RFC3339 future honored",
+			class: failoverRateLimited,
+			setup: func(h http.Header) {
+				h.Set("anthropic-ratelimit-tokens-reset", now.Add(200*time.Second).UTC().Format(time.RFC3339))
+			},
+			want:   200 * time.Second,
+			approx: true,
+		},
+		{
+			name:  "anthropic-ratelimit-requests-reset RFC3339 in the past ignored",
+			class: failoverRateLimited,
+			setup: func(h http.Header) {
+				h.Set("anthropic-ratelimit-requests-reset", now.Add(-200*time.Second).UTC().Format(time.RFC3339))
+			},
+			want: vault.RateLimitCooldown,
+		},
+		{
+			name:  "Retry-After precedence over RateLimit-Reset (IETF: Retry-After wins)",
+			class: failoverRateLimited,
+			setup: func(h http.Header) {
+				h.Set("Retry-After", "30")
+				h.Set("RateLimit-Reset", "300")
+			},
+			// Retry-After (30s) wins; 30 is above MinRateLimitFloor so honored verbatim.
+			want: 30 * time.Second,
 		},
 		{
 			name:  "unparseable header ignored falls back to default",
@@ -1429,7 +1483,7 @@ func TestCooldownFromResponse(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			class, h := resp(tt.class, tt.setup)
-			got := cooldownFromResponse(class, h)
+			got := cooldownFromResponse(class, h, nil)
 			if tt.approx {
 				const tol = 2 * time.Second
 				diff := got - tt.want
@@ -1451,10 +1505,10 @@ func TestCooldownFromResponse(t *testing.T) {
 // TestCooldownFromResponseNilSafe verifies the nil-header guard returns the
 // class default rather than panicking.
 func TestCooldownFromResponseNilSafe(t *testing.T) {
-	if got := cooldownFromResponse(failoverRateLimited, nil); got != vault.RateLimitCooldown {
+	if got := cooldownFromResponse(failoverRateLimited, nil, nil); got != vault.RateLimitCooldown {
 		t.Fatalf("nil header: got %v, want %v", got, vault.RateLimitCooldown)
 	}
-	if got := cooldownFromResponse(failoverAuthFailure, nil); got != vault.AuthFailCooldown {
+	if got := cooldownFromResponse(failoverAuthFailure, nil, nil); got != vault.AuthFailCooldown {
 		t.Fatalf("nil header (auth): got %v, want %v", got, vault.AuthFailCooldown)
 	}
 }
@@ -1505,12 +1559,255 @@ func TestParseRecoveryHintHTTPDateGatedToRetryAfter(t *testing.T) {
 	// is honored.
 	resetHdr := make(http.Header)
 	resetHdr.Set("x-ratelimit-reset-requests", httpDate)
-	if got := cooldownFromResponse(failoverRateLimited, resetHdr); got != vault.RateLimitCooldown {
+	if got := cooldownFromResponse(failoverRateLimited, resetHdr, nil); got != vault.RateLimitCooldown {
 		t.Fatalf("reset-family HTTP-date: got %v, want fallback %v", got, vault.RateLimitCooldown)
 	}
 	retryHdr := make(http.Header)
 	retryHdr.Set("Retry-After", httpDate)
-	if got := cooldownFromResponse(failoverRateLimited, retryHdr); got <= 0 || got > vault.MaxCooldown {
+	if got := cooldownFromResponse(failoverRateLimited, retryHdr, nil); got <= 0 || got > vault.MaxCooldown {
 		t.Fatalf("Retry-After HTTP-date: got %v, want a clamped positive duration", got)
+	}
+}
+
+// TestCooldownFromResponseBody covers the B1 body-fallback path: when the
+// upstream sends NO Retry-After / x-ratelimit-reset header (the OpenAI Codex
+// usage_limit_reached case), the cooldown is derived from the JSON body's
+// resets_in_seconds / resets_at, clamped to MaxUsageLimitCooldown. A usable
+// header still wins over the body (precedence), and an unrelated/ill-formed
+// body falls back to the class default.
+func TestCooldownFromResponseBody(t *testing.T) {
+	now := time.Now()
+
+	tests := []struct {
+		name   string
+		class  failoverClass
+		header func(h http.Header)
+		body   []byte
+		want   time.Duration
+		approx bool
+	}{
+		{
+			name:  "usage_limit_reached resets_in_seconds, no header",
+			class: failoverRateLimited,
+			body:  []byte(`{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"team","resets_in_seconds":1357}`),
+			want:  1357 * time.Second,
+		},
+		{
+			name:   "resets_at unix epoch, no resets_in_seconds, no header",
+			class:  failoverRateLimited,
+			body:   []byte(`{"type":"usage_limit_reached","resets_at":` + strconv.FormatInt(now.Add(600*time.Second).Unix(), 10) + `}`),
+			want:   600 * time.Second,
+			approx: true,
+		},
+		{
+			name:  "huge resets_in_seconds clamped to MaxUsageLimitCooldown",
+			class: failoverRateLimited,
+			body:  []byte(`{"type":"usage_limit_reached","resets_in_seconds":327808}`),
+			want:  vault.MaxUsageLimitCooldown,
+		},
+		{
+			name:   "header wins over body when both present",
+			class:  failoverRateLimited,
+			header: func(h http.Header) { h.Set("Retry-After", "120") },
+			body:   []byte(`{"type":"usage_limit_reached","resets_in_seconds":1357}`),
+			want:   120 * time.Second,
+		},
+		{
+			name:  "non-JSON body falls back to class default",
+			class: failoverRateLimited,
+			body:  []byte(`not json at all`),
+			want:  vault.RateLimitCooldown,
+		},
+		{
+			name:  "body without reset fields falls back to class default",
+			class: failoverRateLimited,
+			body:  []byte(`{"type":"usage_limit_reached","message":"nope"}`),
+			want:  vault.RateLimitCooldown,
+		},
+		{
+			name:  "negative resets_in_seconds ignored, class default",
+			class: failoverRateLimited,
+			body:  []byte(`{"resets_in_seconds":-5}`),
+			want:  vault.RateLimitCooldown,
+		},
+		{
+			name:  "zero resets_in_seconds ignored, class default",
+			class: failoverRateLimited,
+			body:  []byte(`{"resets_in_seconds":0}`),
+			want:  vault.RateLimitCooldown,
+		},
+		{
+			name:  "past resets_at ignored, class default",
+			class: failoverRateLimited,
+			body:  []byte(`{"resets_at":` + strconv.FormatInt(now.Add(-600*time.Second).Unix(), 10) + `}`),
+			want:  vault.RateLimitCooldown,
+		},
+		{
+			name:  "auth-failure body window floored at AuthFailCooldown",
+			class: failoverAuthFailure,
+			body:  []byte(`{"resets_in_seconds":5}`),
+			want:  vault.AuthFailCooldown,
+		},
+		{
+			name:  "top-level retry_after delta (Discord/generic)",
+			class: failoverRateLimited,
+			body:  []byte(`{"retry_after":1357}`),
+			want:  1357 * time.Second,
+		},
+		{
+			name:  "top-level reset_after delta",
+			class: failoverRateLimited,
+			body:  []byte(`{"reset_after":600}`),
+			want:  600 * time.Second,
+		},
+		{
+			name:  "nested error.retry_after delta",
+			class: failoverRateLimited,
+			body:  []byte(`{"error":{"retry_after":45}}`),
+			want:  45 * time.Second,
+		},
+		{
+			name:  "nested error.resets_in_seconds delta",
+			class: failoverRateLimited,
+			body:  []byte(`{"error":{"resets_in_seconds":1357}}`),
+			want:  1357 * time.Second,
+		},
+		{
+			name:  "Discord-style float retry_after floored at MinRateLimitFloor",
+			class: failoverRateLimited,
+			body:  []byte(`{"retry_after":0.529}`),
+			want:  vault.MinRateLimitFloor,
+		},
+		{
+			name:  "oversized body falls back to class default",
+			class: failoverRateLimited,
+			body:  oversizedJSONBody(),
+			want:  vault.RateLimitCooldown,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var h http.Header
+			if tt.header != nil {
+				h = make(http.Header)
+				tt.header(h)
+			}
+			got := cooldownFromResponse(tt.class, h, tt.body)
+			if tt.approx {
+				const tol = 2 * time.Second
+				diff := got - tt.want
+				if diff < 0 {
+					diff = -diff
+				}
+				if diff > tol {
+					t.Fatalf("cooldownFromResponse = %v, want ~%v (tol %v)", got, tt.want, tol)
+				}
+				return
+			}
+			if got != tt.want {
+				t.Fatalf("cooldownFromResponse = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// oversizedJSONBody returns a syntactically valid JSON body that carries a
+// usable retry_after but exceeds maxBodyRecoveryHintBytes, so the size guard
+// must skip it (failover error bodies are tiny). The padding lives in an
+// unused string field so the body stays valid JSON.
+func oversizedJSONBody() []byte {
+	pad := strings.Repeat("a", maxBodyRecoveryHintBytes+1)
+	return []byte(`{"retry_after":1357,"pad":"` + pad + `"}`)
+}
+
+// TestParseBodyRecoveryHint exercises the body parser's guards directly:
+// resets_in_seconds is preferred over resets_at, non-finite/negative/zero/past
+// values are rejected, and a field-less or non-JSON body reports ok=false.
+func TestParseBodyRecoveryHint(t *testing.T) {
+	now := time.Now()
+
+	tests := []struct {
+		name   string
+		body   string
+		wantOK bool
+		want   time.Duration
+		approx bool
+	}{
+		{name: "resets_in_seconds delta", body: `{"resets_in_seconds":1357}`, wantOK: true, want: 1357 * time.Second},
+		{
+			name:   "resets_at epoch",
+			body:   `{"resets_at":` + strconv.FormatInt(now.Add(300*time.Second).Unix(), 10) + `}`,
+			wantOK: true, want: 300 * time.Second, approx: true,
+		},
+		{
+			name:   "resets_in_seconds preferred over resets_at",
+			body:   `{"resets_in_seconds":100,"resets_at":` + strconv.FormatInt(now.Add(9000*time.Second).Unix(), 10) + `}`,
+			wantOK: true, want: 100 * time.Second,
+		},
+		{name: "negative resets_in_seconds rejected", body: `{"resets_in_seconds":-5}`, wantOK: false},
+		{name: "zero resets_in_seconds rejected", body: `{"resets_in_seconds":0}`, wantOK: false},
+		// A past unix-epoch resets_at (>= epochThreshold so it disambiguates as
+		// an epoch, not a 1s delta) is rejected.
+		{name: "past resets_at rejected", body: `{"resets_at":` + strconv.FormatInt(now.Add(-600*time.Second).Unix(), 10) + `}`, wantOK: false},
+		{name: "no reset fields", body: `{"type":"usage_limit_reached"}`, wantOK: false},
+		{name: "non-JSON", body: `garbage`, wantOK: false},
+		{name: "empty", body: ``, wantOK: false},
+		{name: "retry_after delta", body: `{"retry_after":1357}`, wantOK: true, want: 1357 * time.Second},
+		{name: "reset_after delta", body: `{"reset_after":600}`, wantOK: true, want: 600 * time.Second},
+		{name: "nested error.retry_after delta", body: `{"error":{"retry_after":45}}`, wantOK: true, want: 45 * time.Second},
+		{name: "nested error.resets_in_seconds delta", body: `{"error":{"resets_in_seconds":1357}}`, wantOK: true, want: 1357 * time.Second},
+		{
+			// Top-level wins over nested when both present (order: top-level first).
+			name:   "top-level retry_after preferred over nested error.retry_after",
+			body:   `{"retry_after":100,"error":{"retry_after":9000}}`,
+			wantOK: true, want: 100 * time.Second,
+		},
+		{
+			// retry_after at an epoch magnitude is treated as a unix epoch.
+			name:   "retry_after at epoch magnitude treated as epoch",
+			body:   `{"retry_after":` + strconv.FormatInt(now.Add(300*time.Second).Unix(), 10) + `}`,
+			wantOK: true, want: 300 * time.Second, approx: true,
+		},
+		{name: "oversized body rejected", body: string(oversizedJSONBody()), wantOK: false},
+		{name: "overflow-magnitude resets_in_seconds rejected", body: `{"resets_in_seconds":1e308}`, wantOK: false},
+		{
+			// 327808s > MaxUsageLimitCooldown (24h): the parser caps in float
+			// space at MaxUsageLimitCooldown before the nanosecond multiply (so
+			// the int64 conversion can't overflow); the caller's clamp then
+			// keeps that same value.
+			name:   "huge resets_in_seconds capped at MaxUsageLimitCooldown",
+			body:   `{"resets_in_seconds":327808}`,
+			wantOK: true, want: vault.MaxUsageLimitCooldown,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, ok := parseBodyRecoveryHint([]byte(tt.body), now)
+			if ok != tt.wantOK {
+				t.Fatalf("parseBodyRecoveryHint ok = %v, want %v (d=%v)", ok, tt.wantOK, d)
+			}
+			if !tt.wantOK {
+				if d != 0 {
+					t.Fatalf("parseBodyRecoveryHint rejected case returned d=%v, want 0", d)
+				}
+				return
+			}
+			if tt.approx {
+				const tol = 2 * time.Second
+				diff := d - tt.want
+				if diff < 0 {
+					diff = -diff
+				}
+				if diff > tol {
+					t.Fatalf("parseBodyRecoveryHint = %v, want ~%v (tol %v)", d, tt.want, tol)
+				}
+				return
+			}
+			if d != tt.want {
+				t.Fatalf("parseBodyRecoveryHint = %v, want %v", d, tt.want)
+			}
+		})
 	}
 }

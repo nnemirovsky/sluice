@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -155,56 +156,181 @@ func classDefaultCooldown(class failoverClass) time.Duration {
 }
 
 // recoveryHintHeaders are the response headers, in precedence order, from
-// which cooldownFromResponse derives the real recovery window. Retry-After is
-// the standard signal; the x-ratelimit-reset* family is provider-specific
-// (OpenAI emits per-resource reset hints). Each value is parsed as either a
-// delta-seconds count, an HTTP-date (Retry-After only), or — for the reset
-// family — a unix epoch.
+// which cooldownFromResponse derives the real recovery window. The list spans
+// the conventions across AI providers and general rate limiters:
+//
+//   - Retry-After (RFC 9110: delta-seconds or HTTP-date) MUST be first per
+//     IETF draft-ietf-httpapi-ratelimit-headers.
+//   - RateLimit-Reset (IETF draft, delta-seconds, no x- prefix).
+//   - X-RateLimit-Reset (generic: GitHub/Twitter emit a unix EPOCH; others a
+//     delta — disambiguated by magnitude).
+//   - X-RateLimit-Reset-After (Discord: delta-seconds, may be a float).
+//   - x-ratelimit-reset-requests / x-ratelimit-reset-tokens (OpenAI:
+//     unit-suffixed durations like "6m0s" / "1.5s").
+//   - anthropic-ratelimit-requests-reset / anthropic-ratelimit-tokens-reset
+//     (Anthropic: an ISO-8601 / RFC3339 absolute timestamp).
+//
+// Each value is parsed by parseRecoveryHint as a delta-seconds count, a unix
+// epoch (magnitude-disambiguated), an HTTP-date (Retry-After only), an
+// RFC3339/ISO-8601 timestamp, or a unit-suffixed duration. http.Header.Get is
+// case-insensitive so the canonical casing here matches any wire casing.
 var recoveryHintHeaders = []string{
 	"Retry-After",
-	"x-ratelimit-reset",
+	"RateLimit-Reset",
+	"X-RateLimit-Reset",
+	"X-RateLimit-Reset-After",
 	"x-ratelimit-reset-requests",
 	"x-ratelimit-reset-tokens",
+	"anthropic-ratelimit-requests-reset",
+	"anthropic-ratelimit-tokens-reset",
 }
 
 // cooldownFromResponse derives the cooldown duration for a failed pool member
-// from the upstream's recovery hint headers, clamped to the class bounds.
+// from the upstream's recovery hints, clamped to the class bounds.
 //
-// Precedence: Retry-After (delta-seconds or HTTP-date), then the
-// x-ratelimit-reset* family (delta-seconds or unix epoch). The first header
-// that yields a positive duration wins. With NO usable hint the flat class
-// default is returned (RateLimitCooldown / AuthFailCooldown), so behavior is
-// unchanged from before B1 on responses that carry no hint.
+// Precedence:
 //
-// The parsed window is clamped to [minFloorForClass(class), MaxCooldown]: a
-// rate-limit hint may shrink the cooldown down to MinRateLimitFloor (honoring
-// a short real window), an auth failure stays floored at AuthFailCooldown, and
-// any absurd/hostile value is capped at MaxCooldown so a member is never
-// parked indefinitely.
+//  1. Headers, in recoveryHintHeaders precedence order (Retry-After first per
+//     the IETF draft, then RateLimit-Reset / X-RateLimit-Reset[-After] / the
+//     OpenAI x-ratelimit-reset-* family / the Anthropic anthropic-ratelimit-*-
+//     reset family). Each value is parsed as delta-seconds, a unix epoch
+//     (magnitude-disambiguated), an HTTP-date (Retry-After only), an
+//     RFC3339/ISO-8601 timestamp, or a unit-suffixed duration. The first header
+//     that yields a positive duration wins and is clamped to
+//     [minFloorForClass(class), MaxCooldown] (a rate-limit hint may shrink the
+//     cooldown down to MinRateLimitFloor; an auth failure stays floored at
+//     AuthFailCooldown; an absurd/hostile value is capped at MaxCooldown).
+//  2. If NO header hint is present, the response BODY is consulted for a reset
+//     window. The candidate fields (top-level first, then nested under a
+//     top-level error object) are resets_in_seconds, resets_at, retry_after,
+//     and reset_after — covering OpenAI Codex usage_limit_reached
+//     (resets_in_seconds / resets_at) and the Discord/generic retry_after /
+//     reset_after conventions. A body-derived window is clamped to
+//     [minFloorForClass(class), MaxUsageLimitCooldown] — the higher cap,
+//     because the body reset is authoritative and can be many hours/days out
+//     (a usage limit, not a transient rate-limit window).
+//  3. With neither, the flat class default is returned (RateLimitCooldown /
+//     AuthFailCooldown), so behavior is unchanged from before B1 on responses
+//     that carry no usable hint.
 //
-// No body parsing in v1 (deferred until a real Codex 429 is captured — see the
-// plan's Post-Completion note); only headers are consulted.
-//
-// Takes the response header directly (not *http.Response) so it works
-// uniformly against the go-mitmproxy Flow's Response.Header at the call site
-// and a plain http.Header in tests.
-func cooldownFromResponse(class failoverClass, header http.Header) time.Duration {
-	if header == nil {
-		return classDefaultCooldown(class)
-	}
+// Takes the response header AND body directly (not *http.Response) so it works
+// uniformly against the go-mitmproxy Flow's Response.{Header,Body} at the call
+// site and plain values in tests. A nil header / nil body is safe.
+func cooldownFromResponse(class failoverClass, header http.Header, body []byte) time.Duration {
 	now := time.Now()
-	for _, h := range recoveryHintHeaders {
-		raw := strings.TrimSpace(header.Get(h))
-		if raw == "" {
-			continue
+	if header != nil {
+		for _, h := range recoveryHintHeaders {
+			raw := strings.TrimSpace(header.Get(h))
+			if raw == "" {
+				continue
+			}
+			d, ok := parseRecoveryHint(h, raw, now)
+			if !ok || d <= 0 {
+				continue
+			}
+			return clampCooldownTo(class, d, vault.MaxCooldown)
 		}
-		d, ok := parseRecoveryHint(h, raw, now)
-		if !ok || d <= 0 {
-			continue
-		}
-		return clampCooldown(class, d)
+	}
+	// No usable header hint: fall back to the response body. OpenAI Codex
+	// usage-limit 429s carry NO Retry-After / x-ratelimit-reset header — the
+	// real reset window is in the JSON body (resets_in_seconds / resets_at).
+	if d, ok := parseBodyRecoveryHint(body, now); ok {
+		return clampCooldownTo(class, d, vault.MaxUsageLimitCooldown)
 	}
 	return classDefaultCooldown(class)
+}
+
+// bodyRecoveryHint mirrors the small subset of a 429 error body that carries a
+// reset window across providers. Every field is a number in the wire format:
+// resets_in_seconds / retry_after / reset_after are deltas from now while
+// resets_at is a unix epoch — but a value large enough to be a plausible epoch
+// is treated as one regardless of field name (the same magnitude
+// disambiguation as the header path), so a provider that puts an epoch in
+// retry_after is handled too. type is intentionally NOT required (many
+// responses omit it); the presence of a positive reset field is the gate.
+//
+// The same field set is probed at the top level AND nested under a top-level
+// error object (many providers wrap errors as {"error":{...}}), so the
+// embedded errorBody mirrors the four fields.
+type bodyRecoveryHint struct {
+	ResetsInSeconds *float64 `json:"resets_in_seconds"`
+	ResetsAt        *float64 `json:"resets_at"`
+	RetryAfter      *float64 `json:"retry_after"`
+	ResetAfter      *float64 `json:"reset_after"`
+	Error           *struct {
+		ResetsInSeconds *float64 `json:"resets_in_seconds"`
+		ResetsAt        *float64 `json:"resets_at"`
+		RetryAfter      *float64 `json:"retry_after"`
+		ResetAfter      *float64 `json:"reset_after"`
+	} `json:"error"`
+}
+
+// maxBodyRecoveryHintBytes bounds the body parseBodyRecoveryHint will attempt
+// to JSON-decode. Failover error bodies are tiny JSON; anything larger is not
+// a quota/auth error envelope and is skipped (the caller falls back to the
+// class default).
+const maxBodyRecoveryHintBytes = 64 << 10 // 64 KiB
+
+// parseBodyRecoveryHint parses a 429 response body for a reset window. It
+// probes resets_in_seconds, resets_at, retry_after, and reset_after — at the
+// top level FIRST, then nested under a top-level error object — and returns
+// the first that yields a positive duration. Each candidate is interpreted
+// like the header bare-numeric path: a value at/above epochThreshold is a unix
+// epoch (minus now), otherwise a delta-from-now. It is deliberately tolerant:
+// an empty, oversized, non-JSON, unrelated, or field-less body returns
+// (0, false) so the caller falls back to the class default. Non-finite
+// (NaN/±Inf), negative, zero, out-of-range, and zero-or-past values are
+// rejected with the same guards as parseRecoveryHint, so a hostile or stale
+// body can never produce a wrong/negative duration before clamping.
+func parseBodyRecoveryHint(body []byte, now time.Time) (time.Duration, bool) {
+	if len(body) == 0 || len(body) > maxBodyRecoveryHintBytes {
+		return 0, false
+	}
+	var h bodyRecoveryHint
+	if err := json.Unmarshal(body, &h); err != nil {
+		return 0, false
+	}
+	// Top-level candidates first, in the documented field order, then the same
+	// fields nested under a top-level error object. The first that yields a
+	// positive duration wins.
+	candidates := []*float64{h.ResetsInSeconds, h.ResetsAt, h.RetryAfter, h.ResetAfter}
+	if h.Error != nil {
+		candidates = append(candidates,
+			h.Error.ResetsInSeconds, h.Error.ResetsAt, h.Error.RetryAfter, h.Error.ResetAfter)
+	}
+	for _, c := range candidates {
+		if c == nil {
+			continue
+		}
+		if d, ok := bodyHintFromSeconds(*c, now); ok {
+			return d, true
+		}
+	}
+	return 0, false
+}
+
+// bodyHintFromSeconds converts a single body reset value to a positive
+// duration, mirroring the header bare-numeric path: reject non-finite,
+// negative, zero, and out-of-range magnitudes; treat a value at/above
+// epochThreshold as a unix epoch (minus now), otherwise as a delta-from-now;
+// cap a delta in float space before the nanosecond multiply so the
+// int64(time.Duration) conversion can never overflow (the caller's clamp
+// applies the real MaxUsageLimitCooldown ceiling).
+func bodyHintFromSeconds(secs float64, now time.Time) (time.Duration, bool) {
+	if secs <= 0 || math.IsNaN(secs) || math.IsInf(secs, 0) || secs > maxRecoveryHintSeconds {
+		return 0, false
+	}
+	if secs >= epochThreshold {
+		if d := time.Unix(int64(secs), 0).Sub(now); d > 0 {
+			return d, true
+		}
+		return 0, false
+	}
+	deltaSec := secs
+	if maxSec := vault.MaxUsageLimitCooldown.Seconds(); deltaSec > maxSec {
+		deltaSec = maxSec
+	}
+	return time.Duration(deltaSec * float64(time.Second)), true
 }
 
 // parseRecoveryHint parses a single recovery-hint header value into a positive
@@ -236,6 +362,12 @@ func cooldownFromResponse(class failoverClass, header http.Header) time.Duration
 // yet small enough that int64(secs) cannot overflow on the epoch branch.
 const maxRecoveryHintSeconds = 1e12
 
+// epochThreshold disambiguates a bare-numeric reset value: at/above this it is
+// treated as a unix epoch (~2001-09 and later), below it as a delta-seconds
+// count. Shared by the header (parseRecoveryHint) and body (bodyHintFromSeconds)
+// paths so both interpret a magnitude identically.
+const epochThreshold = 1_000_000_000
+
 func parseRecoveryHint(header, raw string, now time.Time) (time.Duration, bool) {
 	// Bare numeric: delta-seconds for Retry-After; for the reset family it may
 	// be either delta-seconds OR a unix epoch. Disambiguate by magnitude — a
@@ -251,7 +383,6 @@ func parseRecoveryHint(header, raw string, now time.Time) (time.Duration, bool) 
 		if secs < 0 || math.IsNaN(secs) || math.IsInf(secs, 0) || secs > maxRecoveryHintSeconds {
 			return 0, false
 		}
-		const epochThreshold = 1_000_000_000 // ~2001-09; below this, treat as delta-seconds
 		if header != "Retry-After" && secs >= epochThreshold {
 			until := time.Unix(int64(secs), 0)
 			if d := until.Sub(now); d > 0 {
@@ -261,7 +392,7 @@ func parseRecoveryHint(header, raw string, now time.Time) (time.Duration, bool) 
 		}
 		// Delta path: cap in float space before the *float64(time.Second)
 		// multiply so the int64(time.Duration) conversion can never overflow.
-		// clampCooldown applies the real ceiling (MaxCooldown) afterward; this
+		// clampCooldownTo applies the real ceiling (MaxCooldown) afterward; this
 		// only prevents the conversion itself from wrapping.
 		deltaSec := secs
 		if maxSec := vault.MaxCooldown.Seconds(); deltaSec > maxSec {
@@ -270,9 +401,9 @@ func parseRecoveryHint(header, raw string, now time.Time) (time.Duration, bool) 
 		return time.Duration(deltaSec * float64(time.Second)), true
 	}
 	// HTTP-date (Retry-After absolute form, per RFC 9110). Only Retry-After is
-	// permitted to carry an absolute HTTP-date; the x-ratelimit-reset* family is
-	// numeric (delta-seconds / unix epoch / unit-suffixed duration) and must not
-	// be coerced through HTTP-date parsing.
+	// permitted to carry an absolute HTTP-date; the numeric reset families
+	// (delta-seconds / unix epoch / unit-suffixed duration) must not be coerced
+	// through HTTP-date parsing.
 	if header == "Retry-After" {
 		if t, err := http.ParseTime(raw); err == nil {
 			if d := t.Sub(now); d > 0 {
@@ -281,22 +412,35 @@ func parseRecoveryHint(header, raw string, now time.Time) (time.Duration, bool) 
 			return 0, false
 		}
 	}
-	// Unit-suffixed duration (e.g. OpenAI "1.5s", "60ms").
+	// RFC3339 / ISO-8601 absolute timestamp (Anthropic's
+	// anthropic-ratelimit-*-reset). Safe to attempt for ANY header: a bare
+	// number or unit-suffixed duration does not parse as RFC3339, so this only
+	// fires on a real timestamp. A future timestamp's distance from now is the
+	// recovery window; a past/equal one is not usable.
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		if d := t.Sub(now); d > 0 {
+			return d, true
+		}
+		return 0, false
+	}
+	// Unit-suffixed duration (e.g. OpenAI "1.5s", "60ms", "6m0s").
 	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
 		return d, true
 	}
 	return 0, false
 }
 
-// clampCooldown bounds a derived cooldown to [minFloorForClass(class),
-// MaxCooldown].
-func clampCooldown(class failoverClass, d time.Duration) time.Duration {
+// clampCooldownTo bounds a derived cooldown to [minFloorForClass(class), max].
+// The header path passes vault.MaxCooldown (transient window ceiling); the
+// body path (usage_limit_reached) passes vault.MaxUsageLimitCooldown, which is
+// higher because the body reset is authoritative and can be many hours/days.
+func clampCooldownTo(class failoverClass, d, ceil time.Duration) time.Duration {
 	floor := minFloorForClass(class)
 	if d < floor {
 		return floor
 	}
-	if d > vault.MaxCooldown {
-		return vault.MaxCooldown
+	if d > ceil {
+		return ceil
 	}
 	return d
 }
@@ -667,13 +811,19 @@ func (a *SluiceAddon) handlePoolFailover(f *mitmproxy.Flow) {
 		return
 	}
 
-	// B1: derive the cooldown window from the upstream's recovery hints
-	// (Retry-After / x-ratelimit-reset*) instead of the flat class TTL, so a
-	// quota-exhausted member is parked for the REAL window rather than being
-	// re-probed every RateLimitCooldown (60s). cooldownFromResponse clamps to
-	// the class bounds and falls back to the flat default when no hint header
-	// is present.
-	ttl := cooldownFromResponse(class, f.Response.Header)
+	// B1: derive the cooldown window from the upstream's recovery hints instead
+	// of the flat class TTL, so a quota-exhausted member is parked for the REAL
+	// window rather than being re-probed every RateLimitCooldown (60s).
+	// cooldownFromResponse tries the headers first (Retry-After /
+	// x-ratelimit-reset*); when none is present it parses the 429 JSON BODY for
+	// an OpenAI Codex usage_limit_reached window (resets_in_seconds /
+	// resets_at), clamped to MaxUsageLimitCooldown. The body fallback matters
+	// for Codex because its usage-limit 429s carry no recovery header — without
+	// it the pool re-probes an account that won't reset for hours every 60s. It
+	// falls back to the flat class default when neither hint is present. The
+	// body is read the same way classifyFailover already reads f.Response.Body
+	// (small JSON error bodies are not gzipped).
+	ttl := cooldownFromResponse(class, f.Response.Header, f.Response.Body)
 	until := time.Now().Add(ttl)
 	tag := failoverReasonTag(class, f.Response.StatusCode, bodyTag)
 
