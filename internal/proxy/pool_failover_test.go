@@ -1378,9 +1378,63 @@ func TestCooldownFromResponse(t *testing.T) {
 			class: failoverRateLimited,
 			setup: func(h http.Header) {
 				h.Set("Retry-After", "120")
-				h.Set("x-ratelimit-reset", "30")
+				h.Set("x-ratelimit-reset-requests", "30")
 			},
 			want: 120 * time.Second,
+		},
+		{
+			name:  "RateLimit-Reset delta seconds honored (IETF draft)",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("RateLimit-Reset", "120") },
+			want:  120 * time.Second,
+		},
+		{
+			name:  "X-RateLimit-Reset future epoch honored (GitHub/Twitter)",
+			class: failoverRateLimited,
+			setup: func(h http.Header) {
+				h.Set("X-RateLimit-Reset", strconv.FormatInt(now.Add(300*time.Second).Unix(), 10))
+			},
+			want:   300 * time.Second,
+			approx: true,
+		},
+		{
+			name:  "X-RateLimit-Reset small delta honored (non-epoch magnitude)",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("X-RateLimit-Reset", "90") },
+			want:  90 * time.Second,
+		},
+		{
+			name:  "X-RateLimit-Reset-After float floored at MinRateLimitFloor (Discord)",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("X-RateLimit-Reset-After", "1.5") },
+			want:  vault.MinRateLimitFloor,
+		},
+		{
+			name:  "anthropic-ratelimit-tokens-reset RFC3339 future honored",
+			class: failoverRateLimited,
+			setup: func(h http.Header) {
+				h.Set("anthropic-ratelimit-tokens-reset", now.Add(200*time.Second).UTC().Format(time.RFC3339))
+			},
+			want:   200 * time.Second,
+			approx: true,
+		},
+		{
+			name:  "anthropic-ratelimit-requests-reset RFC3339 in the past ignored",
+			class: failoverRateLimited,
+			setup: func(h http.Header) {
+				h.Set("anthropic-ratelimit-requests-reset", now.Add(-200*time.Second).UTC().Format(time.RFC3339))
+			},
+			want: vault.RateLimitCooldown,
+		},
+		{
+			name:  "Retry-After precedence over RateLimit-Reset (IETF: Retry-After wins)",
+			class: failoverRateLimited,
+			setup: func(h http.Header) {
+				h.Set("Retry-After", "30")
+				h.Set("RateLimit-Reset", "300")
+			},
+			// Retry-After (30s) wins; 30 is above MinRateLimitFloor so honored verbatim.
+			want: 30 * time.Second,
 		},
 		{
 			name:  "unparseable header ignored falls back to default",
@@ -1594,6 +1648,42 @@ func TestCooldownFromResponseBody(t *testing.T) {
 			body:  []byte(`{"resets_in_seconds":5}`),
 			want:  vault.AuthFailCooldown,
 		},
+		{
+			name:  "top-level retry_after delta (Discord/generic)",
+			class: failoverRateLimited,
+			body:  []byte(`{"retry_after":1357}`),
+			want:  1357 * time.Second,
+		},
+		{
+			name:  "top-level reset_after delta",
+			class: failoverRateLimited,
+			body:  []byte(`{"reset_after":600}`),
+			want:  600 * time.Second,
+		},
+		{
+			name:  "nested error.retry_after delta",
+			class: failoverRateLimited,
+			body:  []byte(`{"error":{"retry_after":45}}`),
+			want:  45 * time.Second,
+		},
+		{
+			name:  "nested error.resets_in_seconds delta",
+			class: failoverRateLimited,
+			body:  []byte(`{"error":{"resets_in_seconds":1357}}`),
+			want:  1357 * time.Second,
+		},
+		{
+			name:  "Discord-style float retry_after floored at MinRateLimitFloor",
+			class: failoverRateLimited,
+			body:  []byte(`{"retry_after":0.529}`),
+			want:  vault.MinRateLimitFloor,
+		},
+		{
+			name:  "oversized body falls back to class default",
+			class: failoverRateLimited,
+			body:  oversizedJSONBody(),
+			want:  vault.RateLimitCooldown,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1622,6 +1712,15 @@ func TestCooldownFromResponseBody(t *testing.T) {
 	}
 }
 
+// oversizedJSONBody returns a syntactically valid JSON body that carries a
+// usable retry_after but exceeds maxBodyRecoveryHintBytes, so the size guard
+// must skip it (failover error bodies are tiny). The padding lives in an
+// unused string field so the body stays valid JSON.
+func oversizedJSONBody() []byte {
+	pad := strings.Repeat("a", maxBodyRecoveryHintBytes+1)
+	return []byte(`{"retry_after":1357,"pad":"` + pad + `"}`)
+}
+
 // TestParseBodyRecoveryHint exercises the body parser's guards directly:
 // resets_in_seconds is preferred over resets_at, non-finite/negative/zero/past
 // values are rejected, and a field-less or non-JSON body reports ok=false.
@@ -1648,10 +1747,29 @@ func TestParseBodyRecoveryHint(t *testing.T) {
 		},
 		{name: "negative resets_in_seconds rejected", body: `{"resets_in_seconds":-5}`, wantOK: false},
 		{name: "zero resets_in_seconds rejected", body: `{"resets_in_seconds":0}`, wantOK: false},
-		{name: "past resets_at rejected", body: `{"resets_at":1}`, wantOK: false},
+		// A past unix-epoch resets_at (>= epochThreshold so it disambiguates as
+		// an epoch, not a 1s delta) is rejected.
+		{name: "past resets_at rejected", body: `{"resets_at":` + strconv.FormatInt(now.Add(-600*time.Second).Unix(), 10) + `}`, wantOK: false},
 		{name: "no reset fields", body: `{"type":"usage_limit_reached"}`, wantOK: false},
 		{name: "non-JSON", body: `garbage`, wantOK: false},
 		{name: "empty", body: ``, wantOK: false},
+		{name: "retry_after delta", body: `{"retry_after":1357}`, wantOK: true, want: 1357 * time.Second},
+		{name: "reset_after delta", body: `{"reset_after":600}`, wantOK: true, want: 600 * time.Second},
+		{name: "nested error.retry_after delta", body: `{"error":{"retry_after":45}}`, wantOK: true, want: 45 * time.Second},
+		{name: "nested error.resets_in_seconds delta", body: `{"error":{"resets_in_seconds":1357}}`, wantOK: true, want: 1357 * time.Second},
+		{
+			// Top-level wins over nested when both present (order: top-level first).
+			name:   "top-level retry_after preferred over nested error.retry_after",
+			body:   `{"retry_after":100,"error":{"retry_after":9000}}`,
+			wantOK: true, want: 100 * time.Second,
+		},
+		{
+			// retry_after at an epoch magnitude is treated as a unix epoch.
+			name:   "retry_after at epoch magnitude treated as epoch",
+			body:   `{"retry_after":` + strconv.FormatInt(now.Add(300*time.Second).Unix(), 10) + `}`,
+			wantOK: true, want: 300 * time.Second, approx: true,
+		},
+		{name: "oversized body rejected", body: string(oversizedJSONBody()), wantOK: false},
 		{name: "overflow-magnitude resets_in_seconds rejected", body: `{"resets_in_seconds":1e308}`, wantOK: false},
 		{
 			// 327808s > MaxUsageLimitCooldown (24h): the parser caps in float
