@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -219,13 +220,35 @@ func cooldownFromResponse(class failoverClass, header http.Header) time.Duration
 // Returns ok=false when the value parses to nothing usable (negative,
 // zero-after-now, unparseable). A delta value carrying a unit suffix (OpenAI's
 // "1.5s" / "60ms" form) is handled via time.ParseDuration as a fallback.
+//
+// Non-finite (NaN, +Inf, -Inf) and out-of-range bare-numeric values are
+// rejected up front: strconv.ParseFloat accepts all of them, NaN<0 and Inf<0
+// are both false so the old `secs < 0` guard let them through, and the
+// subsequent float->int64 conversion (delta `time.Duration(secs*1e9)` and
+// epoch `int64(secs)`) is implementation-defined for those inputs and can wrap
+// to a wrong (even negative) duration before clampCooldown runs. Any finite
+// magnitude above maxRecoveryHintSeconds is also rejected — it is far larger
+// than any real Retry-After / reset / epoch and would overflow int64 once
+// multiplied into nanoseconds.
+// maxRecoveryHintSeconds is the upper bound for a bare-numeric recovery hint
+// (~31,000 years). Any larger value is not a real Retry-After / reset / unix
+// epoch and is rejected: it is comfortably above a present-day epoch (~1.7e9)
+// yet small enough that int64(secs) cannot overflow on the epoch branch.
+const maxRecoveryHintSeconds = 1e12
+
 func parseRecoveryHint(header, raw string, now time.Time) (time.Duration, bool) {
 	// Bare numeric: delta-seconds for Retry-After; for the reset family it may
 	// be either delta-seconds OR a unix epoch. Disambiguate by magnitude — a
 	// value large enough to be a plausible epoch (>= ~ year 2001) is treated
 	// as absolute, otherwise as a delta.
 	if secs, err := strconv.ParseFloat(raw, 64); err == nil {
-		if secs < 0 {
+		// Reject negative, non-finite (NaN/±Inf), and absurdly large
+		// magnitudes before any float->int64 conversion. maxRecoveryHintSeconds
+		// (~31,000 years) comfortably exceeds any real epoch (~1.7e9 today) or
+		// recovery delta, while staying well within int64 for the epoch
+		// branch's int64(secs); the delta branch additionally caps in float
+		// space (below) so secs*1e9 can never overflow int64 (~9.2e18).
+		if secs < 0 || math.IsNaN(secs) || math.IsInf(secs, 0) || secs > maxRecoveryHintSeconds {
 			return 0, false
 		}
 		const epochThreshold = 1_000_000_000 // ~2001-09; below this, treat as delta-seconds
@@ -236,7 +259,15 @@ func parseRecoveryHint(header, raw string, now time.Time) (time.Duration, bool) 
 			}
 			return 0, false
 		}
-		return time.Duration(secs * float64(time.Second)), true
+		// Delta path: cap in float space before the *float64(time.Second)
+		// multiply so the int64(time.Duration) conversion can never overflow.
+		// clampCooldown applies the real ceiling (MaxCooldown) afterward; this
+		// only prevents the conversion itself from wrapping.
+		deltaSec := secs
+		if maxSec := vault.MaxCooldown.Seconds(); deltaSec > maxSec {
+			deltaSec = maxSec
+		}
+		return time.Duration(deltaSec * float64(time.Second)), true
 	}
 	// HTTP-date (Retry-After absolute form, per RFC 9110). Only Retry-After is
 	// permitted to carry an absolute HTTP-date; the x-ratelimit-reset* family is

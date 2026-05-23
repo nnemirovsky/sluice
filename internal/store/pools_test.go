@@ -1571,8 +1571,12 @@ func TestRemoveCredentialMetaCASNoOpLeavesHealthIntact(t *testing.T) {
 // migration (000008) up -> down -> up against a POPULATED schema: a pool with
 // two members and a credential_health row must survive the down (which
 // rebuilds credential_pools while preserving the credential_pool_members FK)
-// and the re-up round-trip. The down migration disables foreign_keys for the
-// 12-step rebuild, so the FK-referencing member rows must NOT be cascade-wiped.
+// and the re-up round-trip. golang-migrate runs the down migration inside a
+// transaction where SQLite ignores PRAGMA foreign_keys=OFF, so dropping
+// credential_pools during the 12-step rebuild would CASCADE-wipe the member
+// rows. The down migration instead snapshots credential_pool_members into a
+// temp table before the drop and restores it once the rebuilt parent rows
+// exist, so the FK-referencing member rows survive.
 func TestMigration000008DownUpPopulated(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "m.db")
@@ -1636,8 +1640,10 @@ func TestMigration000008DownUpPopulated(t *testing.T) {
 
 	// Down one step (000008 -> 000007): the column goes; the rebuilt
 	// credential_pools keeps its row; the FK-referencing member rows and the
-	// health row survive (foreign_keys=OFF during the rebuild prevents a
-	// cascade wipe).
+	// health row survive (PRAGMA foreign_keys=OFF is ignored inside the
+	// migration transaction, so the down migration snapshots the member rows
+	// into a temp table and restores them after the rebuild rather than letting
+	// the credential_pools drop cascade-wipe them).
 	if err := m.Steps(-1); err != nil {
 		t.Fatalf("down 1 (000008): %v", err)
 	}

@@ -1367,6 +1367,36 @@ func TestCooldownFromResponse(t *testing.T) {
 			setup: func(h http.Header) { h.Set("Retry-After", "-5") },
 			want:  vault.RateLimitCooldown,
 		},
+		{
+			name:  "NaN delta ignored falls back to default",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "NaN") },
+			want:  vault.RateLimitCooldown,
+		},
+		{
+			name:  "Inf delta ignored falls back to default",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "Inf") },
+			want:  vault.RateLimitCooldown,
+		},
+		{
+			name:  "+Inf delta ignored falls back to default",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "+Inf") },
+			want:  vault.RateLimitCooldown,
+		},
+		{
+			name:  "-Inf delta ignored falls back to default",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "-Inf") },
+			want:  vault.RateLimitCooldown,
+		},
+		{
+			name:  "overflow-magnitude delta ignored falls back to default",
+			class: failoverRateLimited,
+			setup: func(h http.Header) { h.Set("Retry-After", "1e308") },
+			want:  vault.RateLimitCooldown,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1406,6 +1436,25 @@ func TestCooldownFromResponseNilSafe(t *testing.T) {
 	}
 	if got := cooldownFromResponse(failoverAuthFailure, nil); got != vault.AuthFailCooldown {
 		t.Fatalf("nil header (auth): got %v, want %v", got, vault.AuthFailCooldown)
+	}
+}
+
+// TestParseRecoveryHintRejectsNonFinite verifies the bare-numeric branch
+// rejects NaN/±Inf and absurdly large finite magnitudes up front (ok=false,
+// d=0) instead of letting strconv.ParseFloat's acceptance of those tokens slip
+// past the `secs < 0` guard into an implementation-defined float->int64
+// conversion that could wrap to a wrong/negative duration. Exercised on both
+// the delta header (Retry-After) and the epoch-branch reset family (where the
+// int64(secs) conversion lives).
+func TestParseRecoveryHintRejectsNonFinite(t *testing.T) {
+	now := time.Now()
+	headers := []string{"Retry-After", "x-ratelimit-reset"}
+	for _, h := range headers {
+		for _, raw := range []string{"NaN", "Inf", "+Inf", "-Inf", "1e308"} {
+			if d, ok := parseRecoveryHint(h, raw, now); ok || d != 0 {
+				t.Errorf("parseRecoveryHint(%q, %q) = (%v, %v), want (0, false)", h, raw, d, ok)
+			}
+		}
 	}
 }
 
