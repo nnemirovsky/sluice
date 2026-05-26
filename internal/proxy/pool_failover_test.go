@@ -48,36 +48,37 @@ func newPoolRespFlow(client *mitmproxy.ClientConn, status int, respBody []byte) 
 // TestClassifyFailover is the classification truth table from the plan.
 func TestClassifyFailover(t *testing.T) {
 	cases := []struct {
-		name        string
-		status      int
-		body        string
-		tokenEP     bool
-		wantClass   failoverClass
-		wantTagPart string
+		name         string
+		status       int
+		body         string
+		tokenEP      bool
+		refreshGrant bool
+		wantClass    failoverClass
+		wantTagPart  string
 	}{
-		{"429 rate limited", 429, "", false, failoverRateLimited, "429"},
-		{"403 insufficient_quota", 403, `{"error":"insufficient_quota"}`, false, failoverRateLimited, "403"},
-		{"403 quota_exceeded", 403, `{"error":{"code":"quota_exceeded"}}`, false, failoverRateLimited, "403"},
-		{"403 unrelated -> noop", 403, `{"error":"forbidden: bad scope"}`, false, failoverNone, ""},
+		{"429 rate limited", 429, "", false, false, failoverRateLimited, "429"},
+		{"403 insufficient_quota", 403, `{"error":"insufficient_quota"}`, false, false, failoverRateLimited, "403"},
+		{"403 quota_exceeded", 403, `{"error":{"code":"quota_exceeded"}}`, false, false, failoverRateLimited, "403"},
+		{"403 unrelated -> noop", 403, `{"error":"forbidden: bad scope"}`, false, false, failoverNone, ""},
 		// Finding 1: a token-endpoint 403 carrying invalid_grant/invalid_token
 		// is an auth failure (consistent with the 400/401 token-endpoint path).
 		// The old code early-returned failoverNone in the 403 branch before the
 		// token-endpoint body check ever ran.
-		{"403 token-endpoint invalid_grant -> auth", 403, `{"error":"invalid_grant"}`, true, failoverAuthFailure, "invalid_grant"},
-		{"403 token-endpoint invalid_token -> auth", 403, `{"error":"invalid_token"}`, true, failoverAuthFailure, "invalid_token"},
+		{"403 token-endpoint invalid_grant -> auth", 403, `{"error":"invalid_grant"}`, true, false, failoverAuthFailure, "invalid_grant"},
+		{"403 token-endpoint invalid_token -> auth", 403, `{"error":"invalid_token"}`, true, false, failoverAuthFailure, "invalid_token"},
 		// 403 + quota signal stays rate-limited (unchanged).
-		{"403 insufficient_quota (tokenEP) stays rate-limited", 403, `{"error":"insufficient_quota"}`, true, failoverRateLimited, "403"},
+		{"403 insufficient_quota (tokenEP) stays rate-limited", 403, `{"error":"insufficient_quota"}`, true, false, failoverRateLimited, "403"},
 		// 403 + invalid_grant but NOT a real token endpoint -> still noop
 		// (the body is only trusted on a real token URL).
-		{"403 invalid_grant but NOT token endpoint -> noop", 403, `{"error":"invalid_grant"}`, false, failoverNone, ""},
-		{"401 auth failure", 401, "", false, failoverAuthFailure, "401"},
-		{"token-endpoint invalid_grant", 400, `{"error":"invalid_grant"}`, true, failoverAuthFailure, "invalid_grant"},
-		{"token-endpoint invalid_token", 400, `{"error":"invalid_token"}`, true, failoverAuthFailure, "invalid_token"},
-		{"invalid_grant but NOT token endpoint -> noop", 400, `{"error":"invalid_grant"}`, false, failoverNone, ""},
-		{"200 success -> noop", 200, `{"access_token":"x"}`, true, failoverNone, ""},
-		{"500 server error -> noop", 500, `oops`, false, failoverNone, ""},
-		{"502 -> noop", 502, ``, false, failoverNone, ""},
-		{"404 -> noop", 404, ``, false, failoverNone, ""},
+		{"403 invalid_grant but NOT token endpoint -> noop", 403, `{"error":"invalid_grant"}`, false, false, failoverNone, ""},
+		{"401 auth failure", 401, "", false, false, failoverAuthFailure, "401"},
+		{"token-endpoint invalid_grant", 400, `{"error":"invalid_grant"}`, true, false, failoverAuthFailure, "invalid_grant"},
+		{"token-endpoint invalid_token", 400, `{"error":"invalid_token"}`, true, false, failoverAuthFailure, "invalid_token"},
+		{"invalid_grant but NOT token endpoint -> noop", 400, `{"error":"invalid_grant"}`, false, false, failoverNone, ""},
+		{"200 success -> noop", 200, `{"access_token":"x"}`, true, false, failoverNone, ""},
+		{"500 server error -> noop", 500, `oops`, false, false, failoverNone, ""},
+		{"502 -> noop", 502, ``, false, false, failoverNone, ""},
+		{"404 -> noop", 404, ``, false, false, failoverNone, ""},
 		// Round-17 Finding 2: a token-endpoint 5xx whose body happens to
 		// contain invalid_grant/invalid_token must STAY a no-op. A server-side
 		// error is not evidence the member's account is exhausted/revoked
@@ -85,25 +86,48 @@ func TestClassifyFailover(t *testing.T) {
 		// (statusCode < 200 || statusCode > 299) wrongly classified these as
 		// auth-failure and cooled an innocent member. The fix restricts the
 		// body classification to 4xx CLIENT errors only.
-		{"token-endpoint 503 invalid_grant -> noop", 503, `{"error":"invalid_grant"}`, true, failoverNone, ""},
-		{"token-endpoint 500 invalid_grant -> noop", 500, `{"error":"invalid_grant"}`, true, failoverNone, ""},
-		{"token-endpoint 502 invalid_token -> noop", 502, `{"error":"invalid_token"}`, true, failoverNone, ""},
+		{"token-endpoint 503 invalid_grant -> noop", 503, `{"error":"invalid_grant"}`, true, false, failoverNone, ""},
+		{"token-endpoint 500 invalid_grant -> noop", 500, `{"error":"invalid_grant"}`, true, false, failoverNone, ""},
+		{"token-endpoint 502 invalid_token -> noop", 502, `{"error":"invalid_token"}`, true, false, failoverNone, ""},
 		// The 4xx token-endpoint paths are UNAFFECTED by the fix.
-		{"token-endpoint 400 invalid_grant still auth", 400, `{"error":"invalid_grant"}`, true, failoverAuthFailure, "invalid_grant"},
-		{"token-endpoint 403 invalid_grant still auth", 403, `{"error":"invalid_grant"}`, true, failoverAuthFailure, "invalid_grant"},
-		{"token-endpoint 499 invalid_token still auth", 499, `{"error":"invalid_token"}`, true, failoverAuthFailure, "invalid_token"},
+		{"token-endpoint 400 invalid_grant still auth", 400, `{"error":"invalid_grant"}`, true, false, failoverAuthFailure, "invalid_grant"},
+		{"token-endpoint 403 invalid_grant still auth", 403, `{"error":"invalid_grant"}`, true, false, failoverAuthFailure, "invalid_grant"},
+		{"token-endpoint 499 invalid_token still auth", 499, `{"error":"invalid_token"}`, true, false, failoverAuthFailure, "invalid_token"},
 		// 401/429 are explicit status cases ABOVE the body check; unaffected.
-		{"401 still auth (unaffected)", 401, ``, true, failoverAuthFailure, "401"},
-		{"429 still rate-limited (unaffected)", 429, `{"error":"invalid_grant"}`, true, failoverRateLimited, "429"},
+		{"401 still auth (unaffected)", 401, ``, true, false, failoverAuthFailure, "401"},
+		{"429 still rate-limited (unaffected)", 429, `{"error":"invalid_grant"}`, true, false, failoverRateLimited, "429"},
 		// 2xx is still a no-op even with an invalid_grant-looking body.
-		{"2xx invalid_grant body still noop", 200, `{"error":"invalid_grant"}`, true, failoverNone, ""},
+		{"2xx invalid_grant body still noop", 200, `{"error":"invalid_grant"}`, true, false, failoverNone, ""},
 		// Non-token-endpoint 4xx with invalid_grant body is still a no-op
 		// (the body is only trusted on a real token URL).
-		{"non-token-endpoint 400 invalid_grant -> noop", 400, `{"error":"invalid_grant"}`, false, failoverNone, ""},
+		{"non-token-endpoint 400 invalid_grant -> noop", 400, `{"error":"invalid_grant"}`, false, false, failoverNone, ""},
+		// Refresh-grant rejection: a 4xx answer to a refresh_token grant is an
+		// auth failure even when the body carries none of the recognized tokens
+		// (the production miss — OpenAI's wording on a dead refresh token).
+		{
+			"refresh-grant 400 OpenAI 'already been used' -> auth", 400,
+			`{"error":{"message":"Your refresh token has already been used to generate a new access token. Please try signing in again."}}`,
+			true, true, failoverAuthFailure, "refresh_rejected",
+		},
+		{"refresh-grant 400 empty body -> auth", 400, ``, true, true, failoverAuthFailure, "refresh_rejected"},
+		// token_expired body now classifies (recognized tag) even on a
+		// non-refresh grant at a token endpoint.
+		{"token-endpoint 401-body token_expired -> auth", 400, `{"error":{"code":"token_expired"}}`, true, false, failoverAuthFailure, "token_expired"},
+		// Body-specific tags win over the generic refresh_rejected tag.
+		{"refresh-grant 400 invalid_grant keeps precise tag", 400, `{"error":"invalid_grant"}`, true, true, failoverAuthFailure, "invalid_grant"},
+		// SAFETY: an in-progress device_code login polls the token endpoint and
+		// gets 400 authorization_pending — NOT a refresh grant, must stay a
+		// no-op so a healthy member is never cooled mid-login.
+		{"device_code 400 authorization_pending -> noop", 400, `{"error":"authorization_pending"}`, true, false, failoverNone, ""},
+		// The refresh-grant catch is still gated on a real token endpoint.
+		{"refresh-grant 400 but NOT token endpoint -> noop", 400, ``, false, true, failoverNone, ""},
+		// 5xx on a refresh grant stays a no-op (transient upstream, not a dead
+		// account) — the 4xx restriction holds for the refresh-grant path too.
+		{"refresh-grant 503 -> noop", 503, ``, true, true, failoverNone, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			class, bodyTag := classifyFailover(c.status, []byte(c.body), c.tokenEP)
+			class, bodyTag := classifyFailover(c.status, []byte(c.body), c.tokenEP, c.refreshGrant)
 			if class != c.wantClass {
 				t.Fatalf("class = %v, want %v", class, c.wantClass)
 			}
