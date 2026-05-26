@@ -112,7 +112,7 @@ func TestClassifyFailover(t *testing.T) {
 		{"refresh-grant 400 empty body -> auth", 400, ``, true, true, failoverAuthFailure, "refresh_rejected"},
 		// token_expired body now classifies (recognized tag) even on a
 		// non-refresh grant at a token endpoint.
-		{"token-endpoint 401-body token_expired -> auth", 400, `{"error":{"code":"token_expired"}}`, true, false, failoverAuthFailure, "token_expired"},
+		{"token-endpoint 400 token_expired -> auth", 400, `{"error":{"code":"token_expired"}}`, true, false, failoverAuthFailure, "token_expired"},
 		// Body-specific tags win over the generic refresh_rejected tag.
 		{"refresh-grant 400 invalid_grant keeps precise tag", 400, `{"error":"invalid_grant"}`, true, true, failoverAuthFailure, "invalid_grant"},
 		// SAFETY: an in-progress device_code login polls the token endpoint and

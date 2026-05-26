@@ -74,6 +74,9 @@ func failoverReasonTag(class failoverClass, statusCode int, bodyTag string) stri
 //   - HTTP 401                                      -> auth-failure
 //   - token-endpoint body invalid_grant/invalid_token/token_expired -> auth-failure
 //   - token-endpoint 4xx on a refresh_token grant   -> auth-failure
+//     (only the 4xx not already matched above: 429 and quota-403 are
+//     classified rate-limited first, so this catches 400/401/4xx refresh
+//     rejections that carry no recognized body token)
 //   - 2xx, 5xx, and everything else                 -> no-op (documented)
 //
 // isTokenEndpoint is true when the request URL matched the OAuth token-URL
