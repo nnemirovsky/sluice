@@ -72,15 +72,27 @@ func failoverReasonTag(class failoverClass, statusCode int, bodyTag string) stri
 //   - HTTP 429                                      -> rate-limited
 //   - HTTP 403 with body insufficient_quota / quota -> rate-limited
 //   - HTTP 401                                      -> auth-failure
-//   - token-endpoint body invalid_grant/invalid_token -> auth-failure
+//   - token-endpoint body invalid_grant/invalid_token/token_expired -> auth-failure
+//   - token-endpoint 4xx on a refresh_token grant   -> auth-failure
+//     (only the 4xx not already matched above: 429 and quota-403 are
+//     classified rate-limited first, so this catches 400/401/4xx refresh
+//     rejections that carry no recognized body token)
 //   - 2xx, 5xx, and everything else                 -> no-op (documented)
 //
 // isTokenEndpoint is true when the request URL matched the OAuth token-URL
 // index (so a body classification is only trusted on an actual token
 // endpoint, not on an arbitrary API 4xx that happens to echo the string
-// "invalid_grant" in unrelated prose). bodyTag returns the matched body
-// token (for the audit reason) when the decision came from the body.
-func classifyFailover(statusCode int, body []byte, isTokenEndpoint bool) (class failoverClass, bodyTag string) {
+// "invalid_grant" in unrelated prose). isRefreshGrant is true when that token
+// request carried grant_type=refresh_token: a 4xx answer to a refresh then
+// means the refresh token itself was rejected (expired / already-used /
+// revoked) and is an auth failure even when the provider's body wording is not
+// one we pattern-match (e.g. OpenAI's "refresh token has already been used …,
+// please sign in again"). It is scoped to refresh grants so an in-progress
+// device_code / authorization_code login — whose 4xx (authorization_pending,
+// slow_down) is normal — never cools an otherwise-healthy member. bodyTag
+// returns the matched body token (for the audit reason) when the decision came
+// from the body.
+func classifyFailover(statusCode int, body []byte, isTokenEndpoint, isRefreshGrant bool) (class failoverClass, bodyTag string) {
 	switch statusCode {
 	case 429:
 		return failoverRateLimited, ""
@@ -113,6 +125,17 @@ func classifyFailover(statusCode int, body []byte, isTokenEndpoint bool) (class 
 		}
 		if bodyContainsAny(body, "invalid_token") {
 			return failoverAuthFailure, "invalid_token"
+		}
+		if bodyContainsAny(body, "token_expired") {
+			return failoverAuthFailure, "token_expired"
+		}
+		// A 4xx answer to a refresh_token grant means the refresh token was
+		// rejected outright — an auth failure regardless of the provider's
+		// exact body wording (OpenAI's "refresh token has already been used …"
+		// carries none of the tokens above). Scoped to refresh grants so a
+		// device_code / authorization_code login in progress is never cooled.
+		if isRefreshGrant {
+			return failoverAuthFailure, "refresh_rejected"
 		}
 	}
 	return failoverNone, ""
@@ -802,11 +825,14 @@ func (a *SluiceAddon) handlePoolFailover(f *mitmproxy.Flow) {
 	}
 
 	isTokenEndpoint := false
+	isRefreshGrant := false
 	if idx := a.oauthIndex.Load(); idx != nil {
-		_, isTokenEndpoint = idx.Match(f.Request.URL)
+		if _, isTokenEndpoint = idx.Match(f.Request.URL); isTokenEndpoint {
+			isRefreshGrant = requestFlowGrantType(f, idx) == "refresh_token"
+		}
 	}
 
-	class, bodyTag := classifyFailover(f.Response.StatusCode, f.Response.Body, isTokenEndpoint)
+	class, bodyTag := classifyFailover(f.Response.StatusCode, f.Response.Body, isTokenEndpoint, isRefreshGrant)
 	if class == failoverNone {
 		return
 	}
