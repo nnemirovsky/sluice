@@ -3,7 +3,7 @@ package proxy
 import (
 	"testing"
 
-	uuid "github.com/satori/go.uuid"
+	"github.com/google/uuid"
 )
 
 // flowInjectedSize returns the current number of live flow-attribution
@@ -98,7 +98,7 @@ func TestFlowInjectedTagFreedAfterResponse(t *testing.T) {
 	// TTL backstop: a tag for a flow whose Response NEVER fires (streamed /
 	// abandoned) must survive — Delete must not have over-reached. The tag
 	// is bounded only by flowAttrTTL + the opportunistic sweep in Tag.
-	abandoned := uuid.NewV4()
+	abandoned := uuid.New()
 	addon.flowInjected.Tag(abandoned, "memA")
 	if m, ok := addon.flowInjected.Peek(abandoned); !ok || m != "memA" {
 		t.Fatalf("abandoned-flow tag not retained as TTL backstop; got %q ok=%v", m, ok)
@@ -115,8 +115,8 @@ func TestFlowInjectedTagFreedAfterResponse(t *testing.T) {
 // (not panic, not corrupt the map) and must not disturb other flows' tags.
 func TestFlowInjectedDeleteIsIdempotent(t *testing.T) {
 	m := newFlowInjectedMember()
-	id1 := uuid.NewV4()
-	id2 := uuid.NewV4()
+	id1 := uuid.New()
+	id2 := uuid.New()
 	m.Tag(id1, "memA")
 	m.Tag(id2, "memB")
 

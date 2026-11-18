@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	uuid "github.com/satori/go.uuid"
+	"github.com/google/uuid"
 )
 
 // flowAttrTTL bounds how long a flow-id -> injected-member tag is retained.

@@ -16,12 +16,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	mitmproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
-	uuid "github.com/satori/go.uuid"
 	"golang.org/x/sync/singleflight"
 )
 

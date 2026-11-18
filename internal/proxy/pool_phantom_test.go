@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	mitmproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
-	uuid "github.com/satori/go.uuid"
 )
 
 func timeFuture() time.Time { return time.Now().Add(5 * time.Minute) }
@@ -195,7 +195,7 @@ func newPoolReqRespFlow(client *mitmproxy.ClientConn, reqBody []byte, respBody [
 	respHdr := make(http.Header)
 	respHdr.Set("Content-Type", "application/json")
 	return &mitmproxy.Flow{
-		Id:          uuid.NewV4(),
+		Id:          uuid.New(),
 		ConnContext: &mitmproxy.ConnContext{ClientConn: client},
 		Request: &mitmproxy.Request{
 			Method: "POST",

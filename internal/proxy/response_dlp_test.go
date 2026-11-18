@@ -17,11 +17,11 @@ import (
 	"testing"
 
 	"github.com/andybalholm/brotli"
+	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 	mitmproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/policy"
-	uuid "github.com/satori/go.uuid"
 )
 
 // newDLPResponseFlow builds a flow with a Response suitable for DLP tests.
@@ -36,7 +36,7 @@ func newDLPResponseFlow(client *mitmproxy.ClientConn, body []byte, header http.H
 		header = make(http.Header)
 	}
 	return &mitmproxy.Flow{
-		Id: uuid.NewV4(),
+		Id: uuid.New(),
 		ConnContext: &mitmproxy.ConnContext{
 			ClientConn: client,
 		},
@@ -444,7 +444,7 @@ func TestResponseDLP_NilResponseNoPanic(t *testing.T) {
 	addon.ClientConnected(client)
 
 	f := &mitmproxy.Flow{
-		Id: uuid.NewV4(),
+		Id: uuid.New(),
 		ConnContext: &mitmproxy.ConnContext{
 			ClientConn: client,
 		},

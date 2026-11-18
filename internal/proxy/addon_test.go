@@ -16,11 +16,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	mitmproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 	"github.com/nemirovsky/sluice/internal/policy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
-	uuid "github.com/satori/go.uuid"
 )
 
 // testOAuthTokenURL is the token endpoint used across all OAuth test helpers.
@@ -30,7 +30,7 @@ const testOAuthTokenURL = "https://auth.example.com/oauth/token"
 // testing addon lifecycle methods.
 func newTestClientConn() *mitmproxy.ClientConn {
 	return &mitmproxy.ClientConn{
-		Id:   uuid.NewV4(),
+		Id:   uuid.New(),
 		Conn: &net.TCPConn{},
 	}
 }
@@ -43,7 +43,7 @@ func newTestConnContext(client *mitmproxy.ClientConn, addr string) *mitmproxy.Co
 	return &mitmproxy.ConnContext{
 		ClientConn: client,
 		ServerConn: &mitmproxy.ServerConn{
-			Id:      uuid.NewV4(),
+			Id:      uuid.New(),
 			Address: addr,
 		},
 	}
@@ -247,13 +247,13 @@ func TestSluiceAddon_MultipleClientsIsolated(t *testing.T) {
 func TestSluiceAddon_SetConnCheckerNoState(_ *testing.T) {
 	addon := NewSluiceAddon()
 	// Should not panic when setting checker for unknown client.
-	addon.SetConnChecker(uuid.NewV4(), &RequestPolicyChecker{})
+	addon.SetConnChecker(uuid.New(), &RequestPolicyChecker{})
 }
 
 func TestSluiceAddon_SetConnSkipCheckNoState(_ *testing.T) {
 	addon := NewSluiceAddon()
 	// Should not panic when setting skip-check for unknown client.
-	addon.SetConnSkipCheck(uuid.NewV4())
+	addon.SetConnSkipCheck(uuid.New())
 }
 
 // --- Requestheaders tests ---
@@ -263,7 +263,7 @@ func TestSluiceAddon_SetConnSkipCheckNoState(_ *testing.T) {
 func newTestFlow(client *mitmproxy.ClientConn, method, reqURL string) *mitmproxy.Flow {
 	u, _ := url.Parse(reqURL)
 	return &mitmproxy.Flow{
-		Id: uuid.NewV4(),
+		Id: uuid.New(),
 		ConnContext: &mitmproxy.ConnContext{
 			ClientConn: client,
 		},
@@ -1262,7 +1262,7 @@ func newTestResponseFlow(client *mitmproxy.ClientConn, reqURL string, statusCode
 		header.Set("Content-Type", contentType)
 	}
 	return &mitmproxy.Flow{
-		Id: uuid.NewV4(),
+		Id: uuid.New(),
 		ConnContext: &mitmproxy.ConnContext{
 			ClientConn: client,
 		},
