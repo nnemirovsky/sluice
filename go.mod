@@ -9,7 +9,7 @@ require (
 	github.com/andybalholm/brotli v1.0.5
 	github.com/coder/websocket v1.8.14
 	github.com/getkin/kin-openapi v0.134.0
-	github.com/go-chi/chi/v5 v5.2.5
+	github.com/go-chi/chi/v5 v5.4.0
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/hashicorp/vault/api v1.23.0
