@@ -28,11 +28,12 @@ sluice holds real credentials and sits between an AI agent and everything it can
 - the age vault, the CA private key, `sluice.db` or the audit log written in plain text or readable by other users, or a credential value written to a log
 - an edited audit log that `sluice audit verify` reports as intact
 - a credential name, env var value or auth-reset target that runs a command inside the agent container
+- a command the exec inspector is meant to block getting past it in another form (another spelling, quoting, an interpreter or a wrapper). The patterns are heuristics, but report a bypass privately: a public issue shows every agent the way around.
 
 Out of scope:
 
 - the limits the README and CLAUDE.md document: streamed responses (SSE and bodies over 5 MiB) skip response DLP and pool failover, DNS forwards every query that is not denied, QUIC has no OAuth response interception, and WebSocket, SSH, IMAP and SMTP are checked per connection
-- a redact rule or an exec-inspector pattern that misses a variant. These are heuristics on top of policy, so open a normal issue.
+- a redact rule that misses a variant of a secret. Response DLP is a heuristic on top of policy, so open a normal issue.
 - an agent using a credential on its bound destination in a way your policy allows
 - traffic that never goes through sluice, such as an agent outside the tun2proxy routing or a Hermes backend on third-party infrastructure
 - secrets you choose to keep in plain text: the `env` provider and MCP upstream `--env` values not given as `vault:` references
