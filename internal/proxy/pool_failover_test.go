@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	mitmproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
-	uuid "github.com/satori/go.uuid"
 )
 
 // newPoolRespFlow builds a response flow for the pooled destination with an
@@ -29,7 +29,7 @@ func newPoolRespFlow(client *mitmproxy.ClientConn, status int, respBody []byte) 
 	respHdr := make(http.Header)
 	respHdr.Set("Content-Type", "application/json")
 	return &mitmproxy.Flow{
-		Id:          uuid.NewV4(),
+		Id:          uuid.New(),
 		ConnContext: &mitmproxy.ConnContext{ClientConn: client},
 		Request: &mitmproxy.Request{
 			Method: "POST",
@@ -318,7 +318,7 @@ func TestFailoverNonPooledDestinationIgnored(t *testing.T) {
 	// path, so it must not be used here.)
 	u, _ := url.Parse("https://unrelated.example.com/v1/data")
 	f := &mitmproxy.Flow{
-		Id:          uuid.NewV4(),
+		Id:          uuid.New(),
 		ConnContext: &mitmproxy.ConnContext{ClientConn: client},
 		Request:     &mitmproxy.Request{Method: "GET", URL: u, Header: make(http.Header)},
 		Response:    &mitmproxy.Response{StatusCode: 429, Header: make(http.Header)},
@@ -628,7 +628,7 @@ func newPoolRespFlowBody(client *mitmproxy.ClientConn, status int, realRefresh s
 	respHdr := make(http.Header)
 	respHdr.Set("Content-Type", "application/json")
 	return &mitmproxy.Flow{
-		Id:          uuid.NewV4(),
+		Id:          uuid.New(),
 		ConnContext: &mitmproxy.ConnContext{ClientConn: client},
 		Request: &mitmproxy.Request{
 			Method: "POST",

@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	mitmproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 	"github.com/nemirovsky/sluice/internal/audit"
 	"github.com/nemirovsky/sluice/internal/vault"
-	uuid "github.com/satori/go.uuid"
 )
 
 // failoverClass is the result of classifying an upstream response for a

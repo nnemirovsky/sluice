@@ -6,10 +6,10 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/google/uuid"
 	mitmproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 	"github.com/nemirovsky/sluice/internal/store"
 	"github.com/nemirovsky/sluice/internal/vault"
-	uuid "github.com/satori/go.uuid"
 )
 
 // Round-12 regression: poolForResponse's API-host path iterates
@@ -90,7 +90,7 @@ func setupTwoPoolAddonSameAPIHost(t *testing.T) (*SluiceAddon, *atomic.Pointer[v
 func newAPIHostRespFlow(client *mitmproxy.ClientConn, status int) *mitmproxy.Flow {
 	u, _ := url.Parse("https://api.example.com/v1/responses")
 	return &mitmproxy.Flow{
-		Id:          uuid.NewV4(),
+		Id:          uuid.New(),
 		ConnContext: &mitmproxy.ConnContext{ClientConn: client},
 		Request:     &mitmproxy.Request{Method: "POST", URL: u, Header: make(http.Header)},
 		Response:    &mitmproxy.Response{StatusCode: status, Header: make(http.Header)},
