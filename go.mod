@@ -13,7 +13,7 @@ require (
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/hashicorp/vault/api v1.23.0
-	github.com/klauspost/compress v1.17.8
+	github.com/klauspost/compress v1.18.7
 	github.com/lqqyt2423/go-mitmproxy v1.8.11
 	github.com/oapi-codegen/runtime v1.3.1
 	github.com/quic-go/quic-go v0.59.0
