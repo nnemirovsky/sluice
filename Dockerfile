@@ -6,7 +6,7 @@ RUN go mod download
 COPY . .
 RUN go build -ldflags='-s -w -linkmode external -extldflags "-static"' -o /sluice ./cmd/sluice/
 
-FROM alpine:3.21
+FROM alpine:3.24
 # Runtimes installed so sluice can spawn common stdio MCP servers:
 #   nodejs + npm -> npx for JavaScript/TypeScript MCPs
 #   python3 + uv -> uvx for Python MCPs
