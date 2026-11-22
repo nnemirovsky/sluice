@@ -14,17 +14,17 @@ require (
 	github.com/golang-migrate/migrate/v4 v4.20.1
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/vault/api v1.23.0
-	github.com/klauspost/compress v1.20.4
+	github.com/klauspost/compress v1.20.5
 	github.com/lqqyt2423/go-mitmproxy v1.9.5
 	github.com/oapi-codegen/runtime v1.9.0
 	github.com/quic-go/quic-go v0.65.0
 	github.com/things-go/go-socks5 v0.1.4
 	github.com/tobischo/gokeepasslib/v3 v3.7.1
-	golang.org/x/crypto v0.58.0
-	golang.org/x/net v0.61.0
-	golang.org/x/sync v0.24.0
-	golang.org/x/term v0.47.0
-	lukechampine.com/blake3 v1.4.1
+	golang.org/x/crypto v0.59.0
+	golang.org/x/net v0.62.0
+	golang.org/x/sync v0.25.0
+	golang.org/x/term v0.48.0
+	lukechampine.com/blake3 v1.5.0
 	modernc.org/sqlite v1.62.0
 )
 
@@ -66,8 +66,8 @@ require (
 	github.com/tobischo/argon2 v0.2.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.9.0 // indirect
 	go.yaml.in/yaml/v4 v4.0.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	modernc.org/libc v1.80.1 // indirect
